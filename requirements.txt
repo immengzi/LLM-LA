@@ -1,0 +1,6 @@
+aiohttp>=3.9.0
+kubernetes>=29.0.0
+pynvml
+click
+fastapi
+uvicorn

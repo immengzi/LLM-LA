@@ -1,0 +1,33 @@
+# Simulator only
+SIM_MODE: "only"
+
+# Shared cap
+MAX_TOKENS: 1024
+IGNORE_EOS: true
+
+# Length policy: fixed completion length
+LENGTH_MODE: "target-output"
+TARGET_OUTPUT_TOKENS: 128
+TARGET_TOTAL_TOKENS: null
+
+# Disable distribution sampling
+SIM_VARY_OUT_TOKENS: false
+# (SIM_OUT_TOKENS is the fallback if you ever switch to legacy)
+SIM_OUT_TOKENS: 128
+
+# Input sizing
+SIM_VARY_IN_TOKENS: true
+SIM_CHARS_PER_TOKEN: 4.0
+SIM_IN_MIN: 1
+SIM_IN_MAX: 8192
+
+# Simulator endpoints & runtime
+SIM_ENDPOINTS:
+  L40S:
+    tps: 24000
+    count: 2
+SIM_WORKERS: 1
+SIM_CONT_BATCH: true
+SIM_MAX_BATCH: 8
+SIM_BATCH_WINDOW_MS: 20
+SIM_TIMESCALE: 0.01

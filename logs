@@ -1,0 +1,517 @@
+1. initial real world experiment
+2. initial simulated experiment
+3. simulated experiments for analyzing queuing behavior
+4. addition of client_queue_before_http_s and observing why latency_s is higher pull but the metrics for serving and queueing inside the serve are smaller -> look into measuring latency_s and client_queue_before_http_s
+5. piont by point measuring for send and recieve -> resulted in implementing different load mechansims
+6. testing implementation on constant load -> pull batching does a lot worth, weird sudden drop, unknown why this is happening
+7. new sets of experiments to confim system acting similar after changes to the load - results should be similar to 2 -> confirmed similarity to 2
+
+
+==== Experiments ====
+
+24:
+comparison of batching based methods with removing the cap on queueing
+resutls were good but due to the distribution intervals
+
+
+25:
+
+added load to 24
+50 50 split 32, 4096
+load 2 rps
+
+26:
+
+repeat of 25
+10 90 split 32 4096
+load 2 rps
+
+27:
+
+repeat of 26
+90 10 split 32 4096
+load 2 rps
+
+28:
+
+Good results
+repeat of 27
+90 10 split 32 4096
+load 2 rps
+batch size on the vLLM server 1
+
+
+29:
+
+repeat of 28 to debug the timing issue
+1 split 4096
+load 2 rps
+batch size on the vLLM server 1
+5 request
+
+30:
+
+repeat of 28 to debug the timing issue
+1 split 32
+load 2 rps
+batch size on the vLLM server 1
+10 request
+
+31:
+
+repeat of the 30 after the changes
+
+32:
+
+repeat of the 29 after the changes
+
+33:
+
+repeat of the 28 after the changes
+
+34
+
+repeat of the 33 to see the results instability in the rr method and if stability of pull based
+
+35
+
+repeat of the 33 to see the results instability in the rr method and if stability of pull based
+
+36
+
+experiment withj batch size 2
+40 request
+2 rps
+
+37
+
+experiment withj batch size 2
+40 request
+4 rps
+
+
+43
+
+80 20 split 32 4096
+load 8 rps
+batch size on the vLLM server 8
+
+44
+80 20 split 32 4096
+load 8 rps
+batch size on the vLLM server 8
+
+45
+80 20 split 32 4096
+load 8 rps
+batch size on the vLLM server 8
+
+46 ...
+
+50-53
+last night
+
+57-58
+shuffled orderr
+
+59:
+increased number of requests
+some initial results
+30 70 split 32 4096
+load 8 rps
+batch size on the vLLM server 8
+200 requests 
+
+60:
+2 replicas
+gpu
+increased number of requests to 400
+30 70 split 32 4096
+load 1 rps
+batch size on the vLLM server 8
+400 requests
+outcome:
+
+61:
+2 replicas
+gpu
+increase the request sizes
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 8
+200 requests
+outcome:
+
+62:
+2 replicas
+gpu
+increased number of requests to 400
+increase the request sizes
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 8
+400 requests
+outcome: promissing because of lots of high latency for SLO violation narrative, hitted the 1800 seconds limit
+
+63:
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 8
+200 requests
+outcome: Also promising under a SLO attainment narrative
+
+64:
+2 replicas
+gpu
+increase the request sizes
+adjusted rps to near utilization
+30 70 split 32 16384
+load 0.1 rps
+batch size on the vLLM server 8
+200 requests
+outcome:
+
+65:
+2 replicas
+gpu
+increased number of requests to 400
+increase the request sizes
+adjusted rps to near utilization
+30 70 split 32 16384
+load 0.1 rps
+batch size on the vLLM server 8
+400 requests
+outcome:
+
+66:
+4 replicas
+npu
+increased number of requests to 400
+30 70 split 32 4096
+load 1 rps
+batch size on the vLLM server 8
+400 requests
+outcome:
+
+67:
+4 replicas
+npu
+increase the request sizes
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 8
+200 requests
+outcome:
+
+68:
+4 replicas
+npu
+increased number of requests to 400
+increase the request sizes
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 8
+400 requests
+outcome: promissing because of lots of high latency for SLO violation narrative, hitted the 1800 seconds limit
+
+69:
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 8
+200 requests
+outcome: Also promising under a SLO attainment narrative
+
+70:
+4 replicas
+npu
+increase the request sizes
+adjusted rps to near utilization
+30 70 split 32 16384
+load 0.1 rps
+batch size on the vLLM server 8
+200 requests
+outcome:
+
+71:
+4 replicas
+npu
+increased number of requests to 400
+increase the request sizes
+adjusted rps to near utilization
+30 70 split 32 16384
+load 0.1 rps
+batch size on the vLLM server 8
+400 requests
+outcome:
+
+72:
+repeat of 62 with increased timeout
+2 replicas
+gpu
+increased number of requests to 400
+increase the request sizes
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 8
+400 requests
+outcome: promissing because of lots of high latency for SLO violation narrative, hitted the 1800 seconds limit
+
+73:
+repeat of 68 with increased timeout
+4 replicas
+npu
+increased number of requests to 400
+increase the request sizes
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 8
+400 requests
+outcome: not promissing after the increase of the batch size
+
+74
+repeat of 63
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 1
+200 requests
+outcome: Also promising under a SLO attainment narrative
+
+75
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 2
+200 requests
+outcome: Also promising under a SLO attainment narrative
+
+76
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 4
+200 requests
+outcome: Also promising under a SLO attainment narrative
+
+77
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 1
+200 requests
+outcome: Also promising under a SLO attainment narrative
+
+78
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 2
+200 requests
+outcome: Also promising under a SLO attainment narrative
+
+79
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 4
+200 requests
+outcome: Not sure what happend because it is only sending to two server isntead of all four
+
+80
+
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 64
+200 requests
+outcome: not good, no effect because of not saturated
+
+81
+
+Repeat of 80 with a much higher load
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 3 rps
+batch size on the vLLM server 64
+1000 requests
+outcome: not good, no effect because of too saturated
+
+82
+
+Repeat of 81 with a lower load
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 1 rps
+batch size on the vLLM server 64
+1000 requests
+outcome: TODO
+
+83:
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 16384
+load 3 rps
+batch size on the vLLM server 64
+200 requests
+outcome: not good, no effect because of not saturated
+
+84:
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 64
+200 requests
+outcome: not good, no effect because of not saturated
+
+85:
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 64
+200 requests
+outcome: no conclusion due to so many missed requests
+
+86:
+4 replicas
+outcome: no conclusion due to so many missed requests
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 3 rps
+batch size on the vLLM server 64
+200 requests
+outcome: no conclusion due to so many missed requests
+
+87:
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 1 rps
+batch size on the vLLM server 64
+200 requests
+outcome: no conclusion due to so many missed requests
+
+88:
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 16384
+load 3 rps
+batch size on the vLLM server 64
+200 requests
+outcome: no conclusion due to so many missed requests
+
+89:
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 64
+200 requests
+outcome: no conclusion due to so many missed requests
+
+90:
+TODO
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 64
+200 requests
+outcome: no conclusion due to so many missed requests
+
+other batch sizes under one of the former selected experiments (select one 63)
+
+
+
+
+
+77-78-79
+npu
+other batch sizes under one of the former selected experiments (select one 63)
+
+80:
+gpu with more context length
+
+81:
+npu with more contexgt length
+
+66:
+wrap up former experiments, write it to Ahmed document, you are losing
+
+66:
+do it on more servers
+
+
+66:
+mimic heteroginity with different model variants
+
+66:
+investigate difference between LQ and Pull
+
+66:
+if any works do it for all batch sizes increasing
+
+==== Profiling ====
+1:
+batch 8-16-32-64
+gpu
+context 4096
+
+2:
+debug experiment
+
+3:
+debug experiment
+
+4:
+8-16-32-64
+batch 8-16-32-64
+gpu
+context 4096
+
+5:
+16-32
+context 4096
+optimal batch size 25
+
+6:
+debug exepriment
+
+7:
+28-33
+npu
+context 4096
+optimal batch size 30
