@@ -1,0 +1,26 @@
+# Real endpoints only
+SIM_MODE: "off"
+
+# Shared cap
+MAX_TOKENS: 1024
+IGNORE_EOS: true
+
+# Length policy: fixed completion length (same as fixed_sim)
+LENGTH_MODE: "target-output"
+TARGET_OUTPUT_TOKENS: 128
+TARGET_TOTAL_TOKENS: null
+
+# Turn off distribution sampling to avoid confusion
+SIM_VARY_OUT_TOKENS: false
+SIM_OUT_TOKENS: 128
+
+# Input sizing hinting (for planning/metadata)
+SIM_VARY_IN_TOKENS: true
+SIM_CHARS_PER_TOKEN: 4.0
+SIM_IN_MIN: 1
+SIM_IN_MAX: 8192
+
+# Router/discovery for real
+NAMESPACE: "vllm"
+LABEL_SELECTOR: "app=vllm-qwen"
+VLLM_PORT: 8200

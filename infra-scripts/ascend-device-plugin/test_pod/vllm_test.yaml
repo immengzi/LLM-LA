@@ -1,0 +1,31 @@
+# # Add the configuration in YAML to assign the physical card.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-npu-pod
+  namespace: npu-test  # Specifying a Namespace
+  # annotations:
+  #   huawei.com/Ascend: "Ascend-0,Ascend-1" # this doesn't work
+spec:
+  containers:
+  - name: test-container
+    image: quay.io/ascend/vllm-ascend:v0.10.0rc1-openeuler
+    imagePullPolicy: IfNotPresent
+    command: ["sleep", "3600"]  # Keep the container running for testing.
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    resources:
+      limits:
+        huawei.com/Ascend: 2  # maximum 2 NPU
+      requests:
+        huawei.com/Ascend: 2  # request 2 NPU
+    env:
+      - name: DLS_TASK_NUMBER  # If a task number needs to be specified, you can set an environment variable.
+        value: "2"
+  volumes:
+  - name: model-storage        # It must match the name of the volumeMounts above.
+    hostPath:
+      path: /mnt/storage1/data/models     # The absolute path of the model on the host node
+      type: Directory
+  restartPolicy: Never

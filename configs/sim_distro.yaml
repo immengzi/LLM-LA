@@ -1,0 +1,190 @@
+# ===========================
+# WORKING SINGLE CONFIG (flat)
+# ===========================
+# Modes:
+#   - SIM: set SIM_MODE: "only"
+#   - REAL: set SIM_MODE: "off"
+#
+# Length:
+#   - Distribution: LENGTH_MODE: "dist-output"; SIM_VARY_OUT_TOKENS: true; pick one SIM_OUT_DIST
+#   - Fixed:        LENGTH_MODE: "target-output"; TARGET_OUTPUT_TOKENS: 128; SIM_VARY_OUT_TOKENS: false
+#
+# Token scale presets (uncomment one MAX_TOKENS + matching SIM_OUT_DIST block if you want high/low):
+#   - Medium (default): MAX_TOKENS: 1024 + one of the MEDIUM SIM_OUT_DIST blocks
+#   - High:             MAX_TOKENS: 2048 + one of the HIGH SIM_OUT_DIST blocks
+#   - Very Large:       MAX_TOKENS: 8192 + the VERY LARGE histogram block
+#   - Low:              MAX_TOKENS: 256  + one of the LOW SIM_OUT_DIST blocks
+
+# ------- Choose SIM vs REAL -------
+SIM_MODE: "only"        # <- SIM (default). For REAL use: "off"
+
+# ------- Global caps / general -------
+MAX_TOKENS: 8192
+IGNORE_EOS: true
+
+# ------- Length policy -------
+LENGTH_MODE: "dist-output"
+# LENGTH_MODE: "target-output"    # <- Uncomment to use fixed mode
+TARGET_OUTPUT_TOKENS: null
+TARGET_TOTAL_TOKENS: null
+
+# Distribution RNG
+LENGTH_DIST_SEED: 2025
+LENGTH_DIST_BY_PROMPT: true
+
+# =======================
+# DISTRO: pick ONE block
+# =======================
+
+# Disable distribution sampling
+SIM_VARY_OUT_TOKENS: false
+# (SIM_OUT_TOKENS is the fallback if you ever switch to legacy)
+SIM_OUT_TOKENS: 128
+
+
+# ---- MEDIUM tokens (example: lognormal) ----
+# SIM_OUT_DIST:
+#   kind: "lognormal"
+#   mu: 5.3
+#   sigma: 0.8
+#   min: 16
+#   max: 1024
+
+# ---- MEDIUM / alt: gamma ----
+# SIM_OUT_DIST:
+#   kind: "gamma"
+#   k: 2.2
+#   theta: 48
+#   min: 16
+#   max: 1024
+
+# ---- MEDIUM / alt: hist ----
+# SIM_OUT_DIST:
+#   kind: "hist"
+#   values: [32, 64, 128, 256, 512, 768, 1024]
+#   probs:  [0.05,0.10,0.30,0.30,0.15,0.07,0.03]
+#   min: 16
+#   max: 1024
+
+
+# ---- HIGH tokens ----
+# SIM_OUT_DIST:
+#   kind: "lognormal"
+#   mu: 6.0
+#   sigma: 0.9
+#   min: 64
+#   max: 2048
+
+# ---- VERY LARGE histogram (ACTIVE) ----
+# SIM_OUT_DIST:
+#   kind: "hist"
+#   values: [512, 1024, 2048, 4096, 6144, 8192]
+#   probs:  [0.05, 0.10, 0.20, 0.30, 0.20, 0.15]
+#   min: 512
+#   max: 8192
+
+# ---- LOW tokens ----
+# SIM_OUT_DIST:
+#   kind: "lognormal"
+#   mu: 4.3
+#   sigma: 0.7
+#   min: 8
+#   max: 256
+
+# =========================
+# Input token estimation
+# =========================
+SIM_VARY_IN_TOKENS: true
+SIM_CHARS_PER_TOKEN: 4.0
+SIM_IN_MIN: 1
+SIM_IN_MAX: 8192
+
+# =======================================
+# Simulator endpoints — choose ONE block
+# =======================================
+# NOTE: uncomment exactly one SIM_ENDPOINTS block.
+
+# --- ACTIVE: Heterogeneous servers ---
+SIM_ENDPOINTS:
+  H100:
+    tps: 36000
+    count: 2
+  L40S:
+    tps: 24000
+    count: 2
+  A100-40GB:
+    tps: 20000
+    count: 1
+  A10:
+    tps: 12000
+    count: 1
+  T4:
+    tps: 6000
+    count: 1
+
+# --- Consistent servers (homogeneous cluster) ---
+# SIM_ENDPOINTS:
+#   L40S:
+#     tps: 22000
+#     count: 2
+  # T4:
+  #   tps: 6000
+  #   count: 2
+
+
+# --- Skewed: many slow, few fast ---
+# SIM_ENDPOINTS:
+#   T4:
+#     tps: 6000
+#     count: 10
+#   H100:
+#     tps: 36000
+#     count: 1
+
+# --- Bursty single-beast ---
+# SIM_ENDPOINTS:
+#   H200:
+#     tps: 42000
+#     count: 1
+#   A100-40GB:
+#     tps: 20000
+#     count: 1
+
+# --- Edge-heavy: many small GPUs ---
+# SIM_ENDPOINTS:
+#   L4:
+#     tps: 9000
+#     count: 8
+#   T4:
+#     tps: 6000
+#     count: 8
+
+# --- Minimal dev rig ---
+# SIM_ENDPOINTS:
+#   RTX-4060:
+#     tps: 9000
+#     count: 1
+
+# =========================
+# Runtime shaping knobs
+# =========================
+SIM_WORKERS: 1
+SIM_CONT_BATCH: true
+SIM_MAX_BATCH: 512
+SIM_BATCH_WINDOW_MS: 20
+SIM_TIMESCALE: 0.1
+
+# =========================
+# Router / discovery basics
+# =========================
+NAMESPACE: "vllm"
+LABEL_SELECTOR: "app=vllm-qwen"
+VLLM_PORT: 8200
+
+# Router concurrency
+MAX_INFLIGHT_PER_EP: 4
+BURST: 1
+
+SIM_MODE: "only"
+SIM_HTTP_HOST: "127.0.0.1"
+SIM_HTTP_PORT_BASE: 9101

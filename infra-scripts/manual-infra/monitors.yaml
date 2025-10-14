@@ -1,0 +1,37 @@
+# --- PodMonitor: scrape vLLM pods exposing /metrics on named port "http"
+# Namespace: vllm | Label selector: app=vllm-qwen | Interval: 15s
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: vllm-qwen
+  namespace: vllm
+spec:
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  podMetricsEndpoints:
+    - path: /metrics
+      port: http
+      interval: 15s
+---
+# --- ServiceMonitor: scrape NVIDIA dcgm-exporter Service on port name "gpu-metrics"
+# Namespace: gpu-operator-resources | Service label: app=nvidia-dcgm-exporter
+# Interval: 1s | Timeout: 900ms
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nvidia-dcgm-exporter
+  namespace: gpu-operator-resources
+spec:
+  namespaceSelector:
+    matchNames:
+      - gpu-operator-resources
+  selector:
+    matchLabels:
+      app: nvidia-dcgm-exporter
+  endpoints:
+    - port: gpu-metrics
+      path: /metrics
+      interval: 1s
+      scrapeTimeout: 900ms
+      honorLabels: true
