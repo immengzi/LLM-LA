@@ -75,7 +75,7 @@ spec:
             - "--kv-cache-dtype"
             - "auto"
             - "--max-num-seqs"
-            - "1"
+            - "8"
             # If you require KV transfer and your image supports it, uncomment:
             # - "--kv-transfer-config"
             # - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'

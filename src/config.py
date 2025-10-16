@@ -64,8 +64,7 @@ class RouterConfig:
     # =========================
     USE_LEN_AWARE: bool = False
     LEN_POLICY: Literal["short_first", "long_first", "longest_first", "even_short_long"] = "even_short_long"
-    PRED_LEN_THRESHOLD: int = 512
-    POOL_FACTOR: int = 3
+    POOL_FACTOR: int = 1000
     LONG_BATCH_GUARD_N: int = 4
 
     # =========================
@@ -101,7 +100,7 @@ class RouterConfig:
     # Simulator runtime behavior
     SIM_CONT_BATCH: bool = True  # continuous batching only
     SIM_MAX_BATCH: int = 1       # max concurrent decode requests
-    SIM_TIMESCALE: float = 0.01  # wall-time scaling
+    SIM_TIMESCALE: float = 1  # wall-time scaling
     SIM_SEED: int = 12345        # random seed
 
     # Heuristic input sizing

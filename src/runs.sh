@@ -74,17 +74,38 @@
 # python3 batch_size_profile.py --batches "42,50" --yaml-file vllm-k8s-npu.yaml
 
 # python main.py --mode least-queue-batching --config real_distro_token_length --prompts-file short --prompts-limit 10
-python main.py --mode rr-batching --config real_distro_token_length_false --prompts-file short --prompts-limit 40
-sleep 30
-python main.py --mode rr-batching --config real_distro_token_length_true --prompts-file short --prompts-limit 40
-sleep 30
+# python main.py --mode rr-batching --config real_distro_token_length_false --prompts-file short --prompts-limit 40
+# sleep 30
 
-python main.py --mode least-queue-batching --config real_distro_token_length_false --prompts-file short --prompts-limit 40
+# python main.py --mode rr-batching --config real_distro_token_length_false --prompts-file short --prompts-limit 400
+# sleep 30
+# python main.py --mode rr-batching --config real_distro_token_length_true5 --prompts-file short --prompts-limit 40
+# sleep 30
+python main.py --mode rr-batching --config real_distro_token_length_true --prompts-file short --prompts-limit 400
 sleep 30
-python main.py --mode least-queue-batching --config real_distro_token_length_true --prompts-file short --prompts-limit 40
-sleep 30
+# python main.py --mode rr-batching --config real_distro_token_length_true5 --prompts-file short --prompts-limit 200
+# sleep 30
+# python main.py --mode rr-batching --config real_distro_token_length_true10 --prompts-file short --prompts-limit 200
+# sleep 30
 
-python main.py --mode pull-batching --config real_distro_token_length_false --prompts-file short --prompts-limit 40
+# python main.py --mode least-queue-batching --config real_distro_token_length_false --prompts-file short --prompts-limit 400
+# sleep 30
+# python main.py --mode least-queue-batching --config real_distro_token_length_true5 --prompts-file short --prompts-limit 40
+# sleep 30
+python main.py --mode least-queue-batching --config real_distro_token_length_true --prompts-file short --prompts-limit 400
 sleep 30
-python main.py --mode pull-batching --config real_distro_token_length_true --prompts-file short --prompts-limit 40
+# python main.py --mode least-queue-batching --config real_distro_token_length_true5 --prompts-file short --prompts-limit 200
+# sleep 30
+# python main.py --mode least-queue-batching --config real_distro_token_length_true10 --prompts-file short --prompts-limit 200
+# sleep 30
+
+# python main.py --mode pull-batching --config real_distro_token_length_false --prompts-file short --prompts-limit 400
+# sleep 30
+# python main.py --mode pull-batching --config real_distro_token_length_true5 --prompts-file short --prompts-limit 40
+# sleep 30
+python main.py --mode pull-batching --config real_distro_token_length_true --prompts-file short --prompts-limit 400
 sleep 30
+# python main.py --mode pull-batching --config real_distro_token_length_true5 --prompts-file short --prompts-limit 200
+# sleep 30
+# python main.py --mode pull-batching --config real_distro_token_length_true10 --prompts-file short --prompts-limit 200
+# sleep 30

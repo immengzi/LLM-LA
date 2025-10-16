@@ -15,7 +15,7 @@ HEADER = [
     "status",
     "latency_s",
     "start_time",
-    "end_time",          # arrival time
+    "end_time",
     "response_raw_len",
     "output_tokens",
     "error",
