@@ -70,7 +70,7 @@ SIM_OUT_DIST:
 USE_LEN_AWARE: True
 LEN_POLICY: even_short_long
 PRED_LEN_THRESHOLD: 33
-POOL_FACTOR: 40
+POOL_FACTOR: 1000
 LONG_BATCH_GUARD_N: 4
 
 
@@ -138,6 +138,6 @@ LOAD_RATE_RPS: 1
 
 # --- ACTIVE: Heterogeneous servers ---
 SIM_ENDPOINTS:
-  H100:
-    tps: 36000
-    count: 2
+  A30:
+    sec_per_token: 0.01
+    count: 8

@@ -161,6 +161,7 @@ adjusted rps to near utilization
 load 0.3 rps
 batch size on the vLLM server 8
 200 requests
+Final result: very good JCT on batch size above 1
 outcome: Also promising under a SLO attainment narrative
 
 64:
@@ -454,9 +455,73 @@ outcome: no conclusion due to so many missed requests
 
 other batch sizes under one of the former selected experiments (select one 63)
 
+91:
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: even_short_long
+30 70 split 4096
+no prediction
 
+92:
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: even_short_long
+30 70 split 4096
+with prediction
 
+93:
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+30 70 split 4096
+with prediction
 
+94:
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+without prediction
+after changes to general token based rather than only short/long
+
+95:
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+after changes to general token based rather than only short/long
+
+96:
+40 requests
+batch size 1
+load pattern: dump
+after removing the gurdrail
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+after changes to general token based rather than only short/long
+
+95:
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+after changes to general token based rather than only short/long
 
 77-78-79
 npu

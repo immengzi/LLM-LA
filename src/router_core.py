@@ -36,9 +36,8 @@ _pred = get_length_predictor()  # singleton predictor based on cfg.PREDICTOR_NAM
 # ---- Length-aware config knobs (shared by both pull & push) ----
 _USE_LEN_AWARE: bool = bool(getattr(_cfg, "USE_LEN_AWARE", False))
 _LEN_POLICY: str = str(getattr(_cfg, "LEN_POLICY", "short_first") or "short_first")
-_PRED_LEN_THRESHOLD: int = int(getattr(_cfg, "PRED_LEN_THRESHOLD", 512) or 512)
+# _PRED_LEN_THRESHOLD: int = int(getattr(_cfg, "PRED_LEN_THRESHOLD", 512) or 512)
 _POOL_FACTOR: int = int(getattr(_cfg, "POOL_FACTOR", 3) or 3)
-_LONG_BATCH_GUARD_N: int = int(getattr(_cfg, "LONG_BATCH_GUARD_N", 0) or 0)  # pull only when >0
 _DEFAULT_MAX_TOKENS: int = int(getattr(_cfg, "MAX_TOKENS", 256) or 256)
 
 # One global lock for queue peeking/return across threads
@@ -79,9 +78,6 @@ class PullBatchingRouter:
         self._id_cache: Dict[str, Tuple[float, str, Optional[float]]] = {}
         self._id_ttl_s: float = float(getattr(_cfg, "TPS_TTL_S", 5.0))
 
-        # NEW: per-router state for length-aware guardrails
-        self._len_state: Dict[str, Dict[str, int]] = {}
-
 
     def ensure_endpoints(self, endpoints: List[str]):
         for ep in endpoints:
@@ -115,11 +111,6 @@ class PullBatchingRouter:
                 self._refill_evts.pop(ep, None)
                 self._util_cache.pop(ep, None)
                 self._id_cache.pop(ep, None)
-                # also drop len-aware per-EP state
-                try:
-                    self._len_state.get("batches_since_long", {}).pop(ep, None)
-                except Exception:
-                    pass
 
         self.eps = list(endpoints)
 
@@ -305,11 +296,7 @@ class PullBatchingRouter:
                 selected = select_batch(
                     self.q, want, _pred, _Q_LOCK,
                     policy=_LEN_POLICY,
-                    threshold=_PRED_LEN_THRESHOLD,
                     pool_factor=_POOL_FACTOR,
-                    ep=ep,
-                    state=self._len_state,
-                    guard_long_every_n=_LONG_BATCH_GUARD_N,
                     default_max_tokens=_DEFAULT_MAX_TOKENS,
                 )
             else:
@@ -348,9 +335,8 @@ class PullBatchingRouter:
                     "every_n": every_n,
                     "len_aware": bool(_USE_LEN_AWARE),
                     "len_policy": str(_LEN_POLICY),
-                    "len_threshold": int(_PRED_LEN_THRESHOLD),
-                    "pool_factor": int(_POOL_FACTOR),
-                    "guard_long_every_n": int(_LONG_BATCH_GUARD_N),
+                    # "len_threshold": int(_PRED_LEN_THRESHOLD),
+                    "pool_factor": int(_POOL_FACTOR)
                 }
                 print(
                     f"[PULL*BATCH] {name} (ep={ep}) util={util_str} want={want} pulled={pulled_n} "
@@ -430,9 +416,6 @@ class _BaseBatchingRouter:
         self._id_ttl_s: float = float(getattr(_cfg, "TPS_TTL_S", 5.0))
 
         self._admission_mode: str = str(getattr(_cfg, "ADMISSION_MODE", "util")).lower()
-
-        # NEW: shared len-aware state (optional)
-        self._len_state: Dict[str, Dict[str, int]] = {}
 
 
     def ensure_endpoints(self, endpoints: List[str]):
@@ -630,11 +613,7 @@ class _BaseBatchingRouter:
                 selected = select_batch(
                     self.q, want, _pred, _Q_LOCK,
                     policy=_LEN_POLICY,
-                    threshold=_PRED_LEN_THRESHOLD,
                     pool_factor=_POOL_FACTOR,
-                    ep=ep,
-                    state=self._len_state,
-                    guard_long_every_n=0,
                     default_max_tokens=_DEFAULT_MAX_TOKENS,
                 )
                 for prompt, t_enq_client, _pred_tok, req_id in selected:
@@ -642,7 +621,6 @@ class _BaseBatchingRouter:
                         self.inflight[ep] = self.inflight.get(ep, 0) + 1
                     pulled += 1
                     self._launch_one(ep, prompt, t_enq_client, req_id)
-                print("there")
             else:
                 from queue import Empty as QEmpty
                 for _ in range(want):
@@ -654,7 +632,6 @@ class _BaseBatchingRouter:
                         self.inflight[ep] = self.inflight.get(ep, 0) + 1
                     pulled += 1
                     self._launch_one(ep, prompt, t_enq_client, req_id)
-                print("here")
 
             q_after = self.q.qsize()
             with self._lock:
@@ -684,9 +661,8 @@ class _BaseBatchingRouter:
                         "every_n": every_n,
                         "len_aware": bool(_USE_LEN_AWARE),
                         "len_policy": str(_LEN_POLICY),
-                        "len_threshold": int(_PRED_LEN_THRESHOLD),
-                        "pool_factor": int(_POOL_FACTOR),
-                        "guard_long_every_n": 0,
+                        # "len_threshold": int(_PRED_LEN_THRESHOLD),
+                        "pool_factor": int(_POOL_FACTOR)
                     },
                 )
 
