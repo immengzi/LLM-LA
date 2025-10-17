@@ -4,3 +4,4 @@ pynvml
 click
 fastapi
 uvicorn
+huggingface-hub
