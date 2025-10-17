@@ -70,7 +70,7 @@ SIM_OUT_DIST:
 USE_LEN_AWARE: true
 LEN_POLICY: short_first
 PRED_LEN_THRESHOLD: 33
-POOL_FACTOR: 400
+POOL_FACTOR: 10000
 
 
 # ---- HIGH tokens (set MAX_TOKENS: 2048 above) ----
@@ -135,8 +135,8 @@ LOAD_RATE_RPS: 1
 # =========================
 # Load generation knobs
 # =========================
-LOAD_PATTERN: "dump"          # one of: dump, det, poisson, bursty, steps
-LOAD_RATE_RPS: 1
+LOAD_PATTERN: "det"          # one of: dump, det, poisson, bursty, steps
+LOAD_RATE_RPS: 0.125
 LOAD_WARMUP_S: 0.0
 LOAD_DURATION_S: 999999.0
 LENGTH_DIST_STRICT_HIST: true
