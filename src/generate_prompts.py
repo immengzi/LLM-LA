@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# make_prompt_buckets_click.py
+# generate_prompts.py
 # Build length-controlled prompt buckets from real datasets with progress bars and streaming.
 # Writes both "<name>.json" (prompts only) and "<name>-full.json" (rich records with metadata).
 #
@@ -462,6 +462,124 @@ def write_simple_and_full(
 
 
 # ------------------------------------------------------------------------------
+# Replay helpers (dataset-agnostic): build (prompt, reply_len_tokens) pairs
+# ------------------------------------------------------------------------------
+def _pairs_lmsys(ex: Dict):
+    def pull_pair(conv):
+        if not isinstance(conv, list) or len(conv) < 2:
+            return None
+        m0, m1 = conv[0], conv[1]
+        def _get(m, k): return (m.get(k) if isinstance(m, dict) else None)
+        t0 = (_get(m0, "content") if isinstance(m0, dict) else (m0 if isinstance(m0, str) else None))
+        t1 = (_get(m1, "content") if isinstance(m1, dict) else (m1 if isinstance(m1, str) else None))
+        return (t0, t1) if (t0 and t1) else None
+    ca, cb = ex.get("conversation_a"), ex.get("conversation_b")
+    if isinstance(ca, list):
+        p = pull_pair(ca)
+        if p: yield p
+    if isinstance(cb, list):
+        p = pull_pair(cb)
+        if p: yield p
+    if not isinstance(ca, list) and not isinstance(cb, list):
+        conv = ex.get("conversation") or ex.get("conversation_a")
+        p = pull_pair(conv)
+        if p: yield p
+
+def _pairs_oasst(ex: Dict):
+    conv = ex.get("conversation") or ex.get("messages") or []
+    if isinstance(conv, list) and len(conv) >= 2:
+        u, a = conv[0], conv[1]
+        u_txt = (u.get("text") or u.get("content") or "").strip() if isinstance(u, dict) else ""
+        a_txt = (a.get("text") or a.get("content") or "").strip() if isinstance(a, dict) else ""
+        if u_txt and a_txt:
+            yield (u_txt, a_txt)
+
+def _pairs_dolly(ex: Dict):
+    inst = (ex.get("instruction") or "").strip()
+    out  = (ex.get("response") or ex.get("output") or "").strip()
+    if inst and out:
+        yield (inst, out)
+
+def _pairs_alpaca(ex: Dict):
+    inst = (ex.get("instruction") or "").strip()
+    inp  = (ex.get("input") or "").strip()
+    out  = (ex.get("output") or "").strip()
+    if inst and out:
+        prompt = f"{inst}\n\nInput: {inp}" if inp else inst
+        yield (prompt, out)
+
+PAIR_EXTRACTORS: Dict[str, Callable[[Dict], Iterable[Tuple[str, str]]]] = {
+    "lmsys/lmsys-chat-1m": _pairs_lmsys,
+    "lmsys/chatbot_arena_conversations": _pairs_lmsys,
+    "OpenAssistant/oasst1": _pairs_oasst,
+    "databricks/databricks-dolly-15k": _pairs_dolly,
+    "tatsu-lab/alpaca": _pairs_alpaca,
+    "yahma/alpaca-cleaned": _pairs_alpaca,
+}
+
+def build_replay_for_sources(
+    ds_dicts: List[Tuple[str, DatasetDict]],
+    tokenizer_name: str = "gpt2",
+    max_rows_per_split: int = 1_000_000,
+    seed: int = 13,
+) -> Tuple[List[str], List[int]]:
+    """
+    Create parallel arrays:
+      prompts[i] -> cleaned user prompt
+      out_tokens[i] -> tokenized length of the *first* reply in the example
+    Only datasets with a PAIR_EXTRACTOR are used; others are skipped.
+    """
+    tok = AutoTokenizer.from_pretrained(tokenizer_name)
+    def enc_len(s: str) -> int:
+        return len(tok.encode(s, add_special_tokens=False))
+
+    prompts: List[str] = []
+    out_tokens: List[int] = []
+
+    for name, ds in ds_dicts:
+        pair_fn = PAIR_EXTRACTORS.get(name)
+        if not pair_fn:
+            log.info(f"[REPLAY] No pair extractor for {name}; skipping.")
+            continue
+
+        log.info(f"[REPLAY] Building pairs from {name} …")
+        for split_name in ds.keys():
+            split = ds[split_name]
+            added = 0
+            # Accept both streaming (IterableDataset) and in-memory Dataset
+            it = split if isinstance(split, IterableDataset) else split
+            for ex in _take_n(it, max_rows_per_split):
+                for user, reply in pair_fn(ex) or []:
+                    u = clean_prompt(user)
+                    if not u or not is_english(u):
+                        continue
+                    prompts.append(u)
+                    out_tokens.append(enc_len(reply))
+                    added += 1
+            log.info(f"[REPLAY] {name}:{split_name} added={added}")
+
+    # Deterministic shuffle to keep alignment
+    idx = list(range(len(prompts)))
+    random.Random(seed).shuffle(idx)
+    prompts = [prompts[i] for i in idx]
+    out_tokens = [out_tokens[i] for i in idx]
+    return prompts, out_tokens
+
+
+def write_replay_files(out_dir: str, prompts: List[str], out_tokens: List[int]):
+    os.makedirs(out_dir, exist_ok=True)
+    if len(prompts) != len(out_tokens):
+        raise ValueError("prompts and out_tokens length mismatch")
+    p_path = os.path.join(out_dir, "replay_prompts.json")
+    t_path = os.path.join(out_dir, "replay_out_tokens.json")
+    with open(p_path, "w", encoding="utf-8") as f:
+        json.dump(prompts, f, ensure_ascii=False, indent=2)
+    with open(t_path, "w", encoding="utf-8") as f:
+        json.dump(out_tokens, f, ensure_ascii=False, indent=2)
+    log.info(f"[REPLAY] Wrote {p_path} and {t_path} ({len(prompts)} items)")
+
+
+# ------------------------------------------------------------------------------
 # CLI
 # ------------------------------------------------------------------------------
 @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
@@ -564,6 +682,12 @@ def write_simple_and_full(
         "If omitted, uses SOURCES_DEFAULT (top of file)."
     ),
 )
+@click.option(
+    "--make-replay/--no-make-replay",
+    default=False,
+    show_default=True,
+    help="Also create replay_prompts.json and replay_out_tokens.json from any sources that include outputs.",
+)
 def main(
     out_dir: str,
     target_per_bucket: int,
@@ -579,6 +703,7 @@ def main(
     min_chars: int,
     max_chars: int,
     sources_cli: Tuple[str, ...],
+    make_replay: bool,
 ):
     random.seed(seed)
 
@@ -644,6 +769,27 @@ def main(
         log.info(f"Wrote {_CFG.PROMPTS_FILE_PATH} (mirror of mix.json)")
     except Exception as e:
         log.warning(f"Could not write PROMPTS_FILE {_CFG.PROMPTS_FILE_PATH}: {e}")
+
+    # ---- Optional: create replay files (dataset-agnostic; uses PAIR_EXTRACTORS) ----
+    if make_replay:
+        try:
+            loaded: List[Tuple[str, DatasetDict]] = []
+            for name, _ext in sources:
+                ds = _load_hf_dataset(name, streaming)
+                if ds is not None:
+                    loaded.append((name, ds))
+            prompts_r, out_tok = build_replay_for_sources(
+                loaded,
+                tokenizer_name=tokenizer_name,
+                max_rows_per_split=max_source_rows,
+                seed=seed,
+            )
+            if prompts_r:
+                write_replay_files(out_dir, prompts_r, out_tok)
+            else:
+                log.info("[REPLAY] No eligible pairs found; nothing written.")
+        except Exception as e:
+            log.warning(f"[REPLAY][WARN] Failed to build replay files: {e}")
 
     log.info(f"Done in {time.time()-t0:.1f}s")
 

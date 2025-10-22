@@ -51,36 +51,100 @@ _req_id_counter = count(start=0)
 #         except Exception:
 #             router.q.put((prompt, time.time(), rid))
 #     return enqueue_one
+# def _make_enqueue_fn_for_batched(router) -> callable:
+#     def enqueue_one(prompt: str, t_enq_client: float):
+#         rid = next(_req_id_counter)
+#         try:
+#             router.q.put((prompt, t_enq_client, rid))
+#         except Exception:
+#             router.q.put((prompt, time.time(), rid))
+#     return enqueue_one
 def _make_enqueue_fn_for_batched(router) -> callable:
-    def enqueue_one(prompt: str, t_enq_client: float):
+    """
+    enqueue_one(prompt_or_pair, t_enq_client)
+    - prompt_or_pair: either a string prompt or (prompt, replay_out_len) from HF loader
+    """
+    from length_backend import register_replay_out_len  # local import to avoid cycles
+
+    def enqueue_one(prompt_or_pair, t_enq_client: float):
+        # Accept both "str" and "(prompt, out_len)" tuples
+        if isinstance(prompt_or_pair, tuple) and len(prompt_or_pair) == 2:
+            prompt, replay_out_len = prompt_or_pair
+        else:
+            prompt, replay_out_len = prompt_or_pair, None
+
         rid = next(_req_id_counter)
         try:
-            router.q.put((prompt, t_enq_client, rid))
+            if replay_out_len is not None:
+                try:
+                    register_replay_out_len(int(rid), int(replay_out_len))
+                except Exception:
+                    pass
+            router.q.put((str(prompt), float(t_enq_client), int(rid)))
         except Exception:
-            router.q.put((prompt, time.time(), rid))
+            if replay_out_len is not None:
+                try:
+                    register_replay_out_len(int(rid), int(replay_out_len))
+                except Exception:
+                    pass
+            router.q.put((str(prompt), time.time(), int(rid)))
     return enqueue_one
 
-def _start_load_feeder_if_needed(
-    pattern: str,
-    prompts: deque,
-    enqueue_one: callable,
-) -> threading.Thread | None:
-    """
-    Start a timed feeder thread for non-dump patterns.
-    Returns the Thread (or None if dump/immediate).
-    """
-    from loadgen import drive_load  # local import
+# def _start_load_feeder_if_needed(
+#     pattern: str,
+#     prompts: deque,
+#     enqueue_one: callable,
+# ) -> threading.Thread | None:
+#     """
+#     Start a timed feeder thread for non-dump patterns.
+#     Returns the Thread (or None if dump/immediate).
+#     """
+#     from loadgen import drive_load  # local import
 
-    if (pattern or "dump").lower() == "dump":
+#     if (pattern or "dump").lower() == "dump":
+#         t0 = time.time()
+#         while prompts:
+#             p = prompts.popleft()
+#             enqueue_one(p, t0)
+#         return None
+
+#     def _runner():
+#         drive_load(
+#             pattern=pattern,
+#             prompts=prompts,
+#             enqueue_one=enqueue_one,
+#             rate_rps=_cfg.LOAD_RATE_RPS,
+#             warmup_s=_cfg.LOAD_WARMUP_S,
+#             duration_s=_cfg.LOAD_DURATION_S,
+#             burst_on_s=_cfg.BURST_ON_S,
+#             burst_off_s=_cfg.BURST_OFF_S,
+#             burst_rps_on=_cfg.BURST_RPS_ON,
+#             burst_rps_off=_cfg.BURST_RPS_OFF,
+#             step_schedule=_cfg.STEP_SCHEDULE,
+#         )
+
+#     th = threading.Thread(target=_runner, daemon=True)
+#     th.start()
+#     return th
+def _start_load_feeder_if_needed(pattern, prompts, enqueue_one) -> threading.Thread | None:
+    from loadgen import drive_load
+    pat = (pattern or "dump").lower()
+
+    # For "dump", handle both deque and iterator
+    if pat == "dump":
         t0 = time.time()
-        while prompts:
-            p = prompts.popleft()
-            enqueue_one(p, t0)
+        if hasattr(prompts, "popleft"):
+            while prompts:
+                enqueue_one(prompts.popleft(), t0)
+        else:
+            for p in prompts:
+                enqueue_one(p, t0)
         return None
 
+    # Non-dump: just pass through; drive_load now supports iterators
     def _runner():
         drive_load(
-            pattern=pattern,
+            pattern=pat,
             prompts=prompts,
             enqueue_one=enqueue_one,
             rate_rps=_cfg.LOAD_RATE_RPS,
@@ -92,7 +156,6 @@ def _start_load_feeder_if_needed(
             burst_rps_off=_cfg.BURST_RPS_OFF,
             step_schedule=_cfg.STEP_SCHEDULE,
         )
-
     th = threading.Thread(target=_runner, daemon=True)
     th.start()
     return th
@@ -123,10 +186,14 @@ def _run_batched_common(
     # --- router
     router = router_cls(mode_name=mode_name)
 
-    # --- STRICT HIST plan (precompute for exactly N enqueues)
+    # --- STRICT HIST plan (precompute for exactly N enqueues) — SKIP if replay-output
     try:
         from length_backend import set_hist_plan
-        strict = bool(getattr(_cfg, "LENGTH_DIST_STRICT_HIST", False))
+        eff_mode = str(getattr(_cfg, "LENGTH_MODE", "legacy") or "legacy").lower().strip()
+        strict = (
+            bool(getattr(_cfg, "LENGTH_DIST_STRICT_HIST", False))
+            and eff_mode == "dist-output"
+        )
         if strict:
             # Number of enqueues this run (after PROMPTS_LIMIT already applied)
             N = len(prompts)
@@ -141,6 +208,8 @@ def _run_batched_common(
                 print(f"[LENGTH*PLAN] strict-hist plan prepared: label={label} N={N} values={len(values)}")
             else:
                 print("[LENGTH*PLAN][WARN] SIM_OUT_DIST.values is empty; strict-hist plan skipped.")
+        elif eff_mode == "replay-output":
+            print("[LENGTH*PLAN] replay-output mode: skipping strict-hist plan.")
     except Exception as e:
         print(f"[LENGTH*PLAN][WARN] failed to prepare strict-hist plan: {e}")
 
@@ -212,6 +281,7 @@ def _run_batched_common(
             print("[SUMMARY] Summary saved (path not returned by save_summary).")
     except Exception as e:
         print(f"[SUMMARY][WARN] Failed to save summary: {e}")
+
 
 
 

@@ -60,8 +60,8 @@ SIM_OUT_DIST:
   kind: "hist"
   # values: [32, 64, 128, 256, 512, 768, 1024]
   # probs:  [0.05,0.10,0.30,0.30,0.15,0.07,0.03]
-  values: [32, 4096]
-  probs:  [0.7,0.3]
+  values: [32, 1024, 4096]
+  probs:  [0.4, 0.3, 0.3]
   # values: [1024]
   # probs:  [1]
   min: 16
@@ -70,7 +70,7 @@ SIM_OUT_DIST:
 USE_LEN_AWARE: false
 LEN_POLICY: short_first
 PRED_LEN_THRESHOLD: 33
-POOL_FACTOR: 400
+POOL_FACTOR: 1000
 
 
 # ---- HIGH tokens (set MAX_TOKENS: 2048 above) ----
@@ -136,7 +136,7 @@ LOAD_RATE_RPS: 1
 # Load generation knobs
 # =========================
 LOAD_PATTERN: "det"          # one of: dump, det, poisson, bursty, steps
-LOAD_RATE_RPS: 1
+LOAD_RATE_RPS: 8
 LOAD_WARMUP_S: 0.0
 LOAD_DURATION_S: 999999.0
 LENGTH_DIST_STRICT_HIST: true

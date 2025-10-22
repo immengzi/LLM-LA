@@ -125,7 +125,7 @@ class RouterConfig:
     SIM_MODE: Literal["append", "only", "off"] = "off"
 
     # Length-control mode
-    LENGTH_MODE: Literal["legacy", "target-output", "target-total", "dist-output"] = "dist-output"
+    LENGTH_MODE: Literal["legacy", "target-output", "target-total", "dist-output", "replay-output"] = "dist-output"
     TARGET_OUTPUT_TOKENS: Optional[int] = 54
     TARGET_TOTAL_TOKENS: Optional[int] = None
     IGNORE_EOS: bool = True
@@ -156,6 +156,18 @@ class RouterConfig:
 
     # Token length predictor
     PREDICTOR_NAME: str = "oracle"
+
+    # =========================
+    # Prompt source (local JSON by default)
+    # =========================
+    PROMPTS_SOURCE: Literal["file", "hf-lmsys"] = "file"
+
+    # HuggingFace live-dataset options (used only when PROMPTS_SOURCE="hf-lmsys")
+    HF_DATASET_NAME: str = "lmsys/lmsys-chat-1m"
+    HF_DATASET_SPLIT: str = "train"
+    HF_TOKENIZER_NAME: str = "Qwen/Qwen2-7B"     # used for reply-length estimation when needed
+    HF_STREAMING: bool = False           # use HF streaming loader when available
+
 
 
 # --- global holder ---

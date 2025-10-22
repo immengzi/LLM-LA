@@ -523,6 +523,100 @@ len_policy: short_first
 with prediction
 after changes to general token based rather than only short/long
 
+96
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+repetition after changes to the system (don't remember the changes)
+pull shows similar
+
+97
+40 requests
+batch size 1
+load pattern: det at 5
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+Good results
+
+98
+40 requests
+batch size 1
+load pattern: det at 10
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+Good results
+
+99
+40 requests
+batch size 1
+load pattern: det at 20
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+Good results
+
+100
+400 requests
+batch size 8
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+Good results
+
+101
+400 requests
+batch size 8
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+Good results
+
+102
+400 requests
+batch size 8
+load pattern: det at 1 rps
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+Very good results
+
+103
+400 requests
+batch size 8
+load pattern: det at 1 rps
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+without prediction
+sligthly good resutls
+
+99
+
+100
+
+101
+
+102
+
+
+103
+
+104
+
 77-78-79
 npu
 other batch sizes under one of the former selected experiments (select one 63)
@@ -580,3 +674,499 @@ debug exepriment
 npu
 context 4096
 optimal batch size 30
+
+
+
+
+=============================
+|        NPU results        |
+=============================
+
+1:
+8 replicas
+npu
+30 70 split (32 4096)
+load dump @ 40 rps
+batch size 8
+1000 requests
+outcome:
+
+2:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 32 rps
+batch size 8
+1000 requests
+outcome:
+
+3:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 32 rps
+batch size 8
+1000 requests
+outcome:
+
+4:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 16 rps
+batch size 8
+1000 requests
+outcome:
+
+5:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 16 rps
+batch size 8
+1000 requests
+outcome:
+
+6:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 8 rps
+batch size 8
+1000 requests
+outcome:
+
+7:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 8 rps
+batch size 8
+1000 requests
+outcome:
+
+8:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 4 rps
+batch size 8
+1000 requests
+outcome:
+
+9:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 4 rps
+batch size 8
+1000 requests
+outcome:
+
+10:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 2 rps
+batch size 8
+1000 requests
+outcome:
+
+11:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 2 rps
+batch size 8
+1000 requests
+outcome:
+
+12:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 1 rps
+batch size 8
+1000 requests
+outcome:
+
+13:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 1 rps
+batch size 8
+1000 requests
+outcome:
+
+14:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 0.5 rps
+batch size 8
+1000 requests
+outcome:
+
+15:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 0.5 rps
+batch size 8
+1000 requests
+outcome:
+
+16:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 0.25 rps
+batch size 8
+1000 requests
+outcome:
+
+17:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 0.25 rps
+batch size 8
+1000 requests
+outcome:
+
+18:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 0.125 rps
+batch size 8
+1000 requests
+outcome:
+
+19:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 0.125 rps
+batch size 8
+1000 requests
+outcome:
+
+20–37 (reversed distribution = 70 30 split)
+
+20:
+8 replicas
+npu
+70 30 split (32 4096)
+load dump @ 40 rps
+batch size 8
+1000 requests
+outcome:
+
+21:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 32 rps
+batch size 8
+1000 requests
+outcome:
+
+22:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 32 rps
+batch size 8
+1000 requests
+outcome:
+
+23:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 16 rps
+batch size 8
+1000 requests
+outcome:
+
+24:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 16 rps
+batch size 8
+1000 requests
+outcome:
+
+25:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 8 rps
+batch size 8
+1000 requests
+outcome:
+
+26:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 8 rps
+batch size 8
+1000 requests
+outcome:
+
+27:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 4 rps
+batch size 8
+1000 requests
+outcome:
+
+28:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 4 rps
+batch size 8
+1000 requests
+outcome:
+
+29:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 2 rps
+batch size 8
+1000 requests
+outcome:
+
+30:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 2 rps
+batch size 8
+1000 requests
+outcome:
+
+31:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 1 rps
+batch size 8
+1000 requests
+outcome:
+
+32:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 1 rps
+batch size 8
+1000 requests
+outcome:
+
+33:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 0.5 rps
+batch size 8
+1000 requests
+outcome:
+
+34:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 0.5 rps
+batch size 8
+1000 requests
+outcome:
+
+35:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 0.25 rps
+batch size 8
+1000 requests
+outcome:
+
+36:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 0.25 rps
+batch size 8
+1000 requests
+outcome:
+
+37:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 0.125 rps
+batch size 8
+1000 requests
+outcome:
+
+38:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 0.125 rps
+batch size 8
+1000 requests
+outcome:
+
+
+39:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096)
+load dump @ 40 rps
+batch size 8
+1000 requests
+outcome:
+
+40:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096)
+load det @ 32 rps
+batch size 8
+1000 requests
+outcome:
+
+41:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096) length-aware enabled
+load det @ 32 rps
+batch size 8
+1000 requests
+outcome:
+
+42:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096)
+load det @ 16 rps
+batch size 8
+1000 requests
+outcome:
+
+43:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096) length-aware enabled
+load det @ 16 rps
+batch size 8
+1000 requests
+outcome:
+
+44:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096)
+load det @ 8 rps
+batch size 8
+1000 requests
+outcome:
+
+45:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096) length-aware enabled
+load det @ 8 rps
+batch size 8
+1000 requests
+outcome:
+
+46:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096)
+load det @ 4 rps
+batch size 8
+1000 requests
+outcome:
+
+47:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096) length-aware enabled
+load det @ 4 rps
+batch size 8
+1000 requests
+outcome:
+
+48:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096)
+load det @ 2 rps
+batch size 8
+1000 requests
+outcome:
+
+49:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096) length-aware enabled
+load det @ 2 rps
+batch size 8
+1000 requests
+outcome:
+
+50:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096)
+load det @ 1 rps
+batch size 8
+1000 requests
+outcome:
+
+51:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096) length-aware enabled
+load det @ 1 rps
+batch size 8
+1000 requests
+outcome:
+
+52:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096)
+load det @ 0.5 rps
+batch size 8
+1000 requests
+outcome:
+
+53:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096) length-aware enabled
+load det @ 0.5 rps
+batch size 8
+1000 requests
+outcome:
+
+54:
+8 replicas
+npu
+three-bucket 40 30 30 (32 1024 4096) length-aware enabled
+load det @ 0.25 rps
+batch size 8
+1000 requests
+outcome:

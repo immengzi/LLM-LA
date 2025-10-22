@@ -7,12 +7,10 @@ Shared length-backend helpers used by BOTH:
 - utils.send_chat_request (real vLLM path that may mirror/simulate)
 - oracle predictor preview (side-effect-free)
 
-Key updates for determinism with prompts limiting:
-- Prebuilt STRICT histogram plan sized to the number of enqueues (set_hist_plan).
-- Index selection by stable `req_id` rather than a global advancing pointer
-  (get_hist_index_for_req).
-- Predictor preview and simulator sampling both accept `req_id` and use the same
-  indexer so predicted and actual lengths match per request.
+New:
+- "replay-output" mode: uses dataset-provided out_len (if available)
+- register_replay_out_len(req_id, out_len): called at enqueue time
+Fully backward-compatible with previous modes.
 """
 
 import math
@@ -31,11 +29,7 @@ _hist_lock = threading.Lock()
 
 
 def _next_hist_index(label: str, probs: List[float]) -> int:
-    """
-    Balanced multinomial sequencer (deterministic, prefix-fair).
-    For each request, add fractional quota (probs) and pick the bin with max debt.
-    NOTE: This ADVANCES a global state and is kept for backward-compat only.
-    """
+    """Balanced multinomial sequencer (deterministic, prefix-fair)."""
     m = len(probs)
     key = (label, m)
     with _hist_lock:
@@ -53,7 +47,6 @@ def _next_hist_index(label: str, probs: List[float]) -> int:
 
 
 def reset_hist_sequence(label: Optional[str] = None):
-    """Optional: reset sequencer state (e.g., between experiments)."""
     with _hist_lock:
         if label is None:
             _hist_state.clear()
@@ -71,13 +64,7 @@ _plan_lock = threading.Lock()
 
 
 def set_hist_plan(label: str, probs: List[float], n: int, seed_base: int):
-    """
-    Build a deterministic plan of length-bin indices of size n:
-    counts ~ probs (rounded to sum exactly n), then shuffle with fixed seed.
-
-    Called ONCE per run (after prompts are limited), so the plan exactly matches
-    the number of enqueues and keeps 80/20 (or any) for that subset.
-    """
+    """Precompute a deterministic histogram plan exactly size n."""
     with _plan_lock:
         counts = [int(round(float(p) * n)) for p in probs]
         delta = n - sum(counts)
@@ -102,10 +89,6 @@ def set_hist_plan(label: str, probs: List[float], n: int, seed_base: int):
 
 
 def _next_hist_index_from_plan(label: str, default_fn: Callable[[], int]) -> int:
-    """
-    Legacy helper that ADVANCES an internal pointer. Kept for backwards compat.
-    Prefer using get_hist_index_for_req with req_id indexing.
-    """
     with _plan_lock:
         st = _plan_state.get(label)
         if not st or not st.get("seq"):
@@ -117,25 +100,7 @@ def _next_hist_index_from_plan(label: str, default_fn: Callable[[], int]) -> int
         return idx
 
 
-def _peek_hist_index_from_plan(label: str, default_fn: Callable[[], int]) -> int:
-    """
-    Non-advancing peek of the current pointer. Kept for backwards compat.
-    """
-    with _plan_lock:
-        st = _plan_state.get(label)
-        if not st or not st.get("seq"):
-            return default_fn()
-        ptr = st["ptr"]
-        seq: List[int] = st["seq"]
-        idx = seq[ptr % len(seq)]
-        return idx
-
-
 def get_hist_index_for_req(label: str, req_id: int, default_fn: Callable[[], int]) -> int:
-    """
-    Deterministically pick the histogram bin for a request ID using the prebuilt plan.
-    Falls back to default_fn() if no plan is available.
-    """
     with _plan_lock:
         st = _plan_state.get(label)
         if not st or not st.get("seq"):
@@ -175,13 +140,11 @@ def _next_hist_index_prng(label: str, probs: List[float], seed_base: int) -> int
 # Common helpers
 # ---------------------------------------------------------------------
 def seed_for_name(seed_base: int, name: str) -> int:
-    """Deterministic seed from a base seed and a stable string (endpoint/prompt/etc.)."""
     h = hashlib.sha256(f"{seed_base}:{name}".encode("utf-8")).hexdigest()
     return int(h[:16], 16)
 
 
 def rng_for_prompt(seed_base: int, prompt: Optional[str], by_prompt: bool = True) -> random.Random:
-    """Build an RNG either from base seed only, or mixed with the prompt content."""
     if by_prompt and prompt:
         s = seed_for_name(seed_base, prompt)
     else:
@@ -198,6 +161,26 @@ def estimate_in_tokens_from_chars(prompt: str) -> int:
     lo = int(cfg.SIM_IN_MIN)
     hi = int(cfg.SIM_IN_MAX)
     return max(lo, min(hi, est))
+
+
+# ---------------------------------------------------------------------
+# Replay registry: req_id -> out_len (dataset-driven)
+# ---------------------------------------------------------------------
+_replay_lock = threading.Lock()
+_replay_out_len: Dict[int, int] = {}
+
+
+def register_replay_out_len(req_id: int, out_len: int) -> None:
+    """Called at enqueue time if dataset-provided reply length is known."""
+    with _replay_lock:
+        _replay_out_len[int(req_id)] = int(max(0, out_len))
+
+
+def _get_replay_out_len(req_id: Optional[int]) -> Optional[int]:
+    if req_id is None:
+        return None
+    with _replay_lock:
+        return _replay_out_len.get(int(req_id))
 
 
 # ---------------------------------------------------------------------
@@ -218,23 +201,19 @@ def sample_out_tokens_from_cfg(rng: random.Random, req_id: Optional[int] = None)
         mu = float(d.get("mu", 4.8))
         sigma = float(d.get("sigma", 0.8))
         x = rng.lognormvariate(mu, sigma)
-
     elif kind == "gamma":
         k = float(d.get("k", 2.0))
         theta = float(d.get("theta", 64.0 / max(k, 1e-9)))
         x = rng.gammavariate(k, theta)
-
     elif kind == "pareto":
         alpha = float(d.get("alpha", 1.5))
         xm = float(d.get("xm", 16.0))
         x = xm * rng.paretovariate(alpha)
-
     elif kind == "hist":
         values = list(map(int, d.get("values", [])))
         probs = d.get("probs") or [1.0 / max(1, len(values))] * max(1, len(values))
         if not values:
             return int(cfg.SIM_OUT_TOKENS)
-
         if bool(getattr(cfg, "LENGTH_DIST_STRICT_HIST", False)) and req_id is not None:
             label = str(getattr(cfg, "LENGTH_HIST_SERIES_LABEL", "default"))
             seed_base = int(
@@ -257,7 +236,6 @@ def sample_out_tokens_from_cfg(rng: random.Random, req_id: Optional[int] = None)
                     break
             if x is None:
                 x = int(values[-1])
-
     else:
         return int(cfg.SIM_OUT_TOKENS)
 
@@ -265,7 +243,7 @@ def sample_out_tokens_from_cfg(rng: random.Random, req_id: Optional[int] = None)
 
 
 # ---------------------------------------------------------------------
-# Compute per-request cap/targets (unchanged, but kept here for completeness)
+# Compute per-request cap/targets
 # ---------------------------------------------------------------------
 def compute_length_plan(
     *,
@@ -291,21 +269,14 @@ def compute_length_plan(
     if base_cap == 0 and cfg_cap > 0:
         base_cap = cfg_cap
 
-    if target_output_tokens is not None and target_total_tokens is not None:
-        raise ValueError("Provide only one of target_output_tokens or target_total_tokens.")
-
+    # Explicit override modes
     if target_output_tokens is not None or target_total_tokens is not None:
         forced_out = forced_tot = None
         if target_output_tokens is not None:
             forced_out = max(0, int(target_output_tokens))
         if target_total_tokens is not None:
             forced_tot = max(0, int(target_total_tokens))
-        if forced_out is not None:
-            eff_max = forced_out if base_cap == 0 else min(forced_out, base_cap)
-        elif forced_tot is not None:
-            eff_max = forced_tot if base_cap == 0 else min(forced_tot, base_cap)
-        else:
-            eff_max = base_cap
+        eff_max = forced_out or forced_tot or base_cap
         return {
             "eff_mode": eff_mode,
             "eff_max": int(max(0, eff_max)),
@@ -317,89 +288,103 @@ def compute_length_plan(
 
     meta: Dict[str, Any] = {"_length_mode": eff_mode}
 
+    # Target-output
     if eff_mode == "target-output":
         tgt = getattr(cfg, "TARGET_OUTPUT_TOKENS", None)
-        if tgt is None:
+        if tgt is not None:
+            tgt = int(tgt)
+            eff_max = min(tgt, base_cap)
+            meta["_target_completion_tokens"] = tgt
             return {
-                "eff_mode": "legacy",
-                "eff_max": int(max(0, base_cap)),
-                "forced_out": None,
+                "eff_mode": eff_mode,
+                "eff_max": eff_max,
+                "forced_out": tgt,
                 "forced_tot": None,
                 "eff_ignore_eos": eff_ignore_eos,
                 "meta": meta,
             }
-        tgt = int(tgt)
-        eff_max = tgt if base_cap == 0 else min(tgt, base_cap)
-        meta["_target_completion_tokens"] = int(tgt)
+
+    # Target-total
+    if eff_mode == "target-total":
+        tgt = getattr(cfg, "TARGET_TOTAL_TOKENS", None)
+        if tgt is not None:
+            tgt = int(tgt)
+            eff_max = min(tgt, base_cap)
+            meta["_target_total_tokens"] = tgt
+            return {
+                "eff_mode": eff_mode,
+                "eff_max": eff_max,
+                "forced_out": None,
+                "forced_tot": tgt,
+                "eff_ignore_eos": eff_ignore_eos,
+                "meta": meta,
+            }
+
+    # NEW: replay-output
+    if eff_mode == "replay-output":
+        v = _get_replay_out_len(req_id)
+        if v is not None:
+            est_in = int(estimate_in_tokens_from_chars(plain_prompt))
+            out_budget = v if base_cap == 0 else min(int(v), base_cap)
+            meta.update(
+                {
+                    "_replay_mode": True,
+                    "_replay_out_len": int(v),
+                    "_replay_total_tokens_target": int(est_in + out_budget),
+                    "_req_id": (None if req_id is None else int(req_id)),
+                }
+            )
+            return {
+                "eff_mode": eff_mode,
+                "eff_max": int(max(0, out_budget)),
+                "forced_out": int(v),
+                "forced_tot": None,
+                "eff_ignore_eos": eff_ignore_eos,
+                "meta": meta,
+            }
+        # fallback to legacy if no replay length
         return {
-            "eff_mode": eff_mode,
-            "eff_max": int(max(0, eff_max)),
-            "forced_out": tgt,
+            "eff_mode": "legacy",
+            "eff_max": base_cap,
+            "forced_out": None,
             "forced_tot": None,
             "eff_ignore_eos": eff_ignore_eos,
             "meta": meta,
         }
 
-    if eff_mode == "target-total":
-        tgt = getattr(cfg, "TARGET_TOTAL_TOKENS", None)
-        if tgt is None:
-            return {
-                "eff_mode": "legacy",
-                "eff_max": int(max(0, base_cap)),
-                "forced_out": None,
-                "forced_tot": None,
-                "eff_ignore_eos": eff_ignore_eos,
-                "meta": meta,
-            }
-        tgt = int(tgt)
-        eff_max = tgt if base_cap == 0 else min(tgt, base_cap)
-        meta["_target_total_tokens"] = int(tgt)
-        return {
-            "eff_mode": eff_mode,
-            "eff_max": int(max(0, eff_max)),
-            "forced_out": None,
-            "forced_tot": tgt,
-            "eff_ignore_eos": eff_ignore_eos,
-            "meta": meta,
-        }
-
+    # Distribution-based
     if eff_mode == "dist-output":
-        seed_base = int(
-            getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0
-        )
+        seed_base = int(getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0)
         by_prompt = bool(getattr(cfg, "LENGTH_DIST_BY_PROMPT", True))
         rng = rng_for_prompt(seed_base, (plain_prompt if by_prompt else None), by_prompt=by_prompt)
 
-        # KEY: feed req_id so STRICT_HIST picks the same bin as predictor/real
         sampled_out = int(sample_out_tokens_from_cfg(rng, req_id=req_id))
         est_in = int(estimate_in_tokens_from_chars(plain_prompt))
-        out_budget = sampled_out if base_cap == 0 else min(sampled_out, base_cap)
-
+        out_budget = min(sampled_out, base_cap)
         meta.update(
             {
                 "_dist_mode": True,
-                "_dist_seed_base": int(seed_base),
-                "_dist_by_prompt": bool(by_prompt),
-                "_dist_prompt_tokens_est": int(est_in),
-                "_dist_completion_tokens_target": int(out_budget),
-                "_dist_total_tokens_target": int(est_in + out_budget),
-                "_dist_sampled_out_raw": int(sampled_out),
-                "_req_id": (None if req_id is None else int(req_id)),
+                "_dist_seed_base": seed_base,
+                "_dist_by_prompt": by_prompt,
+                "_dist_prompt_tokens_est": est_in,
+                "_dist_completion_tokens_target": out_budget,
+                "_dist_total_tokens_target": est_in + out_budget,
+                "_req_id": req_id,
             }
         )
-
         return {
             "eff_mode": eff_mode,
-            "eff_max": int(max(0, out_budget)),
+            "eff_max": out_budget,
             "forced_out": sampled_out,
             "forced_tot": None,
             "eff_ignore_eos": eff_ignore_eos,
             "meta": meta,
         }
 
+    # legacy fallback
     return {
         "eff_mode": "legacy",
-        "eff_max": int(max(0, base_cap)),
+        "eff_max": base_cap,
         "forced_out": None,
         "forced_tot": None,
         "eff_ignore_eos": eff_ignore_eos,
@@ -408,18 +393,12 @@ def compute_length_plan(
 
 
 # ---------------------------------------------------------------------
-# Side-effect-free prediction used by Oracle predictor — accepts req_id
+# Predictor preview — side-effect-free
 # ---------------------------------------------------------------------
 def preview_out_tokens_for_prompt(*, plain_prompt: str, req_id: int) -> int:
-    """
-    Return the predicted completion tokens for this prompt under the current
-    SIM/length policy WITHOUT mutating any global state. Uses req_id for
-    STRICT histogram so predictor and simulator align exactly.
-    """
     cfg = get_config()
     mode = str(getattr(cfg, "LENGTH_MODE", "legacy") or "legacy").lower().strip()
 
-    # Explicit targets
     if mode == "target-output":
         tgt = getattr(cfg, "TARGET_OUTPUT_TOKENS", None)
         if tgt is not None:
@@ -429,17 +408,22 @@ def preview_out_tokens_for_prompt(*, plain_prompt: str, req_id: int) -> int:
         if tgt is not None:
             return int(tgt)
 
-    # Distribution-based
+    # NEW: replay-output
+    if mode == "replay-output":
+        v = _get_replay_out_len(req_id)
+        if v is not None:
+            return int(v)
+        cap = int(getattr(cfg, "MAX_TOKENS", 0) or 0)
+        return int(cap if cap > 0 else 0)
+
     if mode == "dist-output":
         d = dict(getattr(cfg, "SIM_OUT_DIST", {}) or {})
         kind = str(d.get("kind", "lognormal")).lower()
-
         if kind == "hist":
             values = list(map(int, d.get("values", [])))
             probs = d.get("probs") or ([1.0 / max(1, len(values))] * len(values))
             if not values:
                 return int(getattr(cfg, "SIM_OUT_TOKENS", 0) or 0)
-
             if bool(getattr(cfg, "LENGTH_DIST_STRICT_HIST", False)):
                 label = str(getattr(cfg, "LENGTH_HIST_SERIES_LABEL", "default"))
                 seed_base = int(
@@ -467,8 +451,6 @@ def preview_out_tokens_for_prompt(*, plain_prompt: str, req_id: int) -> int:
                     if u <= cum:
                         return int(v)
                 return int(values[-1])
-
-        # non-hist distributions
         seed_base = int(
             getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0
         )
