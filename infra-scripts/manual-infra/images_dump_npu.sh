@@ -7,13 +7,8 @@ mkdir -p "$OUT_DIR"
 
 OUT_TAR="$OUT_DIR/$(echo "$SRC_IMAGE" | tr '/:' '_').tar"
 
-# Remove any existing tar file
 rm -f "$OUT_TAR"
-
-# Pull the image using Docker
-docker pull "$SRC_IMAGE"
-
-# Save the image to a tarball
-docker save "$SRC_IMAGE" -o "$OUT_TAR"
+sudo ctr images pull --platform linux/amd64 "$SRC_IMAGE"
+sudo ctr images export "$OUT_TAR" "$SRC_IMAGE"
 
 echo "✅ Saved to $OUT_TAR"

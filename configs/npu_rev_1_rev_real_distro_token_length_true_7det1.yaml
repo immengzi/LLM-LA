@@ -60,17 +60,17 @@ SIM_OUT_DIST:
   kind: "hist"
   # values: [32, 64, 128, 256, 512, 768, 1024]
   # probs:  [0.05,0.10,0.30,0.30,0.15,0.07,0.03]
-  values: [32, 4096]
-  probs:  [0.7,0.3]
+  values: [32, 1024, 4096]
+  probs:  [0.4, 0.3, 0.3]
   # values: [1024]
   # probs:  [1]
   min: 16
   max: 40960
 
-USE_LEN_AWARE: false
+USE_LEN_AWARE: true
 LEN_POLICY: short_first
 PRED_LEN_THRESHOLD: 33
-POOL_FACTOR: 400
+POOL_FACTOR: 10000
 
 
 # ---- HIGH tokens (set MAX_TOKENS: 2048 above) ----

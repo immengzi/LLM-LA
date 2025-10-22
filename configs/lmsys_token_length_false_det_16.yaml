@@ -22,7 +22,7 @@ MAX_TOKENS: 8192        # Medium cap (default). For HIGH use 2048; VERY LARGE us
 IGNORE_EOS: true
 
 # ------- Length policy -------
-LENGTH_MODE: "dist-output"        # Distribution mode (default for this file)
+LENGTH_MODE: "replay-output"        # Distribution mode (default for this file)
 # LENGTH_MODE: "target-output"    # Fixed length mode (uncomment to use)
 TARGET_OUTPUT_TOKENS: null        # e.g., 128 when using fixed mode
 TARGET_TOTAL_TOKENS: null
@@ -136,8 +136,20 @@ LOAD_RATE_RPS: 1
 # Load generation knobs
 # =========================
 LOAD_PATTERN: "det"          # one of: dump, det, poisson, bursty, steps
-LOAD_RATE_RPS: 1
+LOAD_RATE_RPS: 16
 LOAD_WARMUP_S: 0.0
 LOAD_DURATION_S: 999999.0
 LENGTH_DIST_STRICT_HIST: true
 LENGTH_HIST_SERIES_LABEL: "default"
+
+# =========================
+# Prompt source (use HF instead of local file)
+# =========================
+PROMPTS_SOURCE: "hf-lmsys"          # "file" | "hf-lmsys"
+
+# HuggingFace live-dataset options (used only when PROMPTS_SOURCE="hf-lmsys")
+HF_DATASET_NAME: "lmsys/lmsys-chat-1m"
+HF_DATASET_SPLIT: "train"
+HF_TOKENIZER_NAME: "Qwen/Qwen2-7B"  # for reply-length estimation (harmless if you don’t use it)
+HF_STREAMING: false                 # set false if streaming triggers rate-limit / TLS issues
+PROMPTS_LIMIT: 1000                 # merged with HF_MAX_N -> effective_max_n = min(HF_MAX_N, PROMPTS_LIMIT)

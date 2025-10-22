@@ -2,7 +2,7 @@
 #  simple, config-driven open-loop load generator with optional logging
 
 import time, random
-from typing import Callable, Deque, Tuple
+from typing import Callable, Deque, Tuple, Optional, Iterable, Iterator
 from collections import deque
 
 
@@ -39,7 +39,7 @@ def _parse_steps(spec: str) -> list[Tuple[float, float]]:
 def drive_load(
     *,
     pattern: str,
-    prompts: Deque[str],
+    prompts: Iterable[str] | Iterator[str] | Deque[str],
     enqueue_one: Callable[[str, float], None],  # (prompt, t_enq_client)
     rate_rps: float = 5.0,
     warmup_s: float = 5.0,
@@ -52,17 +52,36 @@ def drive_load(
     verbose: bool = True,
 ) -> None:
     """
-    Open-loop arrival driver. Consumes from 'prompts' and calls 'enqueue_one(p, t_enq)' at scheduled times.
+    Open-loop arrival driver. Consumes from 'prompts' lazily and calls 'enqueue_one(p, t_enq)'.
+    Supports:
+      - deque (legacy)
+      - iterator/generator (streaming)
     Patterns:
-      - "dump": enqueue all immediately (legacy behavior)
-      - "poisson": exponential inter-arrivals at LOAD_RATE_RPS
-      - "det": fixed spacing 1/R
-      - "bursty": on/off windows with different RPS
-      - "steps": piecewise-constant RPS using STEP_SCHEDULE (t:rps)
+      - "dump": enqueue all immediately
+      - "poisson": exponential inter-arrivals
+      - "det": fixed inter-arrivals
+      - "bursty": alternating on/off load windows
+      - "steps": piecewise-constant RPS from schedule
     """
-    # --- Defensive: ensure we have a deque (callers sometimes pass list) ---
-    if not hasattr(prompts, "popleft"):
-        prompts = deque(prompts)
+
+    # normalize to iterator or deque
+    is_deque = hasattr(prompts, "popleft")
+    if not is_deque:
+        # If it's an iterable but not an iterator, make it one
+        if hasattr(prompts, "__iter__") and not hasattr(prompts, "__next__"):
+            prompts = iter(prompts)
+
+    def _pop_next() -> Optional[str]:
+        """Get next prompt from deque or iterator."""
+        if is_deque:
+            if len(prompts) == 0:
+                return None
+            return prompts.popleft()
+        else:
+            try:
+                return next(prompts)
+            except StopIteration:
+                return None
 
     t0 = time.time()
     sent = 0
@@ -72,23 +91,28 @@ def drive_load(
             f"[LOAD] start pattern={pattern}, rate={rate_rps}, warmup={warmup_s}s, duration={duration_s}s"
         )
 
-    # Warmup phase
+    # --- Warmup phase ---
     if warmup_s > 0 and pattern != "dump":
         if verbose:
             print(f"[LOAD] warmup for {warmup_s}s")
-        t = time.time()
-        while (time.time() - t0) < warmup_s and prompts:
-            p = prompts.popleft()
+        while (time.time() - t0) < warmup_s:
+            p = _pop_next()
+            if p is None:
+                break
             enqueue_one(p, time.time())
             sent += 1
             if verbose and sent % 10 == 0:
                 print(f"[LOAD] warmup sent={sent}")
             time.sleep(0.002)
 
+    # --- Dump mode ---
     if pattern == "dump":
         now = time.time()
-        while prompts:
-            enqueue_one(prompts.popleft(), now)
+        while True:
+            p = _pop_next()
+            if p is None:
+                break
+            enqueue_one(p, now)
             sent += 1
         if verbose:
             print(f"[LOAD] dump mode: sent {sent} prompts")
@@ -96,23 +120,26 @@ def drive_load(
 
     end_at = t0 + warmup_s + max(0.0, duration_s)
 
+    # --- Poisson or deterministic arrivals ---
     if pattern in ("poisson", "det"):
         next_at = time.time()
-        while prompts and time.time() < end_at:
+        while time.time() < end_at:
             next_at += _next_ia_seconds(rate_rps, pattern)
             _sleep_until(next_at)
-            if not prompts:
+            p = _pop_next()
+            if p is None:
                 break
-            enqueue_one(prompts.popleft(), time.time())
+            enqueue_one(p, time.time())
             sent += 1
             if verbose and sent % 50 == 0:
                 print(f"[LOAD] steady sent={sent} so far at {time.time()-t0:.1f}s")
 
+    # --- Bursty pattern ---
     elif pattern == "bursty":
         cur_on = True
         window_end = time.time() + burst_on_s
         next_at = time.time()
-        while prompts and time.time() < end_at:
+        while time.time() < end_at:
             r = burst_rps_on if cur_on else burst_rps_off
             if r <= 0:
                 if verbose:
@@ -121,9 +148,10 @@ def drive_load(
             else:
                 next_at += _next_ia_seconds(r, "poisson")
                 _sleep_until(next_at)
-                if not prompts:
+                p = _pop_next()
+                if p is None:
                     break
-                enqueue_one(prompts.popleft(), time.time())
+                enqueue_one(p, time.time())
                 sent += 1
                 if verbose and sent % 50 == 0:
                     print(f"[LOAD] burst sent={sent} so far")
@@ -132,12 +160,13 @@ def drive_load(
                 window_end = time.time() + (burst_on_s if cur_on else burst_off_s)
                 next_at = time.time()
 
+    # --- Steps pattern ---
     elif pattern == "steps":
         steps = _parse_steps(step_schedule) or [(0.0, rate_rps)]
         base = time.time()
         step_idx = 0
         next_at = time.time()
-        while prompts and time.time() < end_at:
+        while time.time() < end_at:
             if step_idx + 1 < len(steps):
                 t_next, _ = steps[step_idx + 1]
                 if (time.time() - base) >= t_next:
@@ -153,9 +182,10 @@ def drive_load(
                 continue
             next_at += _next_ia_seconds(cur_rps, "poisson")
             _sleep_until(next_at)
-            if not prompts:
+            p = _pop_next()
+            if p is None:
                 break
-            enqueue_one(prompts.popleft(), time.time())
+            enqueue_one(p, time.time())
             sent += 1
             if verbose and sent % 50 == 0:
                 print(f"[LOAD] step sent={sent} so far")
