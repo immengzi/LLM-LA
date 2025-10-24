@@ -29,6 +29,9 @@ from router_core import (
     RandomBatchingRouter,
     LeastQueueBatchingRouter,
 )
+from autoscaler import QueueBacklogAutoscaler
+from utils import log_autoscale
+
 
 # Centralized config
 _cfg = get_config()
@@ -42,23 +45,6 @@ from itertools import count
 
 _req_id_counter = count(start=0)
 
-# def _make_enqueue_fn_for_batched(router) -> callable:
-#     """Return enqueue(prompt, t_enq) for routers with shared queue."""
-#     def enqueue_one(prompt: str, t_enq_client: float):
-#         rid = next(_req_id_counter)
-#         try:
-#             router.q.put((prompt, t_enq_client, rid))
-#         except Exception:
-#             router.q.put((prompt, time.time(), rid))
-#     return enqueue_one
-# def _make_enqueue_fn_for_batched(router) -> callable:
-#     def enqueue_one(prompt: str, t_enq_client: float):
-#         rid = next(_req_id_counter)
-#         try:
-#             router.q.put((prompt, t_enq_client, rid))
-#         except Exception:
-#             router.q.put((prompt, time.time(), rid))
-#     return enqueue_one
 def _make_enqueue_fn_for_batched(router) -> callable:
     """
     enqueue_one(prompt_or_pair, t_enq_client)
@@ -90,42 +76,6 @@ def _make_enqueue_fn_for_batched(router) -> callable:
             router.q.put((str(prompt), time.time(), int(rid)))
     return enqueue_one
 
-# def _start_load_feeder_if_needed(
-#     pattern: str,
-#     prompts: deque,
-#     enqueue_one: callable,
-# ) -> threading.Thread | None:
-#     """
-#     Start a timed feeder thread for non-dump patterns.
-#     Returns the Thread (or None if dump/immediate).
-#     """
-#     from loadgen import drive_load  # local import
-
-#     if (pattern or "dump").lower() == "dump":
-#         t0 = time.time()
-#         while prompts:
-#             p = prompts.popleft()
-#             enqueue_one(p, t0)
-#         return None
-
-#     def _runner():
-#         drive_load(
-#             pattern=pattern,
-#             prompts=prompts,
-#             enqueue_one=enqueue_one,
-#             rate_rps=_cfg.LOAD_RATE_RPS,
-#             warmup_s=_cfg.LOAD_WARMUP_S,
-#             duration_s=_cfg.LOAD_DURATION_S,
-#             burst_on_s=_cfg.BURST_ON_S,
-#             burst_off_s=_cfg.BURST_OFF_S,
-#             burst_rps_on=_cfg.BURST_RPS_ON,
-#             burst_rps_off=_cfg.BURST_RPS_OFF,
-#             step_schedule=_cfg.STEP_SCHEDULE,
-#         )
-
-#     th = threading.Thread(target=_runner, daemon=True)
-#     th.start()
-#     return th
 def _start_load_feeder_if_needed(pattern, prompts, enqueue_one) -> threading.Thread | None:
     from loadgen import drive_load
     pat = (pattern or "dump").lower()
@@ -169,119 +119,155 @@ def _run_batched_common(
     log_prefix: str,
     summary_caption: str,
 ):
-    # --- metrics start
     start_metrics_collection(mode_name, _cfg.METRICS_PATH, metrics_interval)
     start_time = time.time()
 
-    # --- optional: print where logs will go if config exposes it
     try:
-        results_dir = getattr(_cfg, "RESULTS_PATH", None) or getattr(
-            _cfg, "RESULTS_DIR", None
-        )
+        results_dir = getattr(_cfg, "RESULTS_PATH", None) or getattr(_cfg, "RESULTS_DIR", None)
         if results_dir:
-            print(f"[RESULTS] Per-request logs are written under: {results_dir}")
+            print(f"[RESULTS] Logs under: {results_dir}")
     except Exception:
         pass
 
-    # --- router
     router = router_cls(mode_name=mode_name)
 
-    # --- STRICT HIST plan (precompute for exactly N enqueues) — SKIP if replay-output
-    try:
-        from length_backend import set_hist_plan
-        eff_mode = str(getattr(_cfg, "LENGTH_MODE", "legacy") or "legacy").lower().strip()
-        strict = (
-            bool(getattr(_cfg, "LENGTH_DIST_STRICT_HIST", False))
-            and eff_mode == "dist-output"
-        )
-        if strict:
-            # Number of enqueues this run (after PROMPTS_LIMIT already applied)
-            N = len(prompts)
-            d = dict(getattr(_cfg, "SIM_OUT_DIST", {}) or {})
-            values = list(map(int, d.get("values", [])))
-            probs = d.get("probs") or ([1.0 / max(1, len(values))] * len(values))
-            label = str(getattr(_cfg, "LENGTH_HIST_SERIES_LABEL", "default"))
-            seed_base = int(getattr(_cfg, "LENGTH_DIST_SEED", None) or getattr(_cfg, "SEED", 0) or 0)
-
-            if values:
-                set_hist_plan(label, probs, int(N), seed_base)
-                print(f"[LENGTH*PLAN] strict-hist plan prepared: label={label} N={N} values={len(values)}")
-            else:
-                print("[LENGTH*PLAN][WARN] SIM_OUT_DIST.values is empty; strict-hist plan skipped.")
-        elif eff_mode == "replay-output":
-            print("[LENGTH*PLAN] replay-output mode: skipping strict-hist plan.")
-    except Exception as e:
-        print(f"[LENGTH*PLAN][WARN] failed to prepare strict-hist plan: {e}")
-
-    # --- load feeder (assigns req_id in _make_enqueue_fn_for_batched)
+    # --- load feeder
     feeder = _start_load_feeder_if_needed(
         _cfg.LOAD_PATTERN,
         prompts,
         _make_enqueue_fn_for_batched(router),
     )
 
-    # --- initial discovery
-    eps = discover_endpoints(core, _cfg.NAMESPACE, _cfg.LABEL_SELECTOR, _cfg.VLLM_PORT)
-    if not eps:
+    eps_all = discover_endpoints(core, _cfg.NAMESPACE, _cfg.LABEL_SELECTOR, _cfg.VLLM_PORT)
+    if not eps_all:
         print("No running vLLM pods found. Exiting.")
         stop_metrics_collection(mode_name)
         return
-    update_metrics_endpoints(mode_name, eps)
-    router.ensure_endpoints(eps)
+    update_metrics_endpoints(mode_name, eps_all)
 
+    # --- autoscaler setup
+    scaler = None
+    if getattr(_cfg, "AUTOSCALE_ENABLED", True):
+        scaler = QueueBacklogAutoscaler(
+            mode=str(getattr(_cfg, "AUTOSCALE_MODE", "virtual")),
+            target_q_per_server=int(getattr(_cfg, "AUTOSCALE_Q_PER_SERVER", 10)),
+            min_servers=int(getattr(_cfg, "AUTOSCALE_MIN_SERVERS", 1)),
+            max_servers=int(getattr(_cfg, "AUTOSCALE_MAX_SERVERS", 10_000)),
+            hysteresis=float(getattr(_cfg, "AUTOSCALE_HYSTERESIS", 0.20)),
+            debounce_s=float(getattr(_cfg, "AUTOSCALE_DEBOUNCE_S", 1.0)),
+            router_mode_name=mode_name,
+        )
+    else:
+        print("[AUTOSCALE] Disabled in config.")
+        # Log one initial disabled state using the new, unambiguous signature.
+        log_autoscale(
+            router_mode=mode_name,
+            desired_servers=len(eps_all),
+            realized_servers=len(eps_all),
+            total_eps=len(eps_all),
+            active_eps=len(eps_all),
+            draining_eps=0,
+            queue_len=0,
+            inflight=0,
+            reason="autoscale-disabled",
+        )
+        scaler = None
+
+    router.ensure_endpoints(eps_all)
     last_discovery = 0.0
+    last_logged_sig = None  # (desired_servers, sorted(active), sorted(draining))
+
     try:
         while router.has_work() or (feeder.is_alive() if feeder else False):
             now = time.time()
             if now - last_discovery > _cfg.DISCOVERY_INTERVAL_S:
-                new_eps = discover_endpoints(
-                    core, _cfg.NAMESPACE, _cfg.LABEL_SELECTOR, _cfg.VLLM_PORT
-                )
-                update_metrics_endpoints(mode_name, new_eps)
-                router.ensure_endpoints(new_eps)
+                eps_all = discover_endpoints(core, _cfg.NAMESPACE, _cfg.LABEL_SELECTOR, _cfg.VLLM_PORT)
+                update_metrics_endpoints(mode_name, eps_all)
                 last_discovery = now
-                if not new_eps:
-                    print("No running vLLM pods found yet. Waiting...")
+                if not eps_all:
+                    print("No vLLM pods found; waiting...")
                     time.sleep(1.0)
                     continue
 
+            # inflight (sum + per-EP map)
+            inflight_sum = 0
+            inflight_by_ep = {}
+            try:
+                if hasattr(router, "inflight") and isinstance(router.inflight, dict):
+                    inflight_by_ep = {str(k): int(v) for k, v in router.inflight.items()}
+                    inflight_sum = sum(inflight_by_ep.values())
+            except Exception:
+                pass
+
+            # ---- autoscale decision (with draining awareness) ----
+            if scaler:
+                # The autoscaler returns (active_eps, draining_eps, desired_servers, reason, changed)
+                active_eps, draining_eps, desired_servers, reason, changed = scaler.step_and_select(
+                    eps_all,
+                    queue_len=router.q.qsize(),
+                    inflight_by_ep=inflight_by_ep,
+                )
+            else:
+                active_eps = list(eps_all)
+                draining_eps = []
+                desired_servers = len(active_eps)
+                reason, changed = "autoscale-disabled", False
+
+            # Realized = active + draining currently kept in the pool.
+            realized_servers = len(active_eps) + len(draining_eps)
+
+            # Tell router which EPs are draining (no new work), and keep both active+draining present.
+            if hasattr(router, "set_draining_eps"):
+                try:
+                    router.set_draining_eps(set(draining_eps))
+                except Exception:
+                    pass
+            router.ensure_endpoints(list(active_eps) + list(draining_eps))
+
+            # ---- structured autoscale log (no legacy/duplicate fields) ----
+            sig = (desired_servers, tuple(sorted(active_eps)), tuple(sorted(draining_eps)))
+            if changed or sig != last_logged_sig:
+                log_autoscale(
+                    router_mode=mode_name,
+                    desired_servers=desired_servers,
+                    realized_servers=realized_servers,
+                    total_eps=len(eps_all),
+                    active_eps=len(active_eps),
+                    draining_eps=len(draining_eps),
+                    queue_len=router.q.qsize(),
+                    inflight=inflight_sum,
+                    reason=reason,
+                )
+                last_logged_sig = sig
+
+            # Step the router (push) or noop (pull) and print a human line.
             router.step()
-            print(f"[{log_prefix}]", router.status_line())
+            print(
+                f"[{log_prefix}] desired={desired_servers} realized={realized_servers} "
+                f"active={len(active_eps)} draining={len(draining_eps)} total={len(eps_all)} "
+                f"q={router.q.qsize()} inflight={inflight_sum} reason={reason} | {router.status_line()}"
+            )
             time.sleep(_cfg.SAMPLE_INTERVAL)
     finally:
-        # daemon worker threads are tracked via inflight; nothing explicit to stop here
         pass
 
-    # --- summary (console)
-    print(f"\n==== SUMMARY ({summary_caption}) ====")
+    # --- summary
     runtime = time.time() - start_time
-    print(f"Total runtime: {runtime:.2f} seconds")
+    print(f"\n==== SUMMARY ({summary_caption}) ====")
+    print(f"Total runtime: {runtime:.2f}s")
     stats = router.stats()
-    for ep in sorted(stats.keys()):
-        s = stats[ep]
+    for ep, s in sorted(stats.items()):
         print(f"{ep}: ok={s['ok']} err={s['err']}")
-
-    # --- metrics stop
     stop_metrics_collection(mode_name)
-
-    # --- persisted run summary
-    try:
-        summary_path = save_summary(
-            mode_name,
-            {
-                "runtime_sec": runtime,
-                "endpoints": stats,
-                "total_ok": sum(v["ok"] for v in stats.values()),
-                "total_err": sum(v["err"] for v in stats.values()),
-            },
-        )
-        if summary_path:
-            print(f"[SUMMARY] Saved summary to: {summary_path}")
-        else:
-            print("[SUMMARY] Summary saved (path not returned by save_summary).")
-    except Exception as e:
-        print(f"[SUMMARY][WARN] Failed to save summary: {e}")
-
+    save_summary(
+        mode_name,
+        {
+            "runtime_sec": runtime,
+            "endpoints": stats,
+            "total_ok": sum(v["ok"] for v in stats.values()),
+            "total_err": sum(v["err"] for v in stats.values()),
+        },
+    )
 
 
 

@@ -164,7 +164,7 @@ def cli(
             ds_name   = getattr(cfg, "HF_DATASET_NAME", "lmsys/lmsys-chat-1m")
             ds_split  = getattr(cfg, "HF_DATASET_SPLIT", "train")
             tok_name  = getattr(cfg, "HF_TOKENIZER_NAME", "gpt2")
-            streaming = bool(getattr(cfg, "HF_STREAMING", True))
+            streaming = bool(getattr(cfg, "HF_STREAMING", False))
             limit     = getattr(cfg, "PROMPTS_LIMIT", None)
             max_n     = int(limit) if limit is not None else None  # None => unbounded
 

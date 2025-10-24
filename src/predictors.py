@@ -18,59 +18,6 @@ from config import get_config
 from length_backend import preview_out_tokens_for_prompt, compute_length_plan
 
 
-# class BaseLengthPredictor:
-#     name: str = "base"
-
-#     def predict_out_tokens(self, prompt: str, req_id: Optional[int] = None) -> Optional[int]:
-#         """Return predicted completion tokens for this prompt, or None if unavailable."""
-#         raise NotImplementedError
-
-
-# class NoopLengthPredictor(BaseLengthPredictor):
-#     name = "none"
-
-#     def predict_out_tokens(self, prompt: str, req_id: Optional[int] = None) -> Optional[int]:
-#         return None
-
-
-# class OracleLengthPredictor(BaseLengthPredictor):
-#     """
-#     Oracle predictor:
-#       - Uses the same SIM length-policy configuration but in a *preview* mode
-#         that does not mutate any shared state (no pointer/RNG advancement).
-#       - Under STRICT histogram (with a prebuilt plan indexed by req_id) or
-#         PRNG-by-prompt, the preview matches the eventual completion length.
-#       - IMPORTANT: We also clamp to the same effective max as generation
-#         so predicted_out_tokens == actual_out_tokens.
-#     """
-#     name = "oracle"
-
-#     def predict_out_tokens(self, prompt: str, req_id: Optional[int] = None) -> Optional[int]:
-#         try:
-#             cfg = get_config()
-#             rid = 0 if req_id is None else int(req_id)
-
-#             # 1) Compute the SAME effective cap generator uses.
-#             #    (base_cap defaults to cfg.MAX_TOKENS; we intentionally pass
-#             #     targets/mode from config so this mirrors send_chat_request.)
-#             base_cap = int(getattr(cfg, "MAX_TOKENS", 0) or 0)
-#             plan = compute_length_plan(
-#                 plain_prompt=prompt,
-#                 base_cap=base_cap,
-#                 target_output_tokens=getattr(cfg, "TARGET_OUTPUT_TOKENS", None),
-#                 target_total_tokens=getattr(cfg, "TARGET_TOTAL_TOKENS", None),
-#                 ignore_eos=getattr(cfg, "IGNORE_EOS", False),
-#                 length_mode=getattr(cfg, "LENGTH_MODE", "legacy"),
-#             )
-#             eff_max = int(plan.get("eff_max", base_cap))
-
-#             # 2) Side-effect-free preview (indexed by req_id for STRICT hist).
-#             raw = int(preview_out_tokens_for_prompt(plain_prompt=prompt, req_id=rid))
-
-#             # 3) Clamp to eff_max to match generation path exactly.
-#             return min(raw, eff_max)
-#         except Exception:
-#             return None
 class BaseLengthPredictor:
     name: str = "base"
 

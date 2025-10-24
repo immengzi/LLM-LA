@@ -77,6 +77,10 @@
 # python main.py --mode rr-batching --config real_distro_token_length_false --prompts-file short --prompts-limit 40
 # sleep 30
 
+python main.py --mode pull-batching --config lmsys_token_length_false --prompts-limit 1000
+sleep 30
+python main.py --mode pull-batching --config lmsys_token_length_false_det_32 --prompts-limit 1000
+sleep 30
 python main.py --mode pull-batching --config lmsys_token_length_false_det_16 --prompts-limit 1000
 sleep 30
 python main.py --mode pull-batching --config lmsys_token_length_false_det_8 --prompts-limit 1000
@@ -84,6 +88,10 @@ sleep 30
 python main.py --mode pull-batching --config lmsys_token_length_false_det_4 --prompts-limit 1000
 sleep 30
 
+python main.py --mode pull-batching --config lmsys_token_length_true --prompts-limit 1000
+sleep 30
+python main.py --mode pull-batching --config lmsys_token_length_true_det_32 --prompts-limit 1000
+sleep 30
 python main.py --mode pull-batching --config lmsys_token_length_true_det_16 --prompts-limit 1000
 sleep 30
 python main.py --mode pull-batching --config lmsys_token_length_true_det_8 --prompts-limit 1000
@@ -101,7 +109,10 @@ sleep 30
 # python main.py --mode rr-batching --config real_distro_token_length_true10 --prompts-file short --prompts-limit 200
 # sleep 30
 
-
+python main.py --mode least-queue-batching --config lmsys_token_length_false --prompts-limit 1000
+sleep 30
+python main.py --mode least-queue-batching --config lmsys_token_length_false_det_32 --prompts-limit 1000
+sleep 30
 python main.py --mode least-queue-batching --config lmsys_token_length_false_det_16 --prompts-limit 1000
 sleep 30
 python main.py --mode least-queue-batching --config lmsys_token_length_false_det_8 --prompts-limit 1000
@@ -109,6 +120,10 @@ sleep 30
 python main.py --mode least-queue-batching --config lmsys_token_length_false_det_4 --prompts-limit 1000
 sleep 30
 
+python main.py --mode least-queue-batching --config lmsys_token_length_true --prompts-limit 1000
+sleep 30
+python main.py --mode least-queue-batching --config lmsys_token_length_true_det_32 --prompts-limit 1000
+sleep 30
 python main.py --mode least-queue-batching --config lmsys_token_length_true_det_16 --prompts-limit 1000
 sleep 30
 python main.py --mode least-queue-batching --config lmsys_token_length_true_det_8 --prompts-limit 1000
@@ -120,6 +135,10 @@ sleep 30
 # python main.py --mode least-queue-batching --config real_distro_token_length_true10 --prompts-file short --prompts-limit 200
 # sleep 30
 
+python main.py --mode rr-batching --config lmsys_token_length_false --prompts-limit 1000
+sleep 30
+python main.py --mode rr-batching --config lmsys_token_length_false_det_32 --prompts-limit 1000
+sleep 30
 python main.py --mode rr-batching --config lmsys_token_length_false_det_16 --prompts-limit 1000
 sleep 30
 python main.py --mode rr-batching --config lmsys_token_length_false_det_8 --prompts-limit 1000
@@ -127,12 +146,17 @@ sleep 30
 python main.py --mode rr-batching --config lmsys_token_length_false_det_4 --prompts-limit 1000
 sleep 30
 
+python main.py --mode rr-batching --config lmsys_token_length_true --prompts-limit 1000
+sleep 30
+python main.py --mode rr-batching --config lmsys_token_length_true_det_32 --prompts-limit 1000
+sleep 30
 python main.py --mode rr-batching --config lmsys_token_length_true_det_16 --prompts-limit 1000
 sleep 30
 python main.py --mode rr-batching --config lmsys_token_length_true_det_8 --prompts-limit 1000
 sleep 30
 python main.py --mode rr-batching --config lmsys_token_length_true_det_4 --prompts-limit 1000
 sleep 30
+
 # python main.py --mode pull-batching --config real_distro_token_length_false --prompts-file short --prompts-limit 400
 # sleep 30
 # python main.py --mode pull-batching --config real_distro_token_length_true5 --prompts-file short --prompts-limit 40
