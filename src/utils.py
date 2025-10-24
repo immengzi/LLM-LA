@@ -198,22 +198,6 @@ def save_summary(mode: str, summary: dict) -> None:
 
 # ---------------- HTTP helpers ----------------
 
-
-# def healthy(endpoint: str, health_path: str, timeout: float = 3.0) -> bool:
-#     if endpoint.startswith("sim://"):
-#         return True
-#     # Block real health checks in sim-only mode
-#     if str(get_config().SIM_MODE).lower() == "only" and get_config().SIM_ENDPOINTS:
-#         raise RuntimeError(
-#             f"SIM_MODE=only but tried to health-check real endpoint: {endpoint}"
-#         )
-#     try:
-#         r = requests.get(endpoint.rstrip("/") + health_path, timeout=timeout)
-#         return r.status_code == 200
-#     except requests.RequestException:
-#         return False
-
-
 # --- helpers: detect HTTP sim endpoints from config ---
 def _count_sim_eps_from_cfg(cfg) -> int:
     sim = cfg.SIM_ENDPOINTS
@@ -307,6 +291,8 @@ def send_chat_request(
     logprobs: Optional[int] = None,
     logit_bias: Optional[Dict[str, float]] = None,
     extra_headers: Optional[Dict[str, str]] = None,
+    # NEW: persistent HTTP connection (if provided, use keep-alive & pooling)
+    session: "requests.Session | None" = None,
     # Unified length control — let the policy compute the plan.
     target_output_tokens: Optional[int] = None,
     target_total_tokens: Optional[int] = None,
@@ -395,7 +381,12 @@ def send_chat_request(
     # Optional: uncomment for quick visibility
     # print(f"[SEND*HTTP] POST {url} timeout={timeout} req_id={req_id}")
 
-    r = requests.post(url, json=payload, headers=(headers or None), timeout=timeout)
+    # Reuse a persistent session if provided (prevents bursty new TCP handshakes)
+    if session is not None:
+        r = session.post(url, json=payload, headers=(headers or None), timeout=timeout)
+    else:
+        r = requests.post(url, json=payload, headers=(headers or None), timeout=timeout)
+
     # Optional: nicer error body for debugging
     if not r.ok:
         raise RuntimeError(f"HTTP {r.status_code} {r.reason}: {r.text[:500]}")
@@ -413,6 +404,7 @@ def send_chat_request(
     if req_id is not None:
         resp["_req_id"] = int(req_id)
     return resp
+
 
 
 
@@ -505,3 +497,64 @@ def _is_http_sim_endpoint(endpoint: str, cfg) -> bool:
         return (ep_host == host) and (base <= ep_port < base + total)
     except Exception:
         return False
+
+# ---- AUTOSCALE LOGGER ----
+
+_autoscale_loggers: Dict[str, JsonlLogger] = {}
+_autoscale_loggers_guard = threading.Lock()
+AUTOSCALE_LOG_FILENAME = getattr(_cfg, "AUTOSCALE_LOG_FILENAME", "autoscale.jsonl")
+
+def _get_autoscale_logger_for_mode(router_mode: str) -> JsonlLogger:
+    """
+    Writes to results/<router_mode>/<run_id>/<AUTOSCALE_LOG_FILENAME>.
+    """
+    run_dir = get_run_dir(router_mode)
+    path = os.path.join(run_dir, AUTOSCALE_LOG_FILENAME)
+    key = f"{router_mode}::{path}"
+    with _autoscale_loggers_guard:
+        if key not in _autoscale_loggers:
+            _autoscale_loggers[key] = JsonlLogger(path)
+        return _autoscale_loggers[key]
+
+
+def log_autoscale(
+    *,
+    router_mode: str,
+    desired_servers: int,
+    realized_servers: int,
+    total_eps: int,
+    active_eps: int,
+    draining_eps: int,
+    queue_len: int,
+    inflight: int,
+    reason: str,
+):
+    """
+    Writes autoscale telemetry both to stdout and to:
+      results/<router_mode>/<run_id>/<AUTOSCALE_LOG_FILENAME>
+
+    Each record is a single JSON line with clear fields.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    record = {
+        "ts": now,
+        "router_mode": router_mode,
+        "reason": reason,
+        "desired_servers": int(desired_servers),
+        "realized_servers": int(realized_servers),
+        "total_eps": int(total_eps),
+        "active_eps": int(active_eps),
+        "draining_eps": int(draining_eps),
+        "queue_len": int(queue_len),
+        "inflight": int(inflight),
+    }
+
+    # Print live to stdout (unbuffered)
+    print(json.dumps(record, ensure_ascii=False), flush=True)
+
+    # Write to the per-run autoscale.jsonl in results/<mode>/<run_id>/
+    try:
+        logger = _get_autoscale_logger_for_mode(router_mode)
+        logger.write(record)
+    except Exception as e:
+        print(f"[WARN] autoscale log failed: {e}", flush=True)

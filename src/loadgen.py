@@ -51,6 +51,7 @@ def drive_load(
     step_schedule: str = "",
     verbose: bool = True,
 ) -> None:
+    print(f"rate_rps - here: {rate_rps}")
     """
     Open-loop arrival driver. Consumes from 'prompts' lazily and calls 'enqueue_one(p, t_enq)'.
     Supports:

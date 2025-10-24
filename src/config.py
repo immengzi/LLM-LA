@@ -168,6 +168,37 @@ class RouterConfig:
     HF_TOKENIZER_NAME: str = "Qwen/Qwen2-7B"     # used for reply-length estimation when needed
     HF_STREAMING: bool = False           # use HF streaming loader when available
 
+    # ---- AUTOSCALER ----
+
+    # Master switch: enable or disable autoscaling logic entirely.
+    # When False, all endpoints remain active (no scaling decisions).
+    AUTOSCALE_ENABLED: bool = False
+    # Autoscale mode:
+    # - "virtual": logical only — router activates/deactivates subsets of endpoints,
+    #              but doesn’t touch Kubernetes.
+    # - "real": (future use) would scale pods via the K8s API.
+    AUTOSCALE_MODE: str = "virtual"
+    # Target queue length per desired server.
+    # Example: with Q_PER_SERVER=10, a queue of 100 → desired_servers=10.
+    # Smaller = more aggressive (scales up faster).
+    # Larger = more conservative (tolerates bigger queue per server).
+    AUTOSCALE_Q_PER_SERVER: int = 8
+    # Minimum number of servers to keep active at all times.
+    # Even if the queue is empty, we never go below this.
+    AUTOSCALE_MIN_SERVERS: int = 1
+    # Upper bound on desired server count.
+    # Acts as a hard cap even if backlog is huge or discovery lists more endpoints.
+    AUTOSCALE_MAX_SERVERS: int = 10000
+    # Hysteresis band (fractional change threshold) to avoid oscillation.
+    # Example: 0.20 → require at least ±20% change in desired size
+    # before triggering another scale event.
+    AUTOSCALE_HYSTERESIS: float = 0.20
+    # Minimum seconds between consecutive scaling decisions.
+    # Prevents reacting too quickly to short-term queue spikes.
+    AUTOSCALE_DEBOUNCE_S: float = 1.0
+
+    AUTOSCALE_LOG_FILENAME: str = "autoscale.jsonl"
+
 
 
 # --- global holder ---
