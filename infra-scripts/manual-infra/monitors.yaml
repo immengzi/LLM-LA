@@ -12,7 +12,7 @@ spec:
   podMetricsEndpoints:
     - path: /metrics
       port: http
-      interval: 15s
+      interval: 1s
 ---
 # --- ServiceMonitor: scrape NVIDIA dcgm-exporter Service on port name "gpu-metrics"
 # Namespace: gpu-operator-resources | Service label: app=nvidia-dcgm-exporter

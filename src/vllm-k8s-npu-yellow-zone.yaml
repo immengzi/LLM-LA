@@ -15,7 +15,7 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: ""
   hostPath:
-    path: /home/saeid/llm-lb/src/qwen-4b
+    path: /mnt/nvme1/saeid/models/qwen3-4b
     type: Directory
 
 ---
@@ -49,10 +49,10 @@ spec:
         app: vllm-qwen
     spec:
       restartPolicy: Always
-      tolerations:
-        - key: "node.kubernetes.io/disk-pressure"
-          operator: "Exists"
-          effect: "NoSchedule"
+      # tolerations:
+      #   - key: "node.kubernetes.io/disk-pressure"
+      #     operator: "Exists"
+      #     effect: "NoSchedule"
       containers:
         - name: vllm
           image: quay.io/ascend/vllm-ascend:v0.10.1rc1

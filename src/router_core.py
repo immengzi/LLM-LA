@@ -1097,12 +1097,85 @@ class RandomBatchingRouter(_BaseBatchingRouter):
         return order
 
 
+# class LeastQueueBatchingRouter(_BaseBatchingRouter):
+#     """Prefer endpoints with the fewest inflight (join-the-shortest-queue)."""
+
+#     def __init__(self, mode_name: str = "least-queue-batching"):
+#         super().__init__(mode_name)
+
+#     def _ordered_eps_for_step(self) -> List[str]:
+#         with self._lock:
+#             return sorted(self.eps, key=lambda ep: (self.inflight.get(ep, 0), ep))
+
+# class LeastQueueBatchingRouter(_BaseBatchingRouter):
+#     """Prefer endpoints with the fewest inflight (join-the-shortest-queue)."""
+
+#     def __init__(self, mode_name: str = "least-queue-batching"):
+#         super().__init__(mode_name)
+#         self._log_path = "./least_queue_selection_log.txt"
+#         open(self._log_path, "w").write("# order log start\n")
+
+#     def _ordered_eps_for_step(self) -> List[str]:
+#         with self._lock:
+#             ordered = sorted(self.eps, key=lambda ep: (self.inflight.get(ep, 0), ep))
+#             inflight = {ep: self.inflight.get(ep, 0) for ep in self.eps}
+#             with open(self._log_path, "a") as f:
+#                 f.write(f"inflight={inflight} | ordered={ordered}\n")
+#             return ordered
+
+# class LeastQueueBatchingRouter(_BaseBatchingRouter):
+#     """Prefer endpoints with the smallest total backlog (inflight + per-EP sender queue)."""
+
+#     def __init__(self, mode_name: str = "least-queue-batching"):
+#         super().__init__(mode_name)
+#         self._log_path = "./least_queue_selection_log.txt"
+#         open(self._log_path, "w").write("# order log start\n")
+
+#     def _ordered_eps_for_step(self) -> List[str]:
+#         with self._lock:
+#             # Snapshots
+#             inflight = {ep: self.inflight.get(ep, 0) for ep in self.eps}
+#             # Per-EP backlog lives in the sender queues
+#             backlog = {}
+#             for ep in self.eps:
+#                 q_ep = self._send_queues.get(ep)
+#                 backlog[ep] = (q_ep.qsize() if q_ep is not None else 0)
+
+#             # Logical load = active inflight + backlog queued-to-send
+#             logical = {ep: inflight[ep] + backlog[ep] for ep in self.eps}
+
+#             # Sort primarily by logical, then by active inflight (helps fairness),
+#             # then by endpoint string for stable tie-breaking
+#             ordered = sorted(
+#                 self.eps,
+#                 key=lambda ep: (logical[ep], inflight[ep], ep),
+#             )
+
+#             # Minimal logging with the sorting keys
+#             with open(self._log_path, "a") as f:
+#                 f.write(
+#                     f"logical={logical} | inflight={inflight} | backlog={backlog} | ordered={ordered}\n"
+#                 )
+
+#             return ordered
+
 class LeastQueueBatchingRouter(_BaseBatchingRouter):
-    """Prefer endpoints with the fewest inflight (join-the-shortest-queue)."""
+    """Prefer endpoints with the smallest total backlog (inflight + per-EP sender queue)."""
 
     def __init__(self, mode_name: str = "least-queue-batching"):
         super().__init__(mode_name)
 
     def _ordered_eps_for_step(self) -> List[str]:
         with self._lock:
-            return sorted(self.eps, key=lambda ep: (self.inflight.get(ep, 0), ep))
+            # Snapshots
+            inflight = {ep: self.inflight.get(ep, 0) for ep in self.eps}
+            backlog = {}
+            for ep in self.eps:
+                q_ep = self._send_queues.get(ep)
+                backlog[ep] = q_ep.qsize() if q_ep is not None else 0
+
+            # Logical load = active inflight + queued-to-send backlog
+            logical = {ep: inflight[ep] + backlog[ep] for ep in self.eps}
+
+            # Order by logical, then inflight, then endpoint (stable)
+            return sorted(self.eps, key=lambda ep: (logical[ep], inflight[ep], ep))

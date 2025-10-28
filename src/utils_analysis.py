@@ -2,10 +2,12 @@
 import os
 import json
 import re
-import pandas as pd
-import numpy as np
 from typing import List, Tuple, Dict, Any
+
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+
 
 # ---------- Readers ----------
 
@@ -1395,3 +1397,178 @@ def draw_violin_for_metric(
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.show()
+
+def draw_token_length_distribution_per_endpoint(
+    method: str,
+    run_id: str,
+    token_col: str = "actual_out_tokens",   # "predicted_out_tokens" or "actual_out_tokens"
+    *,
+    endpoints=None,                         # None = all; or str/list[str] endpoint URLs
+    base_dir: str = "results",
+    bins: int = 30,
+    density: bool = False,                  # True = show probability density instead of counts
+    value_range: tuple[float, float] | None = None,  # e.g., (0, 4096)
+    title_prefix: str | None = None,
+    save_path_template: str | None = None,  # e.g., "plots/{method}_{run_id}_{endpoint}_{metric}.png"
+) -> None:
+    """
+    Plot token-length histograms per endpoint from router output.jsonl logs.
+    Creates a separate figure for each endpoint.
+
+    token_col: which token metric to plot. Usually 'actual_out_tokens' or 'predicted_out_tokens'.
+    """
+    exp = load_experiment(method, run_id, base_dir=base_dir)
+    odf = exp.get("output")
+    if odf is None or odf.empty:
+        raise ValueError(f"No output.jsonl found or empty for {method}/{run_id}")
+    if "endpoint" not in odf.columns:
+        raise KeyError("'endpoint' column missing in output.jsonl")
+
+    df = odf.copy()
+    if "ts" in df.columns:
+        df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+        df = df.sort_values("ts")
+
+    if token_col not in df.columns:
+        raise KeyError(
+            f"Token metric '{token_col}' not found. "
+            "Use one of: 'actual_out_tokens', 'predicted_out_tokens'."
+        )
+
+    if endpoints is not None:
+        eps = _as_list(endpoints)
+        df = df[df["endpoint"].isin(eps)]
+        if df.empty:
+            raise ValueError("No rows after endpoint filter.")
+
+    for ep, g in df.groupby("endpoint", dropna=False):
+        s = pd.to_numeric(g[token_col], errors="coerce").dropna()
+        if s.empty:
+            continue
+
+        plt.figure(figsize=(8.5, 4.5))
+        plt.hist(s.values, bins=bins, range=value_range, density=density, edgecolor="none")
+        title = title_prefix or "Token length distribution"
+        plt.title(f"{title} — {method}/{run_id}\n{ep} • {token_col}")
+        plt.xlabel(token_col)
+        plt.ylabel("density" if density else "count")
+        plt.grid(True, linestyle="--", alpha=0.3)
+        plt.tight_layout()
+
+        if save_path_template:
+            safe_ep = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(ep))
+            out_path = save_path_template.format(
+                method=method, run_id=run_id, endpoint=safe_ep, metric=token_col
+            )
+            plt.savefig(out_path, dpi=150, bbox_inches="tight")
+
+        plt.show()
+
+# ========================================
+# Helper functions — compare token-length distributions across endpoints
+# ========================================
+
+def _load_tokens_for_run_by_endpoint(method: str, run_id: str, base_dir: str, token_col: str, endpoints=None):
+    """Return DataFrame: [method, run_id, endpoint, token]."""
+    exp = load_experiment(method, run_id, base_dir=base_dir)
+    odf = exp.get("output")
+    if odf is None or odf.empty:
+        return pd.DataFrame(columns=["method", "run_id", "endpoint", "token"])
+
+    df = odf.copy()
+    if "endpoint" not in df.columns:
+        raise KeyError("'endpoint' column missing in output.jsonl")
+    if token_col not in df.columns:
+        raise KeyError(f"Token metric '{token_col}' not found.")
+
+    if "ts" in df.columns:
+        df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+        df = df.sort_values("ts")
+
+    if endpoints is not None:
+        eps = _as_list(endpoints)
+        df = df[df["endpoint"].isin(eps)]
+
+    out = df[["endpoint", token_col]].rename(columns={token_col: "token"}).copy()
+    out["method"] = method
+    out["run_id"] = str(run_id)
+    return out[["method", "run_id", "endpoint", "token"]].dropna()
+
+
+def build_tokens_by_endpoint(experiments, base_dir: str, token_col: str, endpoints=None) -> pd.DataFrame:
+    frames = []
+    for method, run_id in experiments:
+        frames.append(_load_tokens_for_run_by_endpoint(method, run_id, base_dir, token_col, endpoints))
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["method","run_id","endpoint","token"])
+
+
+def _qdict(series: pd.Series, qs=(0.5, 0.9, 0.95, 0.99)):
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty:
+        return {f"p{int(q*100)}": np.nan for q in qs}
+    qv = s.quantile(list(qs), interpolation="linear")
+    return {f"p{int(q*100)}": float(qv.loc[q]) for q in qs}
+
+
+def summarize_by_endpoint(tokens_df: pd.DataFrame) -> pd.DataFrame:
+    """Summary per (method, run_id, endpoint)."""
+    if tokens_df.empty:
+        return pd.DataFrame(columns=["method","run_id","endpoint","count","mean","std","min","max","p50","p90","p95","p99"])
+    recs = []
+    for (m, r, ep), g in tokens_df.groupby(["method","run_id","endpoint"], dropna=False):
+        s = pd.to_numeric(g["token"], errors="coerce").dropna()
+        stats = {
+            "method": m, "run_id": r, "endpoint": ep,
+            "count": int(s.count()),
+            "mean": float(s.mean()) if s.size else np.nan,
+            "std": float(s.std(ddof=1)) if s.size > 1 else 0.0,
+            "min": float(s.min()) if s.size else np.nan,
+            "max": float(s.max()) if s.size else np.nan,
+        }
+        stats.update(_qdict(s))
+        recs.append(stats)
+    cols = ["method","run_id","endpoint","count","mean","std","min","max","p50","p90","p95","p99"]
+    return pd.DataFrame(recs)[cols].sort_values(["method","run_id","endpoint"]).reset_index(drop=True)
+
+
+def plot_ecdf_per_method(tokens_df: pd.DataFrame, title_prefix=None):
+    """One ECDF figure per method; curves = endpoints."""
+    if tokens_df.empty:
+        print("No data to plot.")
+        return
+    for m, g in tokens_df.groupby("method", dropna=False):
+        plt.figure(figsize=(9, 5))
+        for ep, ge in g.groupby("endpoint", dropna=False):
+            s = pd.to_numeric(ge["token"], errors="coerce").dropna().sort_values()
+            if s.empty:
+                continue
+            y = np.linspace(0, 1, len(s), endpoint=True)
+            plt.step(s.values, y, where="post", label=str(ep))
+        plt.xlabel("token length")
+        plt.ylabel("ECDF")
+        plt.title((title_prefix or "ECDF per endpoint") + f" — {m}")
+        plt.legend(loc="lower right", fontsize=8)
+        plt.grid(True, linestyle="--", alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+
+
+def plot_violins_per_method(tokens_df: pd.DataFrame, title_prefix=None):
+    """One violin figure per method; violins = endpoints."""
+    if tokens_df.empty:
+        print("No data to plot.")
+        return
+    for m, g in tokens_df.groupby("method", dropna=False):
+        endpoints = list(g["endpoint"].unique())
+        data = [pd.to_numeric(g.loc[g["endpoint"] == ep, "token"], errors="coerce").dropna().values for ep in endpoints]
+        if not any(len(d) for d in data):
+            continue
+        plt.figure(figsize=(10, 5))
+        plt.violinplot(data, showmeans=True, showmedians=False, showextrema=True)
+        plt.xticks(np.arange(1, len(endpoints) + 1), endpoints, rotation=15, ha="right")
+        plt.xlabel("endpoint")
+        plt.ylabel("token length")
+        plt.title((title_prefix or "Token length per endpoint") + f" — {m}")
+        plt.grid(True, linestyle="--", alpha=0.3)
+        plt.tight_layout()
+        plt.show()
