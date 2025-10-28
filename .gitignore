@@ -21,3 +21,4 @@ out
 bin
 ncu_runs
 nsys_runs
+_len_cache
