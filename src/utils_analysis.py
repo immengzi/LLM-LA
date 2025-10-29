@@ -165,6 +165,30 @@ def collect_all_outputs(runs_index: pd.DataFrame) -> pd.DataFrame:
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
+def collect_all_queues(runs_index: pd.DataFrame) -> pd.DataFrame:
+    """Concatenate queue.json across selected experiments.
+
+    Adds 'method' and 'run_id' columns, coerces 'ts' to datetime if present,
+    and preserves any existing numeric queue/state fields (e.g., q_before/q_after/inflight_*).
+    """
+    frames = []
+    for _, row in runs_index.iterrows():
+        qp = row.get("queue_path")
+        if qp and os.path.exists(qp):
+            try:
+                df = read_queue(qp)
+            except Exception as e:
+                print("Error reading queue:", qp, e)
+                continue
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                df = df.copy()
+                df["method"] = row["method"]
+                df["run_id"] = row["run_id"]
+                if "ts" in df.columns:
+                    df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+                frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
 
 # ---------- Flexible selectors for aggregated metrics ----------
 

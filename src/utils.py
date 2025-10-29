@@ -2,6 +2,8 @@
 import json
 import os
 import time
+from enum import Enum
+import re
 import threading
 import random
 from collections import deque
@@ -19,6 +21,32 @@ _cfg = get_config()
 # Use central config for results layout (ENV/JSON already handled there)
 RESULTS_ROOT = _cfg.RESULTS_DIR
 QUEUE_LOG_FILENAME = _cfg.QUEUE_LOG_FILENAME
+
+
+class _PayloadMode(str, Enum):
+    OFF = "off"
+    HEAD = "head"
+    FULL = "full"
+
+def _redact_text(text: str | None) -> str | None:
+    # TODO: add patterns for secrets, emails, tokens, etc.
+    return text
+
+def _clip_by_mode(text: str | None, mode: str, head_chars: int) -> tuple[str | None, bool]:
+    """
+    Returns (text_to_log, was_truncated).
+    - OFF  => (None, False)
+    - HEAD => first head_chars with ellipsis if needed
+    - FULL => full text
+    """
+    if not text:
+        return text, False
+    m = (mode or "").lower()
+    if m == _PayloadMode.OFF:
+        return None, False
+    if m == _PayloadMode.FULL or len(text) <= head_chars:
+        return text, False
+    return text[:max(0, int(head_chars))] + "… [truncated]", True
 
 
 def _mode_dir(mode: str) -> str:
@@ -89,32 +117,76 @@ def _get_logger_for_mode(mode: str) -> JsonlLogger:
         return _loggers[mode]
 
 
+# ---- unified request/response logger (back-compatible) ----
 def log_result(
     *,
     mode: str,
     endpoint: str,
     model: str,
-    prompt: str,
     status: str,
+    prompt: str | None = None,
+    response: str | None = None,
+    # BACK-COMPAT: accept legacy kw and map to response if response is None
     response_preview: str | None = None,
     latency_s: float | None = None,
     error: str | None = None,
     extra: Dict[str, Any] | None = None,
+    **_ignored,  # tolerate any other stray legacy kwargs
 ) -> None:
-    rec = {
+    """
+    Writes one JSONL record to results/<mode>/<run_id>/output.jsonl
+
+    Controls:
+      - LOG_PAYLOAD_MODE: "off" | "head" | "full"
+      - LOG_HEAD_CHARS: int  (used when mode == "head")
+
+    Fields:
+      - Always writes metadata (ts, mode, endpoint, model, status, latency_s, error, ...extra)
+      - If payload mode != OFF:
+          prompt, response    -> per LOG_PAYLOAD_MODE
+          response_preview    -> short head (for dashboards)
+          truncated           -> {prompt: bool, response: bool}
+    """
+    cfg = get_config()
+    payload_mode = str(getattr(cfg, "LOG_PAYLOAD_MODE", "head")).lower()
+    head_chars   = int(getattr(cfg, "LOG_HEAD_CHARS", 512))
+
+    # Prefer explicit response; else use legacy response_preview
+    if response is None and response_preview is not None:
+        response = response_preview
+
+    # Redact first, then clip consistently for both prompt & response
+    prompt   = _redact_text(prompt)
+    response = _redact_text(response)
+
+    clipped_prompt,  prompt_trunc  = _clip_by_mode(prompt,   payload_mode, head_chars)
+    clipped_response, resp_trunc   = _clip_by_mode(response, payload_mode, head_chars)
+
+    record: Dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "mode": mode,
         "endpoint": endpoint,
         "model": model,
         "status": status,
         "latency_s": latency_s,
-        "prompt": prompt,
-        "response_preview": response_preview,
         "error": error,
     }
     if extra:
-        rec.update(extra)
-    _get_logger_for_mode(mode).write(rec)
+        record.update(extra)
+
+    if payload_mode != _PayloadMode.OFF:
+        record["prompt"] = clipped_prompt
+        record["response"] = clipped_response
+        # Always keep a short preview for legacy dashboards (head of full text)
+        base_for_preview = response or ""
+        record["response_preview"] = base_for_preview[:head_chars]
+        record["truncated"] = {
+            "prompt":   bool(prompt_trunc  and payload_mode == _PayloadMode.HEAD),
+            "response": bool(resp_trunc    and payload_mode == _PayloadMode.HEAD),
+        }
+
+    _get_logger_for_mode(mode).write(record)
+
 
 
 # ---- queue/batching telemetry helper (same folder as mode logs) ----
