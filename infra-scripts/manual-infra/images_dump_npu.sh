@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-# SRC_IMAGE="${1:-quay.io/ascend/vllm-ascend:v0.10.1rc1}"
-SRC_IMAGE="${1:-busybox}"
+SRC_IMAGE="${1:-quay.io/ascend/vllm-ascend:v0.10.1rc1}"
+# SRC_IMAGE="${1:-busybox}"
 OUT_DIR="images"
 mkdir -p "$OUT_DIR"
 

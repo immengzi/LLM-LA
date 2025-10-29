@@ -1,11 +1,11 @@
-# -*- coding: utf-8 -*-
 """
 Minimal on-the-fly LMSYS loader with live logs.
 Yields (prompt, out_tokens_estimated_from_reply) pairs for testing schedulers.
 
-NEW:
-- progress: bool = False   # show a tqdm progress bar during prepopulation
-- progress_desc: str       # optional label for the bar
+Keeps the same signature/flow as your original, but:
+- Reads LMSYS fields correctly: `conversations` with `{"from": "...", "value": "..."}`.
+- Uses the SAME pairing rule as your notebook Cell 2: last user -> next assistant.
+- Falls back to your old keys if present (to avoid breaking on other sources).
 """
 
 import sys
@@ -42,15 +42,13 @@ def iter_lmsys_pairs(
     print(f"[LMSYS] Loading dataset '{dataset_name}:{split}' (streaming={streaming})...")
     tok = AutoTokenizer.from_pretrained(tokenizer_name)
     try:
-        # Avoid model_max_length warnings when only counting tokens
-        tok.model_max_length = int(1e9)
+        tok.model_max_length = int(1e9)  # avoid max_length warnings when just counting tokens
     except Exception:
         pass
 
     ds = load_dataset(dataset_name, split=split, streaming=streaming)
 
     # --- progress bar wiring (optional) ---
-    # If we can detect total (non-streaming), use it; otherwise use max_n as the bar total.
     use_bar = bool(progress)
     pbar = None
     if use_bar:
@@ -59,7 +57,6 @@ def iter_lmsys_pairs(
             total = None
             if not streaming:
                 try:
-                    # Non-streaming datasets typically expose __len__
                     total = len(ds)  # may raise if not supported
                 except Exception:
                     total = None
@@ -67,34 +64,65 @@ def iter_lmsys_pairs(
                 total = max_n if isinstance(max_n, int) and max_n > 0 else None
             pbar = tqdm(total=total, desc=progress_desc, unit="ex")
         except Exception:
-            # tqdm not available; we’ll fall back to simple prints below
             pbar = None
             use_bar = False
 
+    def _role(t):
+        # Prefer LMSYS schema; fallback to your old keys if present
+        return (t.get("from") or t.get("role") or "").lower()
+
+    def _text(t):
+        # Prefer LMSYS `value`; fall back to `content`
+        return (t.get("value") or t.get("content") or "").strip()
+
+    def _extract_pair_like_notebook(ex):
+        """
+        Match Cell 2 behavior:
+        - Look for 'conversations' (LMSYS), else fallback to old 'conversation'/'conversation_a'
+        - Take the LAST user turn, then the NEXT assistant turn.
+        """
+        conv = None
+        for k in ("conversations", "conversation", "conversation_a"):
+            if k in ex and isinstance(ex[k], list) and ex[k]:
+                conv = ex[k]
+                break
+        if not isinstance(conv, list) or len(conv) < 2:
+            return None
+
+        last_user_idx = None
+        for i, t in enumerate(conv):
+            if _role(t) in ("human", "user"):
+                last_user_idx = i
+        if last_user_idx is None:
+            return None
+        for j in range(last_user_idx + 1, len(conv)):
+            if _role(conv[j]) in ("gpt", "assistant", "bot"):
+                u, a = _text(conv[last_user_idx]), _text(conv[j])
+                if u and a:
+                    return u, a
+        return None
+
     yielded = 0
     for i, ex in enumerate(ds):
-        conv = ex.get("conversation") or ex.get("conversation_a")
-        if not isinstance(conv, list) or len(conv) < 2:
+        pair = _extract_pair_like_notebook(ex)
+        if not pair:
             continue
 
-        u0 = conv[0].get("content", "").strip() if isinstance(conv[0], dict) else ""
-        r1 = conv[1].get("content", "").strip() if isinstance(conv[1], dict) else ""
-        if not u0 or not r1:
-            continue
-
-        in_len = len(tok.encode(u0, add_special_tokens=False))
-        out_len = len(tok.encode(r1, add_special_tokens=False))
+        prompt, reply = pair
+        in_len = len(tok.encode(prompt, add_special_tokens=False))
+        out_len = len(tok.encode(reply, add_special_tokens=False))
 
         if verbose:
             print(
                 f"\n[LMSYS] Example #{yielded+1}\n"
-                f"Input  ({in_len} tokens):\n{u0}\n"
+                f"Input  ({in_len} tokens):\n{prompt}\n"
                 f"{'-'*40}\n"
-                f"Output ({out_len} tokens):\n{r1}\n"
+                f"Output ({out_len} tokens):\n{reply}\n"
                 f"{'='*80}\n"
             )
 
-        yield u0, out_len
+        # Yield SAME shape as before: (prompt, out_tokens_estimated_from_reply)
+        yield prompt, out_len
         yielded += 1
 
         # progress feedback

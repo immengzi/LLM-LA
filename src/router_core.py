@@ -249,7 +249,7 @@ class PullBatchingRouter:
                     model=_cfg.MODEL_NAME,
                     prompt=prompt,
                     status="ok",
-                    response_preview=content,
+                    response=content,
                     latency_s=end_to_end_latency,
                     extra={
                         "req_id": int(req_id),
@@ -268,6 +268,7 @@ class PullBatchingRouter:
                         "actual_out_tokens": None if actual_out is None else int(actual_out),
                     },
                 )
+
                 with self._lock:
                     self.ok_counts[ep] = self.ok_counts.get(ep, 0) + 1
             except Exception as e:
@@ -840,7 +841,7 @@ class _BaseBatchingRouter:
                 model=_cfg.MODEL_NAME,
                 prompt=prompt,
                 status="ok",
-                response_preview=content,
+                response=content,
                 latency_s=end_to_end_latency,
                 extra={
                     "req_id": int(req_id),
@@ -859,6 +860,7 @@ class _BaseBatchingRouter:
                     "actual_out_tokens": None if actual_out is None else int(actual_out),
                 },
             )
+
             with self._lock:
                 self.ok_counts[ep] = self.ok_counts.get(ep, 0) + 1
         except Exception as e:

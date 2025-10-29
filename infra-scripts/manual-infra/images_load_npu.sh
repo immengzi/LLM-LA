@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# TAR_PATH="${1:-images/quay.io_ascend_vllm-ascend_v0.10.1rc1.tar}"
-TAR_PATH="${1:-images/busybox.tar}"
+TAR_PATH="${1:-images/quay.io_ascend_vllm-ascend_v0.10.1rc1.tar}"
+# TAR_PATH="${1:-images/busybox.tar}"
 
 echo "📦 Importing image from: $TAR_PATH ..."
 sudo ctr --debug images import "$TAR_PATH"

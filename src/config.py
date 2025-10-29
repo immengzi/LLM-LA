@@ -199,6 +199,10 @@ class RouterConfig:
 
     AUTOSCALE_LOG_FILENAME: str = "autoscale.jsonl"
 
+    # Payload logging controls
+    LOG_PAYLOAD_MODE: str = "full"   # one of: "off", "head", "full"
+    LOG_HEAD_CHARS: int = 5        # used when mode == "head"
+
 
 
 # --- global holder ---
