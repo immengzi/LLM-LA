@@ -10,7 +10,7 @@ Router modes (batching-only):
 import time
 import threading
 from collections import deque
-from typing import List
+from typing import Type, Union
 
 from kubernetes import client
 
@@ -23,12 +23,31 @@ from utils_prom import (
 )
 from utils import save_summary
 
+# Concrete router imports
 from router_core import (
     PullBatchingRouter,
     RRBatchingRouter,
     RandomBatchingRouter,
     LeastQueueBatchingRouter,
 )
+
+# Union types for router class / instance
+RouterInstance = Union[
+    PullBatchingRouter,
+    RRBatchingRouter,
+    RandomBatchingRouter,
+    LeastQueueBatchingRouter,
+]
+
+RouterClass = Union[
+    Type[PullBatchingRouter],
+    Type[RRBatchingRouter],
+    Type[RandomBatchingRouter],
+    Type[LeastQueueBatchingRouter],
+]
+
+# Optional: for clarity
+PromptItem = Union[str, tuple[str, int]]
 from autoscaler import QueueBacklogAutoscaler
 from utils import log_autoscale
 
@@ -112,16 +131,19 @@ def _start_load_feeder_if_needed(pattern, prompts, enqueue_one) -> threading.Thr
 
 def _run_batched_common(
     core: client.CoreV1Api,
-    prompts: deque,
+    prompts: deque[PromptItem],
     metrics_interval: float,
     mode_name: str,
-    router_cls,
+    router_cls: RouterClass,
     log_prefix: str,
     summary_caption: str,
-):
+) -> None:
+    """Shared driver for pull/push batching modes."""
+
     start_metrics_collection(mode_name, _cfg.METRICS_PATH, metrics_interval)
     start_time = time.time()
 
+    # --- results path
     try:
         results_dir = getattr(_cfg, "RESULTS_PATH", None) or getattr(_cfg, "RESULTS_DIR", None)
         if results_dir:
@@ -129,15 +151,17 @@ def _run_batched_common(
     except Exception:
         pass
 
-    router = router_cls(mode_name=mode_name)
+    # --- router construction
+    router: RouterInstance = router_cls(mode_name=mode_name)
 
-    # --- load feeder
+    # --- load feeder setup
     feeder = _start_load_feeder_if_needed(
         _cfg.LOAD_PATTERN,
         prompts,
         _make_enqueue_fn_for_batched(router),
     )
 
+    # --- initial endpoint discovery
     eps_all = discover_endpoints(core, _cfg.NAMESPACE, _cfg.LABEL_SELECTOR, _cfg.VLLM_PORT)
     if not eps_all:
         print("No running vLLM pods found. Exiting.")
@@ -159,7 +183,6 @@ def _run_batched_common(
         )
     else:
         print("[AUTOSCALE] Disabled in config.")
-        # Log one initial disabled state using the new, unambiguous signature.
         log_autoscale(
             router_mode=mode_name,
             desired_servers=len(eps_all),
@@ -175,11 +198,13 @@ def _run_batched_common(
 
     router.ensure_endpoints(eps_all)
     last_discovery = 0.0
-    last_logged_sig = None  # (desired_servers, sorted(active), sorted(draining))
+    last_logged_sig: tuple | None = None  # (desired_servers, sorted(active), sorted(draining))
 
     try:
         while router.has_work() or (feeder.is_alive() if feeder else False):
             now = time.time()
+
+            # Periodic discovery refresh
             if now - last_discovery > _cfg.DISCOVERY_INTERVAL_S:
                 eps_all = discover_endpoints(core, _cfg.NAMESPACE, _cfg.LABEL_SELECTOR, _cfg.VLLM_PORT)
                 update_metrics_endpoints(mode_name, eps_all)
@@ -189,7 +214,7 @@ def _run_batched_common(
                     time.sleep(1.0)
                     continue
 
-            # inflight (sum + per-EP map)
+            # --- inflight summary
             inflight_sum = 0
             inflight_by_ep = {}
             try:
@@ -199,9 +224,8 @@ def _run_batched_common(
             except Exception:
                 pass
 
-            # ---- autoscale decision (with draining awareness) ----
+            # --- autoscale decision
             if scaler:
-                # The autoscaler returns (active_eps, draining_eps, desired_servers, reason, changed)
                 active_eps, draining_eps, desired_servers, reason, changed = scaler.step_and_select(
                     eps_all,
                     queue_len=router.q.qsize(),
@@ -213,10 +237,9 @@ def _run_batched_common(
                 desired_servers = len(active_eps)
                 reason, changed = "autoscale-disabled", False
 
-            # Realized = active + draining currently kept in the pool.
             realized_servers = len(active_eps) + len(draining_eps)
 
-            # Tell router which EPs are draining (no new work), and keep both active+draining present.
+            # --- router endpoint updates
             if hasattr(router, "set_draining_eps"):
                 try:
                     router.set_draining_eps(set(draining_eps))
@@ -224,7 +247,7 @@ def _run_batched_common(
                     pass
             router.ensure_endpoints(list(active_eps) + list(draining_eps))
 
-            # ---- structured autoscale log (no legacy/duplicate fields) ----
+            # --- structured autoscale log
             sig = (desired_servers, tuple(sorted(active_eps)), tuple(sorted(draining_eps)))
             if changed or sig != last_logged_sig:
                 log_autoscale(
@@ -240,12 +263,13 @@ def _run_batched_common(
                 )
                 last_logged_sig = sig
 
-            # Step the router (push) or noop (pull) and print a human line.
+            # --- router scheduling tick
             router.step()
             print(
                 f"[{log_prefix}] desired={desired_servers} realized={realized_servers} "
                 f"active={len(active_eps)} draining={len(draining_eps)} total={len(eps_all)} "
-                f"q={router.q.qsize()} inflight={inflight_sum} reason={reason} | {router.status_line()}"
+                f"q={router.q.qsize()} inflight={inflight_sum} reason={reason} | "
+                f"{router.status_line()}"
             )
             time.sleep(_cfg.SAMPLE_INTERVAL)
     finally:
@@ -255,9 +279,11 @@ def _run_batched_common(
     runtime = time.time() - start_time
     print(f"\n==== SUMMARY ({summary_caption}) ====")
     print(f"Total runtime: {runtime:.2f}s")
+
     stats = router.stats()
     for ep, s in sorted(stats.items()):
         print(f"{ep}: ok={s['ok']} err={s['err']}")
+
     stop_metrics_collection(mode_name)
     save_summary(
         mode_name,
@@ -268,7 +294,6 @@ def _run_batched_common(
             "total_err": sum(v["err"] for v in stats.values()),
         },
     )
-
 
 
 def run_pull_batching(core: client.CoreV1Api, prompts: deque, metrics_interval: float):

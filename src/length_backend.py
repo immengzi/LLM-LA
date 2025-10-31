@@ -462,3 +462,33 @@ def preview_out_tokens_for_prompt(*, plain_prompt: str, req_id: int) -> int:
 
     cap = int(getattr(cfg, "MAX_TOKENS", 0) or 0)
     return int(cap if cap > 0 else 0)
+
+def count_input_tokens(plain_prompt: str, req_id: Optional[int] = 0) -> int:
+    """
+    Return input token count using the SAME tokenizer/path as compute_length_plan.
+    We call compute_length_plan and read the input-length field it returns.
+
+    Tries several common keys to stay compatible with your plan dict:
+      - "input_tokens", "prompt_tokens", "in_tokens"
+    Falls back to a minimal whitespace heuristic if none are present.
+    """
+    try:
+        cfg = get_config()
+        plan = compute_length_plan(
+            plain_prompt=plain_prompt,
+            base_cap=int(getattr(cfg, "MAX_TOKENS", 0) or 0),
+            target_output_tokens=getattr(cfg, "TARGET_OUTPUT_TOKENS", None),
+            target_total_tokens=getattr(cfg, "TARGET_TOTAL_TOKENS", None),
+            ignore_eos=getattr(cfg, "IGNORE_EOS", False),
+            length_mode=getattr(cfg, "LENGTH_MODE", "legacy"),
+            req_id=int(req_id or 0),
+        )
+        # Try typical field names
+        for k in ("input_tokens", "prompt_tokens", "in_tokens"):
+            v = plan.get(k)
+            if v is not None:
+                return int(v)
+    except Exception:
+        pass
+    # Last-resort fallback to avoid crashes if plan lacks input length
+    return max(1, len((plain_prompt or "").split()))
