@@ -18,6 +18,8 @@ import random
 from queue import Queue, Empty
 from typing import List, Dict, Tuple, Optional
 import requests
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 
 from config import get_config
 from utils import log_result, log_queue, healthy, send_chat_request
@@ -31,15 +33,18 @@ from threading import RLock
 from len_select import select_batch
 from requests.adapters import HTTPAdapter
 
+from length_backend import count_input_tokens
+
+
 _cfg = get_config()
 _pred = get_length_predictor()  # singleton predictor based on cfg.PREDICTOR_NAME
 
 # ---- Length-aware config knobs (shared by both pull & push) ----
-_USE_LEN_AWARE: bool = bool(getattr(_cfg, "USE_LEN_AWARE", False))
-_LEN_POLICY: str = str(getattr(_cfg, "LEN_POLICY", "short_first") or "short_first")
-# _PRED_LEN_THRESHOLD: int = int(getattr(_cfg, "PRED_LEN_THRESHOLD", 512) or 512)
-_POOL_FACTOR: int = int(getattr(_cfg, "POOL_FACTOR", 3) or 3)
-_DEFAULT_MAX_TOKENS: int = int(getattr(_cfg, "MAX_TOKENS", 256) or 256)
+_USE_LEN_AWARE = bool(_cfg.USE_LEN_AWARE)
+_LEN_POLICY = str(_cfg.LEN_POLICY or "short_first")
+_POOL_FACTOR = int(_cfg.POOL_FACTOR)
+_DEFAULT_MAX_TOKENS = int(_cfg.MAX_TOKENS)
+_LEN_BASIS = str(_cfg.LEN_BASIS or "output")
 
 # One global lock for queue peeking/return across threads
 _Q_LOCK = RLock()
@@ -48,9 +53,7 @@ _Q_LOCK = RLock()
 # =========================
 # Pull-batching (true pull)
 # =========================
-# =========================
-# Pull-batching (true pull)
-# =========================
+
 class PullBatchingRouter:
     """
     Adaptive pull-batching router (TRUE pull):
@@ -243,6 +246,15 @@ class PullBatchingRouter:
                 except Exception:
                     pass
 
+                # --- Token accounting for logs ---
+                input_actual_tokens = int(count_input_tokens(prompt))
+                pred_out_int = None if predicted_out_tokens is None else int(predicted_out_tokens)
+                act_out_int = None if actual_out is None else int(actual_out)
+
+                total_predicted_tokens = (input_actual_tokens + pred_out_int) if pred_out_int is not None else None
+                total_actual_tokens    = (input_actual_tokens + act_out_int) if act_out_int is not None else None
+
+
                 log_result(
                     mode=self.mode_name,
                     endpoint=ep,
@@ -264,8 +276,16 @@ class PullBatchingRouter:
                         "measured_server_roundtrip": (t_response_router - t_dispatch_router),
                         "measured_end_to_end_latency": (t_response_router - t_arrival_router),
                         "predictor_name": getattr(_pred, "name", "unknown"),
-                        "predicted_out_tokens": None if predicted_out_tokens is None else int(predicted_out_tokens),
-                        "actual_out_tokens": None if actual_out is None else int(actual_out),
+
+                        # --- token stats ---
+                        "input_tokens": int(input_actual_tokens),
+                        "predicted_out_tokens": pred_out_int,
+                        "actual_out_tokens": act_out_int,
+                        "total_predicted_tokens": total_predicted_tokens,
+                        "total_actual_tokens": total_actual_tokens,
+
+                        # "predicted_out_tokens": None if predicted_out_tokens is None else int(predicted_out_tokens),
+                        # "actual_out_tokens": None if actual_out is None else int(actual_out),
                     },
                 )
 
@@ -341,12 +361,30 @@ class PullBatchingRouter:
             q_before = self.q.qsize()
 
             # ---- Length-aware selection ----
+            # if _USE_LEN_AWARE:
+            #     selected = select_batch(
+            #         self.q, want, _pred, _Q_LOCK,
+            #         policy=_LEN_POLICY,
+            #         pool_factor=_POOL_FACTOR,
+            #         default_max_tokens=_DEFAULT_MAX_TOKENS,
+            #     )
+            # else:
+            #     selected = []
+            #     for _ in range(want):
+            #         try:
+            #             prompt, t_enq_client, req_id = self.q.get_nowait()
+            #             selected.append((prompt, t_enq_client, None, req_id))
+            #         except Empty:
+            #             break
+            # ---- Length-aware selection ----
             if _USE_LEN_AWARE:
                 selected = select_batch(
                     self.q, want, _pred, _Q_LOCK,
                     policy=_LEN_POLICY,
                     pool_factor=_POOL_FACTOR,
                     default_max_tokens=_DEFAULT_MAX_TOKENS,
+                    length_basis=_LEN_BASIS,
+                    input_len_fn=count_input_tokens,
                 )
             else:
                 selected = []
@@ -623,9 +661,24 @@ class _BaseBatchingRouter:
 
     # ---------- per-endpoint sender infra ----------
 
+    # def _make_session(self) -> requests.Session:
+    #     s = requests.Session()
+    #     adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1, pool_block=True)
+    #     s.mount("http://", adapter)
+    #     s.mount("https://", adapter)
+    #     return s
+
     def _make_session(self) -> requests.Session:
         s = requests.Session()
-        adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1, pool_block=True)
+        s.trust_env = False  # ← ignore HTTP(S)_PROXY/NO_PROXY for this session
+        retry = Retry(
+            total=3, connect=3, read=3,
+            backoff_factor=0.2,
+            status_forcelist=[502, 503, 504],
+            allowed_methods=frozenset(["GET", "POST"]),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1, pool_block=True, max_retries=retry)
         s.mount("http://", adapter)
         s.mount("https://", adapter)
         return s
@@ -835,6 +888,14 @@ class _BaseBatchingRouter:
             except Exception:
                 pass
 
+            # --- Token accounting for logs ---
+            input_actual_tokens = int(count_input_tokens(prompt))
+            pred_out_int = None if predicted_out_tokens is None else int(predicted_out_tokens)
+            act_out_int = None if actual_out is None else int(actual_out)
+
+            total_predicted_tokens = (input_actual_tokens + pred_out_int) if pred_out_int is not None else None
+            total_actual_tokens    = (input_actual_tokens + act_out_int) if act_out_int is not None else None
+
             log_result(
                 mode=self.mode_name,
                 endpoint=ep,
@@ -856,8 +917,15 @@ class _BaseBatchingRouter:
                     "measured_server_roundtrip": (t_response_router - t_dispatch_router),
                     "measured_end_to_end_latency": (t_response_router - t_arrival_router),
                     "predictor_name": getattr(_pred, "name", "unknown"),
-                    "predicted_out_tokens": None if predicted_out_tokens is None else int(predicted_out_tokens),
-                    "actual_out_tokens": None if actual_out is None else int(actual_out),
+
+                    # --- token stats ---
+                    "input_tokens": int(input_actual_tokens),
+                    "predicted_out_tokens": pred_out_int,
+                    "actual_out_tokens": act_out_int,
+                    "total_predicted_tokens": total_predicted_tokens,
+                    "total_actual_tokens": total_actual_tokens,
+                    # "predicted_out_tokens": None if predicted_out_tokens is None else int(predicted_out_tokens),
+                    # "actual_out_tokens": None if actual_out is None else int(actual_out),
                 },
             )
 
@@ -896,22 +964,30 @@ class _BaseBatchingRouter:
         self._last_step_ts = now
 
         for ep in self._ordered_eps_for_step():
-            # Optional draining hook: skip assigning to draining endpoints
+            # Skip endpoints that are draining (if any)
             if ep in getattr(self, "_draining_eps", set()):
                 continue
 
+            # Skip unhealthy endpoints
             if not healthy(ep, _cfg.HEALTH_PATH):
                 continue
 
-            # Ensure per-EP sender infra exists (self-heal on churn/init races)
+            # Ensure per-endpoint sender exists
             if ep not in self._send_queues:
                 try:
                     self._ensure_sender_worker(ep)
                 except Exception:
-                    continue  # skip this EP this tick if we couldn't set it up
+                    continue  # skip this endpoint for this tick
 
             want = self._want_for_ep(ep)
+            if want <= 0:
+                # Still increment log counter occasionally to keep heartbeat
+                with self._lock:
+                    cur_idx = self._log_counters.get(ep, 0)
+                    self._log_counters[ep] = cur_idx + 1
+                continue
 
+            # Pre-step state
             with self._lock:
                 inflight_before = self.inflight.get(ep, 0)
                 cur_idx = self._log_counters.get(ep, 0)
@@ -930,17 +1006,20 @@ class _BaseBatchingRouter:
             logical_before = inflight_before + backlog_before
             pulled = 0
 
+            # --- main selection + enqueue block (now correctly inside loop) ---
             if _USE_LEN_AWARE:
                 selected = select_batch(
                     self.q, want, _pred, _Q_LOCK,
                     policy=_LEN_POLICY,
                     pool_factor=_POOL_FACTOR,
                     default_max_tokens=_DEFAULT_MAX_TOKENS,
+                    length_basis=_LEN_BASIS,
+                    input_len_fn=count_input_tokens,
                 )
-                for prompt, t_enq_client, _pred_tok, req_id in selected:
+                for prompt, t_enq_client, _key_len, req_id in selected:
                     q_ep = self._send_queues.get(ep)
                     if q_ep is None:
-                        break  # EP disappeared this tick; stop assigning to it
+                        break
                     pulled += 1
                     q_ep.put((prompt, t_enq_client, req_id))
             else:
@@ -952,7 +1031,7 @@ class _BaseBatchingRouter:
                         break
                     q_ep = self._send_queues.get(ep)
                     if q_ep is None:
-                        # EP disappeared; put the item back and stop
+                        # endpoint disappeared; put item back and stop
                         try:
                             self.q.put((prompt, t_enq_client, req_id))
                         except Exception:
@@ -960,6 +1039,7 @@ class _BaseBatchingRouter:
                         break
                     pulled += 1
                     q_ep.put((prompt, t_enq_client, req_id))
+            # --- end selection + enqueue ---
 
             q_after = self.q.qsize()
 
@@ -975,6 +1055,7 @@ class _BaseBatchingRouter:
 
             logical_after = inflight_after + backlog_after
 
+            # optional logging
             if do_log:
                 util_pct = self._cached_util(ep)
                 util_str = "NONE" if util_pct is None else f"{util_pct:.1f}%"
@@ -1009,8 +1090,10 @@ class _BaseBatchingRouter:
                     },
                 )
 
+            # bump per-EP log counter
             with self._lock:
                 self._log_counters[ep] = cur_idx + 1
+
 
     # ---------- router api ----------
 
@@ -1098,68 +1181,6 @@ class RandomBatchingRouter(_BaseBatchingRouter):
         random.shuffle(order)
         return order
 
-
-# class LeastQueueBatchingRouter(_BaseBatchingRouter):
-#     """Prefer endpoints with the fewest inflight (join-the-shortest-queue)."""
-
-#     def __init__(self, mode_name: str = "least-queue-batching"):
-#         super().__init__(mode_name)
-
-#     def _ordered_eps_for_step(self) -> List[str]:
-#         with self._lock:
-#             return sorted(self.eps, key=lambda ep: (self.inflight.get(ep, 0), ep))
-
-# class LeastQueueBatchingRouter(_BaseBatchingRouter):
-#     """Prefer endpoints with the fewest inflight (join-the-shortest-queue)."""
-
-#     def __init__(self, mode_name: str = "least-queue-batching"):
-#         super().__init__(mode_name)
-#         self._log_path = "./least_queue_selection_log.txt"
-#         open(self._log_path, "w").write("# order log start\n")
-
-#     def _ordered_eps_for_step(self) -> List[str]:
-#         with self._lock:
-#             ordered = sorted(self.eps, key=lambda ep: (self.inflight.get(ep, 0), ep))
-#             inflight = {ep: self.inflight.get(ep, 0) for ep in self.eps}
-#             with open(self._log_path, "a") as f:
-#                 f.write(f"inflight={inflight} | ordered={ordered}\n")
-#             return ordered
-
-# class LeastQueueBatchingRouter(_BaseBatchingRouter):
-#     """Prefer endpoints with the smallest total backlog (inflight + per-EP sender queue)."""
-
-#     def __init__(self, mode_name: str = "least-queue-batching"):
-#         super().__init__(mode_name)
-#         self._log_path = "./least_queue_selection_log.txt"
-#         open(self._log_path, "w").write("# order log start\n")
-
-#     def _ordered_eps_for_step(self) -> List[str]:
-#         with self._lock:
-#             # Snapshots
-#             inflight = {ep: self.inflight.get(ep, 0) for ep in self.eps}
-#             # Per-EP backlog lives in the sender queues
-#             backlog = {}
-#             for ep in self.eps:
-#                 q_ep = self._send_queues.get(ep)
-#                 backlog[ep] = (q_ep.qsize() if q_ep is not None else 0)
-
-#             # Logical load = active inflight + backlog queued-to-send
-#             logical = {ep: inflight[ep] + backlog[ep] for ep in self.eps}
-
-#             # Sort primarily by logical, then by active inflight (helps fairness),
-#             # then by endpoint string for stable tie-breaking
-#             ordered = sorted(
-#                 self.eps,
-#                 key=lambda ep: (logical[ep], inflight[ep], ep),
-#             )
-
-#             # Minimal logging with the sorting keys
-#             with open(self._log_path, "a") as f:
-#                 f.write(
-#                     f"logical={logical} | inflight={inflight} | backlog={backlog} | ordered={ordered}\n"
-#                 )
-
-#             return ordered
 
 class LeastQueueBatchingRouter(_BaseBatchingRouter):
     """Prefer endpoints with the smallest total backlog (inflight + per-EP sender queue)."""

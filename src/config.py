@@ -203,6 +203,19 @@ class RouterConfig:
     LOG_PAYLOAD_MODE: str = "full"   # one of: "off", "head", "full"
     LOG_HEAD_CHARS: int = 5        # used when mode == "head"
 
+    # =========================
+    # Length-aware batching knobs
+    # =========================
+    USE_LEN_AWARE: bool = False
+    LEN_POLICY: Literal["short_first", "long_first", "longest_first", "even_short_long"] = "even_short_long"
+    POOL_FACTOR: int = 1000
+    LONG_BATCH_GUARD_N: int = 4
+
+    # NEW: selection basis for length-aware sorting ("input" | "output" | "total")
+    LEN_BASIS: Literal["input", "output", "total"] = "total"
+
+    # NEW: enforce tokenizer presence when USE_LEN_AWARE is True
+    REQUIRE_INPUT_TOKENIZER: bool = True
 
 
 # --- global holder ---
