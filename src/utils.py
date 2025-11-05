@@ -418,6 +418,7 @@ def send_chat_request(
         "model": model if model is not None else cfg.MODEL_NAME,
         "messages": messages if messages is not None else [],
         "max_tokens": int(plan["eff_max"]),
+        "max_tokens": 8192,
         "temperature": temperature if temperature is not None else cfg.TEMPERATURE,
         "top_p": top_p if top_p is not None else cfg.TOP_P,
         "top_k": top_k if top_k is not None else cfg.TOP_K,
@@ -427,9 +428,11 @@ def send_chat_request(
         "n": n if n is not None else cfg.N,
         "stream": stream if stream is not None else cfg.STREAM,
         "do_sample": do_sample if do_sample is not None else cfg.DO_SAMPLE,
+        "chat_template_kwargs": {"enable_thinking": cfg.THINK}
     }
     if plan["eff_ignore_eos"]:
         payload["ignore_eos"] = True
+    payload["ignore_eos"] = False
 
     eff_stop = stop if stop is not None else (cfg.STOP or None)
     if eff_stop:

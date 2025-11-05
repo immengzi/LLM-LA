@@ -7,10 +7,12 @@ Shared length-backend helpers used by BOTH:
 - utils.send_chat_request (real vLLM path that may mirror/simulate)
 - oracle predictor preview (side-effect-free)
 
-New:
-- "replay-output" mode: uses dataset-provided out_len (if available)
-- register_replay_out_len(req_id, out_len): called at enqueue time
-Fully backward-compatible with previous modes.
+Modes supported:
+- legacy
+- target-output
+- target-total
+- replay-output  (uses register_replay_out_len(req_id, out_len))
+- dist-output    (lognormal/gamma/pareto/hist; optional STRICT hist)
 """
 
 import math
@@ -22,49 +24,14 @@ from typing import Optional, Dict, Any, List, Callable
 from config import get_config
 
 # ---------------------------------------------------------------------
-# Balanced multinomial sequencer (legacy prefix-fair, pointer-based)
-# ---------------------------------------------------------------------
-_hist_state: Dict[tuple, Dict[str, Any]] = {}
-_hist_lock = threading.Lock()
-
-
-def _next_hist_index(label: str, probs: List[float]) -> int:
-    """Balanced multinomial sequencer (deterministic, prefix-fair)."""
-    m = len(probs)
-    key = (label, m)
-    with _hist_lock:
-        st = _hist_state.get(key)
-        if st is None:
-            st = {"t": 0, "debt": [0.0] * m}
-        debt = st["debt"]
-        for i in range(m):
-            debt[i] += float(probs[i])
-        j = max(range(m), key=lambda i: (debt[i], -i))
-        debt[j] -= 1.0
-        st["t"] = int(st["t"]) + 1
-        _hist_state[key] = st
-        return j
-
-
-def reset_hist_sequence(label: Optional[str] = None):
-    with _hist_lock:
-        if label is None:
-            _hist_state.clear()
-        else:
-            for k in list(_hist_state.keys()):
-                if isinstance(k, tuple) and k[0] == label:
-                    _hist_state.pop(k, None)
-
-
-# ---------------------------------------------------------------------
-# Deterministic per-run STRICT plan (no pointer; size = number of enqueues)
+# Deterministic per-run STRICT plan (size = number of enqueues)
 # ---------------------------------------------------------------------
 _plan_state: Dict[str, Dict[str, Any]] = {}
 _plan_lock = threading.Lock()
 
 
 def set_hist_plan(label: str, probs: List[float], n: int, seed_base: int):
-    """Precompute a deterministic histogram plan exactly size n."""
+    """Precompute a deterministic histogram plan of exact size n."""
     with _plan_lock:
         counts = [int(round(float(p) * n)) for p in probs]
         delta = n - sum(counts)
@@ -85,27 +52,16 @@ def set_hist_plan(label: str, probs: List[float], n: int, seed_base: int):
 
         rng = random.Random(seed_for_name(seed_base, f"hist_plan::{label}"))
         rng.shuffle(seq)
-        _plan_state[label] = {"seq": seq, "ptr": 0}
-
-
-def _next_hist_index_from_plan(label: str, default_fn: Callable[[], int]) -> int:
-    with _plan_lock:
-        st = _plan_state.get(label)
-        if not st or not st.get("seq"):
-            return default_fn()
-        ptr = st["ptr"]
-        seq: List[int] = st["seq"]
-        idx = seq[ptr % len(seq)]
-        st["ptr"] = ptr + 1
-        return idx
+        _plan_state[label] = {"seq": seq}
 
 
 def get_hist_index_for_req(label: str, req_id: int, default_fn: Callable[[], int]) -> int:
+    """Return planned class index for a given req_id, or default_fn() if no plan."""
     with _plan_lock:
         st = _plan_state.get(label)
-        if not st or not st.get("seq"):
+        if not st:
             return default_fn()
-        seq: List[int] = st["seq"]
+        seq: List[int] = st.get("seq") or []
         if not seq:
             return default_fn()
         return seq[req_id % len(seq)]
@@ -119,6 +75,7 @@ _prng_lock = threading.Lock()
 
 
 def _next_hist_index_prng(label: str, probs: List[float], seed_base: int) -> int:
+    """Stable categorical draw using a per-label seeded RNG."""
     key = f"prng:{label}"
     with _prng_lock:
         st = _prng_state.get(key)
@@ -145,10 +102,7 @@ def seed_for_name(seed_base: int, name: str) -> int:
 
 
 def rng_for_prompt(seed_base: int, prompt: Optional[str], by_prompt: bool = True) -> random.Random:
-    if by_prompt and prompt:
-        s = seed_for_name(seed_base, prompt)
-    else:
-        s = int(seed_base)
+    s = seed_for_name(seed_base, prompt) if (by_prompt and prompt) else int(seed_base)
     return random.Random(s)
 
 
@@ -216,9 +170,7 @@ def sample_out_tokens_from_cfg(rng: random.Random, req_id: Optional[int] = None)
             return int(cfg.SIM_OUT_TOKENS)
         if bool(getattr(cfg, "LENGTH_DIST_STRICT_HIST", False)) and req_id is not None:
             label = str(getattr(cfg, "LENGTH_HIST_SERIES_LABEL", "default"))
-            seed_base = int(
-                getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0
-            )
+            seed_base = int(getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0)
             idx = get_hist_index_for_req(
                 label,
                 int(req_id),
@@ -256,12 +208,8 @@ def compute_length_plan(
     req_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     cfg = get_config()
-    eff_mode = (
-        (length_mode or getattr(cfg, "LENGTH_MODE", "legacy") or "legacy").lower().strip()
-    )
-    eff_ignore_eos = bool(
-        ignore_eos if ignore_eos is not None else getattr(cfg, "IGNORE_EOS", False)
-    )
+    eff_mode = (length_mode or getattr(cfg, "LENGTH_MODE", "legacy") or "legacy").lower().strip()
+    eff_ignore_eos = bool(ignore_eos if ignore_eos is not None else getattr(cfg, "IGNORE_EOS", False))
 
     cfg_cap = int(getattr(cfg, "MAX_TOKENS", 0) or 0)
     if base_cap is None or base_cap < 0:
@@ -320,7 +268,7 @@ def compute_length_plan(
                 "meta": meta,
             }
 
-    # NEW: replay-output
+    # replay-output
     if eff_mode == "replay-output":
         v = _get_replay_out_len(req_id)
         if v is not None:
@@ -408,7 +356,6 @@ def preview_out_tokens_for_prompt(*, plain_prompt: str, req_id: int) -> int:
         if tgt is not None:
             return int(tgt)
 
-    # NEW: replay-output
     if mode == "replay-output":
         v = _get_replay_out_len(req_id)
         if v is not None:
@@ -426,9 +373,7 @@ def preview_out_tokens_for_prompt(*, plain_prompt: str, req_id: int) -> int:
                 return int(getattr(cfg, "SIM_OUT_TOKENS", 0) or 0)
             if bool(getattr(cfg, "LENGTH_DIST_STRICT_HIST", False)):
                 label = str(getattr(cfg, "LENGTH_HIST_SERIES_LABEL", "default"))
-                seed_base = int(
-                    getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0
-                )
+                seed_base = int(getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0)
                 idx = get_hist_index_for_req(
                     label,
                     int(req_id),
@@ -437,13 +382,9 @@ def preview_out_tokens_for_prompt(*, plain_prompt: str, req_id: int) -> int:
                 idx = max(0, min(idx, len(values) - 1))
                 return int(values[idx])
             else:
-                seed_base = int(
-                    getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0
-                )
+                seed_base = int(getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0)
                 by_prompt = bool(getattr(cfg, "LENGTH_DIST_BY_PROMPT", True))
-                rng = rng_for_prompt(
-                    seed_base, (plain_prompt if by_prompt else None), by_prompt=by_prompt
-                )
+                rng = rng_for_prompt(seed_base, (plain_prompt if by_prompt else None), by_prompt=by_prompt)
                 total = sum(float(p) for p in probs) or 1.0
                 u, cum = rng.random(), 0.0
                 for v, w in zip(values, probs):
@@ -451,17 +392,14 @@ def preview_out_tokens_for_prompt(*, plain_prompt: str, req_id: int) -> int:
                     if u <= cum:
                         return int(v)
                 return int(values[-1])
-        seed_base = int(
-            getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0
-        )
+        seed_base = int(getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0)
         by_prompt = bool(getattr(cfg, "LENGTH_DIST_BY_PROMPT", True))
-        rng = rng_for_prompt(
-            seed_base, (plain_prompt if by_prompt else None), by_prompt=by_prompt
-        )
+        rng = rng_for_prompt(seed_base, (plain_prompt if by_prompt else None), by_prompt=by_prompt)
         return int(sample_out_tokens_from_cfg(rng))
 
     cap = int(getattr(cfg, "MAX_TOKENS", 0) or 0)
     return int(cap if cap > 0 else 0)
+
 
 def count_input_tokens(plain_prompt: str, req_id: Optional[int] = 0) -> int:
     """
@@ -483,12 +421,10 @@ def count_input_tokens(plain_prompt: str, req_id: Optional[int] = 0) -> int:
             length_mode=getattr(cfg, "LENGTH_MODE", "legacy"),
             req_id=int(req_id or 0),
         )
-        # Try typical field names
         for k in ("input_tokens", "prompt_tokens", "in_tokens"):
             v = plan.get(k)
             if v is not None:
                 return int(v)
     except Exception:
         pass
-    # Last-resort fallback to avoid crashes if plan lacks input length
     return max(1, len((plain_prompt or "").split()))

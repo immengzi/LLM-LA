@@ -15,7 +15,7 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: ""
   hostPath:
-    path: /mnt/nvme1/saeid/models/qwen3-4b
+    path: /mnt/nvme1/saeid/models/qwen3-8b
     type: Directory
 
 ---

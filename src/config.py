@@ -1,4 +1,3 @@
-# config.py
 # -*- coding: utf-8 -*-
 import os, json
 from dataclasses import dataclass, asdict, field
@@ -52,12 +51,23 @@ class RouterConfig:
 
     # Pull-batching knobs
     UTIL_THRESHOLD: float = 0.85
-    SAMPLE_INTERVAL: float = 0.1
+    SAMPLE_INTERVAL: float = 0.01
     MAX_INFLIGHT_PER_EP: int = 1
     BURST: int = 1
     NO_UTIL_BURST: int = 10**18
     ADMISSION_MODE: Literal["util", "cap", "algo"] = "algo"
     QUEUE_LOG_EVERY_N: int = 30
+
+    # =========================
+    # Prometheus + Local GPU Util
+    # =========================
+    PROMETHEUS_URL: str = "http://localhost:31190"
+    PROM_TIMEOUT_S: float = 10.0
+    RATE_INTERVAL: str = "2s"
+    METRICS_LOG_INTERVAL: float = 1.0
+    USE_LOCAL_GPU_UTIL: bool = True
+    LOCAL_GPU_REFRESH_S: float = 2.0
+    LOCAL_GPU_POD_CACHE_TTL_S: float = 10.0
 
     # =========================
     # Length-aware batching knobs
@@ -66,6 +76,8 @@ class RouterConfig:
     LEN_POLICY: Literal["short_first", "long_first", "longest_first", "even_short_long"] = "even_short_long"
     POOL_FACTOR: int = 1000
     LONG_BATCH_GUARD_N: int = 4
+    LEN_BASIS: Literal["input", "output", "total"] = "total"
+    REQUIRE_INPUT_TOKENIZER: bool = True
 
     # =========================
     # Project paths
@@ -81,35 +93,22 @@ class RouterConfig:
     PROMPTS_SEED: int = 123
     RESULTS_DIR: str = os.path.join(PROJECT_PATH, "results")
     QUEUE_LOG_FILENAME: str = "queue.json"
-    METRICS_LOG_INTERVAL: float = 1.0
     VLLM_SERVER_FLAGS: Dict[str, Any] = field(default_factory=dict)
 
     # =========================
     # Simulator knobs (SIM:// endpoints)
     # =========================
-    # Each entry defines simulated endpoints:
-    #   simA: { sec_per_token: 0.008, count: 2 }
-    #   simB: { spt: 0.012 }
-    # or a list: ["gpuA@0.008", "gpuB@0.015"]
     SIM_ENDPOINTS: Dict[str, Any] = field(default_factory=dict)
-
-    # Default token sizes
     SIM_IN_TOKENS: int = 64
     SIM_OUT_TOKENS: int = 100
-
-    # Simulator runtime behavior
-    SIM_CONT_BATCH: bool = True  # continuous batching only
-    SIM_MAX_BATCH: int = 1       # max concurrent decode requests
-    SIM_TIMESCALE: float = 1  # wall-time scaling
-    SIM_SEED: int = 12345        # random seed
-
-    # Heuristic input sizing
+    SIM_CONT_BATCH: bool = True
+    SIM_MAX_BATCH: int = 1
+    SIM_TIMESCALE: float = 1
+    SIM_SEED: int = 12345
     SIM_VARY_IN_TOKENS: bool = True
     SIM_CHARS_PER_TOKEN: float = 4.0
     SIM_IN_MIN: int = 1
     SIM_IN_MAX: int = 8192
-
-    # Output distribution
     SIM_VARY_OUT_TOKENS: bool = False
     SIM_OUT_DIST: Dict[str, Any] = field(
         default_factory=lambda: {
@@ -120,11 +119,7 @@ class RouterConfig:
             "max": 2048,
         }
     )
-
-    # Simulator mode: "append", "only", or "off"
     SIM_MODE: Literal["append", "only", "off"] = "off"
-
-    # Length-control mode
     LENGTH_MODE: Literal["legacy", "target-output", "target-total", "dist-output", "replay-output"] = "dist-output"
     TARGET_OUTPUT_TOKENS: Optional[int] = 54
     TARGET_TOTAL_TOKENS: Optional[int] = None
@@ -147,76 +142,37 @@ class RouterConfig:
     LOAD_DURATION_S: float = 999999.0
     LENGTH_DIST_STRICT_HIST: bool = True
     LENGTH_HIST_SERIES_LABEL: str = "default"
-
     BURST_ON_S: float = 2.0
     BURST_OFF_S: float = 2.0
     BURST_RPS_ON: float = 10.0
     BURST_RPS_OFF: float = 0.0
     STEP_SCHEDULE: str = ""
-
-    # Token length predictor
     PREDICTOR_NAME: str = "oracle"
 
     # =========================
-    # Prompt source (local JSON by default)
+    # Prompt source
     # =========================
     PROMPTS_SOURCE: Literal["file", "hf-lmsys"] = "file"
-
-    # HuggingFace live-dataset options (used only when PROMPTS_SOURCE="hf-lmsys")
     HF_DATASET_NAME: str = "lmsys/lmsys-chat-1m"
     HF_DATASET_SPLIT: str = "train"
-    HF_TOKENIZER_NAME: str = "Qwen/Qwen2-7B"     # used for reply-length estimation when needed
-    HF_STREAMING: bool = False           # use HF streaming loader when available
+    HF_TOKENIZER_NAME: str = "Qwen/Qwen2-7B"
+    HF_STREAMING: bool = False
 
     # ---- AUTOSCALER ----
-
-    # Master switch: enable or disable autoscaling logic entirely.
-    # When False, all endpoints remain active (no scaling decisions).
     AUTOSCALE_ENABLED: bool = False
-    # Autoscale mode:
-    # - "virtual": logical only — router activates/deactivates subsets of endpoints,
-    #              but doesn’t touch Kubernetes.
-    # - "real": (future use) would scale pods via the K8s API.
     AUTOSCALE_MODE: str = "virtual"
-    # Target queue length per desired server.
-    # Example: with Q_PER_SERVER=10, a queue of 100 → desired_servers=10.
-    # Smaller = more aggressive (scales up faster).
-    # Larger = more conservative (tolerates bigger queue per server).
     AUTOSCALE_Q_PER_SERVER: int = 8
-    # Minimum number of servers to keep active at all times.
-    # Even if the queue is empty, we never go below this.
     AUTOSCALE_MIN_SERVERS: int = 1
-    # Upper bound on desired server count.
-    # Acts as a hard cap even if backlog is huge or discovery lists more endpoints.
     AUTOSCALE_MAX_SERVERS: int = 10000
-    # Hysteresis band (fractional change threshold) to avoid oscillation.
-    # Example: 0.20 → require at least ±20% change in desired size
-    # before triggering another scale event.
     AUTOSCALE_HYSTERESIS: float = 0.20
-    # Minimum seconds between consecutive scaling decisions.
-    # Prevents reacting too quickly to short-term queue spikes.
     AUTOSCALE_DEBOUNCE_S: float = 1.0
-
     AUTOSCALE_LOG_FILENAME: str = "autoscale.jsonl"
 
-    # Payload logging controls
-    LOG_PAYLOAD_MODE: str = "full"   # one of: "off", "head", "full"
-    LOG_HEAD_CHARS: int = 5        # used when mode == "head"
+    LOG_PAYLOAD_MODE: str = "full"
+    LOG_HEAD_CHARS: int = 5
 
-    # =========================
-    # Length-aware batching knobs
-    # =========================
-    USE_LEN_AWARE: bool = False
-    LEN_POLICY: Literal["short_first", "long_first", "longest_first", "even_short_long"] = "even_short_long"
-    POOL_FACTOR: int = 1000
-    LONG_BATCH_GUARD_N: int = 4
-
-    # NEW: selection basis for length-aware sorting ("input" | "output" | "total")
-    LEN_BASIS: Literal["input", "output", "total"] = "total"
-
-    # NEW: enforce tokenizer presence when USE_LEN_AWARE is True
-    REQUIRE_INPUT_TOKENIZER: bool = True
-
+    # ---- Think/no think ----
+    THINK: bool = False
 
 # --- global holder ---
 _CONFIG: Optional[RouterConfig] = None
@@ -270,8 +226,6 @@ def load_config(path: Optional[str]) -> RouterConfig:
         for k, v in raw.items():
             if hasattr(cfg, k):
                 setattr(cfg, k, v)
-
-    # ENV overrides YAML/JSON/defaults
     for field_desc in RouterConfig.__dataclass_fields__.values():
         name, typ = field_desc.name, field_desc.type
         setattr(cfg, name, _env_or(getattr(cfg, name), name, typ))
