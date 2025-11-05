@@ -7,7 +7,7 @@ Length predictors (pluggable).
   implemented via a side-effect-free preview function in length_backend.
 
 NOTE:
-- Updated to accept and propagate `req_id` for strict determinism across runs
+- Propagate `req_id` for strict determinism across runs
   and retries.
 - CLAMPS the preview to the same effective max tokens as generation
   (computed with compute_length_plan), so predicted == generated.
@@ -15,7 +15,7 @@ NOTE:
 
 from typing import Optional, Dict
 from config import get_config
-from length_backend import preview_out_tokens_for_prompt, compute_length_plan
+from length_backend import compute_length_plan
 
 
 class BaseLengthPredictor:

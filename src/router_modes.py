@@ -57,6 +57,42 @@ _cfg = get_config()
 
 # -------------------------
 # Helpers (loadgen wiring)
+
+# Load flow (detailed, with file origins):
+#
+#  ┌──────────────────────────────────────────────────────────────────────┐
+#  │ loadgen (from: loadgen.py)                                          │
+#  │  - drive_load() produces prompts (dump/poisson/det/bursty/steps)    │
+#  │  - enqueue_one() (defined in router_modes.py) assigns req_id,       │
+#  │    t_enq_client, and optional replay_out_len                        │
+#  └─────────────┬────────────────────────────────────────────────────────┘
+#                │ (prompt, t_enq_client, req_id)
+#                ▼
+#  ┌──────────────────────────────┐
+#  │ router.q (Queue object)      │  ← shared pending requests
+#  │ from: router_core.py         │
+#  └─────────────┬────────────────┘
+#                │ consumed by router.step()
+#                ▼
+#  ┌──────────────────────────────────────────────────────────────────────┐
+#  │ router (from: router_core.py)                                       │
+#  │  - PullBatchingRouter / RR / Random / LeastQueue                    │
+#  │  1) Peek N items under _Q_LOCK                                      │
+#  │  2) Use len_select.select_batch() (len_select.py)                   │
+#  │  3) Compute 'want' via GPU util + admission mode                    │
+#  │  4) Send batches, record timestamps (t_arrival/dispatch/response)   │
+#  │  5) Handle draining endpoints, errors, requeues                     │
+#  └─────────────┬────────────────────────────────────────────────────────┘
+#                │ batched HTTP calls (via requests + HTTPAdapter)
+#                ▼
+#  ┌──────────────────────────────────────────────────────────────────────┐
+#  │ endpoints (vLLM pods discovered via utils_k8s.py)                   │
+#  │  - Serve requests, produce completions                              │
+#  │  - Router logs ok/err, updates Prometheus via utils_prom.py         │
+#  │  - Metrics: queue_wait, roundtrip, end_to_end                       │
+#  └──────────────────────────────────────────────────────────────────────┘
+
+
 # -------------------------
 
 
@@ -69,7 +105,7 @@ def _make_enqueue_fn_for_batched(router) -> callable:
     enqueue_one(prompt_or_pair, t_enq_client)
     - prompt_or_pair: either a string prompt or (prompt, replay_out_len) from HF loader
     """
-    from length_backend import register_replay_out_len  # local import to avoid cycles
+    from length_backend import register_replay_out_len
 
     def enqueue_one(prompt_or_pair, t_enq_client: float):
         # Accept both "str" and "(prompt, out_len)" tuples
@@ -128,6 +164,15 @@ def _start_load_feeder_if_needed(pattern, prompts, enqueue_one) -> threading.Thr
     th = threading.Thread(target=_runner, daemon=True)
     th.start()
     return th
+
+# -------------------------
+# Main Experiment Loop
+# 1. Start metrics and initialize router + load feeder
+# 2. Discover endpoints and configure autoscaler
+# 3. Main loop: refresh discovery, autoscale, update router, step scheduler
+# 4. Log status and autoscale events
+# 5. On finish: stop metrics, print summary, save results
+# -------------------------
 
 def _run_batched_common(
     core: client.CoreV1Api,

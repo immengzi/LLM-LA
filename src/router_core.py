@@ -87,10 +87,10 @@ class PullBatchingRouter:
         self._id_cache: Dict[str, Tuple[float, str, Optional[float]]] = {}
         self._id_ttl_s: float = float(getattr(_cfg, "TPS_TTL_S", 5.0))
 
-        # NEW: draining endpoints (present but should pull no new work)
+        # draining endpoints (present but should pull no new work) - For autoscaling scenario
         self._draining_eps: set[str] = set()
 
-        # NEW: archive stats for endpoints that are removed during the run
+        # archive stats for endpoints that are removed during the run - For autoscaling scenario
         # key: endpoint URL -> {"ok": int, "err": int}
         self._stats_archive: Dict[str, Dict[str, int]] = {}
 
@@ -661,16 +661,9 @@ class _BaseBatchingRouter:
 
     # ---------- per-endpoint sender infra ----------
 
-    # def _make_session(self) -> requests.Session:
-    #     s = requests.Session()
-    #     adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1, pool_block=True)
-    #     s.mount("http://", adapter)
-    #     s.mount("https://", adapter)
-    #     return s
-
     def _make_session(self) -> requests.Session:
         s = requests.Session()
-        s.trust_env = False  # ← ignore HTTP(S)_PROXY/NO_PROXY for this session
+        s.trust_env = False
         retry = Retry(
             total=3, connect=3, read=3,
             backoff_factor=0.2,
@@ -924,8 +917,6 @@ class _BaseBatchingRouter:
                     "actual_out_tokens": act_out_int,
                     "total_predicted_tokens": total_predicted_tokens,
                     "total_actual_tokens": total_actual_tokens,
-                    # "predicted_out_tokens": None if predicted_out_tokens is None else int(predicted_out_tokens),
-                    # "actual_out_tokens": None if actual_out is None else int(actual_out),
                 },
             )
 
@@ -959,6 +950,7 @@ class _BaseBatchingRouter:
 
     def step(self):
         now = time.time()
+        # print(f"self._step_interval_s: {self._step_interval_s}")
         if now - self._last_step_ts < self._step_interval_s:
             return
         self._last_step_ts = now
