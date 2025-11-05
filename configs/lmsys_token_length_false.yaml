@@ -22,7 +22,7 @@ MAX_TOKENS: 8192        # Medium cap (default). For HIGH use 2048; VERY LARGE us
 IGNORE_EOS: true
 
 # ------- Length policy -------
-LENGTH_MODE: "replay-output"        # Distribution mode (default for this file)
+LENGTH_MODE: "replay-output"      # Distribution mode (default for this file)
 # LENGTH_MODE: "target-output"    # Fixed length mode (uncomment to use)
 TARGET_OUTPUT_TOKENS: null        # e.g., 128 when using fixed mode
 TARGET_TOTAL_TOKENS: null
@@ -145,7 +145,7 @@ LENGTH_HIST_SERIES_LABEL: "default"
 # =========================
 # Prompt source (use HF instead of local file)
 # =========================
-PROMPTS_SOURCE: "hf-lmsys"          # "file" | "hf-lmsys"
+PROMPTS_SOURCE: "file"          # "file" | "hf-lmsys"
 
 # HuggingFace live-dataset options (used only when PROMPTS_SOURCE="hf-lmsys")
 HF_DATASET_NAME: "lmsys/lmsys-chat-1m"

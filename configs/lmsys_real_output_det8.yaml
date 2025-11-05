@@ -19,10 +19,10 @@ SIM_MODE: "off"
 
 # ------- Global caps / general -------
 MAX_TOKENS: 8192        # Medium cap (default). For HIGH use 2048; VERY LARGE use 8192; LOW use 256
-IGNORE_EOS: true
+IGNORE_EOS: false
 
 # ------- Length policy -------
-LENGTH_MODE: "dist-output"        # Distribution mode (default for this file)
+LENGTH_MODE: "legacy"      # Distribution mode (default for this file)
 # LENGTH_MODE: "target-output"    # Fixed length mode (uncomment to use)
 TARGET_OUTPUT_TOKENS: null        # e.g., 128 when using fixed mode
 TARGET_TOTAL_TOKENS: null
@@ -60,8 +60,8 @@ SIM_OUT_DIST:
   kind: "hist"
   # values: [32, 64, 128, 256, 512, 768, 1024]
   # probs:  [0.05,0.10,0.30,0.30,0.15,0.07,0.03]
-  values: [32, 1024, 4096]
-  probs:  [0.4, 0.3, 0.3]
+  values: [32, 4096]
+  probs:  [0.7,0.3]
   # values: [1024]
   # probs:  [1]
   min: 16
@@ -70,7 +70,7 @@ SIM_OUT_DIST:
 USE_LEN_AWARE: false
 LEN_POLICY: short_first
 PRED_LEN_THRESHOLD: 33
-POOL_FACTOR: 1000
+POOL_FACTOR: 400
 
 
 # ---- HIGH tokens (set MAX_TOKENS: 2048 above) ----
@@ -136,8 +136,20 @@ LOAD_RATE_RPS: 1
 # Load generation knobs
 # =========================
 LOAD_PATTERN: "det"          # one of: dump, det, poisson, bursty, steps
-LOAD_RATE_RPS: 16
+LOAD_RATE_RPS: 8
 LOAD_WARMUP_S: 0.0
 LOAD_DURATION_S: 999999.0
 LENGTH_DIST_STRICT_HIST: true
 LENGTH_HIST_SERIES_LABEL: "default"
+
+# =========================
+# Prompt source (use HF instead of local file)
+# =========================
+PROMPTS_SOURCE: "hf-lmsys"          # "file" | "hf-lmsys"
+
+# HuggingFace live-dataset options (used only when PROMPTS_SOURCE="hf-lmsys")
+HF_DATASET_NAME: "lmsys/lmsys-chat-1m"
+HF_DATASET_SPLIT: "train"
+HF_TOKENIZER_NAME: "Qwen/Qwen3-8B"  # for reply-length estimation (harmless if you don’t use it)
+HF_STREAMING: false                 # set false if streaming triggers rate-limit / TLS issues
+PROMPTS_LIMIT: 1000                 # merged with HF_MAX_N -> effective_max_n = min(HF_MAX_N, PROMPTS_LIMIT)
