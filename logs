@@ -1057,6 +1057,40 @@ outcome:
 added metrics but not sure
 
 
+184
+8 replicas
+npu
+dataset: lmsys
+token-aware: true
+load: dump
+batch size on the vLLM server 8
+1000 requests
+tokenizer: Qwen/Qwen2-7B
+outcome: pull more optimzied than the 
+
+185
+8 replicas
+npu
+dataset: lmsys
+token-aware: true
+load: dump
+batch size on the vLLM server 8
+1000 requests
+tokenizer: Qwen/Qwen3-8B 
+
+186
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: dump
+batch size on the vLLM server 8
+1000 requests
+load: 4 rps
+real outptus 
+tokenizer: Qwen/Qwen3-8B 
+
+186-189 TODO
 
 
 =============================

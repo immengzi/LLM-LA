@@ -136,10 +136,45 @@ class RouterConfig:
     # =========================
     # Load generation knobs
     # =========================
-    LOAD_PATTERN: Literal["dump", "det", "poisson", "bursty", "steps"] = "dump"
+    # To alternate patterns, set LOAD_PATTERN and use the matching block below.
+    #
+    # Examples (uncomment & adjust as needed):
+    #
+    # -- Dump everything immediately --
+    # LOAD_PATTERN = "dump"
+    #
+    # -- Fixed-rate deterministic or Poisson --
+    # LOAD_PATTERN = "det"       # or "poisson"
+    # LOAD_RATE_RPS = 5.0
+    # LOAD_WARMUP_S = 5.0
+    # LOAD_DURATION_S = 60.0
+    #
+    # -- Bursty on/off windows --
+    # LOAD_PATTERN = "bursty"
+    # BURST_ON_S = 2.0
+    # BURST_OFF_S = 2.0
+    # BURST_RPS_ON = 10.0
+    # BURST_RPS_OFF = 0.0
+    #
+    # -- Piecewise steps (times are seconds from start) --
+    # LOAD_PATTERN = "steps"
+    # STEP_SCHEDULE = "0:3,30:8,60:1"
+    #
+    # -- Random range per epoch (uniformly sample RPS in [min,max]) --
+    # LOAD_PATTERN = "rand"
+    # RAND_RPS_MIN = 3.0
+    # RAND_RPS_MAX = 12.0
+    # RAND_EPOCH_S = 4.0
+    # RAND_KIND = "poisson"   # or "det"
+    #
+    LOAD_PATTERN: Literal["dump", "det", "poisson", "bursty", "steps", "rand"] = "dump"
+
+    # Common knobs for det/poisson/steps default rate
     LOAD_RATE_RPS: float = 2.0
     LOAD_WARMUP_S: float = 0.0
     LOAD_DURATION_S: float = 999999.0
+
+    # Steps & bursty specifics
     LENGTH_DIST_STRICT_HIST: bool = True
     LENGTH_HIST_SERIES_LABEL: str = "default"
     BURST_ON_S: float = 2.0
@@ -147,6 +182,21 @@ class RouterConfig:
     BURST_RPS_ON: float = 10.0
     BURST_RPS_OFF: float = 0.0
     STEP_SCHEDULE: str = ""
+
+    # Random-range specifics
+    RAND_RPS_MIN: Optional[float] = None    # lower inclusive bound
+    RAND_RPS_MAX: Optional[float] = None    # upper inclusive bound
+    RAND_EPOCH_S: float = 5.0               # how often to resample RPS
+    RAND_KIND: Literal["poisson", "det"] = "poisson"
+
+    # Repeatability controls (NEW)
+    LOADGEN_SEED: int = 12345               # seeds loadgen RNG for Poisson/rand/bursty/steps
+    RANDOM_ROUTER_SEED: int = 12345         # used by Random router (if applicable)
+
+    # Load logging controls (for loadgen)
+    VERBOSE_LOAD: bool = False
+    LOAD_LOG_EVERY: int = 1
+
     PREDICTOR_NAME: str = "oracle"
 
     # =========================
@@ -173,6 +223,7 @@ class RouterConfig:
 
     # ---- Think/no think ----
     THINK: bool = False
+
 
 # --- global holder ---
 _CONFIG: Optional[RouterConfig] = None

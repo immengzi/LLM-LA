@@ -22,7 +22,6 @@ _cfg = get_config()
 RESULTS_ROOT = _cfg.RESULTS_DIR
 QUEUE_LOG_FILENAME = _cfg.QUEUE_LOG_FILENAME
 
-
 class _PayloadMode(str, Enum):
     OFF = "off"
     HEAD = "head"
@@ -48,12 +47,10 @@ def _clip_by_mode(text: str | None, mode: str, head_chars: int) -> tuple[str | N
         return text, False
     return text[:max(0, int(head_chars))] + "… [truncated]", True
 
-
 def _mode_dir(mode: str) -> str:
     path = os.path.join(RESULTS_ROOT, mode)
     os.makedirs(path, exist_ok=True)
     return path
-
 
 def _next_run_dir(mode: str) -> str:
     mode_path = _mode_dir(mode)
@@ -77,17 +74,14 @@ def _next_run_dir(mode: str) -> str:
 
     return run_path
 
-
 _run_dirs: Dict[str, str] = {}
 _run_dirs_guard = threading.Lock()
-
 
 def get_run_dir(mode: str) -> str:
     with _run_dirs_guard:
         if mode not in _run_dirs:
             _run_dirs[mode] = _next_run_dir(mode)
         return _run_dirs[mode]
-
 
 class JsonlLogger:
     def __init__(self, path: str):
@@ -103,10 +97,8 @@ class JsonlLogger:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
-
 _loggers: Dict[str, JsonlLogger] = {}
 _loggers_guard = threading.Lock()
-
 
 def _get_logger_for_mode(mode: str) -> JsonlLogger:
     run_dir = get_run_dir(mode)
@@ -115,7 +107,6 @@ def _get_logger_for_mode(mode: str) -> JsonlLogger:
         if mode not in _loggers:
             _loggers[mode] = JsonlLogger(path)
         return _loggers[mode]
-
 
 # ---- unified request/response logger (back-compatible) ----
 def log_result(
@@ -187,13 +178,10 @@ def log_result(
 
     _get_logger_for_mode(mode).write(record)
 
-
-
 # ---- queue/batching telemetry helper (same folder as mode logs) ----
 
 _queue_loggers: Dict[str, JsonlLogger] = {}
 _queue_loggers_guard = threading.Lock()
-
 
 def _get_queue_logger_for_mode(router_mode: str) -> JsonlLogger:
     """
@@ -207,7 +195,6 @@ def _get_queue_logger_for_mode(router_mode: str) -> JsonlLogger:
         if key not in _queue_loggers:
             _queue_loggers[key] = JsonlLogger(path)
         return _queue_loggers[key]
-
 
 def log_queue(
     *,
@@ -241,21 +228,69 @@ def log_queue(
         rec.update(extra)
     _get_queue_logger_for_mode(router_mode).write(rec)
 
+# ---- LOAD LOGGER (new) ----
+
+_load_loggers: Dict[str, JsonlLogger] = {}
+_load_loggers_guard = threading.Lock()
+LOAD_LOG_FILENAME = getattr(_cfg, "LOAD_LOG_FILENAME", "load.jsonl")
+
+def _get_load_logger_for_mode(router_mode: str) -> JsonlLogger:
+    """
+    Writes to results/<router_mode>/<run_id>/load.jsonl (or cfg.LOAD_LOG_FILENAME).
+    """
+    run_dir = get_run_dir(router_mode)
+    path = os.path.join(run_dir, LOAD_LOG_FILENAME)
+    key = f"{router_mode}::{path}"
+    with _load_loggers_guard:
+        if key not in _load_loggers:
+            _load_loggers[key] = JsonlLogger(path)
+        return _load_loggers[key]
+
+def log_load(
+    *,
+    router_mode: str,
+    event: str,                # "start", "warmup_begin", "arrival", "step_change", "rand_epoch", "burst_on", "burst_off", "done"
+    rps: float | None = None,  # epoch/effective RPS if relevant
+    pattern: str | None = None,
+    extra: Dict[str, Any] | None = None,
+) -> None:
+    """
+    Structured load telemetry writer.
+
+    Location:
+      results/<router_mode>/<run_id>/load.jsonl
+
+    Fields:
+      - ts, event, pattern, rps (optional)
+      - extra: arbitrary user fields (e.g., epoch_s, lo/hi bounds, step_idx, phase, etc.)
+    """
+    rec: Dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+    }
+    if pattern is not None:
+        rec["pattern"] = pattern
+    if rps is not None:
+        rec["rps"] = float(rps)
+    if extra:
+        rec.update(extra)
+
+    try:
+        _get_load_logger_for_mode(router_mode).write(rec)
+    except Exception as e:
+        print(f"[WARN] load log failed: {e}", flush=True)
 
 # ---- metrics summary registry (hooked by prom_utils) ----
 _metrics_summary_getter: Optional[callable] = None
-
 
 def register_metrics_getter(getter: callable) -> None:
     global _metrics_summary_getter
     _metrics_summary_getter = getter
 
-
 def get_metrics_summary(mode: str) -> Dict[str, Any]:
     if _metrics_summary_getter is None:
         return {}
     return _metrics_summary_getter(mode) or {}
-
 
 def save_summary(mode: str, summary: dict) -> None:
     metrics = get_metrics_summary(mode)
@@ -266,7 +301,6 @@ def save_summary(mode: str, summary: dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print(f"[SUMMARY] Saved {path}")
-
 
 # ---------------- HTTP helpers ----------------
 
@@ -283,7 +317,6 @@ def _count_sim_eps_from_cfg(cfg) -> int:
             if isinstance(item, str) and "@" in item:
                 total += 1
     return total
-
 
 def _is_http_sim_endpoint(endpoint: str, cfg) -> bool:
     """
@@ -307,7 +340,6 @@ def _is_http_sim_endpoint(endpoint: str, cfg) -> bool:
         return base <= port < (base + total)
     except Exception:
         return False
-
 
 # --- REPLACE your healthy() with this version ---
 def healthy(
@@ -456,6 +488,8 @@ def send_chat_request(
     # Optional: uncomment for quick visibility
     # print(f"[SEND*HTTP] POST {url} timeout={timeout} req_id={req_id}")
 
+    # print(f"HERE payload: {payload}")
+
     # Reuse a persistent session if provided (prevents bursty new TCP handshakes)
     if session is not None:
         r = session.post(url, json=payload, headers=(headers or None), timeout=timeout)
@@ -480,11 +514,7 @@ def send_chat_request(
         resp["_req_id"] = int(req_id)
     return resp
 
-
-
-
 DEFAULT_PROMPTS_FILE = _cfg.PROMPTS_FILE_PATH
-
 
 def _read_json_or_jsonl(path: str) -> List[str]:
     ext = os.path.splitext(path)[1].lower()
@@ -522,7 +552,6 @@ def _read_json_or_jsonl(path: str) -> List[str]:
         "Prompts file must be a JSON list / JSONL, or an object with key 'prompts'."
     )
 
-
 def load_prompts(path: Optional[str] = None) -> deque:
     cfg = get_config()
     path = path or cfg.PROMPTS_FILE_PATH
@@ -540,7 +569,6 @@ def load_prompts(path: Optional[str] = None) -> deque:
 
     return deque(items)
 
-
 def _count_sim_eps_from_cfg(cfg) -> int:
     sim = cfg.SIM_ENDPOINTS
     total = 0
@@ -553,7 +581,6 @@ def _count_sim_eps_from_cfg(cfg) -> int:
             if isinstance(item, str) and "@" in item:
                 total += 1
     return total
-
 
 def _is_http_sim_endpoint(endpoint: str, cfg) -> bool:
     host = getattr(cfg, "SIM_HTTP_HOST", "127.0.0.1")
@@ -590,7 +617,6 @@ def _get_autoscale_logger_for_mode(router_mode: str) -> JsonlLogger:
         if key not in _autoscale_loggers:
             _autoscale_loggers[key] = JsonlLogger(path)
         return _autoscale_loggers[key]
-
 
 def log_autoscale(
     *,
@@ -633,3 +659,54 @@ def log_autoscale(
         logger.write(record)
     except Exception as e:
         print(f"[WARN] autoscale log failed: {e}", flush=True)
+
+# ---- LOAD TRACE LOGGER (new) ----
+_load_trace_loggers: Dict[str, JsonlLogger] = {}
+_load_trace_loggers_guard = threading.Lock()
+LOAD_TRACE_LOG_FILENAME = getattr(_cfg, "LOAD_TRACE_LOG_FILENAME", "load_trace.jsonl")
+
+def _get_load_trace_logger_for_mode(router_mode: str) -> JsonlLogger:
+    run_dir = get_run_dir(router_mode)
+    path = os.path.join(run_dir, LOAD_TRACE_LOG_FILENAME)
+    key = f"{router_mode}::{path}"
+    with _load_trace_loggers_guard:
+        if key not in _load_trace_loggers:
+            _load_trace_loggers[key] = JsonlLogger(path)
+        return _load_trace_loggers[key]
+
+def log_load_trace(
+    *,
+    router_mode: str,
+    idx: int,                     # monotonically increasing sequence number
+    phase: str,                   # "warmup" | "main" | "dump"
+    pattern: str,
+    uid: str | None,              # None during warmup until start is emitted
+    second: int | None,
+    rps_effective: float | None,  # rps at this moment (for steps/bursty/rand/det/poisson)
+    planned_at: float,            # absolute epoch seconds when we *planned* to enqueue
+    woke_at: float,               # when the scheduler woke up from sleep
+    enq_at: float,                # when we actually called enqueue_one(...)
+    note: str | None = None,      # optional human note
+    extra: Dict[str, Any] | None = None,
+) -> None:
+    rec: Dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "seq": int(idx),
+        "phase": phase,
+        "pattern": pattern,
+        "uid": uid,
+        "second": second,
+        "rps": rps_effective,
+        "planned_at": float(planned_at),
+        "woke_at": float(woke_at),
+        "enq_at": float(enq_at),
+        "sleep_drift_ms": (woke_at - planned_at) * 1000.0,
+        "enqueue_drift_ms": (enq_at - planned_at) * 1000.0,
+        "note": note,
+    }
+    if extra:
+        rec.update(extra)
+    try:
+        _get_load_trace_logger_for_mode(router_mode).write(rec)
+    except Exception as e:
+        print(f"[WARN] load trace log failed: {e}", flush=True)
