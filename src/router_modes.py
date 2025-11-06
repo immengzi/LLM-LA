@@ -49,7 +49,7 @@ RouterClass = Union[
 # Optional: for clarity
 PromptItem = Union[str, tuple[str, int]]
 from autoscaler import QueueBacklogAutoscaler
-from utils import log_autoscale
+from utils import log_autoscale, log_load  # <- load logger added
 
 
 # Centralized config
@@ -131,22 +131,42 @@ def _make_enqueue_fn_for_batched(router) -> callable:
             router.q.put((str(prompt), time.time(), int(rid)))
     return enqueue_one
 
-def _start_load_feeder_if_needed(pattern, prompts, enqueue_one) -> threading.Thread | None:
+def _start_load_feeder_if_needed(pattern, prompts, enqueue_one, *, router_mode: str) -> threading.Thread | None:
+    """
+    Starts the load feeder if needed.
+    - For "dump": enqueue here (and log start/done).
+    - For others: spawn a daemon thread that calls drive_load(...) with logging enabled.
+    """
     from loadgen import drive_load
     pat = (pattern or "dump").lower()
 
-    # For "dump", handle both deque and iterator
+    # For "dump", handle both deque and iterator (and log)
     if pat == "dump":
         t0 = time.time()
+        # start log
+        try:
+            log_load(router_mode=router_mode, event="start", pattern="dump")
+        except Exception:
+            pass
+
+        sent = 0
         if hasattr(prompts, "popleft"):
             while prompts:
                 enqueue_one(prompts.popleft(), t0)
+                sent += 1
         else:
             for p in prompts:
                 enqueue_one(p, t0)
+                sent += 1
+
+        # done log
+        try:
+            log_load(router_mode=router_mode, event="done", pattern="dump", extra={"sent": sent, "elapsed_s": 0.0})
+        except Exception:
+            pass
         return None
 
-    # Non-dump: just pass through; drive_load now supports iterators
+    # Non-dump: just pass through; drive_load supports iterators and logging
     def _runner():
         drive_load(
             pattern=pat,
@@ -160,6 +180,15 @@ def _start_load_feeder_if_needed(pattern, prompts, enqueue_one) -> threading.Thr
             burst_rps_on=_cfg.BURST_RPS_ON,
             burst_rps_off=_cfg.BURST_RPS_OFF,
             step_schedule=_cfg.STEP_SCHEDULE,
+            # random-range pattern params
+            rand_rps_min=getattr(_cfg, "RAND_RPS_MIN", None),
+            rand_rps_max=getattr(_cfg, "RAND_RPS_MAX", None),
+            rand_epoch_s=float(getattr(_cfg, "RAND_EPOCH_S", 5.0)),
+            rand_kind=str(getattr(_cfg, "RAND_KIND", "poisson")),
+            # logging controls
+            router_mode=router_mode,
+            log_every=int(getattr(_cfg, "LOAD_LOG_EVERY", 1)),
+            verbose=bool(getattr(_cfg, "VERBOSE_LOAD", True)),
         )
     th = threading.Thread(target=_runner, daemon=True)
     th.start()
@@ -199,11 +228,12 @@ def _run_batched_common(
     # --- router construction
     router: RouterInstance = router_cls(mode_name=mode_name)
 
-    # --- load feeder setup
+    # --- load feeder setup (now passes router_mode for load logging)
     feeder = _start_load_feeder_if_needed(
         _cfg.LOAD_PATTERN,
         prompts,
         _make_enqueue_fn_for_batched(router),
+        router_mode=mode_name,
     )
 
     # --- initial endpoint discovery

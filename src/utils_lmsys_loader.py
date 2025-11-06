@@ -1,23 +1,63 @@
+# -*- coding: utf-8 -*-
 """
-Minimal on-the-fly LMSYS loader with live logs.
+Config-aware LMSYS loader with unified local/hub logic.
 Yields (prompt, out_tokens_estimated_from_reply) pairs for testing schedulers.
 
-Keeps the same signature/flow as your original, but:
-- Reads LMSYS fields correctly: `conversations` with `{"from": "...", "value": "..."}`.
-- Uses the SAME pairing rule as your notebook Cell 2: last user -> next assistant.
-- Falls back to your old keys if present (to avoid breaking on other sources).
+- If HF_DATASET_NAME points to a local path, load_from_disk() is used.
+- Otherwise, it’s treated as a Hugging Face dataset ID.
+- Same rule applies to HF_TOKENIZER_NAME (local path vs. hub model).
 """
 
+import os
 import sys
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 from transformers import AutoTokenizer
+from config import get_config
+
+
+def _load_tokenizer(cfg):
+    """Load tokenizer from either a local folder or the HF Hub."""
+    name = getattr(cfg, "HF_TOKENIZER_NAME", "gpt2")
+
+    if isinstance(name, str) and os.path.isdir(name):
+        print(f"[TOK] ✅ Using local tokenizer path: {name}")
+        tok = AutoTokenizer.from_pretrained(name, local_files_only=True)
+    else:
+        print(f"[TOK] 🌐 Loading tokenizer from HF Hub: {name}")
+        tok = AutoTokenizer.from_pretrained(name)
+
+    try:
+        tok.model_max_length = int(1e9)
+    except Exception:
+        pass
+    return tok
+
+
+def _load_dataset(cfg):
+    """Load dataset from local path or HF Hub, depending on HF_DATASET_NAME value."""
+    name = getattr(cfg, "HF_DATASET_NAME", "lmsys/lmsys-chat-1m")
+    split = getattr(cfg, "HF_DATASET_SPLIT", "train")
+    streaming = bool(getattr(cfg, "HF_STREAMING", False))
+
+    # Detect local directory path
+    if isinstance(name, str) and os.path.isdir(name):
+        print(f"[DATASET] ✅ Using local dataset path: {name}")
+        try:
+            return load_from_disk(name)
+        except Exception as e:
+            print(f"[DATASET] ⚠️ Failed to load local dataset ({e}), falling back to HF Hub.")
+
+    # Otherwise treat as HF dataset repo id
+    print(f"[DATASET] 🌐 Loading from Hugging Face Hub: {name}:{split} (streaming={streaming})")
+    return load_dataset(name, split=split, streaming=streaming)
+
 
 def iter_lmsys_pairs(
-    dataset_name: str = "lmsys/lmsys-chat-1m",
-    split: str = "train",
-    tokenizer_name: str = "gpt2",
+    dataset_name: str = None,
+    split: str = None,
+    tokenizer_name: str = None,
     max_n: int = 10000,
-    streaming: bool = True,
+    streaming: bool = None,
     log_interval: int = 500,
     verbose: bool = False,
     *,
@@ -25,39 +65,34 @@ def iter_lmsys_pairs(
     progress_desc: str = "LMSYS",
 ):
     """
-    Stream LMSYS dataset and yield (prompt, reply_len_tokens).
-    Prints lightweight logs as it progresses.
-
-    Args:
-        dataset_name: HF dataset repo id
-        split: dataset split
-        tokenizer_name: HF tokenizer for token counting
-        max_n: cap on yielded pairs
-        streaming: use streaming loader (no local full materialization)
-        log_interval: how often to print a simple counter when not verbose and no tqdm
-        verbose: print each example (prompt + reply lengths)
-        progress: if True, show a tqdm progress bar (best for prepopulation)
-        progress_desc: label text for the progress bar
+    Stream or iterate LMSYS dataset and yield (prompt, reply_len_tokens).
+    Automatically respects local paths and fallback to hub when needed.
     """
-    print(f"[LMSYS] Loading dataset '{dataset_name}:{split}' (streaming={streaming})...")
-    tok = AutoTokenizer.from_pretrained(tokenizer_name)
-    try:
-        tok.model_max_length = int(1e9)  # avoid max_length warnings when just counting tokens
-    except Exception:
-        pass
 
-    ds = load_dataset(dataset_name, split=split, streaming=streaming)
+    cfg = get_config()
 
-    # --- progress bar wiring (optional) ---
+    # Apply overrides or config defaults
+    dataset_name = dataset_name or getattr(cfg, "HF_DATASET_NAME", "lmsys/lmsys-chat-1m")
+    split = split or getattr(cfg, "HF_DATASET_SPLIT", "train")
+    tokenizer_name = tokenizer_name or getattr(cfg, "HF_TOKENIZER_NAME", "gpt2")
+    if streaming is None:
+        streaming = bool(getattr(cfg, "HF_STREAMING", False))
+
+    print(f"[LMSYS] Preparing dataset='{dataset_name}:{split}', tokenizer='{tokenizer_name}'")
+
+    tok = _load_tokenizer(cfg)
+    ds = _load_dataset(cfg)
+
+    # optional progress bar
     use_bar = bool(progress)
     pbar = None
     if use_bar:
         try:
-            from tqdm.auto import tqdm  # type: ignore
+            from tqdm.auto import tqdm
             total = None
             if not streaming:
                 try:
-                    total = len(ds)  # may raise if not supported
+                    total = len(ds)
                 except Exception:
                     total = None
             if total is None:
@@ -68,19 +103,13 @@ def iter_lmsys_pairs(
             use_bar = False
 
     def _role(t):
-        # Prefer LMSYS schema; fallback to your old keys if present
         return (t.get("from") or t.get("role") or "").lower()
 
     def _text(t):
-        # Prefer LMSYS `value`; fall back to `content`
         return (t.get("value") or t.get("content") or "").strip()
 
     def _extract_pair_like_notebook(ex):
-        """
-        Match Cell 2 behavior:
-        - Look for 'conversations' (LMSYS), else fallback to old 'conversation'/'conversation_a'
-        - Take the LAST user turn, then the NEXT assistant turn.
-        """
+        """Extract last user → next assistant pair, as in notebook Cell 2."""
         conv = None
         for k in ("conversations", "conversation", "conversation_a"):
             if k in ex and isinstance(ex[k], list) and ex[k]:
@@ -88,7 +117,6 @@ def iter_lmsys_pairs(
                 break
         if not isinstance(conv, list) or len(conv) < 2:
             return None
-
         last_user_idx = None
         for i, t in enumerate(conv):
             if _role(t) in ("human", "user"):
@@ -121,11 +149,9 @@ def iter_lmsys_pairs(
                 f"{'='*80}\n"
             )
 
-        # Yield SAME shape as before: (prompt, out_tokens_estimated_from_reply)
         yield prompt, out_len
         yielded += 1
 
-        # progress feedback
         if use_bar and pbar is not None:
             pbar.update(1)
         elif not verbose and yielded % log_interval == 0:

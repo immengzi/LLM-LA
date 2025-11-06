@@ -150,6 +150,6 @@ PROMPTS_SOURCE: "hf-lmsys"          # "file" | "hf-lmsys"
 # HuggingFace live-dataset options (used only when PROMPTS_SOURCE="hf-lmsys")
 HF_DATASET_NAME: "lmsys/lmsys-chat-1m"
 HF_DATASET_SPLIT: "train"
-HF_TOKENIZER_NAME: "Qwen/Qwen3-8B"  # for reply-length estimation (harmless if you don’t use it)
+HF_TOKENIZER_NAME: "/mnt/nvme1/saeid/models/qwen3-8b"  # for reply-length estimation (harmless if you don’t use it)
 HF_STREAMING: false                 # set false if streaming triggers rate-limit / TLS issues
 PROMPTS_LIMIT: 1000                 # merged with HF_MAX_N -> effective_max_n = min(HF_MAX_N, PROMPTS_LIMIT)
