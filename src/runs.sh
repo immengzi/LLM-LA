@@ -124,4 +124,4 @@ sleep 30
 python main.py --mode rr-batching --config lmsys_real_output_loads1-16 --prompts-limit 10000
 sleep 30
 python main.py --mode least-queue-batching --config lmsys_real_output_loads1-16 --prompts-limit 10000
-sleep 30
+sleep 304
