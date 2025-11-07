@@ -1088,9 +1088,149 @@ batch size on the vLLM server 8
 1000 requests
 load: 4 rps
 real outptus 
-tokenizer: Qwen/Qwen3-8B 
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput
 
-186-189 TODO
+187
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: dump
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus 
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput
+
+188
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: dump
+batch size on the vLLM server 8
+1000 requests
+load: 4 rps
+real outptus 
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput
+
+189
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: dump
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus 
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput
+
+
+190
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: just a test experiment don't take it seriously
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus 
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput
+
+
+191
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: random 1-4
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus
+1000 outputs
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput
+
+192
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: random 1-8
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus
+1000 outputs
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput
+
+
+193
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: random 1-16
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus
+1000 outputs
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput
+
+
+194
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: random 1-4
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus
+10000 outputs
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput
+
+195
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: random 1-8
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus
+10000 outputs
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput
+
+
+196
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: random 1-16
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus
+10000 outputs
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput
 
 
 =============================
