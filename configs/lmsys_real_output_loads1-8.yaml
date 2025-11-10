@@ -109,8 +109,8 @@ LOAD_WARMUP_S: 0.0
 LOAD_DURATION_S: 999999.0
 RAND_RPS_MIN: 1.0
 RAND_RPS_MAX: 8.0
-RAND_EPOCH_S: 4.0
-RAND_KIND: "poisson"    # or "det" for fixed spacing per epoch
+RAND_EPOCH_S: 1.0
+RAND_KIND: "poisson"    #  det/poisson
 
 # Common knobs
 LENGTH_DIST_STRICT_HIST: true
