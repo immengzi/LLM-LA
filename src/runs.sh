@@ -79,14 +79,14 @@
 
 
 # 191
-python main.py --mode pull-batching --config lmsys_real_output_loads1-4 --prompts-limit 1000
-sleep 30
-python main.py --mode rr-batching --config lmsys_real_output_loads1-4 --prompts-limit 1000
-sleep 30
-python main.py --mode least-queue-batching --config lmsys_real_output_loads1-4 --prompts-limit 1000
-sleep 30
+# python main.py --mode pull-batching --config lmsys_real_output_loads1-4 --prompts-limit 1000
+# sleep 30
+# python main.py --mode rr-batching --config lmsys_real_output_loads1-4 --prompts-limit 1000
+# sleep 30
+# python main.py --mode least-queue-batching --config lmsys_real_output_loads1-4 --prompts-limit 1000
+# sleep 30
 
-# 192
+# 197
 python main.py --mode pull-batching --config lmsys_real_output_loads1-8 --prompts-limit 1000
 sleep 30
 python main.py --mode rr-batching --config lmsys_real_output_loads1-8 --prompts-limit 1000
@@ -94,7 +94,7 @@ sleep 30
 python main.py --mode least-queue-batching --config lmsys_real_output_loads1-8 --prompts-limit 1000
 sleep 30
 
-# 193
+# 198
 python main.py --mode pull-batching --config lmsys_real_output_loads1-16 --prompts-limit 1000
 sleep 30
 python main.py --mode rr-batching --config lmsys_real_output_loads1-16 --prompts-limit 1000
@@ -102,15 +102,8 @@ sleep 30
 python main.py --mode least-queue-batching --config lmsys_real_output_loads1-16 --prompts-limit 1000
 sleep 30
 
-# 194
-python main.py --mode pull-batching --config lmsys_real_output_loads1-4 --prompts-limit 10000
-sleep 30
-python main.py --mode rr-batching --config lmsys_real_output_loads1-4 --prompts-limit 10000
-sleep 30
-python main.py --mode least-queue-batching --config lmsys_real_output_loads1-4 --prompts-limit 10000
-sleep 30
 
-# 195
+# 199
 python main.py --mode pull-batching --config lmsys_real_output_loads1-8 --prompts-limit 10000
 sleep 30
 python main.py --mode rr-batching --config lmsys_real_output_loads1-8 --prompts-limit 10000
@@ -118,10 +111,26 @@ sleep 30
 python main.py --mode least-queue-batching --config lmsys_real_output_loads1-8 --prompts-limit 10000
 sleep 30
 
-# 196
+# 200
 python main.py --mode pull-batching --config lmsys_real_output_loads1-16 --prompts-limit 10000
 sleep 30
 python main.py --mode rr-batching --config lmsys_real_output_loads1-16 --prompts-limit 10000
 sleep 30
 python main.py --mode least-queue-batching --config lmsys_real_output_loads1-16 --prompts-limit 10000
+sleep 304
+
+# 201
+python main.py --mode pull-batching --config lmsys_real_output_loads1-8 --prompts-limit 100000
+sleep 30
+python main.py --mode rr-batching --config lmsys_real_output_loads1-8 --prompts-limit 100000
+sleep 30
+python main.py --mode least-queue-batching --config lmsys_real_output_loads1-8 --prompts-limit 100000
+sleep 30
+
+# 202
+python main.py --mode pull-batching --config lmsys_real_output_loads1-16 --prompts-limit 100000
+sleep 30
+python main.py --mode rr-batching --config lmsys_real_output_loads1-16 --prompts-limit 100000
+sleep 30
+python main.py --mode least-queue-batching --config lmsys_real_output_loads1-16 --prompts-limit 100000
 sleep 304
