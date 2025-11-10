@@ -22,6 +22,7 @@ from utils_prom import (
     stop_metrics_collection,
 )
 from utils import save_summary
+from utils import log_autoscale, log_load  # unified load logger
 
 # Concrete router imports
 from router_core import (
@@ -49,8 +50,6 @@ RouterClass = Union[
 # Optional: for clarity
 PromptItem = Union[str, tuple[str, int]]
 from autoscaler import QueueBacklogAutoscaler
-from utils import log_autoscale, log_load  # <- load logger added
-
 
 # Centralized config
 _cfg = get_config()
@@ -95,7 +94,6 @@ _cfg = get_config()
 
 # -------------------------
 
-
 from itertools import count
 
 _req_id_counter = count(start=0)
@@ -134,7 +132,7 @@ def _make_enqueue_fn_for_batched(router) -> callable:
 def _start_load_feeder_if_needed(pattern, prompts, enqueue_one, *, router_mode: str) -> threading.Thread | None:
     """
     Starts the load feeder if needed.
-    - For "dump": enqueue here (and log start/done).
+    - For "dump": enqueue here (and log start/arrival/done).
     - For others: spawn a daemon thread that calls drive_load(...) with logging enabled.
     """
     from loadgen import drive_load
@@ -145,23 +143,63 @@ def _start_load_feeder_if_needed(pattern, prompts, enqueue_one, *, router_mode: 
         t0 = time.time()
         # start log
         try:
-            log_load(router_mode=router_mode, event="start", pattern="dump")
+            log_load(router_mode=router_mode, event="start", pattern="dump", rps=None, extra={"effective_start_ts": t0})
         except Exception:
             pass
 
         sent = 0
+        trace_idx = 0
+        log_every = int(getattr(_cfg, "LOAD_LOG_EVERY", 1))
+
         if hasattr(prompts, "popleft"):
             while prompts:
                 enqueue_one(prompts.popleft(), t0)
                 sent += 1
+                if log_every > 0 and (sent % log_every) == 0:
+                    trace_idx += 1
+                    try:
+                        log_load(
+                            router_mode=router_mode,
+                            event="arrival",
+                            pattern="dump",
+                            phase="dump",
+                            idx=trace_idx,
+                            rps_effective=None,
+                            planned_at=t0,
+                            woke_at=time.time(),
+                            enq_at=t0,
+                        )
+                    except Exception:
+                        pass
         else:
             for p in prompts:
                 enqueue_one(p, t0)
                 sent += 1
+                if log_every > 0 and (sent % log_every) == 0:
+                    trace_idx += 1
+                    try:
+                        log_load(
+                            router_mode=router_mode,
+                            event="arrival",
+                            pattern="dump",
+                            phase="dump",
+                            idx=trace_idx,
+                            rps_effective=None,
+                            planned_at=t0,
+                            woke_at=time.time(),
+                            enq_at=t0,
+                        )
+                    except Exception:
+                        pass
 
         # done log
         try:
-            log_load(router_mode=router_mode, event="done", pattern="dump", extra={"sent": sent, "elapsed_s": 0.0})
+            log_load(
+                router_mode=router_mode,
+                event="done",
+                pattern="dump",
+                extra={"sent": sent, "elapsed_s": max(0.0, time.time() - t0)},
+            )
         except Exception:
             pass
         return None

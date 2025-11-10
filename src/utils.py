@@ -108,7 +108,7 @@ def _get_logger_for_mode(mode: str) -> JsonlLogger:
             _loggers[mode] = JsonlLogger(path)
         return _loggers[mode]
 
-# ---- unified request/response logger (back-compatible) ----
+# ---- unified request/response logger ----
 def log_result(
     *,
     mode: str,
@@ -117,12 +117,11 @@ def log_result(
     status: str,
     prompt: str | None = None,
     response: str | None = None,
-    # BACK-COMPAT: accept legacy kw and map to response if response is None
     response_preview: str | None = None,
     latency_s: float | None = None,
     error: str | None = None,
     extra: Dict[str, Any] | None = None,
-    **_ignored,  # tolerate any other stray legacy kwargs
+    **_ignored,
 ) -> None:
     """
     Writes one JSONL record to results/<mode>/<run_id>/output.jsonl
@@ -218,17 +217,17 @@ def log_queue(
     """
     rec = {
         "ts": datetime.now(timezone.utc).isoformat(),
-        "mode": "queue-log",  # logical stream name
+        "mode": "queue-log",
         "endpoint": endpoint,
-        "model": router_mode,  # which router emitted the event
+        "model": router_mode,
         "status": "queue",
-        "prompt": event,  # event type
+        "prompt": event,
     }
     if extra:
         rec.update(extra)
     _get_queue_logger_for_mode(router_mode).write(rec)
 
-# ---- LOAD LOGGER (new) ----
+# ---- LOAD LOGGER (unified: summary + per-arrival timing) ----
 
 _load_loggers: Dict[str, JsonlLogger] = {}
 _load_loggers_guard = threading.Lock()
@@ -249,31 +248,60 @@ def _get_load_logger_for_mode(router_mode: str) -> JsonlLogger:
 def log_load(
     *,
     router_mode: str,
-    event: str,                # "start", "warmup_begin", "arrival", "step_change", "rand_epoch", "burst_on", "burst_off", "done"
-    rps: float | None = None,  # epoch/effective RPS if relevant
+    event: str,                      # "start" | "arrival" | "done" | optional others
     pattern: str | None = None,
+    phase: str | None = None,        # "warmup" | "dump" | "main"
+    rps: float | None = None,        # coarse rps for the event (if applicable)
     extra: Dict[str, Any] | None = None,
+    # per-arrival timing (optional)
+    idx: int | None = None,
+    uid: str | None = None,
+    second: int | None = None,
+    rps_effective: float | None = None,
+    planned_at: float | None = None,
+    woke_at: float | None = None,
+    enq_at: float | None = None,
 ) -> None:
     """
-    Structured load telemetry writer.
+    Unified load telemetry.
 
     Location:
       results/<router_mode>/<run_id>/load.jsonl
 
-    Fields:
-      - ts, event, pattern, rps (optional)
-      - extra: arbitrary user fields (e.g., epoch_s, lo/hi bounds, step_idx, phase, etc.)
+    Fields per record:
+      - ts, router_mode, event
+      - pattern, phase, rps (optional)
+      - extra (free-form)
+      - idx, uid, second, rps_effective, planned_at, woke_at, enq_at (optional per-arrival timing)
     """
     rec: Dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(),
+        "router_mode": router_mode,
         "event": event,
     }
     if pattern is not None:
         rec["pattern"] = pattern
+    if phase is not None:
+        rec["phase"] = phase
     if rps is not None:
         rec["rps"] = float(rps)
     if extra:
         rec.update(extra)
+
+    if idx is not None:
+        rec["idx"] = int(idx)
+    if uid is not None:
+        rec["uid"] = str(uid)
+    if second is not None:
+        rec["second"] = int(second)
+    if rps_effective is not None:
+        rec["rps_effective"] = float(rps_effective)
+    if planned_at is not None:
+        rec["planned_at"] = float(planned_at)
+    if woke_at is not None:
+        rec["woke_at"] = float(woke_at)
+    if enq_at is not None:
+        rec["enq_at"] = float(enq_at)
 
     try:
         _get_load_logger_for_mode(router_mode).write(rec)
@@ -304,7 +332,6 @@ def save_summary(mode: str, summary: dict) -> None:
 
 # ---------------- HTTP helpers ----------------
 
-# --- helpers: detect HTTP sim endpoints from config ---
 def _count_sim_eps_from_cfg(cfg) -> int:
     sim = cfg.SIM_ENDPOINTS
     total = 0
@@ -333,7 +360,6 @@ def _is_http_sim_endpoint(endpoint: str, cfg) -> bool:
         p = urlparse(endpoint)
         if p.scheme != "http":
             return False
-        # p.hostname can be None for malformed URLs
         if (p.hostname or "") != host:
             return False
         port = p.port or 80
@@ -341,7 +367,6 @@ def _is_http_sim_endpoint(endpoint: str, cfg) -> bool:
     except Exception:
         return False
 
-# --- REPLACE your healthy() with this version ---
 def healthy(
     endpoint: str, health_path: str = "/health", timeout_s: float | None = None
 ) -> bool:
@@ -356,18 +381,14 @@ def healthy(
     cfg = get_config()
     timeout = float(timeout_s if timeout_s is not None else cfg.HEALTH_TIMEOUT_S)
 
-    # in-process sim endpoints, if you still use them anywhere
     if endpoint.startswith("sim://"):
         return True
 
-    # allow HTTP-sim endpoints in SIM-only mode
     is_http_sim = _is_http_sim_endpoint(endpoint, cfg)
 
-    # Block true-real endpoints *silently* in SIM-only mode
     if str(cfg.SIM_MODE).lower() == "only" and cfg.SIM_ENDPOINTS and not is_http_sim:
         return False
 
-    # For allowed endpoints, probe /health
     try:
         r = requests.get(endpoint.rstrip("/") + health_path, timeout=timeout)
         return bool(r.ok)
@@ -382,7 +403,6 @@ def send_chat_request(
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
     request_timeout_s: Optional[int] = None,
-    # Optional per-call overrides (fall back to config if None)
     top_p: Optional[float] = None,
     top_k: Optional[bool] = None,
     do_sample: Optional[bool] = None,
@@ -395,19 +415,15 @@ def send_chat_request(
     logprobs: Optional[int] = None,
     logit_bias: Optional[Dict[str, float]] = None,
     extra_headers: Optional[Dict[str, str]] = None,
-    # NEW: persistent HTTP connection (if provided, use keep-alive & pooling)
     session: "requests.Session | None" = None,
-    # Unified length control — let the policy compute the plan.
     target_output_tokens: Optional[int] = None,
     target_total_tokens: Optional[int] = None,
     ignore_eos: Optional[bool] = None,
     length_mode: Optional[str] = None,
-    # Keep req_id for determinism/traceability (strict-hist etc.)
     req_id: Optional[int] = None,
 ) -> dict:
     cfg = get_config()
 
-    # Extract a plain prompt (best effort; prefer last user message)
     plain_prompt = ""
     if messages and len(messages) > 0:
         try:
@@ -421,12 +437,10 @@ def send_chat_request(
         except Exception:
             plain_prompt = ""
 
-    # Resolve base cap
     base_cap = int(max_tokens if max_tokens is not None else getattr(cfg, "MAX_TOKENS", 0) or 0)
     if base_cap < 0:
         base_cap = 0
 
-    # Build unified plan (keeps new features) + carry req_id
     plan = compute_length_plan(
         plain_prompt=plain_prompt,
         base_cap=base_cap,
@@ -437,20 +451,15 @@ def send_chat_request(
         req_id=req_id,
     )
 
-    # --- SIM guard (no local synth; we want to POST to HTTP-sim) ----------------
     is_http_sim = _is_http_sim_endpoint(endpoint, cfg)
     sim_flag = str(getattr(cfg, "SIM_MODE", "")).lower().strip()
     if sim_flag == "only" and cfg.SIM_ENDPOINTS and not is_http_sim:
-        # In SIM-only runs, disallow *real* endpoints, but allow HTTP-sim endpoints
         raise RuntimeError(f"SIM_MODE=only but router tried real endpoint: {endpoint}")
-    # ---------------------------------------------------------------------------
 
-    # Compose OpenAI-compatible payload for the server
     payload = {
         "model": model if model is not None else cfg.MODEL_NAME,
         "messages": messages if messages is not None else [],
         "max_tokens": int(plan["eff_max"]),
-        "max_tokens": 8192,
         "temperature": temperature if temperature is not None else cfg.TEMPERATURE,
         "top_p": top_p if top_p is not None else cfg.TOP_P,
         "top_k": top_k if top_k is not None else cfg.TOP_K,
@@ -464,7 +473,6 @@ def send_chat_request(
     }
     if plan["eff_ignore_eos"]:
         payload["ignore_eos"] = True
-    payload["ignore_eos"] = False
 
     eff_stop = stop if stop is not None else (cfg.STOP or None)
     if eff_stop:
@@ -485,30 +493,21 @@ def send_chat_request(
     url = endpoint.rstrip("/") + cfg.VLLM_CHAT_PATH
     timeout = (request_timeout_s if request_timeout_s is not None else cfg.REQUEST_TIMEOUT_S)
 
-    # Optional: uncomment for quick visibility
-    # print(f"[SEND*HTTP] POST {url} timeout={timeout} req_id={req_id}")
-
-    # print(f"HERE payload: {payload}")
-
-    # Reuse a persistent session if provided (prevents bursty new TCP handshakes)
     if session is not None:
         r = session.post(url, json=payload, headers=(headers or None), timeout=timeout)
     else:
         r = requests.post(url, json=payload, headers=(headers or None), timeout=timeout)
 
-    # Optional: nicer error body for debugging
     if not r.ok:
         raise RuntimeError(f"HTTP {r.status_code} {r.reason}: {r.text[:500]}")
 
     resp = r.json()
 
-    # Attach usage-style fields if server returns them
     usage = resp.get("usage") or {}
     resp["_prompt_tokens"] = usage.get("prompt_tokens")
     resp["_completion_tokens"] = usage.get("completion_tokens")
     resp["_total_tokens"] = usage.get("total_tokens")
 
-    # Attach plan meta + req_id (for analysis / strict-hist trace)
     resp.update(plan.get("meta", {}))
     if req_id is not None:
         resp["_req_id"] = int(req_id)
@@ -534,10 +533,9 @@ def _read_json_or_jsonl(path: str) -> List[str]:
                     else:
                         items.append(str(obj))
                 except Exception:
-                    items.append(line)  # tolerate raw text
+                    items.append(line)
         return items
 
-    # JSON
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, list):
@@ -568,37 +566,6 @@ def load_prompts(path: Optional[str] = None) -> deque:
         raise ValueError(f"No prompts found after applying settings (file={path}).")
 
     return deque(items)
-
-def _count_sim_eps_from_cfg(cfg) -> int:
-    sim = cfg.SIM_ENDPOINTS
-    total = 0
-    if isinstance(sim, dict):
-        for k in sim.keys():
-            spec = sim[k] or {}
-            total += int(spec.get("count", 1))
-    elif isinstance(sim, list):
-        for item in sim:
-            if isinstance(item, str) and "@" in item:
-                total += 1
-    return total
-
-def _is_http_sim_endpoint(endpoint: str, cfg) -> bool:
-    host = getattr(cfg, "SIM_HTTP_HOST", "127.0.0.1")
-    base = int(getattr(cfg, "SIM_HTTP_PORT_BASE", 9101))
-    total = _count_sim_eps_from_cfg(cfg)
-    if total <= 0:
-        return False
-    try:
-        parsed = urlparse(endpoint)
-        if parsed.scheme != "http":
-            return False
-        hostport = parsed.netloc.split(":")
-        if len(hostport) != 2:
-            return False
-        ep_host, ep_port = hostport[0], int(hostport[1])
-        return (ep_host == host) and (base <= ep_port < base + total)
-    except Exception:
-        return False
 
 # ---- AUTOSCALE LOGGER ----
 
@@ -650,63 +617,10 @@ def log_autoscale(
         "inflight": int(inflight),
     }
 
-    # Print live to stdout (unbuffered)
     print(json.dumps(record, ensure_ascii=False), flush=True)
 
-    # Write to the per-run autoscale.jsonl in results/<mode>/<run_id>/
     try:
         logger = _get_autoscale_logger_for_mode(router_mode)
         logger.write(record)
     except Exception as e:
         print(f"[WARN] autoscale log failed: {e}", flush=True)
-
-# ---- LOAD TRACE LOGGER (new) ----
-_load_trace_loggers: Dict[str, JsonlLogger] = {}
-_load_trace_loggers_guard = threading.Lock()
-LOAD_TRACE_LOG_FILENAME = getattr(_cfg, "LOAD_TRACE_LOG_FILENAME", "load_trace.jsonl")
-
-def _get_load_trace_logger_for_mode(router_mode: str) -> JsonlLogger:
-    run_dir = get_run_dir(router_mode)
-    path = os.path.join(run_dir, LOAD_TRACE_LOG_FILENAME)
-    key = f"{router_mode}::{path}"
-    with _load_trace_loggers_guard:
-        if key not in _load_trace_loggers:
-            _load_trace_loggers[key] = JsonlLogger(path)
-        return _load_trace_loggers[key]
-
-def log_load_trace(
-    *,
-    router_mode: str,
-    idx: int,                     # monotonically increasing sequence number
-    phase: str,                   # "warmup" | "main" | "dump"
-    pattern: str,
-    uid: str | None,              # None during warmup until start is emitted
-    second: int | None,
-    rps_effective: float | None,  # rps at this moment (for steps/bursty/rand/det/poisson)
-    planned_at: float,            # absolute epoch seconds when we *planned* to enqueue
-    woke_at: float,               # when the scheduler woke up from sleep
-    enq_at: float,                # when we actually called enqueue_one(...)
-    note: str | None = None,      # optional human note
-    extra: Dict[str, Any] | None = None,
-) -> None:
-    rec: Dict[str, Any] = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "seq": int(idx),
-        "phase": phase,
-        "pattern": pattern,
-        "uid": uid,
-        "second": second,
-        "rps": rps_effective,
-        "planned_at": float(planned_at),
-        "woke_at": float(woke_at),
-        "enq_at": float(enq_at),
-        "sleep_drift_ms": (woke_at - planned_at) * 1000.0,
-        "enqueue_drift_ms": (enq_at - planned_at) * 1000.0,
-        "note": note,
-    }
-    if extra:
-        rec.update(extra)
-    try:
-        _get_load_trace_logger_for_mode(router_mode).write(rec)
-    except Exception as e:
-        print(f"[WARN] load trace log failed: {e}", flush=True)

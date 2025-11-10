@@ -1089,7 +1089,8 @@ batch size on the vLLM server 8
 load: 4 rps
 real outptus 
 tokenizer: Qwen/Qwen3-8B
-outcome: better marignally in p99 and throughput
+outcome: better 11.9% in p99, 14% better in throughput and batch occupancy, it iseems under low load I can show better throughput motivation
+to show: for better throughput
 
 187
 8 replicas
@@ -1102,7 +1103,7 @@ batch size on the vLLM server 8
 load: 8 rps
 real outptus 
 tokenizer: Qwen/Qwen3-8B
-outcome: better marignally in p99 and throughput
+outcome: better 15% in p99, 10% worse in throughput and batch occupancy, it iseems under high load least queue can be better in throughput but we still are consistently better in p99
 
 188
 8 replicas
@@ -1115,7 +1116,8 @@ batch size on the vLLM server 8
 load: 4 rps
 real outptus 
 tokenizer: Qwen/Qwen3-8B
-outcome: better marignally in p99 and throughput
+outcome: better 6% in p99, 1% better in throughput and batch occupancy, as this is the repeat of 186 on 10000, it seems we get to dimishining return under larger number of requests, could be due to measurement problem or requests length distribution. TODO check requests distribution and measurements
+
 
 189
 8 replicas
@@ -1128,7 +1130,8 @@ batch size on the vLLM server 8
 load: 8 rps
 real outptus 
 tokenizer: Qwen/Qwen3-8B
-outcome: better marignally in p99 and throughput
+outcome: better 3.6% in p99, 3.5% better in throughput and batch occupancy, as this is the repeat of 186 on 10000, it seems we get to dimishining return under larger number of requests, could be due to measurement problem or requests length distribution. TODO check requests distribution and measurements
+
 
 
 190
@@ -1157,7 +1160,7 @@ load: 8 rps
 real outptus
 1000 outputs
 tokenizer: Qwen/Qwen3-8B
-outcome: better marignally in p99 and throughput
+outcome: no latency improvement, marginally better througput
 
 192
 8 replicas
@@ -1186,7 +1189,7 @@ load: 8 rps
 real outptus
 1000 outputs
 tokenizer: Qwen/Qwen3-8B
-outcome: better marignally in p99 and throughput
+outcome: better marignally in p99 and throughput, rr even marginally better the other two
 
 
 194
@@ -1201,7 +1204,7 @@ load: 8 rps
 real outptus
 10000 outputs
 tokenizer: Qwen/Qwen3-8B
-outcome: better marignally in p99 and throughput
+outcome: better marignally in p99 and throughput but suspisous as visually seems there is lower latency resutls but but that isn't visible in the results,  TODO insight
 
 195
 8 replicas
@@ -1215,7 +1218,7 @@ load: 8 rps
 real outptus
 10000 outputs
 tokenizer: Qwen/Qwen3-8B
-outcome: better marignally in p99 and throughput
+outcome: 8% better in p99 and throughput and batch occupancy about 3% better
 
 
 196
@@ -1230,7 +1233,7 @@ load: 8 rps
 real outptus
 10000 outputs
 tokenizer: Qwen/Qwen3-8B
-outcome: better marignally in p99 and throughput
+outcome: 8% better in p99 and throughput and batch occupancy about 3% better
 
 
 =============================
