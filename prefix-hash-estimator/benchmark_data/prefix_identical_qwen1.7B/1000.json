@@ -1,0 +1,9 @@
+[
+    {
+        "Round Name": "HIT (identical)",
+        "Prefix Length": 4010,
+        "Hit Rate (%)": "93.02",
+        "P90 Latency (s)": "1.26",
+        "P99 Latency (s)": "1.27"
+    }
+]

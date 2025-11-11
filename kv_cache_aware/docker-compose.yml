@@ -1,0 +1,141 @@
+services:
+  # 1. The Redis Database Service
+  redis:
+    image: redis:7-alpine
+    container_name: vllm_redis_db
+    ports:
+      # Expose Redis to the host machine for easy debugging with redis-cli
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+    restart: unless-stopped
+
+  # 2. First vLLM Container
+  vllm-1:
+    image: quay.io/ascend/vllm-ascend:v0.11.0rc0
+    container_name: vllm-ascend-1
+    environment:
+      - PYTHONHASHSEED=0
+    devices:
+      - "/dev/davinci5:/dev/davinci5"
+      - "/dev/davinci_manager:/dev/davinci_manager"
+      - "/dev/devmm_svm:/dev/devmm_svm"
+      - "/dev/hisi_hdc:/dev/hisi_hdc"
+    volumes:
+      - /usr/local/dcmi:/usr/local/dcmi
+      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+      - /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/
+      - /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info
+      - /etc/ascend_install.info:/etc/ascend_install.info
+      - /root/.cache:/root/.cache
+      - /mnt/storage1/amardeep/:/model
+      - /home/amardeep/code/llm-lb/kv_cache_aware:/code
+    ports:
+      - "8001:8000"
+    command: >
+      python -m vllm.entrypoints.api_server
+      --model /model/qwen-test
+      --tokenizer /model/qwen-test
+      --served-model-name Qwen/Qwen3-0.6B
+      --max-num-seqs 512
+      --prefix-caching-hash-algo sha256_cbor
+      --host 0.0.0.0
+      --port 8000
+      --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@vllm-ascend-1@Qwen/Qwen3-0.6B"}'
+    restart: unless-stopped
+
+  # 3. Second vLLM Container
+  vllm-2:
+    image: quay.io/ascend/vllm-ascend:v0.11.0rc0
+    container_name: vllm-ascend-2
+    environment:
+      - PYTHONHASHSEED=0
+    devices:
+      - "/dev/davinci6:/dev/davinci6"
+      - "/dev/davinci_manager:/dev/davinci_manager"
+      - "/dev/devmm_svm:/dev/devmm_svm"
+      - "/dev/hisi_hdc:/dev/hisi_hdc"
+    volumes:
+      - /usr/local/dcmi:/usr/local/dcmi
+      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+      - /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/
+      - /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info
+      - /etc/ascend_install.info:/etc/ascend_install.info
+      - /root/.cache:/root/.cache
+      - /mnt/storage1/amardeep/:/model
+      - /home/amardeep/code/llm-lb/kv_cache_aware:/code
+    ports:
+       - "8002:8000"
+    command: >
+      python -m vllm.entrypoints.api_server
+      --model /model/qwen-test
+      --tokenizer /model/qwen-test
+      --served-model-name Qwen/Qwen3-0.6B
+      --max-num-seqs 512
+      --prefix-caching-hash-algo sha256_cbor
+      --host 0.0.0.0
+      --port 8000
+      --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@vllm-ascend-2@Qwen/Qwen3-0.6B"}'
+
+  # 4. Listener for the first vLLM container
+  listener-1:
+    # build:
+    #   context: .
+    #   dockerfile: ./Dockerfile.subscriber
+    image: kv_cache_event_listener
+    container_name: vllm_listener_1
+    command: ["python", "-u", "zmq_subscriber.py"]
+    depends_on:
+      - redis
+      - vllm-1
+    environment:
+      - VLLM_HOST=vllm-1 # Use the service name for container-to-container communication
+      - REDIS_HOST=redis
+      - CONTAINER_NAME=vllm-1
+      - MODEL_NAME=Qwen/Qwen3-0.6B
+    volumes:
+      - ./src:/app      
+    working_dir: /app
+    restart: unless-stopped
+
+  # 5. Listener for the second vLLM container
+  listener-2:
+    # build:
+    #   context: .
+    #   dockerfile: ./Dockerfile.subscriber
+    image: kv_cache_event_listener
+    container_name: vllm_listener_2
+    command: ["python", "-u", "zmq_subscriber.py"]
+    depends_on:
+      - redis
+      - vllm-2
+    environment:
+      - VLLM_HOST=vllm-2
+      - REDIS_HOST=redis
+      - CONTAINER_NAME=vllm-2
+      - MODEL_NAME=Qwen/Qwen3-0.6B
+    volumes:
+      - ./src:/app
+    working_dir: /app
+    restart: unless-stopped
+  
+  # 6. vLLM KV Scheduler (ARM CPU utility)
+  vllm-kv-scheduler:
+    image: vllm-arm64:vllm
+    container_name: vllm-kv-scheduler
+    privileged: true
+    ports:
+      - "9095:9095"
+    volumes:
+      - /home/amardeep/code/llm-lb:/code/
+      - /mnt/storage1/amardeep/:/model
+    working_dir: /workspace
+    tty: true
+    stdin_open: true
+    command: ["/bin/bash"]
+    # command: >
+    #  bash -c "source /opt/venv/bin/activate &&
+    #           flask --app prefix_hash_service run --host=0.0.0.0 --port=9095"
+    restart: unless-stopped
+networks:
+  default:
+    name: vllm-net
