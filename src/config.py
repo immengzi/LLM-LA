@@ -218,7 +218,7 @@ class RouterConfig:
     AUTOSCALE_DEBOUNCE_S: float = 1.0
     AUTOSCALE_LOG_FILENAME: str = "autoscale.jsonl"
 
-    LOG_PAYLOAD_MODE: str = "full"
+    LOG_PAYLOAD_MODE: Literal["off", "head", "full"] = "head"
     LOG_HEAD_CHARS: int = 5
 
     # ---- Think/no think ----
