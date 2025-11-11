@@ -72,6 +72,155 @@ def load_experiment(
     return exp
 
 
+# === Additions: Load-gen analysis helpers ===
+
+def load_loadtrace_for_run(base_dir: str, method: str, run_id: str) -> Dict[str, Any]:
+    """
+    Load load_trace.jsonl (preferred) or load.jsonl for one run.
+    Returns: {"events": DataFrame, "path": str|None}
+    """
+    run_path = os.path.join(base_dir, method, str(run_id))
+    p_trace = os.path.join(run_path, "load_trace.jsonl")
+    p_load  = os.path.join(run_path, "load.jsonl")
+
+    path = p_trace if os.path.exists(p_trace) else (p_load if os.path.exists(p_load) else None)
+    if not path:
+        return {"events": pd.DataFrame(), "path": None}
+
+    df = read_jsonl(path)
+
+    # Parse timestamps and numeric columns commonly present in load traces
+    if "ts" in df.columns:
+        df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+
+    for c in ("planned_at", "woke_at", "enq_at", "effective_start_ts", "rps_effective", "warmup_s"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    return {"events": df.sort_values("ts").reset_index(drop=True), "path": path}
+
+
+def normalize_arrivals(events: pd.DataFrame) -> pd.DataFrame:
+    """
+    Filter to 'arrival' events and add useful derived timing columns:
+      - wake_delay_s   = woke_at - planned_at
+      - enq_delay_s    = enq_at  - planned_at
+      - woke_to_enq_s  = enq_at  - woke_at
+    Also computes wall-clock 'ts_wall' if effective_start_ts is available.
+    Ensures a 'ts' column suitable for grouping/plotting.
+    """
+    if events is None or events.empty:
+        return pd.DataFrame()
+
+    df = events.copy()
+    if "event" not in df.columns:
+        return pd.DataFrame()  # no event classifier
+
+    df = df[df["event"] == "arrival"].copy()
+    if df.empty:
+        return df
+
+    # Derived timing deltas
+    if {"planned_at", "woke_at"}.issubset(df.columns):
+        df["wake_delay_s"] = df["woke_at"] - df["planned_at"]
+    if {"planned_at", "enq_at"}.issubset(df.columns):
+        df["enq_delay_s"] = df["enq_at"] - df["planned_at"]
+    if {"woke_at", "enq_at"}.issubset(df.columns):
+        df["woke_to_enq_s"] = df["enq_at"] - df["woke_at"]
+
+    # Wall clock from effective_start_ts + (enq_at or planned_at)
+    eff0 = None
+    if "effective_start_ts" in events.columns and events["effective_start_ts"].notna().any():
+        eff0 = pd.to_numeric(events["effective_start_ts"].dropna().iloc[0], errors="coerce")
+
+    if eff0 is not None and np.isfinite(eff0):
+        anchor = "enq_at" if "enq_at" in df.columns else ("planned_at" if "planned_at" in df.columns else None)
+        if anchor:
+            df["ts_wall"] = pd.to_datetime(df[anchor] + eff0, unit="s", errors="coerce", utc=True)
+
+    # Ensure a 'ts' column (prefer file ts; else ts_wall)
+    if "ts" in df.columns and df["ts"].notna().any():
+        df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+    elif "ts_wall" in df.columns:
+        df["ts"] = pd.to_datetime(df["ts_wall"], errors="coerce")
+
+    # Clean types
+    if "second" in df.columns:
+        df["second"] = pd.to_numeric(df["second"], errors="coerce").astype("Int64")
+
+    keep_cols = [c for c in [
+        "ts","ts_wall","router_mode","pattern","phase","idx","uid","second",
+        "rps_effective","planned_at","woke_at","enq_at",
+        "wake_delay_s","enq_delay_s","woke_to_enq_s"
+    ] if c in df.columns]
+
+    return df[keep_cols].sort_values("ts").reset_index(drop=True)
+
+
+def per_second_rps(arrivals: pd.DataFrame, use_wall: bool = True) -> pd.DataFrame:
+    """
+    Compute RPS per second from arrivals. Uses ts_wall if available (and use_wall=True), otherwise ts.
+    Returns columns: second_ts, rps, (optional) phase.
+    """
+    if arrivals is None or arrivals.empty:
+        return pd.DataFrame(columns=["second_ts", "rps", "phase"])
+
+    time_col = "ts_wall" if use_wall and "ts_wall" in arrivals.columns else "ts"
+    s = arrivals[[time_col]].dropna().copy()
+    if s.empty:
+        return pd.DataFrame(columns=["second_ts", "rps", "phase"])
+
+    s["second_ts"] = s[time_col].dt.floor("S")
+    agg = s.groupby("second_ts").size().rename("rps").reset_index()
+
+    # Attach per-second phase mode if present
+    if "phase" in arrivals.columns:
+        ph = arrivals[[time_col, "phase"]].dropna().copy()
+        ph["second_ts"] = ph[time_col].dt.floor("S")
+        ph_mode = ph.groupby("second_ts")["phase"].agg(lambda x: x.value_counts().index[0]).reset_index()
+        agg = agg.merge(ph_mode, on="second_ts", how="left")
+
+    return agg.sort_values("second_ts").reset_index(drop=True)
+
+
+def _quantiles_simple(series: pd.Series, ps=(0.5, 0.9, 0.95, 0.99)) -> Dict[str, float]:
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty:
+        return {f"p{int(p*100)}": np.nan for p in ps}
+    qv = s.quantile(list(ps), interpolation="linear")
+    return {f"p{int(p*100)}": float(qv.loc[p]) for p in ps}
+
+
+def summarize_arrival_lags(arrivals: pd.DataFrame) -> pd.DataFrame:
+    """
+    Summaries for arrival timing jitter:
+      - wake_delay_s, enq_delay_s, woke_to_enq_s
+    Columns: metric, count, mean, std, min, max, p50, p90, p95, p99
+    """
+    if arrivals is None or arrivals.empty:
+        return pd.DataFrame(columns=["metric","count","mean","std","min","max","p50","p90","p95","p99"])
+
+    out = []
+    for col in ("wake_delay_s", "enq_delay_s", "woke_to_enq_s"):
+        if col not in arrivals.columns:
+            continue
+        s = pd.to_numeric(arrivals[col], errors="coerce").dropna()
+        if s.empty:
+            continue
+        rec = {
+            "metric": col,
+            "count": int(s.count()),
+            "mean": float(s.mean()),
+            "std": float(s.std(ddof=1)) if s.count() > 1 else 0.0,
+            "min": float(s.min()),
+            "max": float(s.max()),
+        }
+        rec.update(_quantiles_simple(s))
+        out.append(rec)
+
+    return pd.DataFrame(out)
+
+
 # ---------- Transformations ----------
 
 
@@ -109,14 +258,18 @@ def make_runs_index(
     """Build a minimal runs index from explicit (method, run_id) pairs."""
     rows = []
     for m, r in experiments:
+        base = os.path.join(base_dir, m, str(r))
         rows.append(
             {
                 "method": m,
                 "run_id": str(r),
-                "metrics_path": os.path.join(base_dir, m, str(r), "metrics.jsonl"),
-                "output_path": os.path.join(base_dir, m, str(r), "output.jsonl"),
-                "queue_path": os.path.join(base_dir, m, str(r), "queue.json"),
-                "results_path": os.path.join(base_dir, m, str(r), "results.json"),
+                "metrics_path": os.path.join(base, "metrics.jsonl"),
+                "output_path":  os.path.join(base, "output.jsonl"),
+                "queue_path":   os.path.join(base, "queue.json"),
+                "results_path": os.path.join(base, "results.json"),
+                # New: load-gen files
+                "load_trace_path": os.path.join(base, "load_trace.jsonl"),
+                "load_path":       os.path.join(base, "load.jsonl"),
                 "base_dir": base_dir,
             }
         )
@@ -164,6 +317,7 @@ def collect_all_outputs(runs_index: pd.DataFrame) -> pd.DataFrame:
                 df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
 
 def collect_all_queues(runs_index: pd.DataFrame) -> pd.DataFrame:
     """Concatenate queue.json across selected experiments.
@@ -1422,6 +1576,7 @@ def draw_violin_for_metric(
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.show()
 
+
 def draw_token_length_distribution_per_endpoint(
     method: str,
     run_id: str,
@@ -1487,6 +1642,7 @@ def draw_token_length_distribution_per_endpoint(
             plt.savefig(out_path, dpi=150, bbox_inches="tight")
 
         plt.show()
+
 
 # ========================================
 # Helper functions — compare token-length distributions across endpoints
