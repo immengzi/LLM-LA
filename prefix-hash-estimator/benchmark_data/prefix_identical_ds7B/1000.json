@@ -1,0 +1,12 @@
+[
+    {
+        "Round Name": "HIT (identical)",
+        "Prefix Length": 4010,
+        "Status": "Success",
+        "OK Requests": 20,
+        "Total Requests": 20,
+        "Hit Rate (%)": "93.74",
+        "P90 Latency (s)": "2.75",
+        "P99 Latency (s)": "2.76"
+    }
+]

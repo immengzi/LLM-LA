@@ -1,0 +1,4 @@
+msgspec
+pyzmq
+transformers
+vllm-cpu (install from source code: https://docs.vllm.ai/en/stable/getting_started/installation/cpu.html#arm-aarch64)

@@ -1,0 +1,6 @@
+requests
+transformers
+torch
+redis
+xxhash
+sentencepiece
