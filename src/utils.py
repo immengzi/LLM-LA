@@ -117,7 +117,7 @@ def log_result(
     status: str,
     prompt: str | None = None,
     response: str | None = None,
-    response_preview: str | None = None,
+    response_preview: str | None = None,  # kept for backward compat; used only if response is None
     latency_s: float | None = None,
     error: str | None = None,
     extra: Dict[str, Any] | None = None,
@@ -130,27 +130,28 @@ def log_result(
       - LOG_PAYLOAD_MODE: "off" | "head" | "full"
       - LOG_HEAD_CHARS: int  (used when mode == "head")
 
-    Fields:
-      - Always writes metadata (ts, mode, endpoint, model, status, latency_s, error, ...extra)
-      - If payload mode != OFF:
-          prompt, response    -> per LOG_PAYLOAD_MODE
-          response_preview    -> short head (for dashboards)
-          truncated           -> {prompt: bool, response: bool}
+    Behavior:
+      - FULL  -> emit 'prompt' + 'response' only
+      - HEAD  -> emit 'prompt' (clipped) + 'response_preview' only
+      - OFF   -> emit neither prompt nor response fields
+      - 'truncated' is present only for FULL/HEAD; in FULL it's all False, in HEAD reflects clipping.
     """
     cfg = get_config()
-    payload_mode = str(getattr(cfg, "LOG_PAYLOAD_MODE", "head")).lower()
+    payload_mode = _PayloadMode(str(getattr(cfg, "LOG_PAYLOAD_MODE", "head")).lower())
     head_chars   = int(getattr(cfg, "LOG_HEAD_CHARS", 512))
 
-    # Prefer explicit response; else use legacy response_preview
+    # Prefer explicit response; else accept legacy response_preview once
     if response is None and response_preview is not None:
         response = response_preview
 
-    # Redact first, then clip consistently for both prompt & response
+    # Redact first
     prompt   = _redact_text(prompt)
     response = _redact_text(response)
 
-    clipped_prompt,  prompt_trunc  = _clip_by_mode(prompt,   payload_mode, head_chars)
-    clipped_response, resp_trunc   = _clip_by_mode(response, payload_mode, head_chars)
+    # Clip according to mode for prompt/response separately
+    # NOTE: _clip_by_mode expects a str for 'mode', so pass payload_mode.value
+    clipped_prompt,  prompt_trunc = _clip_by_mode(prompt,   payload_mode.value, head_chars)
+    clipped_resp,    resp_trunc   = _clip_by_mode(response, payload_mode.value, head_chars)
 
     record: Dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -164,18 +165,34 @@ def log_result(
     if extra:
         record.update(extra)
 
-    if payload_mode != _PayloadMode.OFF:
+    if payload_mode == _PayloadMode.FULL:
+        # Only 'response' + full (or untruncated) prompt
         record["prompt"] = clipped_prompt
-        record["response"] = clipped_response
-        # Always keep a short preview for legacy dashboards (head of full text)
-        base_for_preview = response or ""
-        record["response_preview"] = base_for_preview[:head_chars]
+        record["response"] = clipped_resp
         record["truncated"] = {
-            "prompt":   bool(prompt_trunc  and payload_mode == _PayloadMode.HEAD),
-            "response": bool(resp_trunc    and payload_mode == _PayloadMode.HEAD),
+            "prompt":   False,
+            "response": False,
         }
 
+    elif payload_mode == _PayloadMode.HEAD:
+        # Only 'response_preview' + clipped prompt
+        record["prompt"] = clipped_prompt
+        record["response_preview"] = clipped_resp or ""
+        record["truncated"] = {
+            "prompt":   bool(prompt_trunc),
+            "response": bool(resp_trunc),
+        }
+
+    else:  # _PayloadMode.OFF
+        # No payloads
+        pass
+
+    # Final invariant guard
+    assert not (("response" in record) and ("response_preview" in record)), \
+        "Invariant violated: both response and response_preview set."
+
     _get_logger_for_mode(mode).write(record)
+
 
 # ---- queue/batching telemetry helper (same folder as mode logs) ----
 
