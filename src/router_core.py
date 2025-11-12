@@ -31,20 +31,25 @@ from predictors import get_length_predictor
 # NEW: shared length-aware selection hook
 from threading import RLock
 from len_select import select_batch
-from requests.adapters import HTTPAdapter
 
 from length_backend import count_input_tokens
 
+# Optional KV-aware selector (unified policy entry point)
+try:
+    from kv_aware import pick_batch as kv_pick_batch  # signature-compatible with our unified call
+except Exception:
+    kv_pick_batch = None
 
 _cfg = get_config()
 _pred = get_length_predictor()  # singleton predictor based on cfg.PREDICTOR_NAME
 
-# ---- Length-aware config knobs (shared by both pull & push) ----
-_USE_LEN_AWARE = bool(_cfg.USE_LEN_AWARE)
-_LEN_POLICY = str(_cfg.LEN_POLICY or "short_first")
-_POOL_FACTOR = int(_cfg.POOL_FACTOR)
-_DEFAULT_MAX_TOKENS = int(_cfg.MAX_TOKENS)
-_LEN_BASIS = str(_cfg.LEN_BASIS or "output")
+# ---- Length/KV-aware config knobs (shared by both pull & push) ----
+_USE_LEN_AWARE = bool(getattr(_cfg, "USE_LEN_AWARE", getattr(_cfg, "USE_LEN_AWARE", False)))
+_LEN_POLICY = str(getattr(_cfg, "LEN_POLICY", "short_first") or "short_first")
+_POOL_FACTOR = int(getattr(_cfg, "POOL_FACTOR", 2))
+_DEFAULT_MAX_TOKENS = int(getattr(_cfg, "MAX_TOKENS", 1024))
+_LEN_BASIS = str(getattr(_cfg, "LEN_BASIS", "output") or "output")
+_KV_AWARE = bool(getattr(_cfg, "KV_AWARE", True))  # feature toggle
 
 # One global lock for queue peeking/return across threads
 _Q_LOCK = RLock()
@@ -62,13 +67,14 @@ class PullBatchingRouter:
       - Periodic safety tick paced by _cfg.SAMPLE_INTERVAL
       - Util probing cached with TTL to reduce /metrics pressure
       - Queue logging throttled to 0, N, 2N, ... sessions per endpoint
-      - NEW: archives stats for endpoints removed during the run,
-             so final summary includes *all* used servers.
+      - Archives stats for endpoints removed during the run,
+        so final summary includes *all* used servers.
     """
 
     def __init__(self, mode_name: str = "pull-batching"):
         self.mode_name = mode_name
-        self.q: "Queue[Tuple[str, float]]" = Queue()
+        # NOTE: include req_id in the queue tuple
+        self.q: "Queue[Tuple[str, float, int]]" = Queue()
         self.eps: List[str] = []
         self.inflight: Dict[str, int] = {}
         self.ok_counts: Dict[str, int] = {}
@@ -94,8 +100,7 @@ class PullBatchingRouter:
         # key: endpoint URL -> {"ok": int, "err": int}
         self._stats_archive: Dict[str, Dict[str, int]] = {}
 
-        # NEW: remember last known human-friendly name for endpoints
-        # key: endpoint URL -> name string
+        # remember last known human-friendly name for endpoints
         self._name_book: Dict[str, str] = {}
 
     # ------------- endpoints lifecycle -------------
@@ -140,10 +145,7 @@ class PullBatchingRouter:
                     self._log_counters.pop(ep, None)
                 self._refill_evts.pop(ep, None)
                 self._util_cache.pop(ep, None)
-
-                # Keep _id_cache entry (and _name_book) if available so we can still show a nice name.
-                # If you prefer to drop it, comment the next line and rely on _name_book instead.
-                # self._id_cache.pop(ep, None)
+                # keep _id_cache/_name_book for nicer summaries
 
         self.eps = list(endpoints)
 
@@ -162,7 +164,6 @@ class PullBatchingRouter:
         now = time.time()
         ts, nm, tps = self._id_cache.get(ep, (0.0, None, None))
         if now - ts < self._id_ttl_s and nm is not None:
-            # remember last known name
             self._name_book[ep] = nm
             return nm, tps
         try:
@@ -176,7 +177,6 @@ class PullBatchingRouter:
         except Exception:
             nm, tps = ep, None
         self._id_cache[ep] = (now, nm, tps)
-        # remember last known name
         if nm:
             self._name_book[ep] = nm
         return nm, tps
@@ -190,11 +190,11 @@ class PullBatchingRouter:
         if cap <= 0:
             return 0
         if util_pct is None:
-            return min(int(_cfg.NO_UTIL_BURST), cap)
+            return min(int(getattr(_cfg, "NO_UTIL_BURST", 1)), cap)
         headroom = max(0.0, (float(_cfg.UTIL_THRESHOLD) - (util_pct / 100.0))) / max(
             float(_cfg.UTIL_THRESHOLD), 1e-6
         )
-        return min(max(1, int(float(_cfg.BURST) * (1.0 + headroom))), cap)
+        return min(max(1, int(float(getattr(_cfg, "BURST", 1)) * (1.0 + headroom))), cap)
 
     # ------------- launch + worker -------------
 
@@ -254,7 +254,6 @@ class PullBatchingRouter:
                 total_predicted_tokens = (input_actual_tokens + pred_out_int) if pred_out_int is not None else None
                 total_actual_tokens    = (input_actual_tokens + act_out_int) if act_out_int is not None else None
 
-
                 log_result(
                     mode=self.mode_name,
                     endpoint=ep,
@@ -276,16 +275,12 @@ class PullBatchingRouter:
                         "measured_server_roundtrip": (t_response_router - t_dispatch_router),
                         "measured_end_to_end_latency": (t_response_router - t_arrival_router),
                         "predictor_name": getattr(_pred, "name", "unknown"),
-
-                        # --- token stats ---
+                        # token stats
                         "input_tokens": int(input_actual_tokens),
                         "predicted_out_tokens": pred_out_int,
                         "actual_out_tokens": act_out_int,
                         "total_predicted_tokens": total_predicted_tokens,
                         "total_actual_tokens": total_actual_tokens,
-
-                        # "predicted_out_tokens": None if predicted_out_tokens is None else int(predicted_out_tokens),
-                        # "actual_out_tokens": None if actual_out is None else int(actual_out),
                     },
                 )
 
@@ -360,40 +355,38 @@ class PullBatchingRouter:
 
             q_before = self.q.qsize()
 
-            # ---- Length-aware selection ----
-            # if _USE_LEN_AWARE:
-            #     selected = select_batch(
-            #         self.q, want, _pred, _Q_LOCK,
-            #         policy=_LEN_POLICY,
-            #         pool_factor=_POOL_FACTOR,
-            #         default_max_tokens=_DEFAULT_MAX_TOKENS,
-            #     )
-            # else:
-            #     selected = []
-            #     for _ in range(want):
-            #         try:
-            #             prompt, t_enq_client, req_id = self.q.get_nowait()
-            #             selected.append((prompt, t_enq_client, None, req_id))
-            #         except Empty:
-            #             break
-            # ---- Length-aware selection ----
-            if _USE_LEN_AWARE:
-                selected = select_batch(
-                    self.q, want, _pred, _Q_LOCK,
+            # ---- Unified KV/Len-aware selection ----
+            selected: List[Tuple[str, float, Optional[int], int]] = []
+            if _KV_AWARE and kv_pick_batch is not None:
+                selected = kv_pick_batch(
+                    self.q, want, _Q_LOCK,
+                    use_len=_USE_LEN_AWARE,
                     policy=_LEN_POLICY,
                     pool_factor=_POOL_FACTOR,
                     default_max_tokens=_DEFAULT_MAX_TOKENS,
                     length_basis=_LEN_BASIS,
                     input_len_fn=count_input_tokens,
+                    predictor=_pred,
                 )
             else:
-                selected = []
-                for _ in range(want):
-                    try:
-                        prompt, t_enq_client, req_id = self.q.get_nowait()
-                        selected.append((prompt, t_enq_client, None, req_id))
-                    except Empty:
-                        break
+                if _USE_LEN_AWARE:
+                    selected = select_batch(
+                        self.q, want, _pred, _Q_LOCK,
+                        policy=_LEN_POLICY,
+                        pool_factor=_POOL_FACTOR,
+                        default_max_tokens=_DEFAULT_MAX_TOKENS,
+                        length_basis=_LEN_BASIS,
+                        input_len_fn=count_input_tokens,
+                    )
+                else:
+                    selected = []
+                    for _ in range(want):
+                        try:
+                            prompt, t_enq_client, req_id = self.q.get_nowait()
+                            selected.append((prompt, t_enq_client, None, req_id))
+                        except Empty:
+                            break
+            # ---- end selection ----
 
             pulled_n = len(selected)
             q_after = self.q.qsize()
@@ -403,7 +396,7 @@ class PullBatchingRouter:
                 self.inflight[ep] = before_now + pulled_n
                 after_now = self.inflight[ep]
                 cur_idx = self._log_counters.get(ep, 0)
-                every_n = max(1, int(_cfg.QUEUE_LOG_EVERY_N))
+                every_n = max(1, int(getattr(_cfg, "QUEUE_LOG_EVERY_N", 50)))
                 do_log = cur_idx % every_n == 0
                 self._log_counters[ep] = cur_idx + 1
 
@@ -419,14 +412,16 @@ class PullBatchingRouter:
                     "inflight_after": int(after_now),
                     "q_before": int(q_before),
                     "q_after": int(q_after),
-                    "every_n": every_n,
+                    "every_n": int(getattr(_cfg, "QUEUE_LOG_EVERY_N", 50)),
                     "len_aware": bool(_USE_LEN_AWARE),
                     "len_policy": str(_LEN_POLICY),
-                    "pool_factor": int(_POOL_FACTOR)
+                    "pool_factor": int(_POOL_FACTOR),
+                    "kv_aware": bool(_KV_AWARE),
                 }
                 print(
                     f"[PULL*BATCH] {name} (ep={ep}) util={util_str} want={want} pulled={pulled_n} "
-                    f"inflight={before_now}->{after_now} q={q_before}->{q_after} lenAware={_USE_LEN_AWARE} pol={_LEN_POLICY}"
+                    f"inflight={before_now}->{after_now} q={q_before}->{q_after} "
+                    f"lenAware={_USE_LEN_AWARE} pol={_LEN_POLICY} kvAware={_KV_AWARE}"
                 )
                 log_queue(router_mode=self.mode_name, endpoint=ep, event="pull-batch", extra=log_extra)
 
@@ -910,8 +905,7 @@ class _BaseBatchingRouter:
                     "measured_server_roundtrip": (t_response_router - t_dispatch_router),
                     "measured_end_to_end_latency": (t_response_router - t_arrival_router),
                     "predictor_name": getattr(_pred, "name", "unknown"),
-
-                    # --- token stats ---
+                    # token stats
                     "input_tokens": int(input_actual_tokens),
                     "predicted_out_tokens": pred_out_int,
                     "actual_out_tokens": act_out_int,
@@ -950,7 +944,6 @@ class _BaseBatchingRouter:
 
     def step(self):
         now = time.time()
-        # print(f"self._step_interval_s: {self._step_interval_s}")
         if now - self._last_step_ts < self._step_interval_s:
             return
         self._last_step_ts = now
@@ -983,7 +976,7 @@ class _BaseBatchingRouter:
             with self._lock:
                 inflight_before = self.inflight.get(ep, 0)
                 cur_idx = self._log_counters.get(ep, 0)
-                every_n = max(1, int(_cfg.QUEUE_LOG_EVERY_N))
+                every_n = max(1, int(getattr(_cfg, "QUEUE_LOG_EVERY_N", 50)))
                 do_log = cur_idx % every_n == 0
 
             q_before = self.q.qsize()
@@ -998,32 +991,23 @@ class _BaseBatchingRouter:
             logical_before = inflight_before + backlog_before
             pulled = 0
 
-            # --- main selection + enqueue block (now correctly inside loop) ---
-            if _USE_LEN_AWARE:
-                selected = select_batch(
-                    self.q, want, _pred, _Q_LOCK,
+            # --- main selection + enqueue block (KV-aware first, fallback to existing) ---
+            selected: List[Tuple[str, float, Optional[int], int]] = []
+            if _KV_AWARE and kv_pick_batch is not None:
+                selected = kv_pick_batch(
+                    self.q, want, _Q_LOCK,
+                    use_len=_USE_LEN_AWARE,
                     policy=_LEN_POLICY,
                     pool_factor=_POOL_FACTOR,
                     default_max_tokens=_DEFAULT_MAX_TOKENS,
                     length_basis=_LEN_BASIS,
                     input_len_fn=count_input_tokens,
+                    predictor=_pred,
                 )
                 for prompt, t_enq_client, _key_len, req_id in selected:
                     q_ep = self._send_queues.get(ep)
                     if q_ep is None:
-                        break
-                    pulled += 1
-                    q_ep.put((prompt, t_enq_client, req_id))
-            else:
-                from queue import Empty as QEmpty
-                for _ in range(max(0, want)):
-                    try:
-                        prompt, t_enq_client, req_id = self.q.get_nowait()
-                    except QEmpty:
-                        break
-                    q_ep = self._send_queues.get(ep)
-                    if q_ep is None:
-                        # endpoint disappeared; put item back and stop
+                        # endpoint disappeared; put back and stop
                         try:
                             self.q.put((prompt, t_enq_client, req_id))
                         except Exception:
@@ -1031,6 +1015,39 @@ class _BaseBatchingRouter:
                         break
                     pulled += 1
                     q_ep.put((prompt, t_enq_client, req_id))
+            else:
+                if _USE_LEN_AWARE:
+                    selected = select_batch(
+                        self.q, want, _pred, _Q_LOCK,
+                        policy=_LEN_POLICY,
+                        pool_factor=_POOL_FACTOR,
+                        default_max_tokens=_DEFAULT_MAX_TOKENS,
+                        length_basis=_LEN_BASIS,
+                        input_len_fn=count_input_tokens,
+                    )
+                    for prompt, t_enq_client, _key_len, req_id in selected:
+                        q_ep = self._send_queues.get(ep)
+                        if q_ep is None:
+                            break
+                        pulled += 1
+                        q_ep.put((prompt, t_enq_client, req_id))
+                else:
+                    from queue import Empty as QEmpty
+                    for _ in range(max(0, want)):
+                        try:
+                            prompt, t_enq_client, req_id = self.q.get_nowait()
+                        except QEmpty:
+                            break
+                        q_ep = self._send_queues.get(ep)
+                        if q_ep is None:
+                            # endpoint disappeared; put item back and stop
+                            try:
+                                self.q.put((prompt, t_enq_client, req_id))
+                            except Exception:
+                                pass
+                            break
+                        pulled += 1
+                        q_ep.put((prompt, t_enq_client, req_id))
             # --- end selection + enqueue ---
 
             q_after = self.q.qsize()
@@ -1056,7 +1073,7 @@ class _BaseBatchingRouter:
                     f"[PUSH*STEP] {name} (ep={ep}) util={util_str} want={want} pulled={pulled} "
                     f"inflight={logical_before}->{logical_after} (active={inflight_before}->{inflight_after}) "
                     f"backlog={backlog_before}->{backlog_after} q={q_before}->{q_after} "
-                    f"lenAware={_USE_LEN_AWARE} pol={_LEN_POLICY}"
+                    f"lenAware={_USE_LEN_AWARE} pol={_LEN_POLICY} kvAware={_KV_AWARE}"
                 )
                 log_queue(
                     router_mode=self.mode_name,
@@ -1075,10 +1092,11 @@ class _BaseBatchingRouter:
                         "logical_after": int(logical_after),
                         "q_before": int(q_before),
                         "q_after": int(q_after),
-                        "every_n": every_n,
+                        "every_n": int(getattr(_cfg, "QUEUE_LOG_EVERY_N", 50)),
                         "len_aware": bool(_USE_LEN_AWARE),
                         "len_policy": str(_LEN_POLICY),
                         "pool_factor": int(_POOL_FACTOR),
+                        "kv_aware": bool(_KV_AWARE),
                     },
                 )
 
@@ -1134,7 +1152,6 @@ class _BaseBatchingRouter:
         if not isinstance(eps, set):
             eps = set(eps)
         self._draining_eps = set(eps)
-
 
 
 

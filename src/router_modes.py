@@ -50,6 +50,8 @@ RouterClass = Union[
 # Optional: for clarity
 PromptItem = Union[str, tuple[str, int]]
 from autoscaler import QueueBacklogAutoscaler
+from kv_aware import notify_arrival
+
 
 # Centralized config
 _cfg = get_config()
@@ -95,7 +97,6 @@ _cfg = get_config()
 # -------------------------
 
 from itertools import count
-
 _req_id_counter = count(start=0)
 
 def _make_enqueue_fn_for_batched(router) -> callable:
@@ -120,6 +121,11 @@ def _make_enqueue_fn_for_batched(router) -> callable:
                 except Exception:
                     pass
             router.q.put((str(prompt), float(t_enq_client), int(rid)))
+            try:
+                # inform the KV-aware layer that one new item arrived
+                notify_arrival(1)
+            except Exception:
+                pass
         except Exception:
             if replay_out_len is not None:
                 try:
@@ -127,7 +133,14 @@ def _make_enqueue_fn_for_batched(router) -> callable:
                 except Exception:
                     pass
             router.q.put((str(prompt), time.time(), int(rid)))
+            try:
+                # inform the KV-aware layer that one new item arrived
+                notify_arrival(1)
+            except Exception:
+                pass
+
     return enqueue_one
+
 
 def _start_load_feeder_if_needed(pattern, prompts, enqueue_one, *, router_mode: str) -> threading.Thread | None:
     """
