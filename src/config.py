@@ -80,6 +80,41 @@ class RouterConfig:
     REQUIRE_INPUT_TOKENIZER: bool = True
 
     # =========================
+    # KV-aware ranking knobs (NEW)
+    # =========================
+    KV_AWARE: bool = True
+    """
+    Master toggle for enabling KV-aware request ordering.
+    When True, router_core delegates queue selection to kv_aware.pick_batch().
+    """
+
+    KV_PRIORITY_POLICY: Literal["len", "kv", "hybrid", "none"] = "len"
+    """
+    Determines which ranking features to use:
+        - "len"    : only length-aware
+        - "kv"     : only KV cache awareness
+        - "hybrid" : combine both (weighted)
+        - "none"   : plain FIFO/random (no ranking)
+    """
+
+    KV_REFRESH_MODE: Literal["event", "periodic", "mixed"] = "mixed"
+    """
+    How KV rankings update:
+        - "event"     : on cache or request events
+        - "periodic"  : fixed interval
+        - "mixed"     : both event- and timer-driven
+    """
+
+    KV_REFRESH_INTERVAL_S: float = 1.0
+    """Seconds between background KV-rank recomputation if periodic/mixed."""
+
+    KV_RANK_DECAY_S: float = 30.0
+    """Optional exponential-decay horizon for KV rank freshness."""
+
+    KV_POOL_FACTOR: int = 256
+    """Number of requests to peek from queue for reordering per endpoint."""
+
+    # =========================
     # Project paths
     # =========================
     PROJECT_PATH: str = "/home/saeid/llm-lb"
