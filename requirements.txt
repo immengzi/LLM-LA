@@ -6,3 +6,4 @@ fastapi
 uvicorn
 datasets
 transformers
+torch==2.8.0
