@@ -80,7 +80,7 @@ class RouterConfig:
     REQUIRE_INPUT_TOKENIZER: bool = True
 
     # =========================
-    # KV-aware ranking knobs (NEW)
+    # KV-aware ranking knobs
     # =========================
     KV_AWARE: bool = True
     """
@@ -90,29 +90,39 @@ class RouterConfig:
 
     KV_PRIORITY_POLICY: Literal["len", "kv", "hybrid", "none"] = "len"
     """
-    Determines which ranking features to use:
-        - "len"    : only length-aware
-        - "kv"     : only KV cache awareness
-        - "hybrid" : combine both (weighted)
-        - "none"   : plain FIFO/random (no ranking)
+    Determines how ranking is computed:
+        - "len"    : only length-based ranking
+        - "kv"     : rank only by KV cache affinity
+        - "hybrid" : combine length + KV scores
+        - "none"   : FIFO/random (no ranking)
     """
 
     KV_REFRESH_MODE: Literal["event", "periodic", "mixed"] = "mixed"
     """
-    How KV rankings update:
-        - "event"     : on cache or request events
-        - "periodic"  : fixed interval
-        - "mixed"     : both event- and timer-driven
+    When KV affinity scores get refreshed:
+        - "event"     : upon request arrivals / KV-change events
+        - "periodic"  : every KV_REFRESH_INTERVAL_S seconds
+        - "mixed"     : both event-driven and periodic
     """
 
     KV_REFRESH_INTERVAL_S: float = 1.0
-    """Seconds between background KV-rank recomputation if periodic/mixed."""
+    """Seconds between KV rank recalculations if periodic or mixed mode."""
 
     KV_RANK_DECAY_S: float = 30.0
-    """Optional exponential-decay horizon for KV rank freshness."""
+    """Optional exponential-decay horizon to age-out old KV hits."""
 
     KV_POOL_FACTOR: int = 256
-    """Number of requests to peek from queue for reordering per endpoint."""
+    """
+    Number of items to peek from the central queue when computing KV-aware order.
+    Similar to POOL_FACTOR for length-aware but can be tuned independently.
+    """
+
+    KV_LOG_EVERY_N: int = 30
+    """Log KV ranking metadata every N batches (paired with QUEUE_LOG_EVERY_N)."""
+
+    KV_LOG_SCORES: bool = True
+    """If True, include per-request KV + combined scores in queue logs."""
+
 
     # =========================
     # Project paths
