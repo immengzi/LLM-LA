@@ -1,0 +1,1272 @@
+1. initial real world experiment
+2. initial simulated experiment
+3. simulated experiments for analyzing queuing behavior
+4. addition of client_queue_before_http_s and observing why latency_s is higher pull but the metrics for serving and queueing inside the serve are smaller -> look into measuring latency_s and client_queue_before_http_s
+5. piont by point measuring for send and recieve -> resulted in implementing different load mechansims
+6. testing implementation on constant load -> pull batching does a lot worth, weird sudden drop, unknown why this is happening
+7. new sets of experiments to confim system acting similar after changes to the load - results should be similar to 2 -> confirmed similarity to 2
+
+
+==== Experiments ====
+
+24:
+comparison of batching based methods with removing the cap on queueing
+resutls were good but due to the distribution intervals
+
+
+25:
+
+added load to 24
+50 50 split 32, 4096
+load 2 rps
+
+26:
+
+repeat of 25
+10 90 split 32 4096
+load 2 rps
+
+27:
+
+repeat of 26
+90 10 split 32 4096
+load 2 rps
+
+28:
+
+Good results
+repeat of 27
+90 10 split 32 4096
+load 2 rps
+batch size on the vLLM server 1
+
+
+29:
+
+repeat of 28 to debug the timing issue
+1 split 4096
+load 2 rps
+batch size on the vLLM server 1
+5 request
+
+30:
+
+repeat of 28 to debug the timing issue
+1 split 32
+load 2 rps
+batch size on the vLLM server 1
+10 request
+
+31:
+
+repeat of the 30 after the changes
+
+32:
+
+repeat of the 29 after the changes
+
+33:
+
+repeat of the 28 after the changes
+
+34
+
+repeat of the 33 to see the results instability in the rr method and if stability of pull based
+
+35
+
+repeat of the 33 to see the results instability in the rr method and if stability of pull based
+
+36
+
+experiment withj batch size 2
+40 request
+2 rps
+
+37
+
+experiment withj batch size 2
+40 request
+4 rps
+
+
+43
+
+80 20 split 32 4096
+load 8 rps
+batch size on the vLLM server 8
+
+44
+80 20 split 32 4096
+load 8 rps
+batch size on the vLLM server 8
+
+45
+80 20 split 32 4096
+load 8 rps
+batch size on the vLLM server 8
+
+46 ...
+
+50-53
+last night
+
+57-58
+shuffled orderr
+
+59:
+increased number of requests
+some initial results
+30 70 split 32 4096
+load 8 rps
+batch size on the vLLM server 8
+200 requests 
+
+60:
+2 replicas
+gpu
+increased number of requests to 400
+30 70 split 32 4096
+load 1 rps
+batch size on the vLLM server 8
+400 requests
+outcome:
+
+61:
+2 replicas
+gpu
+increase the request sizes
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 8
+200 requests
+outcome:
+
+62:
+2 replicas
+gpu
+increased number of requests to 400
+increase the request sizes
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 8
+400 requests
+outcome: promissing because of lots of high latency for SLO violation narrative, hitted the 1800 seconds limit
+
+63:
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 8
+200 requests
+Final result: very good JCT on batch size above 1
+outcome: Also promising under a SLO attainment narrative
+
+64:
+2 replicas
+gpu
+increase the request sizes
+adjusted rps to near utilization
+30 70 split 32 16384
+load 0.1 rps
+batch size on the vLLM server 8
+200 requests
+outcome:
+
+65:
+2 replicas
+gpu
+increased number of requests to 400
+increase the request sizes
+adjusted rps to near utilization
+30 70 split 32 16384
+load 0.1 rps
+batch size on the vLLM server 8
+400 requests
+outcome:
+
+66:
+4 replicas
+npu
+increased number of requests to 400
+30 70 split 32 4096
+load 1 rps
+batch size on the vLLM server 8
+400 requests
+outcome:
+
+67:
+4 replicas
+npu
+increase the request sizes
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 8
+200 requests
+outcome:
+
+68:
+4 replicas
+npu
+increased number of requests to 400
+increase the request sizes
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 8
+400 requests
+outcome: promissing because of lots of high latency for SLO violation narrative, hitted the 1800 seconds limit
+
+69:
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 8
+200 requests
+outcome: Also promising under a SLO attainment narrative
+
+70:
+4 replicas
+npu
+increase the request sizes
+adjusted rps to near utilization
+30 70 split 32 16384
+load 0.1 rps
+batch size on the vLLM server 8
+200 requests
+outcome:
+
+71:
+4 replicas
+npu
+increased number of requests to 400
+increase the request sizes
+adjusted rps to near utilization
+30 70 split 32 16384
+load 0.1 rps
+batch size on the vLLM server 8
+400 requests
+outcome:
+
+72:
+repeat of 62 with increased timeout
+2 replicas
+gpu
+increased number of requests to 400
+increase the request sizes
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 8
+400 requests
+outcome: promissing because of lots of high latency for SLO violation narrative, hitted the 1800 seconds limit
+
+73:
+repeat of 68 with increased timeout
+4 replicas
+npu
+increased number of requests to 400
+increase the request sizes
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 8
+400 requests
+outcome: not promissing after the increase of the batch size
+
+74
+repeat of 63
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 1
+200 requests
+outcome: Also promising under a SLO attainment narrative
+
+75
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 2
+200 requests
+outcome: Also promising under a SLO attainment narrative
+
+76
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 4
+200 requests
+outcome: Also promising under a SLO attainment narrative
+
+77
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 1
+200 requests
+outcome: Also promising under a SLO attainment narrative
+
+78
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 2
+200 requests
+outcome: Also promising under a SLO attainment narrative
+
+79
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 4
+200 requests
+outcome: Not sure what happend because it is only sending to two server isntead of all four
+
+80
+
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 64
+200 requests
+outcome: not good, no effect because of not saturated
+
+81
+
+Repeat of 80 with a much higher load
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 3 rps
+batch size on the vLLM server 64
+1000 requests
+outcome: not good, no effect because of too saturated
+
+82
+
+Repeat of 81 with a lower load
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 1 rps
+batch size on the vLLM server 64
+1000 requests
+outcome: TODO
+
+83:
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 16384
+load 3 rps
+batch size on the vLLM server 64
+200 requests
+outcome: not good, no effect because of not saturated
+
+84:
+2 replicas
+gpu
+adjusted rps to near utilization
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 64
+200 requests
+outcome: not good, no effect because of not saturated
+
+85:
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 0.3 rps
+batch size on the vLLM server 64
+200 requests
+outcome: no conclusion due to so many missed requests
+
+86:
+4 replicas
+outcome: no conclusion due to so many missed requests
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 3 rps
+batch size on the vLLM server 64
+200 requests
+outcome: no conclusion due to so many missed requests
+
+87:
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 4096
+load 1 rps
+batch size on the vLLM server 64
+200 requests
+outcome: no conclusion due to so many missed requests
+
+88:
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 16384
+load 3 rps
+batch size on the vLLM server 64
+200 requests
+outcome: no conclusion due to so many missed requests
+
+89:
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 64
+200 requests
+outcome: no conclusion due to so many missed requests
+
+90:
+TODO
+4 replicas
+npu
+adjusted rps to near utilization
+30 70 split 32 16384
+load 1 rps
+batch size on the vLLM server 64
+200 requests
+outcome: no conclusion due to so many missed requests
+
+other batch sizes under one of the former selected experiments (select one 63)
+
+91:
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: even_short_long
+30 70 split 4096
+no prediction
+
+92:
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: even_short_long
+30 70 split 4096
+with prediction
+
+93:
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+30 70 split 4096
+with prediction
+
+94:
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+without prediction
+after changes to general token based rather than only short/long
+
+95:
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+after changes to general token based rather than only short/long
+
+96:
+40 requests
+batch size 1
+load pattern: dump
+after removing the gurdrail
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+after changes to general token based rather than only short/long
+
+95:
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+after changes to general token based rather than only short/long
+
+96
+40 requests
+batch size 1
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+repetition after changes to the system (don't remember the changes)
+pull shows similar
+
+97
+40 requests
+batch size 1
+load pattern: det at 5
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+Good results
+
+98
+40 requests
+batch size 1
+load pattern: det at 10
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+Good results
+
+99
+40 requests
+batch size 1
+load pattern: det at 20
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+Good results
+
+100
+400 requests
+batch size 8
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+Good results
+
+101
+400 requests
+batch size 8
+load pattern: dump
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+Good results
+
+102
+400 requests
+batch size 8
+load pattern: det at 1 rps
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+with prediction
+Very good results
+
+103
+400 requests
+batch size 8
+load pattern: det at 1 rps
+2 servers gpu
+len_policy: short_first
+70 30 split 4096
+without prediction
+sligthly good resutls
+
+104-109
+...
+
+110:
+8 replicas
+npu
+30 70 split (32 4096)
+load dump @ 40 rps
+batch size 8
+1000 requests
+outcome:
+
+111:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 32 rps
+batch size 8
+1000 requests
+outcome:
+
+112:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 32 rps
+batch size 8
+1000 requests
+outcome:
+
+113:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 16 rps
+batch size 8
+1000 requests
+outcome:
+
+114:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 16 rps
+batch size 8
+1000 requests
+outcome:
+
+115:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 8 rps
+batch size 8
+1000 requests
+outcome:
+
+116:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 8 rps
+batch size 8
+1000 requests
+outcome:
+
+117:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 4 rps
+batch size 8
+1000 requests
+outcome:
+
+118:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 4 rps
+batch size 8
+1000 requests
+outcome:
+
+119:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 2 rps
+batch size 8
+1000 requests
+outcome:
+
+120:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 2 rps
+batch size 8
+1000 requests
+outcome:
+
+121:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 1 rps
+batch size 8
+1000 requests
+outcome:
+
+122:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 1 rps
+batch size 8
+1000 requests
+outcome:
+
+123:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 0.5 rps
+batch size 8
+1000 requests
+outcome:
+
+124:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 0.5 rps
+batch size 8
+1000 requests
+outcome:
+
+125:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 0.25 rps
+batch size 8
+1000 requests
+outcome:
+
+126:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 0.25 rps
+batch size 8
+1000 requests
+outcome:
+
+127:
+8 replicas
+npu
+30 70 split (32 4096)
+load det @ 0.125 rps
+batch size 8
+1000 requests
+outcome:
+
+128:
+8 replicas
+npu
+30 70 split (32 4096) length-aware enabled
+load det @ 0.125 rps
+batch size 8
+1000 requests
+outcome:
+
+129–146 (reversed distribution = 70 30 split)
+
+129:
+8 replicas
+npu
+70 30 split (32 4096)
+load dump @ 40 rps
+batch size 8
+1000 requests
+outcome:
+
+130:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 32 rps
+batch size 8
+1000 requests
+outcome:
+
+131:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 32 rps
+batch size 8
+1000 requests
+outcome:
+
+132:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 16 rps
+batch size 8
+1000 requests
+outcome:
+
+133:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 16 rps
+batch size 8
+1000 requests
+outcome:
+
+134:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 8 rps
+batch size 8
+1000 requests
+outcome:
+
+135:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 8 rps
+batch size 8
+1000 requests
+outcome:
+
+136:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 4 rps
+batch size 8
+1000 requests
+outcome:
+
+137:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 4 rps
+batch size 8
+1000 requests
+outcome:
+
+138:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 2 rps
+batch size 8
+1000 requests
+outcome:
+
+139:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 2 rps
+batch size 8
+1000 requests
+outcome:
+
+140:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 1 rps
+batch size 8
+1000 requests
+outcome:
+
+141:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 1 rps
+batch size 8
+1000 requests
+outcome:
+
+142:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 0.5 rps
+batch size 8
+1000 requests
+outcome:
+
+143:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 0.5 rps
+batch size 8
+1000 requests
+outcome:
+
+144:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 0.25 rps
+batch size 8
+1000 requests
+outcome:
+
+145:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 0.25 rps
+batch size 8
+1000 requests
+outcome:
+
+146:
+8 replicas
+npu
+70 30 split (32 4096)
+load det @ 0.125 rps
+batch size 8
+1000 requests
+outcome:
+
+147:
+8 replicas
+npu
+70 30 split (32 4096) length-aware enabled
+load det @ 0.125 rps
+batch size 8
+1000 requests
+outcome:
+
+
+148:
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: dump
+batch size on the vLLM server 8
+1000 requests
+outcome:
+
+149:
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: dump
+batch size on the vLLM server 8
+1000 requests
+outcome:
+
+150:
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: det 16
+batch size on the vLLM server 8
+1000 requests
+outcome:
+
+151:
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: dump
+batch size on the vLLM server 8
+1000 requests
+outcome:
+
+152:
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: dump
+batch size on the vLLM server 8
+1000 requests
+outcome:
+
+153:
+8 replicas
+npu
+dataset: lmsys
+token-aware: true
+load: dump
+batch size on the vLLM server 8
+1000 requests
+outcome:
+
+154:
+8 replicas
+npu
+dataset: lmsys
+token-aware: true
+load: dump
+batch size on the vLLM server 8
+1000 requests
+outcome:
+
+155:
+8 replicas
+npu
+dataset: lmsys
+token-aware: true
+load: det 16
+batch size on the vLLM server 8
+1000 requests
+outcome:
+
+156:
+8 replicas
+npu
+dataset: lmsys
+token-aware: true
+load: dump
+batch size on the vLLM server 8
+1000 requests
+outcome:
+
+157:
+8 replicas
+npu
+dataset: lmsys
+token-aware: true
+load: dump
+batch size on the vLLM server 8
+1000 requests
+outcome:
+
+
+157-183
+added metrics but not sure
+
+
+184
+8 replicas
+npu
+dataset: lmsys
+token-aware: true
+load: dump
+batch size on the vLLM server 8
+1000 requests
+tokenizer: Qwen/Qwen2-7B
+outcome: pull more optimzied than the 
+
+185
+8 replicas
+npu
+dataset: lmsys
+token-aware: true
+load: dump
+batch size on the vLLM server 8
+1000 requests
+tokenizer: Qwen/Qwen3-8B 
+
+186
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: dump
+batch size on the vLLM server 8
+1000 requests
+load: 4 rps
+real outptus 
+tokenizer: Qwen/Qwen3-8B
+outcome: better 11.9% in p99, 14% better in throughput and batch occupancy, it iseems under low load I can show better throughput motivation
+to show: for better throughput
+
+187
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: dump
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus 
+tokenizer: Qwen/Qwen3-8B
+outcome: better 15% in p99, 10% worse in throughput and batch occupancy, it iseems under high load least queue can be better in throughput but we still are consistently better in p99
+
+188
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: dump
+batch size on the vLLM server 8
+1000 requests
+load: 4 rps
+real outptus 
+tokenizer: Qwen/Qwen3-8B
+outcome: better 6% in p99, 1% better in throughput and batch occupancy, as this is the repeat of 186 on 10000, it seems we get to dimishining return under larger number of requests, could be due to measurement problem or requests length distribution. TODO check requests distribution and measurements
+
+
+189
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: dump
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus 
+tokenizer: Qwen/Qwen3-8B
+outcome: better 3.6% in p99, 3.5% better in throughput and batch occupancy, as this is the repeat of 186 on 10000, it seems we get to dimishining return under larger number of requests, could be due to measurement problem or requests length distribution. TODO check requests distribution and measurements
+
+
+
+190
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: just a test experiment don't take it seriously
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus 
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput
+
+
+191
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: random 1-4
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus
+1000 outputs
+tokenizer: Qwen/Qwen3-8B
+outcome: no latency improvement, marginally better througput
+
+192
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: random 1-8
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus
+1000 outputs
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput
+
+
+193
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: random 1-16
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus
+1000 outputs
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput, rr even marginally better the other two
+
+
+194
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: random 1-4
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus
+10000 outputs
+tokenizer: Qwen/Qwen3-8B
+outcome: better marignally in p99 and throughput but suspisous as visually seems there is lower latency resutls but but that isn't visible in the results,  TODO insight
+
+195
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: random 1-8
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus
+10000 outputs
+tokenizer: Qwen/Qwen3-8B
+outcome: 8% better in p99 and throughput and batch occupancy about 3% better
+
+
+196
+8 replicas
+npu
+dataset: lmsys
+token-aware: false
+load: random 1-16
+batch size on the vLLM server 8
+1000 requests
+load: 8 rps
+real outptus
+10000 outputs
+tokenizer: Qwen/Qwen3-8B
+outcome: 8% better in p99 and throughput and batch occupancy about 3% better
+
+
+=============================
+|         Profiling         |
+=============================
+
+1:
+batch 8-16-32-64
+gpu
+context 4096
+
+2:
+debug experiment
+
+3:
+debug experiment
+
+4:
+8-16-32-64
+batch 8-16-32-64
+gpu
+context 4096
+
+5:
+16-32
+context 4096
+optimal batch size 25
+
+6:
+debug exepriment
+
+7:
+28-33
+npu
+context 4096
+optimal batch size 30

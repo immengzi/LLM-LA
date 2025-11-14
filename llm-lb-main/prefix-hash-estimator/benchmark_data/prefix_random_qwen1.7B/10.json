@@ -1,0 +1,12 @@
+[
+    {
+        "Round Name": "MISS (unique)",
+        "Prefix Length": 50,
+        "Status": "Success",
+        "OK Requests": 20,
+        "Total Requests": 20,
+        "Hit Rate (%)": "0.00",
+        "P90 Latency (s)": "1.23",
+        "P99 Latency (s)": "1.25"
+    }
+]
