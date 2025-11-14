@@ -80,7 +80,7 @@ services:
   listener-1:
     # build:
     #   context: .
-    #   dockerfile: ./Dockerfile.subscriber
+    #   dockerfile: ./docker/Dockerfile.zmq_subscriber
     image: kv_cache_event_listener
     container_name: vllm_listener_1
     command: ["python", "-u", "zmq_subscriber.py"]
@@ -101,7 +101,7 @@ services:
   listener-2:
     # build:
     #   context: .
-    #   dockerfile: ./Dockerfile.subscriber
+    #   dockerfile: ./docker/Dockerfile.zmq_subscriber
     image: kv_cache_event_listener
     container_name: vllm_listener_2
     command: ["python", "-u", "zmq_subscriber.py"]
@@ -120,6 +120,9 @@ services:
   
   # 6. vLLM KV Scheduler (ARM CPU utility)
   vllm-kv-scheduler:
+  # build:
+    #   context: .
+    #   dockerfile: ./docker/Dockerfile.arm.cpu
     image: vllm-arm64:vllm
     container_name: vllm-kv-scheduler
     privileged: true
