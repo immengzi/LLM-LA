@@ -38,15 +38,17 @@ class AllBlocksCleared(KVCacheEvent):
 class KVEventBatch(EventBatch):
     events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
 
-
 # ------------------------------
-# Async Redis Updater
+# Redis Updater
 # ------------------------------
 async def process_event(event_batch: KVEventBatch, redis, pod_name: str, model_name: Optional[str] = None):
     """
-    Async handler: update Redis mappings:
-      - kvblocks{:{model}}  => block_hash -> pod_name
-      - podblocks:{pod_name}{:{model}} => set of block_hashes
+    Update Redis for KV cache events.
+
+    Redis schema:
+      - kvblocks:{model}               -> HSET(block_hash -> "kvblock:{block_hash}")
+      - kvblock:{block_hash}           -> HSET(pod_name -> timestamp)
+      - podblocks:{model}:{pod_name}   -> SET(block_hashes held by pod)
     """
     key_prefix = f"{model_name}:" if model_name else ""
     kvblocks_key = f"{key_prefix}kvblocks"
@@ -59,37 +61,54 @@ async def process_event(event_batch: KVEventBatch, redis, pod_name: str, model_n
 
     for event in event_batch.events:
         try:
+            # ----------------------
+            # BlockStored event
+            # ----------------------
             if isinstance(event, BlockStored):
                 for block_hash in event.block_hashes:
-                    pipe.hset(kvblocks_key, str(block_hash), f"{pod_name}:{ts}")
-                    pipe.sadd(podblocks_key, str(block_hash))
-                print(f"  -> Stored {len(event.block_hashes)} hash->container mappings for '{pod_name}'.")
+                    kvblock_key = f"{key_prefix}kvblock:{block_hash}"
 
+                    # record mapping: block -> pod
+                    pipe.hset(kvblock_key, pod_name, ts)
+                    # record reverse mapping: pod -> block
+                    pipe.sadd(podblocks_key, str(block_hash))
+                    # optional: add block hash reference
+                    pipe.hset(kvblocks_key, str(block_hash), kvblock_key)
+
+                print(f"Stored {len(event.block_hashes)} block→pod hash mappings for '{pod_name}'")
+
+            # ----------------------
+            # BlockRemoved event
+            # ----------------------
             elif isinstance(event, BlockRemoved):
                 for block_hash in event.block_hashes:
-                    pipe.hdel(kvblocks_key, str(block_hash))
+                    kvblock_key = f"{key_prefix}kvblock:{block_hash}"
+                    pipe.hdel(kvblock_key, pod_name)
                     pipe.srem(podblocks_key, str(block_hash))
-                print(f"  -> Removed {len(event.block_hashes)} hash->container mappings for '{pod_name}'.")
 
+                print(f"Removed {len(event.block_hashes)} block→pod hash mappings for '{pod_name}'")
+
+            # ----------------------
+            # AllBlocksCleared event
+            # ----------------------
             elif isinstance(event, AllBlocksCleared):
-                # Clear both directions for this pod only
+                print(f"Clearing all blocks for {pod_name}")
+
+                async for block_hash in redis.sscan_iter(podblocks_key):
+                    kvblock_key = f"{key_prefix}kvblock:{block_hash}"
+                    pipe.hdel(kvblock_key, pod_name)
+
                 pipe.delete(podblocks_key)
-                # Optionally, clean kvblocks entries belonging to this pod
-                # This is optional because O(n) scan; can be deferred to background cleanup
-                # Example:
-                # async for key, value in redis.hscan_iter(kvblocks_key):
-                #     if value.startswith(pod_name):
-                #         await redis.hdel(kvblocks_key, key)
 
         except Exception as e:
             print(f"⚠️ Error processing event: {e}", file=sys.stderr)
 
     await pipe.execute()
-    print(f"✅ Redis updated for {pod_name}")
+    print(f"Redis updated for {pod_name}")
 
 
 # ------------------------------
-# Main async listener loop
+# Main loop
 # ------------------------------
 async def main():
     vllm_host = os.environ.get("VLLM_HOST", "localhost")
@@ -98,22 +117,19 @@ async def main():
     container_name = os.environ.get("CONTAINER_NAME", "vllm-pod-1")
     model_name = os.environ.get("MODEL_NAME", None)
 
-    print(f"🚀 Starting KV listener for {container_name} ({model_name or 'no-model'})")
-    print(f"→ vLLM: tcp://{vllm_host}:{sub_port}")
-    print(f"→ Redis: {redis_host}")
+    print(f"Starting KV listener for {container_name} ({model_name or 'no-model'})")
+    print(f"vLLM: tcp://{vllm_host}:{sub_port}")
+    print(f"Redis: {redis_host}")
 
-    # Redis
     redis = aioredis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
 
-    # ZMQ
     ctx = zmq.asyncio.Context()
     sub = ctx.socket(zmq.SUB)
     sub.connect(f"tcp://{vllm_host}:{sub_port}")
     sub.setsockopt_string(zmq.SUBSCRIBE, "kv@")
 
     decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
-
-    print("🧩 Listening for KV events...")
+    print("Listening for KV events...")
 
     reconnect_backoff = 1
 
@@ -125,18 +141,17 @@ async def main():
 
             event_batch = decoder.decode(payload)
             await process_event(event_batch, redis, container_name, model_name)
-
-            reconnect_backoff = 1  # reset on success
+            reconnect_backoff = 1
 
         except KeyboardInterrupt:
-            print("🛑 Interrupted.")
+            print("Interrupted.")
             break
         except zmq.ZMQError as e:
-            print(f"⚠️ ZMQ error: {e}, retrying in {reconnect_backoff}s")
+            print(f"ZMQ error: {e}, retrying in {reconnect_backoff}s")
             await asyncio.sleep(reconnect_backoff)
             reconnect_backoff = min(reconnect_backoff * 2, 30)
         except Exception as e:
-            print(f"⚠️ Unexpected error: {e}", file=sys.stderr)
+            print(f"Unexpected error: {e}", file=sys.stderr)
             await asyncio.sleep(1)
 
     await redis.close()
