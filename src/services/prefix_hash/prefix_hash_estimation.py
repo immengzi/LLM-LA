@@ -1,26 +1,22 @@
 #!/usr/bin/env python3
 # prefix_hash_estimation.py
 """
-Compute vLLM prefix cache block hashes by constructing a vLLM Request.
-This uses the same code path as the vLLM server.
-
-Provides:
-- sha256_cbor(obj)               : hash helper
-- BlockHashComputer              : reusable class (load tokenizer once)
-- compute_vllm_block_hashes(...) : convenience function (one-off usage)
+Compute vLLM prefix cache block hashes by creating an actual Request object.
+This uses (as closely as we can) the same code path as the vLLM OpenAI
+chat server: we take a `messages` array, apply the chat template, tokenize,
+then feed those tokens into vLLM's Request + block hasher.
 """
 
 import os
-os.environ.setdefault("PYTHONHASHSEED", "0")  # deterministic hashing
+os.environ["PYTHONHASHSEED"] = "0"
 
 import time
-import hashlib
-from typing import List, Tuple
+import logging
+from typing import List, Tuple, Dict, Any
 
-import cbor2
 from transformers import AutoTokenizer
 
-# vLLM imports (must match your vLLM version)
+# vLLM imports
 from vllm.sampling_params import SamplingParams
 from vllm.v1.request import Request
 from vllm.v1.core.kv_cache_utils import (
@@ -29,19 +25,35 @@ from vllm.v1.core.kv_cache_utils import (
     maybe_convert_block_hash,
 )
 
+import hashlib
+import cbor2
+
+# -------------------------------------------------------------------
+# Logging
+# -------------------------------------------------------------------
+
+logger = logging.getLogger("prefix_hash_estimation")
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+HASH_IMPL_NAME = "local_sha256_cbor (cbor2 + sha256)"
+
 
 def sha256_cbor(obj) -> bytes:
     """
-    Replacement for vllm.utils.hashing.sha256_cbor:
-    Computes SHA256 hash of a CBOR-encoded object and returns raw bytes.
+    CBOR + SHA256, returning 32-byte digest.
+    This is our stand-in for the server's sha256_cbor implementation.
     """
     cbor_bytes = cbor2.dumps(obj)
     return hashlib.sha256(cbor_bytes).digest()
 
 
-# Initialize NONE_HASH once using the same hash function the server uses.
-# This should be done once at import time.
+# Make vLLM's "NONE_HASH" use the same hash function
 init_none_hash(sha256_cbor)
+logger.info("[prefix-hash] init_none_hash configured with %s", HASH_IMPL_NAME)
 
 
 class BlockHashComputer:
@@ -49,7 +61,7 @@ class BlockHashComputer:
     Reusable helper that:
       - Loads tokenizer once
       - Prepares block_hasher once
-      - Computes block hashes for prompts
+      - Computes block hashes for prompts or chat messages
     """
 
     def __init__(
@@ -58,45 +70,102 @@ class BlockHashComputer:
         block_size: int = 128,
         eos_token_id: int = 151643,
     ) -> None:
-        """
-        Args:
-            model_path: Path or HF identifier for the model/tokenizer.
-            block_size: KV block size used by vLLM.
-            eos_token_id: EOS token id for the model (Qwen default shown).
-        """
         self.model_path = model_path
         self.block_size = block_size
         self.eos_token_id = eos_token_id
 
-        # Load tokenizer once; we assume files are local in your setup
+        logger.info(
+            "[prefix-hash] Initializing BlockHashComputer(model_path=%s, "
+            "block_size=%d, eos_token_id=%d, hash_impl=%s)",
+            model_path,
+            block_size,
+            eos_token_id,
+            HASH_IMPL_NAME,
+        )
+
+        # Load tokenizer (same files as GPU vLLM pods)
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_path,
             trust_remote_code=True,
             local_files_only=True,
         )
+        logger.info(
+            "[prefix-hash] Loaded tokenizer from %s (vocab_size=%s, has_chat_template=%s)",
+            model_path,
+            getattr(self.tokenizer, "vocab_size", "unknown"),
+            hasattr(self.tokenizer, "chat_template"),
+        )
 
-        # Create a block hasher compatible with the server
-        self.block_hasher = get_request_block_hasher(block_size, sha256_cbor)
+        # Create block hasher using our sha256_cbor
+        self.block_hasher = get_request_block_hasher(
+            block_size,
+            sha256_cbor,
+        )
+        logger.info(
+            "[prefix-hash] Created block_hasher with block_size=%d using %s",
+            block_size,
+            HASH_IMPL_NAME,
+        )
 
-    def compute(
-        self,
-        prompt_text: str,
-        max_tokens: int = 32,
-    ) -> Tuple[List[int], List[int]]:
+    # ------------------------------------------------------------------
+    # Tokenization helpers
+    # ------------------------------------------------------------------
+
+    def _tokens_from_messages(self, messages: List[Dict[str, Any]]) -> List[int]:
         """
-        Compute KV block hashes and token IDs for a given prompt.
-
-        Returns:
-            block_hashes_as_int: List of block hashes as ints (KV event format)
-            prompt_token_ids   : List of token IDs used for the prompt
+        Try to mimic vLLM OpenAI chat behaviour:
+        - if tokenizer.apply_chat_template exists => use it
+        - else: simple concatenation "role: content"
         """
-        # Tokenize prompt (no special tokens)
-        prompt_token_ids = self.tokenizer.encode(
-            prompt_text,
+        if hasattr(self.tokenizer, "apply_chat_template"):
+            # Qwen3 and other chat models usually define this
+            text = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        else:
+            # Fallback: not perfect, but at least deterministic
+            parts = []
+            for m in messages:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                parts.append(f"{role}: {content}")
+            text = "\n".join(parts)
+
+        token_ids = self.tokenizer.encode(
+            text,
             add_special_tokens=False,
         )
 
-        # Create sampling params (these don't affect block hashing)
+        logger.info(
+            "[prefix-hash] Built chat tokens: len(text)=%d, num_tokens=%d",
+            len(text),
+            len(token_ids),
+        )
+        return token_ids
+
+    # ------------------------------------------------------------------
+    # Public compute APIs
+    # ------------------------------------------------------------------
+
+    def compute_from_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        max_tokens: int = 32,
+    ) -> Tuple[List[int], List[int]]:
+        """
+        Compute KV block hashes for a chat `messages` array
+        (OpenAI-style messages).
+        """
+        prompt_token_ids = self._tokens_from_messages(messages)
+
+        logger.info(
+            "[prefix-hash] Computing hashes from messages: num_tokens=%d, max_tokens=%d",
+            len(prompt_token_ids),
+            max_tokens,
+        )
+
         sampling_params = SamplingParams(
             ignore_eos=False,
             max_tokens=max_tokens,
@@ -104,7 +173,6 @@ class BlockHashComputer:
             prompt_logprobs=None,
         )
 
-        # Create Request object (this triggers block hashing inside vLLM)
         req = Request(
             request_id="compute-hash-demo",
             prompt_token_ids=prompt_token_ids,
@@ -122,13 +190,29 @@ class BlockHashComputer:
             block_hasher=self.block_hasher,
         )
 
-        # Convert block hashes to the format used in KV events (int)
         block_hashes_as_int: List[int] = []
         for block_hash in req.block_hashes:
             hash_int = maybe_convert_block_hash(block_hash)
             block_hashes_as_int.append(hash_int)
 
+        logger.info(
+            "[prefix-hash] Result from messages: num_blocks=%d, first_hashes=%s",
+            len(block_hashes_as_int),
+            block_hashes_as_int[:5],
+        )
+
         return block_hashes_as_int, prompt_token_ids
+
+    def compute(
+        self,
+        prompt_text: str,
+        max_tokens: int = 32,
+    ) -> Tuple[List[int], List[int]]:
+        """
+        Legacy single-prompt API. Wraps into one user message.
+        """
+        messages = [{"role": "user", "content": prompt_text}]
+        return self.compute_from_messages(messages, max_tokens=max_tokens)
 
 
 def compute_vllm_block_hashes(
@@ -140,9 +224,6 @@ def compute_vllm_block_hashes(
 ) -> Tuple[List[int], List[int]]:
     """
     Convenience wrapper for one-off usage.
-
-    NOTE: This creates a new BlockHashComputer each time; use the class
-    directly in services for better performance.
     """
     computer = BlockHashComputer(
         model_path=model_path,
@@ -154,22 +235,22 @@ def compute_vllm_block_hashes(
 
 if __name__ == "__main__":
     # Simple CLI demo
-    demo_prompt = "Hello world."
-    demo_model_path = "/model/qwen-test"
-    demo_block_size = 128
+    prompt_text = "Hello world."
+    model_path = "/model/qwen-test"
+    block_size = 128
 
     hashes, token_ids = compute_vllm_block_hashes(
-        prompt_text=demo_prompt,
-        model_path=demo_model_path,
-        block_size=demo_block_size,
+        prompt_text=prompt_text,
+        model_path=model_path,
+        block_size=block_size,
     )
 
     print("=" * 80)
     print("SUMMARY")
     print("=" * 80)
-    print(f"Prompt: {demo_prompt!r}")
+    print(f"Prompt: {prompt_text!r}")
     print(f"Total tokens: {len(token_ids)}")
-    print(f"Block size: {demo_block_size}")
+    print(f"Block size: {block_size}")
     print(f"Number of block hashes: {len(hashes)}")
     print(f"Computed hashes (ints):")
     print(hashes)
