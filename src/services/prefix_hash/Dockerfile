@@ -2,10 +2,10 @@
 # CPU-only vLLM hash service: exposes /compute_hashes HTTP endpoint
 
 # IMPORTANT: pick a tag that matches your Ascend vLLM version
-FROM openeuler/vllm-cpu:latest
+FROM vllm-arm64:vllm
 
-ENV http_proxy=http://peulerosweb:EulerOS_123@172.18.100.92:8080
-ENV https_proxy=http://peulerosweb:EulerOS_123@172.18.100.92:8080
+# ENV http_proxy=http://peulerosweb:EulerOS_123@172.18.100.92:8080
+# ENV https_proxy=http://peulerosweb:EulerOS_123@172.18.100.92:8080
 
 # Workdir where we'll place the service code
 WORKDIR /workspace
