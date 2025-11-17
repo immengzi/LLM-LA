@@ -2,15 +2,29 @@
 # Entry point: bash for manual debugging
 
 FROM ubuntu:24.04 AS base
+#ARG http_proxy
+#ARG https_proxy
+#ENV http_proxy=http://:3128
+#ENV http_proxy=http://192.0.0.1:3128
+#ENV https_proxy=http://192.0.0.1:3128
+#ENV https_proxy=http://7.242.102.243:3128
+#ENV no_proxy=localhost,127.0.0.1
+#ENV HTTP_PROXY=${http_proxy}
+#ENV HTTPS_PROXY=${https_proxy}
 
-RUN apt update && apt install -y wget ca-certificates
+RUN sed -i "s@http://.*.ubuntu.com@http://mirrors.tools.huawei.com@g" /etc/apt/sources.list
+
+RUN apt update && \
+    apt install -y ca-certificates && \
+    update-ca-certificates 
+#RUN apt install -y wget
 
 # Fetch huawei ssl certificates
-RUN wget --no-check-certificate https://gitlab-uk.rnd.huawei.com/sir_lab/docs/-/raw/master/Infrastructure/config/certs/HuaweiITRootCA.pem -O /usr/local/share/ca-certificates/HuaweiITRootCA.crt
-RUN wget --no-check-certificate https://gitlab-uk.rnd.huawei.com/sir_lab/docs/-/raw/master/Infrastructure/config/certs/HuaweiItEnterpriseCA1.pem -O /usr/local/share/ca-certificates/HuaweiItEnterpriseCA1.crt
-RUN wget --no-check-certificate https://gitlab-uk.rnd.huawei.com/sir_lab/docs/-/raw/master/Infrastructure/config/certs/huawei.pem -O /usr/local/share/ca-certificates/huawei.crt
-RUN wget --no-check-certificate https://gitlab-uk.rnd.huawei.com/sir_lab/docs/-/raw/master/Infrastructure/config/certs/HuaweiSecureInternetProxyCA.pem -O /usr/local/share/ca-certificates/HuaweiSecureInternetProxyCA.crt
-RUN wget --no-check-certificate https://gitlab-uk.rnd.huawei.com/sir_lab/docs/-/raw/master/Infrastructure/config/certs/HuaweiWebSecureInternetGatewayCA.pem -O /usr/local/share/ca-certificates/HuaweiWebSecureInternetGatewayCA.crt
+COPY certs/HuaweiITRootCA.crt  /usr/local/share/ca-certificates/HuaweiITRootCA.crt
+COPY certs/HuaweiItEnterpriseCA1.crt  /usr/local/share/ca-certificates/HuaweiItEnterpriseCA1.crt
+COPY certs/huawei.crt  /usr/local/share/ca-certificates/huawei.crt
+COPY certs/HuaweiSecureInternetProxyCA.crt /usr/local/share/ca-certificates/HuaweiSecureInternetProxyCA.crt
+COPY certs/HuaweiWebSecureInternetGatewayCA.crt  /usr/local/share/ca-certificates/HuaweiWebSecureInternetGatewayCA.crt
 
 # Install SSL certificates
 RUN update-ca-certificates
@@ -18,8 +32,6 @@ RUN update-ca-certificates
 WORKDIR /workspace/
 
 RUN dpkg --print-architecture && uname -m
-RUN apt-get update && apt-get install -y bash file
-RUN file /bin/bash
 
 # Arguments
 ARG PYTHON_VERSION=3.12
@@ -34,7 +46,24 @@ RUN apt-get update -y && \
 
 COPY install_uv.sh /tmp/install_uv.sh
 RUN bash /tmp/install_uv.sh
+#RUN sed -i '1iunset http_proxy\nunset https_proxy\nunset HTTP_PROXY\nunset HTTPS_PROXY' /tmp/install_uv.sh
+#RUN chmod +x /tmp/install_uv.sh
+#RUN bash -c 'http_proxy=${http_proxy} https_proxy=${https_proxy} bash /tmp/install_uv.sh'
 
+# Copy the manually downloaded uv binary
+#COPY ./uv-aarch64-unknown-linux-gnu.tar.gz /tmp/
+
+# Extract the binary to the /opt/uv directory
+#RUN mkdir -p /opt/uv/ 
+#RUN tar -xvzf /tmp/uv-aarch64-unknown-linux-gnu.tar.gz -C /opt/uv/
+
+# Add the /opt/uv/bin directory to the PATH so the binary is accessible
+#ENV PATH="/opt/uv/uv-aarch64-unknown-linux-gnu/:$PATH"
+
+# Optional: Verify the installation of uv
+#RUN uv --version
+
+#RUN pip install --no-cache-dir --trusted-host ms-release.obs.cn-north-4.myhuaweicloud.com -i https://pypi.tuna.tsinghua.edu.cn/simple uv
 
 # Environment setup
 ENV CCACHE_DIR=/root/.cache/ccache
@@ -48,17 +77,14 @@ ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE="copy"
 ENV LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libtcmalloc_minimal.so.4"
-ENV GIT_SSL_NO_VERIFY=false
 
 # Create Python virtual environment
 RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV} --allow-insecure-host github.com
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-WORKDIR /workspace
-RUN git clone --depth 1 https://github.com/vllm-project/vllm.git
 
 # Copy source code
-# COPY . /workspace/vllm
+COPY . /workspace/vllm
 
 # Install Python dependencies
 RUN --mount=type=bind,src=requirements/common.txt,target=requirements/common.txt \
@@ -70,11 +96,11 @@ WORKDIR /workspace/vllm
 RUN rm -rf /workspace/vllm/.deps
 
 # vLLM build steps
-# RUN /bin/bash -c "\
-#     source /opt/venv/bin/activate && \
-#     uv pip install -r requirements/cpu-build.txt --torch-backend cpu && \
-#     uv pip install -r requirements/cpu.txt --torch-backend cpu && \
-#     VLLM_TARGET_DEVICE=cpu python setup.py install \
+#RUN /bin/bash -c "\
+#    source /opt/venv/bin/activate && \
+#    uv pip install -r requirements/cpu-build.txt --torch-backend cpu && \
+#    uv pip install -r requirements/cpu.txt --torch-backend cpu && \
+#    VLLM_TARGET_DEVICE=cpu python setup.py install \
 # "
 
 RUN set -ex && \

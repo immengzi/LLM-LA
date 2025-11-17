@@ -27,8 +27,8 @@ services:
       - /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info
       - /etc/ascend_install.info:/etc/ascend_install.info
       - /root/.cache:/root/.cache
-      - /mnt/storage1/amardeep/:/model
-      - /home/amardeep/code/llm-lb/kv_cache_aware:/code
+      - /home/amardeep/llm-lb/:/code/
+      - /mnt/nvme1/amardeep/:/model
     ports:
       - "8001:8000"
     command: >
@@ -61,8 +61,8 @@ services:
       - /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info
       - /etc/ascend_install.info:/etc/ascend_install.info
       - /root/.cache:/root/.cache
-      - /mnt/storage1/amardeep/:/model
-      - /home/amardeep/code/llm-lb/kv_cache_aware:/code
+      - /home/amardeep/llm-lb/:/code/
+      - /mnt/nvme1/amardeep/:/model
     ports:
        - "8002:8000"
     command: >
@@ -129,8 +129,8 @@ services:
     ports:
       - "9095:9095"
     volumes:
-      - /home/amardeep/code/llm-lb:/code/
-      - /mnt/storage1/amardeep/:/model
+      - /home/amardeep/llm-lb/:/code/
+      - /mnt/nvme1/amardeep/:/model
     working_dir: /workspace
     tty: true
     stdin_open: true
