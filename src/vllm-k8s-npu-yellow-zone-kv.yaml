@@ -87,9 +87,11 @@ spec:
     app: redis
   ports:
     - name: redis
-      port: 6379
-      targetPort: 6379
-  type: ClusterIP   # *** ADDED
+      port: 6379        # service port (inside cluster)
+      targetPort: 6379  # container port
+      nodePort: 30079   # <<< external NodePort on each node
+  type: NodePort        # <<< changed from ClusterIP
+
 
 # =====================================================================
 # *** ADDED: CPU vLLM hash service (block-hash computing)
@@ -161,9 +163,11 @@ spec:
     app: vllm-cpu-hash
   ports:
     - name: http
-      port: 9095
-      targetPort: 9095
-  type: ClusterIP   # *** ADDED
+      port: 9095         # inside cluster
+      targetPort: 9095   # container port
+      nodePort: 30095    # <<< external NodePort
+  type: NodePort
+
 
 # =====================================================================
 # vLLM Ascend Deployment WITH KV-EVENTS + SIDECAR
