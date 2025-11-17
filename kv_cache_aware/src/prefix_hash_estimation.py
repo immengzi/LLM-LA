@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# prefix_hash_estimation.py
 """
 Compute vLLM prefix cache block hashes by creating an actual Request object.
 This uses the exact same code path as the vLLM server.
