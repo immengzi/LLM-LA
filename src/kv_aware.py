@@ -3,34 +3,56 @@
 """
 Event-driven epochs for deterministic KV-aware ordering.
 
-- arrival_epoch bumps on *any* enqueue (you can batch this later if needed)
-- kv_epoch[ep] bumps when that endpoint's KV state changes (hook later to real events)
-- reorder_for_endpoint: epoch-seeded shuffle (optional mode)
-- rank_key: deterministic 64-bit key (endpoint+epochs+req_id) for "hash" mode
+Concept:
+- We maintain two counters:
+    * arrival_epoch: global, bumps when new requests are enqueued.
+    * kv_epoch[ep]: per-endpoint, bumps when that endpoint's KV state changes.
 
-NEW (logging helpers):
-- rank_items_for_endpoint(...) returns both a reordered list of items and
-  a parallel list of small dicts suitable for log_queue() "kv_order" payloads.
+- These epochs are folded into a 64-bit rank key:
+      rank_key(endpoint, req_id)
+  which is used to deterministically order requests for a given endpoint.
+
+- Router integration:
+    * router_core calls:
+          rank_items_for_endpoint(endpoint, items, mode=kv_mode, include_scores=True)
+      where items = [(prompt, t_enq_client, req_id), ...].
+
+    * "mode" controls behavior:
+        - "hash"   : sort by rank_key (KV-aware pseudo-random order).
+        - "shuffle": epoch-seeded shuffle (older helper).
+        - "fifo"   : keep original order.
+        - "none"   : alias of "fifo".
+
+- Logging:
+    * rank_items_for_endpoint returns:
+          (ordered_items, meta_list)
+      meta_list is suitable for log_queue(..., extra={"kv_order": meta_list, ...}).
 """
 
 from typing import Dict, Tuple, List, Any
-import hashlib, random, time
+import hashlib
+import random
+import time
 
+# Global epochs
 _arrival_epoch: int = 0
 _kv_epoch_by_ep: Dict[str, int] = {}
-# Optional: a per-process seed to make the shuffle deterministic across processes
+
+# Optional per-process random salt so hash-based order is deterministic
+# but different across processes.
 _proc_seed: int = int(time.time_ns() & 0xFFFFFFFF)
 
 
-# -------------------------
+# ---------------------------------------------------------------------------
 # Epoch maintenance
-# -------------------------
+# ---------------------------------------------------------------------------
 
 def notify_arrival(n: int = 1) -> None:
     """
     Called when new requests are enqueued into the global router queue.
 
-    n: number of arrivals (batched increments are fine).
+    Args:
+        n: number of arrivals (batched increments are fine).
     """
     global _arrival_epoch
     _arrival_epoch += int(max(1, n))
@@ -38,8 +60,12 @@ def notify_arrival(n: int = 1) -> None:
 
 def notify_kv_update(endpoint: str) -> None:
     """
-    Called when the KV cache *structure* for a given endpoint changes in a
+    Called when the KV cache 'structure' for a given endpoint changes in a
     way that should affect ranking (e.g., cache evictions, new blocks, etc.).
+
+    You typically call this from a KV-event consumer that watches:
+      - BlockStored / BlockRemoved events from vLLM, or
+      - Redis KV block mappings changing for a pod.
     """
     _kv_epoch_by_ep[endpoint] = _kv_epoch_by_ep.get(endpoint, 0) + 1
 
@@ -47,15 +73,16 @@ def notify_kv_update(endpoint: str) -> None:
 def get_epochs(endpoint: str) -> Tuple[int, int]:
     """
     Returns (kv_epoch, arrival_epoch) for the given endpoint.
-    kv_epoch   : how many KV-relevant events we've seen for this endpoint
-    arrival_epoch : global arrival epoch counter (all endpoints share this)
+
+    kv_epoch      : how many KV-relevant events we've seen for this endpoint.
+    arrival_epoch : global arrival epoch counter (all endpoints share this).
     """
     return int(_kv_epoch_by_ep.get(endpoint, 0)), int(_arrival_epoch)
 
 
-# -------------------------
+# ---------------------------------------------------------------------------
 # Deterministic hash key
-# -------------------------
+# ---------------------------------------------------------------------------
 
 def rank_key(endpoint: str, req_id: int) -> int:
     """
@@ -70,12 +97,17 @@ def rank_key(endpoint: str, req_id: int) -> int:
     return int(hashlib.blake2b(s.encode(), digest_size=8).hexdigest(), 16)
 
 
-# -------------------------
+# ---------------------------------------------------------------------------
 # Epoch-seeded shuffle (legacy helper)
-# -------------------------
+# ---------------------------------------------------------------------------
 
-def reorder_for_endpoint(endpoint: str, items: List[Tuple[str, float, int]]) -> List[Tuple[str, float, int]]:
-    """Epoch-seeded shuffle; stable within (endpoint, kv, arrival) state."""
+def reorder_for_endpoint(
+    endpoint: str,
+    items: List[Tuple[str, float, int]],
+) -> List[Tuple[str, float, int]]:
+    """
+    Epoch-seeded shuffle; stable within (endpoint, kv_epoch, arrival_epoch) state.
+    """
     kv_e, arr_e = get_epochs(endpoint)
     seed = hash((endpoint, kv_e, arr_e, _proc_seed)) & 0xFFFFFFFF
     rnd = random.Random(seed)
@@ -84,9 +116,9 @@ def reorder_for_endpoint(endpoint: str, items: List[Tuple[str, float, int]]) -> 
     return out
 
 
-# -------------------------
-# Logging-friendly ranking helper (NEW)
-# -------------------------
+# ---------------------------------------------------------------------------
+# Logging-friendly ranking helper (used by router_core)
+# ---------------------------------------------------------------------------
 
 def rank_items_for_endpoint(
     endpoint: str,
@@ -112,14 +144,19 @@ def rank_items_for_endpoint(
             "rank_index": <int>,        # position in ordered_items
         }
 
-    mode:
-        - "hash"   : stable sort by rank_key(endpoint, req_id)
-        - "shuffle": epoch-seeded shuffle (same behavior as reorder_for_endpoint)
-        - "fifo"   : no reordering (identity)
-        - "none"   : alias of "fifo"
+    Args:
+        endpoint: endpoint URL or identifier string used by router_core.
+        items: list of (prompt, t_enq_client, req_id).
+        mode:
+            - "hash"   : stable sort by rank_key(endpoint, req_id).
+            - "shuffle": epoch-seeded shuffle (same behavior as reorder_for_endpoint).
+            - "fifo"   : no reordering (identity).
+            - "none"   : alias of "fifo".
+        include_scores:
+            - If False, meta_list will be an empty list (no logging overhead).
 
-    include_scores:
-        - If False, meta_list will be an empty list (no overhead for logging).
+    Returns:
+        ordered_items, meta_list
     """
     if not items:
         return [], []

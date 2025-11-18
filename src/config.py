@@ -82,47 +82,25 @@ class RouterConfig:
     # =========================
     # KV-aware ranking knobs
     # =========================
+    # KV-aware routing
     KV_AWARE: bool = True
-    """
-    Master toggle for enabling KV-aware request ordering.
-    When True, router_core delegates queue selection to kv_aware.pick_batch().
-    """
+    KV_PRIORITY_POLICY: str = "none"        # "len" | "kv" | "hybrid" | "none"
 
-    KV_PRIORITY_POLICY: Literal["len", "kv", "hybrid", "none"] = "len"
-    """
-    Determines how ranking is computed:
-        - "len"    : only length-based ranking
-        - "kv"     : rank only by KV cache affinity
-        - "hybrid" : combine length + KV scores
-        - "none"   : FIFO/random (no ranking)
-    """
-
-    KV_REFRESH_MODE: Literal["event", "periodic", "mixed"] = "mixed"
-    """
-    When KV affinity scores get refreshed:
-        - "event"     : upon request arrivals / KV-change events
-        - "periodic"  : every KV_REFRESH_INTERVAL_S seconds
-        - "mixed"     : both event-driven and periodic
-    """
-
+    KV_REFRESH_MODE: str = "event"        # "event" | "periodic" | "mixed"
     KV_REFRESH_INTERVAL_S: float = 1.0
-    """Seconds between KV rank recalculations if periodic or mixed mode."""
-
     KV_RANK_DECAY_S: float = 30.0
-    """Optional exponential-decay horizon to age-out old KV hits."""
 
     KV_POOL_FACTOR: int = 256
-    """
-    Number of items to peek from the central queue when computing KV-aware order.
-    Similar to POOL_FACTOR for length-aware but can be tuned independently.
-    """
 
     KV_LOG_EVERY_N: int = 30
-    """Log KV ranking metadata every N batches (paired with QUEUE_LOG_EVERY_N)."""
-
     KV_LOG_SCORES: bool = True
-    """If True, include per-request KV + combined scores in queue logs."""
 
+    # KV watcher / Redis
+    REDIS_HOST: str = "redis.vllm.svc.cluster.local"
+    REDIS_PORT: int = 6379
+    KV_WATCH_INTERVAL_S: float = 1.0
+    KV_WATCH_MAX_KEYS: int = 200
+    KV_DISCOVERY_INTERVAL_S: float = 5.0
 
     # =========================
     # Project paths
