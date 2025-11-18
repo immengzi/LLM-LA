@@ -22,7 +22,7 @@ from utils_prom import (
     stop_metrics_collection,
 )
 from utils import save_summary
-from utils import log_autoscale, log_load  # unified load logger
+from utils import log_autoscale, log_load
 
 # Concrete router imports
 from router_core import (
@@ -31,6 +31,10 @@ from router_core import (
     RandomBatchingRouter,
     LeastQueueBatchingRouter,
 )
+
+# KV-aware
+from kv_aware import notify_arrival
+from kv_watcher import KVWatcher
 
 # Union types for router class / instance
 RouterInstance = Union[
@@ -50,8 +54,6 @@ RouterClass = Union[
 # Optional: for clarity
 PromptItem = Union[str, tuple[str, int]]
 from autoscaler import QueueBacklogAutoscaler
-from kv_aware import notify_arrival
-
 
 # Centralized config
 _cfg = get_config()
@@ -99,6 +101,7 @@ _cfg = get_config()
 from itertools import count
 _req_id_counter = count(start=0)
 
+
 def _make_enqueue_fn_for_batched(router) -> callable:
     """
     enqueue_one(prompt_or_pair, t_enq_client)
@@ -122,7 +125,6 @@ def _make_enqueue_fn_for_batched(router) -> callable:
                     pass
             router.q.put((str(prompt), float(t_enq_client), int(rid)))
             try:
-                # inform the KV-aware layer that one new item arrived
                 notify_arrival(1)
             except Exception:
                 pass
@@ -134,7 +136,6 @@ def _make_enqueue_fn_for_batched(router) -> callable:
                     pass
             router.q.put((str(prompt), time.time(), int(rid)))
             try:
-                # inform the KV-aware layer that one new item arrived
                 notify_arrival(1)
             except Exception:
                 pass
@@ -154,7 +155,6 @@ def _start_load_feeder_if_needed(pattern, prompts, enqueue_one, *, router_mode: 
     # For "dump", handle both deque and iterator (and log)
     if pat == "dump":
         t0 = time.time()
-        # start log
         try:
             log_load(router_mode=router_mode, event="start", pattern="dump", rps=None, extra={"effective_start_ts": t0})
         except Exception:
@@ -205,7 +205,6 @@ def _start_load_feeder_if_needed(pattern, prompts, enqueue_one, *, router_mode: 
                     except Exception:
                         pass
 
-        # done log
         try:
             log_load(
                 router_mode=router_mode,
@@ -245,13 +244,9 @@ def _start_load_feeder_if_needed(pattern, prompts, enqueue_one, *, router_mode: 
     th.start()
     return th
 
+
 # -------------------------
 # Main Experiment Loop
-# 1. Start metrics and initialize router + load feeder
-# 2. Discover endpoints and configure autoscaler
-# 3. Main loop: refresh discovery, autoscale, update router, step scheduler
-# 4. Log status and autoscale events
-# 5. On finish: stop metrics, print summary, save results
 # -------------------------
 
 def _run_batched_common(
@@ -268,7 +263,6 @@ def _run_batched_common(
     start_metrics_collection(mode_name, _cfg.METRICS_PATH, metrics_interval)
     start_time = time.time()
 
-    # --- results path
     try:
         results_dir = getattr(_cfg, "RESULTS_PATH", None) or getattr(_cfg, "RESULTS_DIR", None)
         if results_dir:
@@ -276,10 +270,27 @@ def _run_batched_common(
     except Exception:
         pass
 
-    # --- router construction
     router: RouterInstance = router_cls(mode_name=mode_name)
 
-    # --- load feeder setup (now passes router_mode for load logging)
+    # KV watcher
+    kv_watcher = None
+    try:
+        kv_watcher = KVWatcher(
+            # model_name=_cfg.MODEL_NAME,
+            # redis_host=_cfg.REDIS_HOST,
+            # redis_port=_cfg.REDIS_PORT,
+            # namespace=_cfg.NAMESPACE,
+            # label_selector=_cfg.LABEL_SELECTOR,
+            # service_port=_cfg.VLLM_PORT,
+            # interval_s=float(_cfg.KV_WATCH_INTERVAL_S),
+            # max_keys=int(_cfg.KV_WATCH_MAX_KEYS),
+        )
+        kv_watcher.start()
+        print("[KV-WATCHER] started.")
+    except Exception as e:
+        print(f"[KV-WATCHER] FAILED TO START: {e}")
+        kv_watcher = None
+
     feeder = _start_load_feeder_if_needed(
         _cfg.LOAD_PATTERN,
         prompts,
@@ -287,15 +298,18 @@ def _run_batched_common(
         router_mode=mode_name,
     )
 
-    # --- initial endpoint discovery
     eps_all = discover_endpoints(core, _cfg.NAMESPACE, _cfg.LABEL_SELECTOR, _cfg.VLLM_PORT)
     if not eps_all:
         print("No running vLLM pods found. Exiting.")
         stop_metrics_collection(mode_name)
+        if kv_watcher:
+            try:
+                kv_watcher.stop()
+            except Exception:
+                pass
         return
     update_metrics_endpoints(mode_name, eps_all)
 
-    # --- autoscaler setup
     scaler = None
     if getattr(_cfg, "AUTOSCALE_ENABLED", True):
         scaler = QueueBacklogAutoscaler(
@@ -324,13 +338,12 @@ def _run_batched_common(
 
     router.ensure_endpoints(eps_all)
     last_discovery = 0.0
-    last_logged_sig: tuple | None = None  # (desired_servers, sorted(active), sorted(draining))
+    last_logged_sig: tuple | None = None
 
     try:
         while router.has_work() or (feeder.is_alive() if feeder else False):
             now = time.time()
 
-            # Periodic discovery refresh
             if now - last_discovery > _cfg.DISCOVERY_INTERVAL_S:
                 eps_all = discover_endpoints(core, _cfg.NAMESPACE, _cfg.LABEL_SELECTOR, _cfg.VLLM_PORT)
                 update_metrics_endpoints(mode_name, eps_all)
@@ -340,7 +353,6 @@ def _run_batched_common(
                     time.sleep(1.0)
                     continue
 
-            # --- inflight summary
             inflight_sum = 0
             inflight_by_ep = {}
             try:
@@ -350,7 +362,6 @@ def _run_batched_common(
             except Exception:
                 pass
 
-            # --- autoscale decision
             if scaler:
                 active_eps, draining_eps, desired_servers, reason, changed = scaler.step_and_select(
                     eps_all,
@@ -365,7 +376,6 @@ def _run_batched_common(
 
             realized_servers = len(active_eps) + len(draining_eps)
 
-            # --- router endpoint updates
             if hasattr(router, "set_draining_eps"):
                 try:
                     router.set_draining_eps(set(draining_eps))
@@ -373,7 +383,6 @@ def _run_batched_common(
                     pass
             router.ensure_endpoints(list(active_eps) + list(draining_eps))
 
-            # --- structured autoscale log
             sig = (desired_servers, tuple(sorted(active_eps)), tuple(sorted(draining_eps)))
             if changed or sig != last_logged_sig:
                 log_autoscale(
@@ -389,7 +398,6 @@ def _run_batched_common(
                 )
                 last_logged_sig = sig
 
-            # --- router scheduling tick
             router.step()
             print(
                 f"[{log_prefix}] desired={desired_servers} realized={realized_servers} "
@@ -399,9 +407,13 @@ def _run_batched_common(
             )
             time.sleep(_cfg.SAMPLE_INTERVAL)
     finally:
-        pass
+        if kv_watcher:
+            try:
+                kv_watcher.stop()
+                print("[KV-WATCHER] stopped.")
+            except Exception:
+                pass
 
-    # --- summary
     runtime = time.time() - start_time
     print(f"\n==== SUMMARY ({summary_caption}) ====")
     print(f"Total runtime: {runtime:.2f}s")

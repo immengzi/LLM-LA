@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# client_kv_routing_scenario.py
 """
 KV-aware routing demo with Kubernetes pod discovery.
 

@@ -100,7 +100,6 @@ def cli(
     ignore_eos: bool,
     prompts_limit: int,
     predictor_name: str,
-    # NEW:
     prompts_source: str,
     hf_name: str,
     hf_split: str,
