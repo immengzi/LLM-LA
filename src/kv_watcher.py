@@ -7,6 +7,7 @@ Background KV watcher:
 - Calls notify_kv_update(endpoint_url).
 """
 
+import os
 import time
 import threading
 from typing import Dict, Optional
@@ -16,19 +17,22 @@ import redis.asyncio as aioredis
 from kubernetes import client as k8s_client, config as k8s_config
 
 from config import get_config
-from kv_aware import notify_kv_update
+from kv_aware import notify_kv_update, register_block_owners
 
 _cfg = get_config()
 
 
-
+# ---------------------------------------------------------------------------
+# Kubernetes discovery helpers
 # ---------------------------------------------------------------------------
 
 def _discover_pods() -> Dict[str, str]:
     """Return {pod_name: pod_ip} for running vLLM pods."""
 
+    running_in_cluster = os.getenv("KUBERNETES_SERVICE_HOST") is not None
+
     try:
-        if _cfg.RUNNING_IN_CLUSTER:
+        if running_in_cluster:
             k8s_config.load_incluster_config()
         else:
             k8s_config.load_kube_config()
@@ -40,8 +44,8 @@ def _discover_pods() -> Dict[str, str]:
 
     try:
         pods = v1.list_namespaced_pod(
-            namespace=_cfg.K8S_NAMESPACE,
-            label_selector=_cfg.K8S_LABEL_SELECTOR,
+            namespace=_cfg.NAMESPACE,
+            label_selector=_cfg.LABEL_SELECTOR,
         ).items
     except Exception as e:
         print(f"[KVWatcher] list_namespaced_pod failed: {e}")
@@ -61,6 +65,8 @@ def _endpoint_for_pod(pod_name: str, pods: Dict[str, str]) -> Optional[str]:
     return f"http://{ip}:{_cfg.VLLM_PORT}"
 
 
+# ---------------------------------------------------------------------------
+# KV watcher
 # ---------------------------------------------------------------------------
 
 class KVWatcher:
@@ -112,11 +118,13 @@ class KVWatcher:
             while not self._stop_evt.is_set():
                 now = time.time()
 
+                # Refresh pod set
                 if now - last_discovery >= self.discovery_interval_s:
                     pods = _discover_pods()
                     last_discovery = now
                     print(f"[KVWatcher] discovered {len(pods)} pods")
 
+                # Scan Redis only if we know endpoints
                 if pods:
                     await self._scan_once(redis, pods)
 
@@ -129,23 +137,51 @@ class KVWatcher:
                 pass
 
     async def _scan_once(self, redis, pods: Dict[str, str]):
+        """
+        Scan kvblock:* and update:
+          • register_block_owners(block_hash, owners)
+          • notify_kv_update(endpoint)
+
+        Includes debug print of all keys seen.
+        """
         pattern = f"{self.model_name}:kvblock:*"
         seen = 0
+        touched_eps = set()
 
         try:
             async for key in redis.scan_iter(match=pattern, count=100):
-                mapping = await redis.hgetall(key)  # {pod_name: ...}
+                mapping = await redis.hgetall(key)
                 if not mapping:
                     continue
 
-                for pod_name in mapping.keys():
+                # key format: served-model:kvblock:<hash>
+                try:
+                    block_hash = int(key.rsplit(":", 1)[1])
+                except Exception:
+                    continue
+
+                owners = list(mapping.keys())
+                register_block_owners(block_hash, owners)
+
+                print(f"[KVWatcher] key={key} pods={owners}")
+
+                for pod_name in owners:
                     ep = _endpoint_for_pod(pod_name, pods)
                     if ep:
                         notify_kv_update(ep)
+                        touched_eps.add(ep)
 
                 seen += 1
                 if seen >= self.max_keys:
                     break
+
+            if seen > 0:
+                print(
+                    f"[KVWatcher] scan complete: scanned={seen} keys, "
+                    f"updated_endpoints={len(touched_eps)}"
+                )
+            else:
+                print("[KVWatcher] scan complete: no kvblock keys found")
 
         except Exception as e:
             print(f"[KVWatcher] scan failed: {e}")

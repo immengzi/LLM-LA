@@ -32,8 +32,25 @@ from router_core import (
     LeastQueueBatchingRouter,
 )
 
-# KV-aware
-from kv_aware import notify_arrival
+# -------------------------
+# KV-aware imports
+# -------------------------
+try:
+    from kv_aware import (
+        notify_arrival,
+        set_hash_service,
+        maybe_register_request_blocks_from_prompt,
+    )
+except Exception:
+    notify_arrival = None  # type: ignore
+    set_hash_service = None  # type: ignore
+    maybe_register_request_blocks_from_prompt = None  # type: ignore
+
+try:
+    from kv_prefix_client import compute_hashes_for_prompt
+except Exception:
+    compute_hashes_for_prompt = None  # type: ignore
+
 from kv_watcher import KVWatcher
 
 # Union types for router class / instance
@@ -116,29 +133,38 @@ def _make_enqueue_fn_for_batched(router) -> callable:
         else:
             prompt, replay_out_len = prompt_or_pair, None
 
-        rid = next(_req_id_counter)
+        prompt_str = str(prompt)
+        rid = int(next(_req_id_counter))
+
+        # Optional: record replay output length (for strict histogram replay)
+        if replay_out_len is not None:
+            try:
+                register_replay_out_len(rid, int(replay_out_len))
+            except Exception:
+                pass
+
+        # --- KV-prefix registration for this request (hash service) ---
+        # This computes block hashes and stores them in kv_aware.state
+        if maybe_register_request_blocks_from_prompt is not None:
+            try:
+                maybe_register_request_blocks_from_prompt(rid, prompt_str)
+            except Exception as e:
+                # Keep it noisy but non-fatal
+                print(f"[KV] hash registration failed for req_id={rid}: {e}")
+
+        # --- Global arrival epoch bump for KV-aware ranking ---
+        if notify_arrival is not None:
+            try:
+                notify_arrival(1)
+            except Exception:
+                pass
+
+        # Finally, enqueue into router queue
         try:
-            if replay_out_len is not None:
-                try:
-                    register_replay_out_len(int(rid), int(replay_out_len))
-                except Exception:
-                    pass
-            router.q.put((str(prompt), float(t_enq_client), int(rid)))
-            try:
-                notify_arrival(1)
-            except Exception:
-                pass
+            router.q.put((prompt_str, float(t_enq_client), rid))
         except Exception:
-            if replay_out_len is not None:
-                try:
-                    register_replay_out_len(int(rid), int(replay_out_len))
-                except Exception:
-                    pass
-            router.q.put((str(prompt), time.time(), int(rid)))
-            try:
-                notify_arrival(1)
-            except Exception:
-                pass
+            # Fallback with fresh timestamp if t_enq_client was bad
+            router.q.put((prompt_str, time.time(), rid))
 
     return enqueue_one
 
@@ -272,19 +298,21 @@ def _run_batched_common(
 
     router: RouterInstance = router_cls(mode_name=mode_name)
 
-    # KV watcher
+    # --- Bind CPU hash service for KV-prefix routing (if available) ---
+    if set_hash_service is not None and compute_hashes_for_prompt is not None:
+        try:
+            kv_timeout = float(getattr(_cfg, "KV_HASH_TIMEOUT_S", 10.0))
+            set_hash_service(compute_hashes_for_prompt, timeout_s=kv_timeout)
+            print(f"[KV] Hash service bound (timeout={kv_timeout:.1f}s)")
+        except Exception as e:
+            print(f"[KV] Failed to bind hash service: {e}")
+    else:
+        print("[KV] Hash service not available; KV-prefix routing will use epochs only.")
+
+    # KV watcher (Redis → block_hash → pod owners)
     kv_watcher = None
     try:
-        kv_watcher = KVWatcher(
-            # model_name=_cfg.MODEL_NAME,
-            # redis_host=_cfg.REDIS_HOST,
-            # redis_port=_cfg.REDIS_PORT,
-            # namespace=_cfg.NAMESPACE,
-            # label_selector=_cfg.LABEL_SELECTOR,
-            # service_port=_cfg.VLLM_PORT,
-            # interval_s=float(_cfg.KV_WATCH_INTERVAL_S),
-            # max_keys=int(_cfg.KV_WATCH_MAX_KEYS),
-        )
+        kv_watcher = KVWatcher()
         kv_watcher.start()
         print("[KV-WATCHER] started.")
     except Exception as e:

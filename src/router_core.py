@@ -36,9 +36,16 @@ from length_backend import count_input_tokens
 
 # Optional KV-aware ranking helper for logging + ordering
 try:
-    from kv_aware import rank_items_for_endpoint  # (endpoint, items, mode, include_scores) -> (ordered, meta)
+    from kv_aware import (
+        rank_items_for_endpoint,   # (endpoint, items, mode, include_scores) -> (ordered, meta)
+        notify_arrival,            # bump global arrival epoch
+    )
 except Exception:
     rank_items_for_endpoint = None  # type: ignore
+
+    def notify_arrival(n: int = 1) -> None:  # type: ignore
+        # Safe no-op fallback if kv_aware isn't available
+        return
 
 _cfg = get_config()
 _pred = get_length_predictor()  # singleton predictor based on cfg.PREDICTOR_NAME
@@ -295,6 +302,8 @@ class PullBatchingRouter:
                     self.err_counts[ep] = self.err_counts.get(ep, 0) + 1
                 try:
                     self.q.put((prompt, time.time(), req_id))
+                    # KV-aware: new logical arrival back into the queue
+                    notify_arrival(1)
                 except Exception:
                     pass
             finally:
@@ -789,6 +798,8 @@ class _BaseBatchingRouter:
                 # Sem gone? requeue the item and exit
                 try:
                     self.q.put((prompt, t_enq_client, req_id))
+                    # KV-aware: logical new arrival to central queue
+                    notify_arrival(1)
                 except Exception:
                     pass
                 break
@@ -815,6 +826,8 @@ class _BaseBatchingRouter:
                 # If we cannot get a session (pool gone), requeue and bail
                 try:
                     self.q.put((prompt, t_enq_client, req_id))
+                    # KV-aware: treat as a re-arrival
+                    notify_arrival(1)
                 except Exception:
                     pass
                 return
@@ -955,6 +968,8 @@ class _BaseBatchingRouter:
             # requeue; sender pacing avoids hammering
             try:
                 self.q.put((prompt, time.time(), req_id))
+                # KV-aware: treat as a fresh arrival into the queue
+                notify_arrival(1)
             except Exception:
                 pass
         finally:
@@ -1078,6 +1093,7 @@ class _BaseBatchingRouter:
                     # endpoint disappeared; put item back and stop
                     try:
                         self.q.put((prompt, t_enq_client, req_id))
+                        notify_arrival(1)
                     except Exception:
                         pass
                     break
