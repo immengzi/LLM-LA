@@ -71,10 +71,10 @@ MAX_INFLIGHT_PER_EP: 8
 # Choose ONE pattern below (uncomment only one LOAD_PATTERN block)
 
 # ---- A) Dump: enqueue everything immediately ----
-# LOAD_PATTERN: "dump"
+LOAD_PATTERN: "dump"
 # (no rate knobs needed)
-# LOAD_WARMUP_S: 0.0
-# LOAD_DURATION_S: 999999.0
+LOAD_WARMUP_S: 0.0
+LOAD_DURATION_S: 999999.0
 
 # ---- B) Deterministic fixed rate ----
 # LOAD_PATTERN: "det"
@@ -104,13 +104,13 @@ MAX_INFLIGHT_PER_EP: 8
 # STEP_SCHEDULE: "0:3,30:8,60:1"
 
 # ---- F) Random range (re-sample RPS every epoch) ----
-LOAD_PATTERN: "rand"
-LOAD_WARMUP_S: 0.0
-LOAD_DURATION_S: 999999.0
-RAND_RPS_MIN: 1.0
-RAND_RPS_MAX: 4.0
-RAND_EPOCH_S: 4.0
-RAND_KIND: "poisson"    # or "det" for fixed spacing per epoch
+# LOAD_PATTERN: "rand"
+# LOAD_WARMUP_S: 0.0
+# LOAD_DURATION_S: 999999.0
+# RAND_RPS_MIN: 1.0
+# RAND_RPS_MAX: 4.0
+# RAND_EPOCH_S: 4.0
+# RAND_KIND: "poisson"    # or "det" for fixed spacing per epoch
 
 # Common knobs
 LENGTH_DIST_STRICT_HIST: true

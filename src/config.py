@@ -84,7 +84,7 @@ class RouterConfig:
     # =========================
     # KV-aware routing
     KV_AWARE: bool = True
-    KV_PRIORITY_POLICY: str = "none"        # "len" | "kv" | "hybrid" | "none"
+    KV_PRIORITY_POLICY: str = "kv"        # "len" | "kv" | "hybrid" | "none"
 
     KV_REFRESH_MODE: str = "event"        # "event" | "periodic" | "mixed"
     KV_REFRESH_INTERVAL_S: float = 1.0
@@ -96,8 +96,10 @@ class RouterConfig:
     KV_LOG_SCORES: bool = True
 
     # KV watcher / Redis
-    REDIS_HOST: str = "redis.vllm.svc.cluster.local"
-    REDIS_PORT: int = 6379
+    # REDIS_HOST: str = "redis.vllm.svc.cluster.local"
+    # REDIS_PORT: int = 6379
+    REDIS_HOST: str = "127.0.0.1"
+    REDIS_PORT: int = 30079
     KV_WATCH_INTERVAL_S: float = 1.0
     KV_WATCH_MAX_KEYS: int = 200
     KV_DISCOVERY_INTERVAL_S: float = 5.0
