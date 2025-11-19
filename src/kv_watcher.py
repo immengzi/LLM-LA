@@ -5,6 +5,11 @@ Background KV watcher:
 - Periodically scans Redis kvblock keys.
 - Maps pod_name -> pod_ip -> router endpoint URL.
 - Calls notify_kv_update(endpoint_url).
+
+Verbosity controlled by config.KV_LOG_KEYS:
+  - "off"     : only start/stop + errors
+  - "summary" : discovery + scan summary
+  - "full"    : per-key logs + summary
 """
 
 import os
@@ -20,6 +25,32 @@ from config import get_config
 from kv_aware import notify_kv_update, register_block_owners
 
 _cfg = get_config()
+_KV_LOG_MODE = str(getattr(_cfg, "KV_LOG_KEYS", "summary")).lower()
+
+
+def _log(msg: str, *, level: str = "summary") -> None:
+    """
+    Small helper for controlling verbosity.
+
+    level:
+      - "full"    -> only printed when KV_LOG_KEYS == "full"
+      - "summary" -> printed when KV_LOG_KEYS in {"summary", "full"}
+      - "always"  -> always printed (ignores KV_LOG_KEYS)
+    """
+    if level == "always":
+        print(f"[KVWatcher] {msg}")
+        return
+
+    if _KV_LOG_MODE == "off":
+        return
+
+    if level == "summary":
+        # both "summary" and "full" should see this
+        print(f"[KVWatcher] {msg}")
+        return
+
+    if level == "full" and _KV_LOG_MODE == "full":
+        print(f"[KVWatcher] {msg}")
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +68,7 @@ def _discover_pods() -> Dict[str, str]:
         else:
             k8s_config.load_kube_config()
     except Exception as e:
-        print(f"[KVWatcher] Failed to load K8s config: {e}")
+        _log(f"Failed to load K8s config: {e}", level="always")
         return {}
 
     v1 = k8s_client.CoreV1Api()
@@ -48,7 +79,7 @@ def _discover_pods() -> Dict[str, str]:
             label_selector=_cfg.LABEL_SELECTOR,
         ).items
     except Exception as e:
-        print(f"[KVWatcher] list_namespaced_pod failed: {e}")
+        _log(f"list_namespaced_pod failed: {e}", level="always")
         return {}
 
     out: Dict[str, str] = {}
@@ -92,14 +123,19 @@ class KVWatcher:
             daemon=True,
         )
         self._thread.start()
-        print(f"[KVWatcher] Started (redis={self.redis_url}, model={self.model_name})")
+        _log(
+            f"Started (redis={self.redis_url}, model={self.model_name}, "
+            f"interval_s={self.interval_s}, max_keys={self.max_keys}, "
+            f"log_mode={_KV_LOG_MODE})",
+            level="always",
+        )
 
     def stop(self):
         self._stop_evt.set()
         if self._thread:
             self._thread.join(timeout=2.0)
             self._thread = None
-        print("[KVWatcher] Stopped")
+        _log("Stopped", level="always")
 
     # -------------------------------------------------------
 
@@ -107,7 +143,7 @@ class KVWatcher:
         try:
             asyncio.run(self._run_async())
         except Exception as e:
-            print(f"[KVWatcher] async loop crashed: {e}")
+            _log(f"async loop crashed: {e}", level="always")
 
     async def _run_async(self):
         redis = aioredis.from_url(self.redis_url, decode_responses=True)
@@ -122,7 +158,7 @@ class KVWatcher:
                 if now - last_discovery >= self.discovery_interval_s:
                     pods = _discover_pods()
                     last_discovery = now
-                    print(f"[KVWatcher] discovered {len(pods)} pods")
+                    _log(f"discovered {len(pods)} pods", level="summary")
 
                 # Scan Redis only if we know endpoints
                 if pods:
@@ -142,7 +178,10 @@ class KVWatcher:
           • register_block_owners(block_hash, owners)
           • notify_kv_update(endpoint)
 
-        Includes debug print of all keys seen.
+        Logging:
+          - full: per-key + scan summary
+          - summary: scan summary only
+          - off: nothing unless error
         """
         pattern = f"{self.model_name}:kvblock:*"
         seen = 0
@@ -163,7 +202,8 @@ class KVWatcher:
                 owners = list(mapping.keys())
                 register_block_owners(block_hash, owners)
 
-                print(f"[KVWatcher] key={key} pods={owners}")
+                # Per-key logging only in "full" mode
+                _log(f"key={key} pods={owners}", level="full")
 
                 for pod_name in owners:
                     ep = _endpoint_for_pod(pod_name, pods)
@@ -176,12 +216,13 @@ class KVWatcher:
                     break
 
             if seen > 0:
-                print(
-                    f"[KVWatcher] scan complete: scanned={seen} keys, "
-                    f"updated_endpoints={len(touched_eps)}"
+                _log(
+                    f"scan complete: scanned={seen} keys, "
+                    f"updated_endpoints={len(touched_eps)}",
+                    level="summary",
                 )
             else:
-                print("[KVWatcher] scan complete: no kvblock keys found")
+                _log("scan complete: no kvblock keys found", level="summary")
 
         except Exception as e:
-            print(f"[KVWatcher] scan failed: {e}")
+            _log(f"scan failed: {e}", level="always")

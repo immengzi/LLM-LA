@@ -104,6 +104,10 @@ class RouterConfig:
     KV_WATCH_MAX_KEYS: int = 200
     KV_DISCOVERY_INTERVAL_S: float = 5.0
 
+    # --- KV-prefix hash service ---
+    HASH_SERVICE_URL: str = "http://127.0.0.1:30095/compute_hashes"
+
+
     # =========================
     # Project paths
     # =========================
@@ -248,6 +252,12 @@ class RouterConfig:
 
     # ---- Think/no think ----
     THINK: bool = False
+
+    # ---- Router status logging verbosity ----
+    # "off"       => print nothing
+    # "summary"   => print compact single-line summary
+    # "full"      => print full detailed status (current behavior)
+    ROUTER_STATUS_LOG: str = "full"   # "off" | "summary" | "full"
 
 
 # --- global holder ---

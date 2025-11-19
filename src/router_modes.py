@@ -10,26 +10,30 @@ Router modes (batching-only):
 import time
 import threading
 from collections import deque
+from itertools import count
 from typing import Type, Union
 
 from kubernetes import client
 
+from autoscaler import QueueBacklogAutoscaler
 from config import get_config
-from utils_k8s import discover_endpoints
-from utils_prom import (
-    start_metrics_collection,
-    update_metrics_endpoints,
-    stop_metrics_collection,
-)
-from utils import save_summary
-from utils import log_autoscale, log_load
-
-# Concrete router imports
 from router_core import (
     PullBatchingRouter,
     RRBatchingRouter,
     RandomBatchingRouter,
     LeastQueueBatchingRouter,
+)
+from utils import (
+    save_summary,
+    log_autoscale,
+    log_load,
+    compute_hashes_for_prompt,
+)
+from utils_k8s import discover_endpoints
+from utils_prom import (
+    start_metrics_collection,
+    update_metrics_endpoints,
+    stop_metrics_collection,
 )
 
 # -------------------------
@@ -45,11 +49,6 @@ except Exception:
     notify_arrival = None  # type: ignore
     set_hash_service = None  # type: ignore
     maybe_register_request_blocks_from_prompt = None  # type: ignore
-
-try:
-    from kv_prefix_client import compute_hashes_for_prompt
-except Exception:
-    compute_hashes_for_prompt = None  # type: ignore
 
 from kv_watcher import KVWatcher
 
@@ -70,7 +69,6 @@ RouterClass = Union[
 
 # Optional: for clarity
 PromptItem = Union[str, tuple[str, int]]
-from autoscaler import QueueBacklogAutoscaler
 
 # Centralized config
 _cfg = get_config()
@@ -115,7 +113,6 @@ _cfg = get_config()
 
 # -------------------------
 
-from itertools import count
 _req_id_counter = count(start=0)
 
 
@@ -176,6 +173,7 @@ def _start_load_feeder_if_needed(pattern, prompts, enqueue_one, *, router_mode: 
     - For others: spawn a daemon thread that calls drive_load(...) with logging enabled.
     """
     from loadgen import drive_load
+
     pat = (pattern or "dump").lower()
 
     # For "dump", handle both deque and iterator (and log)
@@ -266,6 +264,7 @@ def _start_load_feeder_if_needed(pattern, prompts, enqueue_one, *, router_mode: 
             log_every=int(getattr(_cfg, "LOAD_LOG_EVERY", 1)),
             verbose=bool(getattr(_cfg, "VERBOSE_LOAD", True)),
         )
+
     th = threading.Thread(target=_runner, daemon=True)
     th.start()
     return th
@@ -427,12 +426,30 @@ def _run_batched_common(
                 last_logged_sig = sig
 
             router.step()
-            print(
-                f"[{log_prefix}] desired={desired_servers} realized={realized_servers} "
-                f"active={len(active_eps)} draining={len(draining_eps)} total={len(eps_all)} "
-                f"q={router.q.qsize()} inflight={inflight_sum} reason={reason} | "
-                f"{router.status_line()}"
-            )
+
+            # -----------------------------
+            # Router status logging modes:
+            #   "off"     -> no per-iteration print
+            #   "summary" -> compact line (no endpoint spam)
+            #   "full"    -> previous detailed behavior
+            # -----------------------------
+            log_mode = str(getattr(_cfg, "ROUTER_STATUS_LOG", "summary")).lower()
+
+            if log_mode == "full":
+                print(
+                    f"[{log_prefix}] desired={desired_servers} realized={realized_servers} "
+                    f"active={len(active_eps)} draining={len(draining_eps)} total={len(eps_all)} "
+                    f"q={router.q.qsize()} inflight={inflight_sum} reason={reason} | "
+                    f"{router.status_line()}"
+                )
+            elif log_mode == "summary":
+                print(
+                    f"[{log_prefix}] servers={realized_servers}/{desired_servers} "
+                    f"active={len(active_eps)} draining={len(draining_eps)} "
+                    f"q={router.q.qsize()} inflight={inflight_sum} reason={reason}"
+                )
+            # else "off": print nothing
+
             time.sleep(_cfg.SAMPLE_INTERVAL)
     finally:
         if kv_watcher:

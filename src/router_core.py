@@ -39,6 +39,7 @@ try:
     from kv_aware import (
         rank_items_for_endpoint,   # (endpoint, items, mode, include_scores) -> (ordered, meta)
         notify_arrival,            # bump global arrival epoch
+        prefix_len,                # endpoint, req_id -> prefix hits
     )
 except Exception:
     rank_items_for_endpoint = None  # type: ignore
@@ -46,6 +47,11 @@ except Exception:
     def notify_arrival(n: int = 1) -> None:  # type: ignore
         # Safe no-op fallback if kv_aware isn't available
         return
+
+    def prefix_len(endpoint: str, req_id: int) -> int:  # type: ignore
+        # Safe fallback: no KV info
+        return 0
+
 
 _cfg = get_config()
 _pred = get_length_predictor()  # singleton predictor based on cfg.PREDICTOR_NAME
@@ -253,6 +259,28 @@ class PullBatchingRouter:
                 total_predicted_tokens = (input_actual_tokens + pred_out_int) if pred_out_int is not None else None
                 total_actual_tokens    = (input_actual_tokens + act_out_int) if act_out_int is not None else None
 
+                # --- KV candidate stats for this request ---
+                kv_hits_this_ep = int(prefix_len(ep, int(req_id)))
+                kv_candidates: List[Dict[str, int]] = []
+                best_ep: Optional[str] = None
+                best_hits = 0
+
+                eps_snapshot = list(self.eps)
+                for ep2 in eps_snapshot:
+                    try:
+                        h = int(prefix_len(ep2, int(req_id)))
+                    except Exception:
+                        h = 0
+                    if h <= 0:
+                        continue
+                    kv_candidates.append({"endpoint": ep2, "kv_hits": h})
+                    if h > best_hits:
+                        best_hits = h
+                        best_ep = ep2
+
+                kv_candidates.sort(key=lambda d: (-d["kv_hits"], d["endpoint"]))
+                kv_candidates = kv_candidates[:8]  # trim to top-N for log size
+
                 log_result(
                     mode=self.mode_name,
                     endpoint=ep,
@@ -280,6 +308,11 @@ class PullBatchingRouter:
                         "actual_out_tokens": act_out_int,
                         "total_predicted_tokens": total_predicted_tokens,
                         "total_actual_tokens": total_actual_tokens,
+                        # KV stats for this request
+                        "kv_hits": kv_hits_this_ep,
+                        "kv_best_endpoint": best_ep,
+                        "kv_best_hits": int(best_hits),
+                        "kv_candidates": kv_candidates,
                     },
                 )
 
@@ -921,6 +954,28 @@ class _BaseBatchingRouter:
             total_predicted_tokens = (input_actual_tokens + pred_out_int) if pred_out_int is not None else None
             total_actual_tokens    = (input_actual_tokens + act_out_int) if act_out_int is not None else None
 
+            # --- KV candidate stats for this request ---
+            kv_hits_this_ep = int(prefix_len(ep, int(req_id)))
+            kv_candidates: List[Dict[str, int]] = []
+            best_ep: Optional[str] = None
+            best_hits = 0
+
+            eps_snapshot = list(self.eps)
+            for ep2 in eps_snapshot:
+                try:
+                    h = int(prefix_len(ep2, int(req_id)))
+                except Exception:
+                    h = 0
+                if h <= 0:
+                    continue
+                kv_candidates.append({"endpoint": ep2, "kv_hits": h})
+                if h > best_hits:
+                    best_hits = h
+                    best_ep = ep2
+
+            kv_candidates.sort(key=lambda d: (-d["kv_hits"], d["endpoint"]))
+            kv_candidates = kv_candidates[:8]
+
             log_result(
                 mode=self.mode_name,
                 endpoint=ep,
@@ -948,6 +1003,11 @@ class _BaseBatchingRouter:
                     "actual_out_tokens": act_out_int,
                     "total_predicted_tokens": total_predicted_tokens,
                     "total_actual_tokens": total_actual_tokens,
+                    # KV stats
+                    "kv_hits": kv_hits_this_ep,
+                    "kv_best_endpoint": best_ep,
+                    "kv_best_hits": int(best_hits),
+                    "kv_candidates": kv_candidates,
                 },
             )
 
@@ -1170,7 +1230,7 @@ class _BaseBatchingRouter:
             active = any(v > 0 for v in self.inflight.values())
         return (not self.q.empty()) or active
 
-    def status_line(self) -> str:
+    def status_line(self) -> bool:
         with self._lock:
             parts = []
             for ep in self.eps:
