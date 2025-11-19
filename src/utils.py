@@ -8,9 +8,11 @@ import threading
 import random
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
 import requests
 from urllib.parse import urlparse
+
 from config import get_config, dump_config_dict
 from length_backend import compute_length_plan, rng_for_prompt, sample_out_tokens_from_cfg
 
@@ -22,14 +24,17 @@ _cfg = get_config()
 RESULTS_ROOT = _cfg.RESULTS_DIR
 QUEUE_LOG_FILENAME = _cfg.QUEUE_LOG_FILENAME
 
+
 class _PayloadMode(str, Enum):
     OFF = "off"
     HEAD = "head"
     FULL = "full"
 
+
 def _redact_text(text: str | None) -> str | None:
     # TODO: add patterns for secrets, emails, tokens, etc.
     return text
+
 
 def _clip_by_mode(text: str | None, mode: str, head_chars: int) -> tuple[str | None, bool]:
     """
@@ -47,10 +52,12 @@ def _clip_by_mode(text: str | None, mode: str, head_chars: int) -> tuple[str | N
         return text, False
     return text[:max(0, int(head_chars))] + "… [truncated]", True
 
+
 def _mode_dir(mode: str) -> str:
     path = os.path.join(RESULTS_ROOT, mode)
     os.makedirs(path, exist_ok=True)
     return path
+
 
 def _next_run_dir(mode: str) -> str:
     mode_path = _mode_dir(mode)
@@ -74,14 +81,17 @@ def _next_run_dir(mode: str) -> str:
 
     return run_path
 
+
 _run_dirs: Dict[str, str] = {}
 _run_dirs_guard = threading.Lock()
+
 
 def get_run_dir(mode: str) -> str:
     with _run_dirs_guard:
         if mode not in _run_dirs:
             _run_dirs[mode] = _next_run_dir(mode)
         return _run_dirs[mode]
+
 
 class JsonlLogger:
     def __init__(self, path: str):
@@ -97,8 +107,10 @@ class JsonlLogger:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
+
 _loggers: Dict[str, JsonlLogger] = {}
 _loggers_guard = threading.Lock()
+
 
 def _get_logger_for_mode(mode: str) -> JsonlLogger:
     run_dir = get_run_dir(mode)
@@ -107,6 +119,7 @@ def _get_logger_for_mode(mode: str) -> JsonlLogger:
         if mode not in _loggers:
             _loggers[mode] = JsonlLogger(path)
         return _loggers[mode]
+
 
 # ---- unified request/response logger ----
 def log_result(
@@ -138,20 +151,20 @@ def log_result(
     """
     cfg = get_config()
     payload_mode = _PayloadMode(str(getattr(cfg, "LOG_PAYLOAD_MODE", "head")).lower())
-    head_chars   = int(getattr(cfg, "LOG_HEAD_CHARS", 512))
+    head_chars = int(getattr(cfg, "LOG_HEAD_CHARS", 512))
 
     # Prefer explicit response; else accept legacy response_preview once
     if response is None and response_preview is not None:
         response = response_preview
 
     # Redact first
-    prompt   = _redact_text(prompt)
+    prompt = _redact_text(prompt)
     response = _redact_text(response)
 
     # Clip according to mode for prompt/response separately
     # NOTE: _clip_by_mode expects a str for 'mode', so pass payload_mode.value
-    clipped_prompt,  prompt_trunc = _clip_by_mode(prompt,   payload_mode.value, head_chars)
-    clipped_resp,    resp_trunc   = _clip_by_mode(response, payload_mode.value, head_chars)
+    clipped_prompt, prompt_trunc = _clip_by_mode(prompt, payload_mode.value, head_chars)
+    clipped_resp, resp_trunc = _clip_by_mode(response, payload_mode.value, head_chars)
 
     record: Dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -170,7 +183,7 @@ def log_result(
         record["prompt"] = clipped_prompt
         record["response"] = clipped_resp
         record["truncated"] = {
-            "prompt":   False,
+            "prompt": False,
             "response": False,
         }
 
@@ -179,7 +192,7 @@ def log_result(
         record["prompt"] = clipped_prompt
         record["response_preview"] = clipped_resp or ""
         record["truncated"] = {
-            "prompt":   bool(prompt_trunc),
+            "prompt": bool(prompt_trunc),
             "response": bool(resp_trunc),
         }
 
@@ -199,6 +212,7 @@ def log_result(
 _queue_loggers: Dict[str, JsonlLogger] = {}
 _queue_loggers_guard = threading.Lock()
 
+
 def _get_queue_logger_for_mode(router_mode: str) -> JsonlLogger:
     """
     Returns a logger that writes to <results>/<router_mode>/<run_id>/<QUEUE_LOG_FILENAME>.
@@ -211,6 +225,7 @@ def _get_queue_logger_for_mode(router_mode: str) -> JsonlLogger:
         if key not in _queue_loggers:
             _queue_loggers[key] = JsonlLogger(path)
         return _queue_loggers[key]
+
 
 def log_queue(
     *,
@@ -244,11 +259,13 @@ def log_queue(
         rec.update(extra)
     _get_queue_logger_for_mode(router_mode).write(rec)
 
+
 # ---- LOAD LOGGER (unified: summary + per-arrival timing) ----
 
 _load_loggers: Dict[str, JsonlLogger] = {}
 _load_loggers_guard = threading.Lock()
 LOAD_LOG_FILENAME = getattr(_cfg, "LOAD_LOG_FILENAME", "load.jsonl")
+
 
 def _get_load_logger_for_mode(router_mode: str) -> JsonlLogger:
     """
@@ -261,6 +278,7 @@ def _get_load_logger_for_mode(router_mode: str) -> JsonlLogger:
         if key not in _load_loggers:
             _load_loggers[key] = JsonlLogger(path)
         return _load_loggers[key]
+
 
 def log_load(
     *,
@@ -325,17 +343,21 @@ def log_load(
     except Exception as e:
         print(f"[WARN] load log failed: {e}", flush=True)
 
+
 # ---- metrics summary registry (hooked by prom_utils) ----
 _metrics_summary_getter: Optional[callable] = None
+
 
 def register_metrics_getter(getter: callable) -> None:
     global _metrics_summary_getter
     _metrics_summary_getter = getter
 
+
 def get_metrics_summary(mode: str) -> Dict[str, Any]:
     if _metrics_summary_getter is None:
         return {}
     return _metrics_summary_getter(mode) or {}
+
 
 def save_summary(mode: str, summary: dict) -> None:
     metrics = get_metrics_summary(mode)
@@ -346,6 +368,7 @@ def save_summary(mode: str, summary: dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print(f"[SUMMARY] Saved {path}")
+
 
 # ---------------- HTTP helpers ----------------
 
@@ -361,6 +384,7 @@ def _count_sim_eps_from_cfg(cfg) -> int:
             if isinstance(item, str) and "@" in item:
                 total += 1
     return total
+
 
 def _is_http_sim_endpoint(endpoint: str, cfg) -> bool:
     """
@@ -383,6 +407,7 @@ def _is_http_sim_endpoint(endpoint: str, cfg) -> bool:
         return base <= port < (base + total)
     except Exception:
         return False
+
 
 def healthy(
     endpoint: str, health_path: str = "/health", timeout_s: float | None = None
@@ -411,6 +436,7 @@ def healthy(
         return bool(r.ok)
     except Exception:
         return False
+
 
 def send_chat_request(
     *,
@@ -486,7 +512,7 @@ def send_chat_request(
         "n": n if n is not None else cfg.N,
         "stream": stream if stream is not None else cfg.STREAM,
         "do_sample": do_sample if do_sample is not None else cfg.DO_SAMPLE,
-        "chat_template_kwargs": {"enable_thinking": cfg.THINK}
+        "chat_template_kwargs": {"enable_thinking": cfg.THINK},
     }
     if plan["eff_ignore_eos"]:
         payload["ignore_eos"] = True
@@ -530,7 +556,51 @@ def send_chat_request(
         resp["_req_id"] = int(req_id)
     return resp
 
+
+# ---- KV-prefix hash client ----
+
+def compute_hashes_for_prompt(
+    prompt: str,
+    timeout: float = 10.0,
+) -> Tuple[List[int], List[int]]:
+    """
+    Call the CPU hash service and return (block_hashes, token_ids).
+
+    The service is expected to accept:
+        POST HASH_SERVICE_URL
+        {
+            "messages": [{"role": "user", "content": "<prompt>"}]
+        }
+
+    And return:
+        {
+            "block_hashes": [int, ...],
+            "token_ids": [int, ...]
+        }
+
+    URL is taken from get_config().HASH_SERVICE_URL, with a safe default.
+    """
+    cfg = get_config()
+    url = getattr(cfg, "HASH_SERVICE_URL", "http://127.0.0.1:30095/compute_hashes")
+
+    payload = {
+        "messages": [
+            {"role": "user", "content": prompt},
+        ]
+    }
+
+    resp = requests.post(url, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json() or {}
+
+    block_hashes = [int(bh) for bh in (data.get("block_hashes") or [])]
+    token_ids = [int(t) for t in (data.get("token_ids") or [])]
+
+    return block_hashes, token_ids
+
+
 DEFAULT_PROMPTS_FILE = _cfg.PROMPTS_FILE_PATH
+
 
 def _read_json_or_jsonl(path: str) -> List[str]:
     ext = os.path.splitext(path)[1].lower()
@@ -567,6 +637,7 @@ def _read_json_or_jsonl(path: str) -> List[str]:
         "Prompts file must be a JSON list / JSONL, or an object with key 'prompts'."
     )
 
+
 def load_prompts(path: Optional[str] = None) -> deque:
     cfg = get_config()
     path = path or cfg.PROMPTS_FILE_PATH
@@ -584,11 +655,13 @@ def load_prompts(path: Optional[str] = None) -> deque:
 
     return deque(items)
 
+
 # ---- AUTOSCALE LOGGER ----
 
 _autoscale_loggers: Dict[str, JsonlLogger] = {}
 _autoscale_loggers_guard = threading.Lock()
 AUTOSCALE_LOG_FILENAME = getattr(_cfg, "AUTOSCALE_LOG_FILENAME", "autoscale.jsonl")
+
 
 def _get_autoscale_logger_for_mode(router_mode: str) -> JsonlLogger:
     """
@@ -601,6 +674,7 @@ def _get_autoscale_logger_for_mode(router_mode: str) -> JsonlLogger:
         if key not in _autoscale_loggers:
             _autoscale_loggers[key] = JsonlLogger(path)
         return _autoscale_loggers[key]
+
 
 def log_autoscale(
     *,
