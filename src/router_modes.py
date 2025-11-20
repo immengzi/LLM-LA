@@ -5,6 +5,33 @@ Router modes (batching-only):
 - rr-batching
 - random-batching
 - least-queue-batching
+
+High-level KV flow (when enabled):
+
+  1) CPU hash service (compute_hashes_for_prompt) is bound into kv_aware via
+       set_hash_service(...)
+     so the router can compute block_hashes directly from prompts.
+
+  2) At enqueue time (in _make_enqueue_fn_for_batched), we call
+       maybe_register_request_blocks_from_prompt(req_id, prompt)
+     which stores req_id -> [block_hashes] inside kv_aware.
+
+  3) A background KVWatcher scans Redis keys
+       {MODEL_NAME}:kvblock:<block_hash> -> { pod_name: last_ts, ... }
+     and for each block_hash calls
+       register_block_owners(block_hash, owners)
+       notify_kv_update(endpoint_url)
+     so kv_aware knows which endpoints own which blocks.
+
+  4) In router_core:
+       - prefix_len(endpoint, req_id) returns how many prefix blocks that
+         endpoint owns for that request.
+       - In PullBatchingRouter, if
+            KV_AWARE = True
+            KV_PRIORITY_POLICY = "server"
+         then each endpoint worker pulls *only* those requests for which
+         that endpoint is the best KV match (max prefix_len), with a FIFO
+         fallback for items that don't have a useful KV signal.
 """
 
 import time
@@ -75,7 +102,7 @@ _cfg = get_config()
 
 # -------------------------
 # Helpers (loadgen wiring)
-
+#
 # Load flow (detailed, with file origins):
 #
 #  ┌──────────────────────────────────────────────────────────────────────┐
@@ -100,6 +127,7 @@ _cfg = get_config()
 #  │  3) Compute 'want' via GPU util + admission mode                    │
 #  │  4) Send batches, record timestamps (t_arrival/dispatch/response)   │
 #  │  5) Handle draining endpoints, errors, requeues                     │
+#  │  6) (Pull + KV server mode): each EP only pulls its best-KV jobs    │
 #  └─────────────┬────────────────────────────────────────────────────────┘
 #                │ batched HTTP calls (via requests + HTTPAdapter)
 #                ▼
@@ -109,8 +137,6 @@ _cfg = get_config()
 #  │  - Router logs ok/err, updates Prometheus via utils_prom.py         │
 #  │  - Metrics: queue_wait, roundtrip, end_to_end                       │
 #  └──────────────────────────────────────────────────────────────────────┘
-
-
 # -------------------------
 
 _req_id_counter = count(start=0)
@@ -120,6 +146,13 @@ def _make_enqueue_fn_for_batched(router) -> callable:
     """
     enqueue_one(prompt_or_pair, t_enq_client)
     - prompt_or_pair: either a string prompt or (prompt, replay_out_len) from HF loader
+
+    Responsibilities:
+      • Assign monotonically increasing req_id.
+      • Optionally register replay_out_len for strict histogram replay (length_backend).
+      • Register KV block hashes for this request if hash service is bound.
+      • Bump global arrival epoch (notify_arrival) so KV ranking can use it.
+      • Put (prompt, t_enq_client, req_id) into router.q.
     """
     from length_backend import register_replay_out_len
 
@@ -141,7 +174,7 @@ def _make_enqueue_fn_for_batched(router) -> callable:
                 pass
 
         # --- KV-prefix registration for this request (hash service) ---
-        # This computes block hashes and stores them in kv_aware.state
+        # This computes block hashes and stores them in kv_aware state.
         if maybe_register_request_blocks_from_prompt is not None:
             try:
                 maybe_register_request_blocks_from_prompt(rid, prompt_str)
@@ -298,15 +331,24 @@ def _run_batched_common(
     router: RouterInstance = router_cls(mode_name=mode_name)
 
     # --- Bind CPU hash service for KV-prefix routing (if available) ---
-    if set_hash_service is not None and compute_hashes_for_prompt is not None:
+    kv_priority_policy = str(getattr(_cfg, "KV_PRIORITY_POLICY", "len") or "len").lower()
+    kv_aware = bool(getattr(_cfg, "KV_AWARE", True))
+    if set_hash_service is not None and compute_hashes_for_prompt is not None and kv_aware:
         try:
             kv_timeout = float(getattr(_cfg, "KV_HASH_TIMEOUT_S", 10.0))
             set_hash_service(compute_hashes_for_prompt, timeout_s=kv_timeout)
-            print(f"[KV] Hash service bound (timeout={kv_timeout:.1f}s)")
+            print(
+                f"[KV] Hash service bound (timeout={kv_timeout:.1f}s, "
+                f"policy={kv_priority_policy}, aware={kv_aware})"
+            )
         except Exception as e:
             print(f"[KV] Failed to bind hash service: {e}")
     else:
-        print("[KV] Hash service not available; KV-prefix routing will use epochs only.")
+        print(
+            f"[KV] Hash service not available or KV_AWARE disabled "
+            f"(KV_AWARE={kv_aware}, policy={kv_priority_policy}); "
+            f"KV-prefix routing will fall back to no-op."
+        )
 
     # KV watcher (Redis → block_hash → pod owners)
     kv_watcher = None

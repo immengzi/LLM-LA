@@ -53,24 +53,24 @@ spec:
     spec:
       containers:
         - name: redis
-          image: redis:7-alpine   # *** ADDED
-          args: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]  # *** ADDED
+          image: redis:7-alpine
+          args: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
           ports:
             - containerPort: 6379
               name: redis
-          resources:               # *** ADDED
+          resources:
             requests:
               cpu: "100m"
               memory: "256Mi"
             limits:
               cpu: "500m"
               memory: "512Mi"
-          readinessProbe:          # *** ADDED
+          readinessProbe:
             tcpSocket:
               port: 6379
             initialDelaySeconds: 5
             periodSeconds: 10
-          livenessProbe:           # *** ADDED
+          livenessProbe:
             tcpSocket:
               port: 6379
             initialDelaySeconds: 10
@@ -114,10 +114,10 @@ spec:
     spec:
       containers:
         - name: vllm-cpu-hash
-          image: vllm-cpu-hash:latest   # *** ADDED (build from openeuler/vllm-cpu)
+          image: vllm-cpu-hash:latest
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
-          command: ["/bin/bash", "-c"]  # *** ADDED
+          command: ["/bin/bash", "-c"]
           args:
             - |
               source /opt/venv/bin/activate 2>/dev/null || true && \
@@ -126,7 +126,7 @@ spec:
                 --host 0.0.0.0 \
                 --port 9095 \
                 --block-size 128
-          env:                           # *** ADDED
+          env:
             - name: HF_HUB_OFFLINE
               value: "1"
             - name: TRANSFORMERS_OFFLINE
@@ -136,11 +136,11 @@ spec:
           ports:
             - containerPort: 9095
               name: http
-          volumeMounts:                  # *** ADDED
+          volumeMounts:
             - name: model
               mountPath: /model
               readOnly: true
-          resources:                     # *** ADDED (tune as you like)
+          resources:
             requests:
               cpu: "1000m"
               memory: "4Gi"
@@ -150,7 +150,7 @@ spec:
       volumes:
         - name: model
           persistentVolumeClaim:
-            claimName: qwen-local-pvc    # *** ADDED
+            claimName: qwen-local-pvc
 
 ---
 apiVersion: v1
@@ -192,7 +192,7 @@ spec:
       containers:
         - name: vllm
           # image: quay.io/ascend/vllm-ascend:v0.10.1rc1
-          image: quay.io/ascend/vllm-ascend:v0.11.0rc0   # *** FIXED to match docker-compose
+          image: quay.io/ascend/vllm-ascend:v0.11.0rc0
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-c"]
           args:
@@ -223,7 +223,7 @@ spec:
               value: "0"
             - name: TOKENIZERS_PARALLELISM
               value: "false"
-            - name: POD_NAME          # *** ADDED (for kv-events-config topic)
+            - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
@@ -231,7 +231,7 @@ spec:
             - containerPort: 8200
               name: http
               protocol: TCP
-            - containerPort: 5557     # *** ADDED: ZMQ publisher port
+            - containerPort: 5557
               name: kvpub
               protocol: TCP
           volumeMounts:
@@ -276,11 +276,11 @@ spec:
         # ---------------------------------------------------------
         # *** ADDED: KV event listener sidecar (one per vLLM pod)
         # ---------------------------------------------------------
-        - name: kv-listener          # *** ADDED
-          image: kv_cache_event_listener:latest   # *** ADDED (build from Dockerfile.kv-listener)
+        - name: kv-listener
+          image: kv_cache_event_listener:latest
           imagePullPolicy: IfNotPresent
           workingDir: /app
-          command: ["python", "-u", "zmq_subscriber.py"]   # *** ADDED
+          command: ["python", "-u", "zmq_subscriber.py"]
           env:
             - name: VLLM_HOST
               value: "127.0.0.1"         # connect to local ZMQ publisher

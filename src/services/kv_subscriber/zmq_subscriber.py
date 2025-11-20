@@ -56,12 +56,14 @@ class BlockStored(KVCacheEvent):
     token_ids: list[int]
     block_size: int
     lora_id: Optional[int]
-    medium: Optional[str]
+    # REMOVED: medium: Optional[str]
+    # vLLM >= 0.10.x / 0.11.x does NOT send this field anymore.
 
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[BlockHash]
-    medium: Optional[str]
+    # REMOVED: medium: Optional[str]
+    # vLLM >= 0.10.x / 0.11.x does NOT send this field anymore.
 
 
 class AllBlocksCleared(KVCacheEvent):
