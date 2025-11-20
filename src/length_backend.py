@@ -21,7 +21,69 @@ import hashlib
 import threading
 from typing import Optional, Dict, Any, List, Callable
 
+import os
+try:
+    from transformers import AutoTokenizer  # type: ignore
+except Exception:
+    AutoTokenizer = None  # type: ignore
+
 from config import get_config
+
+
+# ---------------------------------------------------------------------
+# Shared tokenizer for logging real input token counts
+# ---------------------------------------------------------------------
+_logging_tokenizer = None
+_logging_tokenizer_lock = threading.Lock()
+
+
+def _get_logging_tokenizer():
+    """
+    Lazily load a tokenizer used for logging input token counts.
+
+    Preference:
+      1) cfg.HF_TOKENIZER_NAME (if set)
+      2) cfg.MODEL_NAME
+
+    Falls back to None if transformers is unavailable or loading fails.
+    """
+    global _logging_tokenizer
+    if _logging_tokenizer is not None:
+        return _logging_tokenizer
+
+    if AutoTokenizer is None:
+        return None
+
+    with _logging_tokenizer_lock:
+        if _logging_tokenizer is not None:
+            return _logging_tokenizer
+
+        cfg = get_config()
+        name = getattr(cfg, "HF_TOKENIZER_NAME", None) or getattr(cfg, "MODEL_NAME", "gpt2")
+
+        try:
+            if isinstance(name, str) and os.path.isdir(name):
+                print(f"[LENGTH_BACKEND] Using local tokenizer path for logging: {name}")
+                tok = AutoTokenizer.from_pretrained(name, local_files_only=True)
+            else:
+                print(f"[LENGTH_BACKEND] Loading tokenizer for logging from HF Hub: {name}")
+                tok = AutoTokenizer.from_pretrained(name)
+
+            try:
+                tok.model_max_length = int(1e9)
+            except Exception:
+                pass
+
+            _logging_tokenizer = tok
+            return _logging_tokenizer
+        except Exception as e:
+            print(
+                f"[LENGTH_BACKEND] WARNING: failed to load tokenizer ({e}); "
+                "falling back to whitespace lengths for input_tokens"
+            )
+            _logging_tokenizer = None
+            return None
+
 
 # ---------------------------------------------------------------------
 # Deterministic per-run STRICT plan (size = number of enqueues)
@@ -403,28 +465,18 @@ def preview_out_tokens_for_prompt(*, plain_prompt: str, req_id: int) -> int:
 
 def count_input_tokens(plain_prompt: str, req_id: Optional[int] = 0) -> int:
     """
-    Return input token count using the SAME tokenizer/path as compute_length_plan.
-    We call compute_length_plan and read the input-length field it returns.
+    Return input token count using the same tokenizer as the model
+    (HF_TOKENIZER_NAME if set, otherwise MODEL_NAME).
 
-    Tries several common keys to stay compatible with your plan dict:
-      - "input_tokens", "prompt_tokens", "in_tokens"
-    Falls back to a minimal whitespace heuristic if none are present.
+    Falls back to a simple whitespace-based length if no tokenizer
+    is available or tokenization fails.
     """
+    prompt = plain_prompt or ""
     try:
-        cfg = get_config()
-        plan = compute_length_plan(
-            plain_prompt=plain_prompt,
-            base_cap=int(getattr(cfg, "MAX_TOKENS", 0) or 0),
-            target_output_tokens=getattr(cfg, "TARGET_OUTPUT_TOKENS", None),
-            target_total_tokens=getattr(cfg, "TARGET_TOTAL_TOKENS", None),
-            ignore_eos=getattr(cfg, "IGNORE_EOS", False),
-            length_mode=getattr(cfg, "LENGTH_MODE", "legacy"),
-            req_id=int(req_id or 0),
-        )
-        for k in ("input_tokens", "prompt_tokens", "in_tokens"):
-            v = plan.get(k)
-            if v is not None:
-                return int(v)
+        tok = _get_logging_tokenizer()
+        if tok is None:
+            raise RuntimeError("no tokenizer available")
+        ids = tok.encode(prompt, add_special_tokens=False)
+        return max(1, len(ids))
     except Exception:
-        pass
-    return max(1, len((plain_prompt or "").split()))
+        return max(1, len(prompt.split()))

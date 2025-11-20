@@ -7,6 +7,13 @@ import json
 import itertools
 from collections import deque
 from itertools import islice
+# import weakref
+# import atexit
+
+# try:
+#     atexit.unregister(weakref.finalize._exitfunc)
+# except Exception:
+#     pass
 
 from kubernetes import client
 

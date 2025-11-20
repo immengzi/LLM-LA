@@ -25,32 +25,14 @@ from config import get_config
 from utils import log_result, log_queue, healthy, send_chat_request
 from utils_prom import probe_gpu_util
 
-# NEW: predictor hook
 from predictors import get_length_predictor
 
-# NEW: shared length-aware selection hook
 from threading import RLock
 from len_select import select_batch
 
 from length_backend import count_input_tokens
 
-# Optional KV-aware ranking helper for logging + ordering
-try:
-    from kv_aware import (
-        rank_items_for_endpoint,   # (endpoint, items, mode, include_scores) -> (ordered, meta)
-        notify_arrival,            # bump global arrival epoch
-        prefix_len,                # endpoint, req_id -> prefix hits
-    )
-except Exception:
-    rank_items_for_endpoint = None  # type: ignore
-
-    def notify_arrival(n: int = 1) -> None:  # type: ignore
-        # Safe no-op fallback if kv_aware isn't available
-        return
-
-    def prefix_len(endpoint: str, req_id: int) -> int:  # type: ignore
-        # Safe fallback: no KV info
-        return 0
+from kv_aware import notify_arrival, prefix_len
 
 
 _cfg = get_config()
@@ -74,11 +56,30 @@ class PullBatchingRouter:
       - Queue logging throttled to 0, N, 2N, ... sessions per endpoint
       - Archives stats for endpoints removed during the run,
         so final summary includes *all* used servers.
+
+    KV-aware routing modes (Pull only):
+
+      • KV_AWARE = False
+          -> no KV logic at all.
+
+      • KV_AWARE = True AND KV_PRIORITY_POLICY != "server"
+          -> endpoint choice is not KV-driven; KV is used only
+             for per-request logging.
+
+      • KV_AWARE = True AND KV_PRIORITY_POLICY == "server"
+          -> endpoint choice becomes KV-driven for Pull router:
+
+             - For each endpoint 'ep', its worker:
+                 * peeks into central queue (bounded pool)
+                 * computes prefix_len(ep2, req_id) for all eps
+                 * only pulls requests whose BEST endpoint is this ep
+                   (max prefix_len across eps), with fallback to FIFO
+                   when KV is missing / insufficient.
     """
 
     def __init__(self, mode_name: str = "pull-batching"):
         self.mode_name = mode_name
-        # NOTE: include req_id in the queue tuple
+        # Queue entries: (prompt, t_enq_client, req_id)
         self.q: "Queue[Tuple[str, float, int]]" = Queue()
         self.eps: List[str] = []
         self.inflight: Dict[str, int] = {}
@@ -101,7 +102,7 @@ class PullBatchingRouter:
         # draining endpoints (present but should pull no new work) - For autoscaling scenario
         self._draining_eps: set[str] = set()
 
-        # archive stats for endpoints that are removed during the run - For autoscaling scenario
+        # archive stats for endpoints that are removed during the run
         # key: endpoint URL -> {"ok": int, "err": int}
         self._stats_archive: Dict[str, Dict[str, int]] = {}
 
@@ -196,10 +197,14 @@ class PullBatchingRouter:
             return 0
         if util_pct is None:
             return min(int(getattr(_cfg, "NO_UTIL_BURST", 1)), cap)
-        headroom = max(0.0, (float(_cfg.UTIL_THRESHOLD) - (util_pct / 100.0))) / max(
-            float(_cfg.UTIL_THRESHOLD), 1e-6
+        headroom = max(
+            0.0,
+            (float(_cfg.UTIL_THRESHOLD) - (util_pct / 100.0)),
+        ) / max(float(_cfg.UTIL_THRESHOLD), 1e-6)
+        return min(
+            max(1, int(float(getattr(_cfg, "BURST", 1)) * (1.0 + headroom))),
+            cap,
         )
-        return min(max(1, int(float(getattr(_cfg, "BURST", 1)) * (1.0 + headroom))), cap)
 
     # ------------- launch + worker -------------
 
@@ -230,16 +235,19 @@ class PullBatchingRouter:
                 end_to_end_latency = t_response_router - t_arrival_router
 
                 # Override with simulated times when present
-                sim_total   = resp.get("_sim_total_wall_s")
-                sim_queue   = resp.get("_sim_queue_wait_s")
+                sim_total = resp.get("_sim_total_wall_s")
+                sim_queue = resp.get("_sim_queue_wait_s")
                 sim_service = resp.get("_sim_service_s") or resp.get("_sim_latency_s")
                 used_sim_times = False
                 if sim_total is not None:
-                    end_to_end_latency = float(sim_total); used_sim_times = True
+                    end_to_end_latency = float(sim_total)
+                    used_sim_times = True
                 if sim_queue is not None:
-                    router_queue_wait = float(sim_queue); used_sim_times = True
+                    router_queue_wait = float(sim_queue)
+                    used_sim_times = True
                 if sim_service is not None:
-                    server_roundtrip = float(sim_service); used_sim_times = True
+                    server_roundtrip = float(sim_service)
+                    used_sim_times = True
 
                 choice = (resp.get("choices") or [{}])[0]
                 content = (choice.get("message") or {}).get("content", "")
@@ -251,15 +259,25 @@ class PullBatchingRouter:
                 except Exception:
                     pass
 
-                # --- Token accounting for logs ---
+                # Token accounting for logs
                 input_actual_tokens = int(count_input_tokens(prompt))
-                pred_out_int = None if predicted_out_tokens is None else int(predicted_out_tokens)
+                pred_out_int = (
+                    None if predicted_out_tokens is None else int(predicted_out_tokens)
+                )
                 act_out_int = None if actual_out is None else int(actual_out)
 
-                total_predicted_tokens = (input_actual_tokens + pred_out_int) if pred_out_int is not None else None
-                total_actual_tokens    = (input_actual_tokens + act_out_int) if act_out_int is not None else None
+                total_predicted_tokens = (
+                    input_actual_tokens + pred_out_int
+                    if pred_out_int is not None
+                    else None
+                )
+                total_actual_tokens = (
+                    input_actual_tokens + act_out_int
+                    if act_out_int is not None
+                    else None
+                )
 
-                # --- KV candidate stats for this request ---
+                # KV candidate stats for this request
                 kv_hits_this_ep = int(prefix_len(ep, int(req_id)))
                 kv_candidates: List[Dict[str, int]] = []
                 best_ep: Optional[str] = None
@@ -279,7 +297,7 @@ class PullBatchingRouter:
                         best_ep = ep2
 
                 kv_candidates.sort(key=lambda d: (-d["kv_hits"], d["endpoint"]))
-                kv_candidates = kv_candidates[:8]  # trim to top-N for log size
+                kv_candidates = kv_candidates[:8]
 
                 log_result(
                     mode=self.mode_name,
@@ -308,7 +326,7 @@ class PullBatchingRouter:
                         "actual_out_tokens": act_out_int,
                         "total_predicted_tokens": total_predicted_tokens,
                         "total_actual_tokens": total_actual_tokens,
-                        # KV stats for this request
+                        # KV stats
                         "kv_hits": kv_hits_this_ep,
                         "kv_best_endpoint": best_ep,
                         "kv_best_hits": int(best_hits),
@@ -335,7 +353,6 @@ class PullBatchingRouter:
                     self.err_counts[ep] = self.err_counts.get(ep, 0) + 1
                 try:
                     self.q.put((prompt, time.time(), req_id))
-                    # KV-aware: new logical arrival back into the queue
                     notify_arrival(1)
                 except Exception:
                     pass
@@ -351,6 +368,92 @@ class PullBatchingRouter:
                     pass
 
         threading.Thread(target=_runner, daemon=True).start()
+
+    # ------------- KV-driven selection (server-level) -------------
+
+    def _kv_select_for_endpoint(
+        self,
+        ep: str,
+        want: int,
+    ) -> List[Tuple[str, float, Optional[int], int]]:
+        """
+        Server-level KV routing for Pull router.
+
+        Strategy:
+          1) Pop up to 'want * KV_ROUTE_POOL_FACTOR' items under _Q_LOCK.
+          2) For each item, compute prefix_len(·, req_id) for *all* endpoints.
+             - find best_ep = argmax prefix_len
+             - if best_ep == ep and prefix_len >= KV_ROUTE_MIN_PREFIX, mark as selected
+             - everything else becomes 'leftover'.
+          3) Push leftovers back into the queue in the same order.
+          4) If we selected < want items, fill remainder via FIFO from the queue
+             (KV-blind fallback so we don't starve non-KV traffic).
+        """
+        if want <= 0:
+            return []
+        if not self.eps:
+            return []
+
+        pool_factor = int(getattr(_cfg, "KV_ROUTE_POOL_FACTOR", 4))
+        if pool_factor <= 0:
+            pool_factor = 4
+        max_scan = want * pool_factor
+
+        min_prefix = int(getattr(_cfg, "KV_ROUTE_MIN_PREFIX", 1))
+
+        selected: List[Tuple[str, float, Optional[int], int]] = []
+        pool: List[Tuple[str, float, int]] = []
+
+        with _Q_LOCK:
+            # 1) Pop a bounded pool from central queue
+            for _ in range(max_scan):
+                try:
+                    prompt, t_enq_client, req_id = self.q.get_nowait()
+                except Empty:
+                    break
+                pool.append((prompt, t_enq_client, req_id))
+
+            if not pool:
+                return []
+
+            # 2) Decide best endpoint per request
+            leftovers: List[Tuple[str, float, int]] = []
+            for prompt, t_enq_client, req_id in pool:
+                best_ep = None
+                best_hits = -1
+                for ep2 in self.eps:
+                    try:
+                        h = int(prefix_len(ep2, int(req_id)))
+                    except Exception:
+                        h = 0
+                    if h > best_hits:
+                        best_hits = h
+                        best_ep = ep2
+
+                if (
+                    best_ep == ep
+                    and best_hits >= min_prefix
+                    and len(selected) < want
+                ):
+                    selected.append((prompt, t_enq_client, None, req_id))
+                else:
+                    leftovers.append((prompt, t_enq_client, req_id))
+
+            # 3) Push leftovers back into the queue in original order
+            for prompt, t_enq_client, req_id in leftovers:
+                self.q.put((prompt, t_enq_client, req_id))
+
+            # 4) Fallback: if we still need more, fill via FIFO
+            while len(selected) < want:
+                try:
+                    prompt, t_enq_client, req_id = self.q.get_nowait()
+                except Empty:
+                    break
+                selected.append((prompt, t_enq_client, None, req_id))
+
+        return selected
+
+    # ------------- worker loop -------------
 
     def _worker_loop(self, ep: str, stop_evt: threading.Event):
         time.sleep(random.uniform(0.0, 0.02))
@@ -389,64 +492,45 @@ class PullBatchingRouter:
 
             q_before = self.q.qsize()
 
-            # ---- Length + KV config (read at use-time) ----
-            use_len_aware      = bool(getattr(_cfg, "USE_LEN_AWARE", False))
-            len_policy         = str(getattr(_cfg, "LEN_POLICY", "short_first") or "short_first")
-            pool_factor        = int(getattr(_cfg, "POOL_FACTOR", 2))
+            # Config (read at use-time)
+            use_len_aware = bool(getattr(_cfg, "USE_LEN_AWARE", False))
+            len_policy = str(getattr(_cfg, "LEN_POLICY", "short_first") or "short_first")
+            pool_factor = int(getattr(_cfg, "POOL_FACTOR", 2))
             default_max_tokens = int(getattr(_cfg, "MAX_TOKENS", 1024))
-            len_basis          = str(getattr(_cfg, "LEN_BASIS", "output") or "output")
-            kv_aware           = bool(getattr(_cfg, "KV_AWARE", True))
-            kv_policy          = str(getattr(_cfg, "KV_PRIORITY_POLICY", "len") or "len").lower()
+            len_basis = str(getattr(_cfg, "LEN_BASIS", "output") or "output")
+            kv_aware = bool(getattr(_cfg, "KV_AWARE", True))
+            kv_policy = str(getattr(_cfg, "KV_PRIORITY_POLICY", "len") or "len").lower()
 
             selected: List[Tuple[str, float, Optional[int], int]] = []
 
-            # --- base selection (length-aware or FIFO) ---
-            if use_len_aware:
-                selected = select_batch(
-                    self.q, want, _pred, _Q_LOCK,
-                    policy=len_policy,
-                    pool_factor=pool_factor,
-                    default_max_tokens=default_max_tokens,
-                    length_basis=len_basis,
-                    input_len_fn=count_input_tokens,
-                )
+            server_kv_mode = (
+                kv_aware
+                and kv_policy == "server"
+                and bool(self.eps)
+            )
+
+            if server_kv_mode:
+                selected = self._kv_select_for_endpoint(ep, want)
             else:
-                for _ in range(want):
-                    try:
-                        prompt, t_enq_client, req_id = self.q.get_nowait()
-                        selected.append((prompt, t_enq_client, None, req_id))
-                    except Empty:
-                        break
-
-            # --- KV-aware per-batch ranking + logging meta (optional) ---
-            kv_rank_meta = None
-            if kv_aware and rank_items_for_endpoint is not None and selected:
-                # Map our config KV_PRIORITY_POLICY -> kv_aware mode
-                # "len" / "none" => keep length order, just log (mode="fifo")
-                # "kv" / "hybrid" => KV-hash ordering within this selected set
-                if kv_policy in ("none", "len"):
-                    kv_mode = "fifo"
+                if use_len_aware:
+                    selected = select_batch(
+                        self.q,
+                        want,
+                        _pred,
+                        _Q_LOCK,
+                        policy=len_policy,
+                        pool_factor=pool_factor,
+                        default_max_tokens=default_max_tokens,
+                        length_basis=len_basis,
+                        input_len_fn=count_input_tokens,
+                    )
                 else:
-                    kv_mode = "hash"
-
-                simple_items = [
-                    (prompt, t_enq_client, req_id)
-                    for (prompt, t_enq_client, _pred_tok, req_id) in selected
-                ]
-                ordered, meta = rank_items_for_endpoint(
-                    ep,
-                    simple_items,
-                    mode=kv_mode,
-                    include_scores=True,
-                )
-
-                # Re-attach _pred_tok using req_id
-                by_id = {req_id: _pred_tok for (prompt, t_enq_client, _pred_tok, req_id) in selected}
-                selected = [
-                    (prompt, t_enq_client, by_id.get(req_id), req_id)
-                    for (prompt, t_enq_client, req_id) in ordered
-                ]
-                kv_rank_meta = meta
+                    for _ in range(want):
+                        try:
+                            prompt, t_enq_client, req_id = self.q.get_nowait()
+                            selected.append((prompt, t_enq_client, None, req_id))
+                        except Empty:
+                            break
 
             pulled_n = len(selected)
             q_after = self.q.qsize()
@@ -478,16 +562,14 @@ class PullBatchingRouter:
                     "pool_factor": int(pool_factor),
                     "kv_aware": bool(kv_aware),
                     "kv_priority_policy": str(kv_policy),
+                    "kv_route_mode": "server" if server_kv_mode else "none",
                 }
-                if kv_rank_meta:
-                    max_items = 16  # keep log payload bounded
-                    log_extra["kv_order"] = kv_rank_meta[:max_items]
-                    log_extra["kv_order_truncated"] = len(kv_rank_meta) > max_items
 
                 print(
                     f"[PULL*BATCH] {name} (ep={ep}) util={util_str} want={want} pulled={pulled_n} "
                     f"inflight={before_now}->{after_now} q={q_before}->{q_after} "
-                    f"lenAware={use_len_aware} pol={len_policy} kvAware={kv_aware} kvPol={kv_policy}"
+                    f"lenAware={use_len_aware} pol={len_policy} "
+                    f"kvAware={kv_aware} kvPol={kv_policy} kvRouteMode={'server' if server_kv_mode else 'none'}"
                 )
                 log_queue(router_mode=self.mode_name, endpoint=ep, event="pull-batch", extra=log_extra)
 
@@ -566,6 +648,7 @@ class _BaseBatchingRouter:
       - endpoint churn handling
       - util-aware 'want' computation (default) + admission modes
       - per-endpoint bounded-concurrency senders with persistent sessions
+
     Subclasses must implement: `_ordered_eps_for_step()`
     """
 
@@ -683,7 +766,10 @@ class _BaseBatchingRouter:
         if util_pct is None:
             no_util_burst = int(getattr(_cfg, "NO_UTIL_BURST", 1)) or 1
             return min(no_util_burst, cap, qsz)
-        headroom = max(0.0, (float(_cfg.UTIL_THRESHOLD) - (util_pct / 100.0))) / max(float(_cfg.UTIL_THRESHOLD), 1e-6)
+        headroom = max(
+            0.0,
+            (float(_cfg.UTIL_THRESHOLD) - (util_pct / 100.0)),
+        ) / max(float(_cfg.UTIL_THRESHOLD), 1e-6)
         want = max(1, int(float(burst) * (1.0 + headroom)))
         return min(want, cap, qsz)
 
@@ -706,7 +792,10 @@ class _BaseBatchingRouter:
                 ok = int(self.ok_counts.pop(ep, 0))
                 err = int(self.err_counts.pop(ep, 0))
                 prev = self._stats_archive.get(ep, {"ok": 0, "err": 0})
-                self._stats_archive[ep] = {"ok": prev["ok"] + ok, "err": prev["err"] + err}
+                self._stats_archive[ep] = {
+                    "ok": prev["ok"] + ok,
+                    "err": prev["err"] + err,
+                }
 
                 self.inflight.pop(ep, None)
                 self._log_counters.pop(ep, None)
@@ -726,13 +815,20 @@ class _BaseBatchingRouter:
         s = requests.Session()
         s.trust_env = False
         retry = Retry(
-            total=3, connect=3, read=3,
+            total=3,
+            connect=3,
+            read=3,
             backoff_factor=0.2,
             status_forcelist=[502, 503, 504],
             allowed_methods=frozenset(["GET", "POST"]),
             raise_on_status=False,
         )
-        adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1, pool_block=True, max_retries=retry)
+        adapter = HTTPAdapter(
+            pool_connections=1,
+            pool_maxsize=1,
+            pool_block=True,
+            max_retries=retry,
+        )
         s.mount("http://", adapter)
         s.mount("https://", adapter)
         return s
@@ -777,7 +873,7 @@ class _BaseBatchingRouter:
         self._session_pool_lock.pop(ep, None)
         self._per_ep_sem.pop(ep, None)
 
-    # ----- sender helpers (no nested functions) -----
+    # ----- sender helpers ----- #
 
     def _sender_checkout_session(self, ep: str) -> Optional[requests.Session]:
         lock = self._session_pool_lock.get(ep)
@@ -831,7 +927,6 @@ class _BaseBatchingRouter:
                 # Sem gone? requeue the item and exit
                 try:
                     self.q.put((prompt, t_enq_client, req_id))
-                    # KV-aware: logical new arrival to central queue
                     notify_arrival(1)
                 except Exception:
                     pass
@@ -859,7 +954,6 @@ class _BaseBatchingRouter:
                 # If we cannot get a session (pool gone), requeue and bail
                 try:
                     self.q.put((prompt, t_enq_client, req_id))
-                    # KV-aware: treat as a re-arrival
                     notify_arrival(1)
                 except Exception:
                     pass
@@ -892,7 +986,14 @@ class _BaseBatchingRouter:
 
     # ---------- single send (used by per-EP runners) ----------
 
-    def _send_one(self, ep: str, prompt: str, t_enq_client: float, req_id: int, session: Optional[requests.Session]):
+    def _send_one(
+        self,
+        ep: str,
+        prompt: str,
+        t_enq_client: float,
+        req_id: int,
+        session: Optional[requests.Session],
+    ):
         predicted_out_tokens = _pred.predict_out_tokens(prompt, req_id=req_id)
         t_arrival_router = float(t_enq_client or time.time())
         t_dispatch_router = time.time()
@@ -925,16 +1026,19 @@ class _BaseBatchingRouter:
             server_roundtrip = t_response_router - t_dispatch_router
             end_to_end_latency = t_response_router - t_arrival_router
 
-            sim_total   = resp.get("_sim_total_wall_s")
-            sim_queue   = resp.get("_sim_queue_wait_s")
+            sim_total = resp.get("_sim_total_wall_s")
+            sim_queue = resp.get("_sim_queue_wait_s")
             sim_service = resp.get("_sim_service_s") or resp.get("_sim_latency_s")
             used_sim_times = False
             if sim_total is not None:
-                end_to_end_latency = float(sim_total); used_sim_times = True
+                end_to_end_latency = float(sim_total)
+                used_sim_times = True
             if sim_queue is not None:
-                router_queue_wait = float(sim_queue); used_sim_times = True
+                router_queue_wait = float(sim_queue)
+                used_sim_times = True
             if sim_service is not None:
-                server_roundtrip = float(sim_service); used_sim_times = True
+                server_roundtrip = float(sim_service)
+                used_sim_times = True
 
             choice = (resp.get("choices") or [{}])[0]
             content = (choice.get("message") or {}).get("content", "")
@@ -946,15 +1050,25 @@ class _BaseBatchingRouter:
             except Exception:
                 pass
 
-            # --- Token accounting for logs ---
+            # Token accounting for logs
             input_actual_tokens = int(count_input_tokens(prompt))
-            pred_out_int = None if predicted_out_tokens is None else int(predicted_out_tokens)
+            pred_out_int = (
+                None if predicted_out_tokens is None else int(predicted_out_tokens)
+            )
             act_out_int = None if actual_out is None else int(actual_out)
 
-            total_predicted_tokens = (input_actual_tokens + pred_out_int) if pred_out_int is not None else None
-            total_actual_tokens    = (input_actual_tokens + act_out_int) if act_out_int is not None else None
+            total_predicted_tokens = (
+                input_actual_tokens + pred_out_int
+                if pred_out_int is not None
+                else None
+            )
+            total_actual_tokens = (
+                input_actual_tokens + act_out_int
+                if act_out_int is not None
+                else None
+            )
 
-            # --- KV candidate stats for this request ---
+            # KV candidate stats for this request
             kv_hits_this_ep = int(prefix_len(ep, int(req_id)))
             kv_candidates: List[Dict[str, int]] = []
             best_ep: Optional[str] = None
@@ -1021,14 +1135,16 @@ class _BaseBatchingRouter:
                 prompt=prompt,
                 status="error",
                 error=str(e),
-                extra={"req_id": int(req_id), "predictor_name": getattr(_pred, "name", "unknown")},
+                extra={
+                    "req_id": int(req_id),
+                    "predictor_name": getattr(_pred, "name", "unknown"),
+                },
             )
             with self._lock:
                 self.err_counts[ep] = self.err_counts.get(ep, 0) + 1
             # requeue; sender pacing avoids hammering
             try:
                 self.q.put((prompt, time.time(), req_id))
-                # KV-aware: treat as a fresh arrival into the queue
                 notify_arrival(1)
             except Exception:
                 pass
@@ -1090,28 +1206,29 @@ class _BaseBatchingRouter:
             logical_before = inflight_before + backlog_before
             pulled = 0
 
-            # ---- Config knobs resolved per-step (no module-level freeze) ----
-            use_len_aware      = bool(getattr(_cfg, "USE_LEN_AWARE", False))
-            len_policy         = str(getattr(_cfg, "LEN_POLICY", "short_first") or "short_first")
-            pool_factor        = int(getattr(_cfg, "POOL_FACTOR", 2))
+            # Resolve config per-step
+            use_len_aware = bool(getattr(_cfg, "USE_LEN_AWARE", False))
+            len_policy = str(getattr(_cfg, "LEN_POLICY", "short_first") or "short_first")
+            pool_factor = int(getattr(_cfg, "POOL_FACTOR", 2))
             default_max_tokens = int(getattr(_cfg, "MAX_TOKENS", 1024))
-            len_basis          = str(getattr(_cfg, "LEN_BASIS", "output") or "output")
-            kv_aware           = bool(getattr(_cfg, "KV_AWARE", True))
-            kv_policy          = str(getattr(_cfg, "KV_PRIORITY_POLICY", "len") or "len").lower()
+            len_basis = str(getattr(_cfg, "LEN_BASIS", "output") or "output")
+            kv_aware = bool(getattr(_cfg, "KV_AWARE", True))
+            kv_policy = str(getattr(_cfg, "KV_PRIORITY_POLICY", "len") or "len").lower()
 
-            # --- main selection + enqueue block ---
             selected: List[Tuple[str, float, Optional[int], int]] = []
 
             if use_len_aware:
                 selected = select_batch(
-                    self.q, want, _pred, _Q_LOCK,
+                    self.q,
+                    want,
+                    _pred,
+                    _Q_LOCK,
                     policy=len_policy,
                     pool_factor=pool_factor,
                     default_max_tokens=default_max_tokens,
                     length_basis=len_basis,
                     input_len_fn=count_input_tokens,
                 )
-                # we'll potentially KV-rank these before enqueue below
             else:
                 from queue import Empty as QEmpty
                 for _ in range(max(0, want)):
@@ -1120,31 +1237,6 @@ class _BaseBatchingRouter:
                     except QEmpty:
                         break
                     selected.append((prompt, t_enq_client, None, req_id))
-
-            # --- KV-aware per-batch ranking + logging meta (optional) ---
-            kv_rank_meta = None
-            if kv_aware and rank_items_for_endpoint is not None and selected:
-                if kv_policy in ("none", "len"):
-                    kv_mode = "fifo"
-                else:
-                    kv_mode = "hash"
-
-                simple_items = [
-                    (prompt, t_enq_client, req_id)
-                    for (prompt, t_enq_client, _pred_tok, req_id) in selected
-                ]
-                ordered, meta = rank_items_for_endpoint(
-                    ep,
-                    simple_items,
-                    mode=kv_mode,
-                    include_scores=True,
-                )
-                by_id = {req_id: _pred_tok for (prompt, t_enq_client, _pred_tok, req_id) in selected}
-                selected = [
-                    (prompt, t_enq_client, by_id.get(req_id), req_id)
-                    for (prompt, t_enq_client, req_id) in ordered
-                ]
-                kv_rank_meta = meta
 
             # enqueue to per-EP sender queue
             for prompt, t_enq_client, _pred_tok, req_id in selected:
@@ -1159,8 +1251,6 @@ class _BaseBatchingRouter:
                     break
                 pulled += 1
                 q_ep.put((prompt, t_enq_client, req_id))
-
-            # --- end selection + enqueue ---
 
             q_after = self.q.qsize()
 
@@ -1201,10 +1291,6 @@ class _BaseBatchingRouter:
                     "kv_aware": bool(kv_aware),
                     "kv_priority_policy": str(kv_policy),
                 }
-                if kv_rank_meta:
-                    max_items = 16
-                    log_extra["kv_order"] = kv_rank_meta[:max_items]
-                    log_extra["kv_order_truncated"] = len(kv_rank_meta) > max_items
 
                 print(
                     f"[PUSH*STEP] {name} (ep={ep}) util={util_str} want={want} pulled={pulled} "
@@ -1230,17 +1316,17 @@ class _BaseBatchingRouter:
             active = any(v > 0 for v in self.inflight.values())
         return (not self.q.empty()) or active
 
-    def status_line(self) -> bool:
+    def status_line(self) -> str:
         with self._lock:
             parts = []
             for ep in self.eps:
                 name, _ = self._cached_identity(ep)
                 active = self.inflight.get(ep, 0)  # actual inflight to vLLM
                 try:
-                    backlog = self._send_queues[ep].qsize()  # queued-to-send at per-EP sender
+                    backlog = self._send_queues[ep].qsize()
                 except Exception:
                     backlog = 0
-                logical = active + backlog  # total assigned to this endpoint
+                logical = active + backlog
                 parts.append(
                     f"{name} ({ep}) inflight={logical} (active={active}) "
                     f"backlog={backlog} ok={self.ok_counts.get(ep,0)} err={self.err_counts.get(ep,0)}"
@@ -1316,15 +1402,12 @@ class LeastQueueBatchingRouter(_BaseBatchingRouter):
 
     def _ordered_eps_for_step(self) -> List[str]:
         with self._lock:
-            # Snapshots
             inflight = {ep: self.inflight.get(ep, 0) for ep in self.eps}
-            backlog = {}
+            backlog: Dict[str, int] = {}
             for ep in self.eps:
                 q_ep = self._send_queues.get(ep)
                 backlog[ep] = q_ep.qsize() if q_ep is not None else 0
 
-            # Logical load = active inflight + queued-to-send backlog
             logical = {ep: inflight[ep] + backlog[ep] for ep in self.eps}
 
-            # Order by logical, then inflight, then endpoint (stable)
             return sorted(self.eps, key=lambda ep: (logical[ep], inflight[ep], ep))

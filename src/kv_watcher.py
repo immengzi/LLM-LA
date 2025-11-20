@@ -45,7 +45,6 @@ def _log(msg: str, *, level: str = "summary") -> None:
         return
 
     if level == "summary":
-        # both "summary" and "full" should see this
         print(f"[KVWatcher] {msg}")
         return
 
@@ -178,10 +177,7 @@ class KVWatcher:
           • register_block_owners(block_hash, owners)
           • notify_kv_update(endpoint)
 
-        Logging:
-          - full: per-key + scan summary
-          - summary: scan summary only
-          - off: nothing unless error
+        FIX: owners are converted from pod names → endpoint URLs.
         """
         pattern = f"{self.model_name}:kvblock:*"
         seen = 0
@@ -199,17 +195,24 @@ class KVWatcher:
                 except Exception:
                     continue
 
-                owners = list(mapping.keys())
-                register_block_owners(block_hash, owners)
+                # Redis owners: pod names
+                pod_owners = list(mapping.keys())
 
-                # Per-key logging only in "full" mode
-                _log(f"key={key} pods={owners}", level="full")
-
-                for pod_name in owners:
+                # Convert to endpoint URLs
+                ep_owners = []
+                for pod_name in pod_owners:
                     ep = _endpoint_for_pod(pod_name, pods)
                     if ep:
+                        ep_owners.append(ep)
                         notify_kv_update(ep)
                         touched_eps.add(ep)
+
+                # If endpoints resolved, register them
+                if ep_owners:
+                    register_block_owners(block_hash, ep_owners)
+
+                # Log pods and endpoints
+                _log(f"key={key} pods={pod_owners} eps={ep_owners}", level="full")
 
                 seen += 1
                 if seen >= self.max_keys:
