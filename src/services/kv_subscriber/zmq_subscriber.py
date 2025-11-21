@@ -13,12 +13,14 @@ Redis schema (per MODEL_NAME):
   - {MODEL}:kvblocks                    (HASH)  index of all block_hashes
 
 Environment variables:
-  - VLLM_HOST       : host of vLLM ZMQ publisher (inside pod, usually 127.0.0.1)
-  - VLLM_SUB_PORT   : ZMQ port (e.g. "5557")
-  - REDIS_HOST      : Redis hostname (e.g. "redis")
-  - REDIS_PORT      : Redis port (default "6379")
-  - CONTAINER_NAME  : Pod or container name, used as pod_name in Redis
-  - MODEL_NAME      : Model identifier used as prefix in Redis keys
+  - VLLM_HOST           : host of vLLM ZMQ publisher (inside pod, usually 127.0.0.1)
+  - VLLM_SUB_PORT       : ZMQ port (e.g. "5557")
+  - REDIS_HOST          : Redis hostname (e.g. "redis")
+  - REDIS_PORT          : Redis port (default "6379")
+  - CONTAINER_NAME      : Pod or container name, used as pod_name in Redis
+  - MODEL_NAME          : Model identifier used as prefix in Redis keys
+  - KV_DEBUG            : "1"/"true"/"yes" to enable verbose debug logs
+  - KV_DEBUG_HASHES     : max number of block hashes to print per event (default: 16)
 """
 
 import asyncio
@@ -31,6 +33,27 @@ import zmq
 import zmq.asyncio
 import msgspec
 from redis import asyncio as aioredis
+
+
+# ------------------------------
+# Debug / logging control
+# ------------------------------
+
+_KV_DEBUG = os.environ.get("KV_DEBUG", "0").lower() in ("1", "true", "yes")
+
+
+def _dprint(pod_name: str, msg: str) -> None:
+    """Debug print, controlled by KV_DEBUG env var."""
+    if _KV_DEBUG:
+        print(f"[{pod_name}] {msg}")
+
+
+def _iprint(pod_name: str, msg: str) -> None:
+    """Info print (always on for high-level messages)."""
+    print(f"[{pod_name}] {msg}")
+
+
+MAX_DEBUG_HASHES = int(os.environ.get("KV_DEBUG_HASHES", "16"))  # how many block hashes to print per event
 
 
 # ------------------------------
@@ -96,7 +119,7 @@ async def process_event(
     kvblocks_key = f"{key_prefix}kvblocks"
     podblocks_key = f"{key_prefix}podblocks:{pod_name}"
 
-    print(f"[{pod_name}] ⏱ Event batch at {event_batch.ts:.3f}: {len(event_batch.events)} events")
+    _dprint(pod_name, f"⏱ Event batch at {event_batch.ts:.3f}: {len(event_batch.events)} events")
 
     pipe = redis.pipeline(transaction=False)
     ts = int(time.time())
@@ -107,6 +130,22 @@ async def process_event(
             # BlockStored event
             # ----------------------
             if isinstance(event, BlockStored):
+                # DEBUG: show hashes & shape
+                if event.block_hashes:
+                    sample_hashes = event.block_hashes[:MAX_DEBUG_HASHES]
+                    _dprint(
+                        pod_name,
+                        (
+                            f"BlockStored: {len(event.block_hashes)} blocks, "
+                            f"block_size={event.block_size}, "
+                            f"parent={event.parent_block_hash}, "
+                            f"token_ids_len={len(event.token_ids)}; "
+                            f"sample_hashes={sample_hashes}"
+                        ),
+                    )
+                else:
+                    _dprint(pod_name, "BlockStored: 0 block_hashes (unexpected)")
+
                 for block_hash in event.block_hashes:
                     kvblock_key = f"{key_prefix}kvblock:{block_hash}"
 
@@ -117,24 +156,36 @@ async def process_event(
                     # optional: add block hash reference
                     pipe.hset(kvblocks_key, str(block_hash), kvblock_key)
 
-                print(f"[{pod_name}] Stored {len(event.block_hashes)} block→pod mappings")
+                _dprint(pod_name, f"Stored {len(event.block_hashes)} block→pod mappings")
 
             # ----------------------
             # BlockRemoved event
             # ----------------------
             elif isinstance(event, BlockRemoved):
+                if event.block_hashes:
+                    sample_hashes = event.block_hashes[:MAX_DEBUG_HASHES]
+                    _dprint(
+                        pod_name,
+                        (
+                            f"BlockRemoved: {len(event.block_hashes)} blocks; "
+                            f"sample_hashes={sample_hashes}"
+                        ),
+                    )
+                else:
+                    _dprint(pod_name, "BlockRemoved: 0 block_hashes (nothing to remove?)")
+
                 for block_hash in event.block_hashes:
                     kvblock_key = f"{key_prefix}kvblock:{block_hash}"
                     pipe.hdel(kvblock_key, pod_name)
                     pipe.srem(podblocks_key, str(block_hash))
 
-                print(f"[{pod_name}] Removed {len(event.block_hashes)} block→pod mappings")
+                _dprint(pod_name, f"Removed {len(event.block_hashes)} block→pod mappings")
 
             # ----------------------
             # AllBlocksCleared event
             # ----------------------
             elif isinstance(event, AllBlocksCleared):
-                print(f"[{pod_name}] Clearing all blocks for this pod")
+                _dprint(pod_name, "AllBlocksCleared: clearing all blocks for this pod")
 
                 # Iterate over all blocks for this pod and remove this pod from their hashes
                 async for block_hash in redis.sscan_iter(podblocks_key):
@@ -142,12 +193,13 @@ async def process_event(
                     pipe.hdel(kvblock_key, pod_name)
 
                 pipe.delete(podblocks_key)
+                _dprint(pod_name, "AllBlocksCleared: podblocks set deleted")
 
         except Exception as e:
             print(f"[{pod_name}] ⚠️ Error processing event: {e}", file=sys.stderr)
 
     await pipe.execute()
-    print(f"[{pod_name}] ✅ Redis updated")
+    _dprint(pod_name, "✅ Redis updated")
 
 
 # ------------------------------
@@ -162,9 +214,11 @@ async def main() -> None:
     container_name = os.environ.get("CONTAINER_NAME", "vllm-pod")
     model_name = os.environ.get("MODEL_NAME", None)
 
+    # High-level startup info always printed
     print(f"[{container_name}] Starting KV listener for model={model_name or 'unset'}")
     print(f"[{container_name}] vLLM ZMQ endpoint: tcp://{vllm_host}:{sub_port}")
     print(f"[{container_name}] Redis: {redis_host}:{redis_port}")
+    print(f"[{container_name}] KV_DEBUG={'on' if _KV_DEBUG else 'off'} (MAX_DEBUG_HASHES={MAX_DEBUG_HASHES})")
 
     # Redis client
     redis = aioredis.from_url(
@@ -179,9 +233,9 @@ async def main() -> None:
     # Subscribe to all KV topics (vLLM typically prefixes topics with 'kv@...')
     sub.setsockopt_string(zmq.SUBSCRIBE, "kv@")
 
-    decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
-    print(f"[{container_name}] Listening for KV events...")
+    _iprint(container_name, "Listening for KV events...")
 
+    decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
     reconnect_backoff = 1
 
     try:
@@ -190,22 +244,29 @@ async def main() -> None:
                 # Message format: [topic, seq_bytes, payload]
                 msg = await sub.recv_multipart()
                 if len(msg) != 3:
-                    print(f"[{container_name}] Unexpected ZMQ frame length: {len(msg)}")
+                    _dprint(container_name, f"Unexpected ZMQ frame length: {len(msg)}")
                     continue
 
                 topic, seq_bytes, payload = msg
                 seq = int.from_bytes(seq_bytes, "big")
 
+                _dprint(
+                    container_name,
+                    f"Received batch: topic={topic.decode('utf-8','ignore')}, seq={seq}, payload_len={len(payload)}",
+                )
+
                 event_batch = decoder.decode(payload)
-                print(f"[{container_name}] Received batch seq={seq}")
                 await process_event(event_batch, redis, container_name, model_name)
                 reconnect_backoff = 1
 
             except KeyboardInterrupt:
-                print(f"[{container_name}] Interrupted, shutting down.")
+                _iprint(container_name, "Interrupted, shutting down.")
                 break
             except zmq.ZMQError as e:
-                print(f"[{container_name}] ZMQ error: {e}, retrying in {reconnect_backoff}s")
+                # ZMQ errors are relatively important; keep them visible
+                print(
+                    f"[{container_name}] ZMQ error: {e}, retrying in {reconnect_backoff}s"
+                )
                 await asyncio.sleep(reconnect_backoff)
                 reconnect_backoff = min(reconnect_backoff * 2, 30)
             except Exception as e:
