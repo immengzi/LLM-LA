@@ -274,7 +274,7 @@ spec:
               ephemeral-storage: "4Gi"
 
         # ---------------------------------------------------------
-        # *** ADDED: KV event listener sidecar (one per vLLM pod)
+        # *** KV event listener sidecar (one per vLLM pod)
         # ---------------------------------------------------------
         - name: kv-listener
           image: kv_cache_event_listener:latest
@@ -290,6 +290,10 @@ spec:
               value: "redis"             # Redis Service name
             - name: REDIS_PORT
               value: "6379"
+            - name: KV_DEBUG
+              value: "1"          # ON: compute kv_summary
+            # - name: KV_DEBUG
+            #   value: "0"        # OFF: skip kv_summary
             - name: CONTAINER_NAME
               valueFrom:
                 fieldRef:

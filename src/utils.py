@@ -359,10 +359,73 @@ def get_metrics_summary(mode: str) -> Dict[str, Any]:
     return _metrics_summary_getter(mode) or {}
 
 
+def _compute_kv_summary_for_run(mode: str) -> Dict[str, Any]:
+    """
+    Scan the current run's output.jsonl and compute KV cache aggregates:
+
+      - kv_requests_with_hits: number of requests with kv_hits > 0
+      - kv_total_hits:        sum of kv_hits over all requests
+      - kv_total_requests:    number of records that had a kv_hits field
+
+    Returns an empty dict if there is no output.jsonl or parsing fails.
+    """
+    run_dir = get_run_dir(mode)
+    path = os.path.join(run_dir, "output.jsonl")
+
+    kv_requests_with_hits = 0
+    kv_total_hits = 0
+    kv_total_requests = 0
+
+    if not os.path.exists(path):
+        return {}
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+
+                # Only count records that actually have kv_hits
+                if "kv_hits" not in rec:
+                    continue
+
+                kv = rec.get("kv_hits")
+                try:
+                    kv_int = int(kv)
+                except Exception:
+                    continue
+
+                kv_total_requests += 1
+                kv_total_hits += kv_int
+                if kv_int > 0:
+                    kv_requests_with_hits += 1
+
+    except Exception as e:
+        print(f"[WARN] failed to compute KV summary from {path}: {e}", flush=True)
+        return {}
+
+    return {
+        "kv_total_requests": kv_total_requests,
+        "kv_requests_with_hits": kv_requests_with_hits,
+        "kv_total_hits": kv_total_hits,
+    }
+
+
 def save_summary(mode: str, summary: dict) -> None:
     metrics = get_metrics_summary(mode)
     if metrics:
         summary = {**summary, "metrics": metrics}
+
+    # ---- KV summary from output.jsonl ----
+    kv_summary = _compute_kv_summary_for_run(mode)
+    if kv_summary:
+        summary = {**summary, "kv_summary": kv_summary}
+
     run_dir = get_run_dir(mode)
     path = os.path.join(run_dir, "results.json")
     with open(path, "w", encoding="utf-8") as f:

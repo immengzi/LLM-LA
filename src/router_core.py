@@ -75,6 +75,18 @@ class PullBatchingRouter:
                  * only pulls requests whose BEST endpoint is this ep
                    (max prefix_len across eps), with fallback to FIFO
                    when KV is missing / insufficient.
+
+    kv_* semantics (this class):
+
+      • kv_hits              -> prefix_len(ep, req_id) at *selection/dispatch time*
+      • kv_candidates        -> list of endpoints and their kv_hits at selection time
+      • kv_best_endpoint     -> best endpoint at selection time
+      • kv_best_hits         -> best kv_hits at selection time
+
+      • kv_hits_after        -> prefix_len(ep, req_id) after the request has run
+      • kv_candidates_after  -> endpoints and kv_hits after the request has run
+      • kv_best_endpoint_after
+      • kv_best_hits_after
     """
 
     def __init__(self, mode_name: str = "pull-batching"):
@@ -108,6 +120,14 @@ class PullBatchingRouter:
 
         # remember last known human-friendly name for endpoints
         self._name_book: Dict[str, str] = {}
+
+        # KV pre-routing info:
+        # req_id -> {
+        #   "candidates": List[{"endpoint": str, "kv_hits": int}],
+        #   "best_ep": Optional[str],
+        #   "best_hits": int,
+        # }
+        self._kv_pre_info: Dict[int, Dict[str, object]] = {}
 
     # ------------- endpoints lifecycle -------------
 
@@ -208,9 +228,24 @@ class PullBatchingRouter:
 
     # ------------- launch + worker -------------
 
-    def _launch_one(self, ep: str, prompt: str, t_enq_client: float, req_id: int):
+    def _launch_one(
+        self,
+        ep: str,
+        prompt: str,
+        t_enq_client: float,
+        req_id: int,
+        kv_hits_before: Optional[int] = None,
+    ):
         def _runner():
             try:
+                # Snapshot KV hits BEFORE sending (if scheduler didn't inject it)
+                local_kv_before = kv_hits_before
+                if local_kv_before is None:
+                    try:
+                        local_kv_before = int(prefix_len(ep, int(req_id)))
+                    except Exception:
+                        local_kv_before = 0
+
                 predicted_out_tokens = _pred.predict_out_tokens(prompt, req_id=req_id)
 
                 # SSOT timestamps
@@ -277,11 +312,15 @@ class PullBatchingRouter:
                     else None
                 )
 
-                # KV candidate stats for this request
-                kv_hits_this_ep = int(prefix_len(ep, int(req_id)))
-                kv_candidates: List[Dict[str, int]] = []
-                best_ep: Optional[str] = None
-                best_hits = 0
+                # --- KV stats AFTER execution ---
+                try:
+                    kv_hits_after = int(prefix_len(ep, int(req_id)))
+                except Exception:
+                    kv_hits_after = 0
+
+                kv_candidates_after: List[Dict[str, int]] = []
+                best_ep_after: Optional[str] = None
+                best_hits_after = 0
 
                 eps_snapshot = list(self.eps)
                 for ep2 in eps_snapshot:
@@ -291,13 +330,27 @@ class PullBatchingRouter:
                         h = 0
                     if h <= 0:
                         continue
-                    kv_candidates.append({"endpoint": ep2, "kv_hits": h})
-                    if h > best_hits:
-                        best_hits = h
-                        best_ep = ep2
+                    kv_candidates_after.append({"endpoint": ep2, "kv_hits": int(h)})
+                    if h > best_hits_after:
+                        best_hits_after = h
+                        best_ep_after = ep2
 
-                kv_candidates.sort(key=lambda d: (-d["kv_hits"], d["endpoint"]))
-                kv_candidates = kv_candidates[:8]
+                if kv_candidates_after:
+                    kv_candidates_after.sort(
+                        key=lambda d: (-d["kv_hits"], d["endpoint"])
+                    )
+                    kv_candidates_after = kv_candidates_after[:8]
+
+                # --- KV stats BEFORE execution (from selection, if available) ---
+                pre = self._kv_pre_info.pop(int(req_id), None)
+                if pre is not None:
+                    pre_candidates = list(pre.get("candidates") or [])
+                    pre_best_ep = pre.get("best_ep")
+                    pre_best_hits = int(pre.get("best_hits") or 0)
+                else:
+                    pre_candidates = []
+                    pre_best_ep = None
+                    pre_best_hits = int(local_kv_before or 0)
 
                 log_result(
                     mode=self.mode_name,
@@ -326,17 +379,28 @@ class PullBatchingRouter:
                         "actual_out_tokens": act_out_int,
                         "total_predicted_tokens": total_predicted_tokens,
                         "total_actual_tokens": total_actual_tokens,
-                        # KV stats
-                        "kv_hits": kv_hits_this_ep,
-                        "kv_best_endpoint": best_ep,
-                        "kv_best_hits": int(best_hits),
-                        "kv_candidates": kv_candidates,
+                        # KV stats (BEFORE)
+                        "kv_hits": int(local_kv_before or 0),
+                        "kv_candidates": pre_candidates,
+                        "kv_best_endpoint": pre_best_ep,
+                        "kv_best_hits": int(pre_best_hits),
+                        # KV stats (AFTER)
+                        "kv_hits_after": int(kv_hits_after),
+                        "kv_candidates_after": kv_candidates_after,
+                        "kv_best_endpoint_after": best_ep_after,
+                        "kv_best_hits_after": int(best_hits_after),
                     },
                 )
 
                 with self._lock:
                     self.ok_counts[ep] = self.ok_counts.get(ep, 0) + 1
             except Exception as e:
+                # Clean up any pre-info on error as well
+                try:
+                    self._kv_pre_info.pop(int(req_id), None)
+                except Exception:
+                    pass
+
                 log_result(
                     mode=self.mode_name,
                     endpoint=ep,
@@ -382,12 +446,20 @@ class PullBatchingRouter:
         Strategy:
           1) Pop up to 'want * KV_ROUTE_POOL_FACTOR' items under _Q_LOCK.
           2) For each item, compute prefix_len(·, req_id) for *all* endpoints.
-             - find best_ep = argmax prefix_len
-             - if best_ep == ep and prefix_len >= KV_ROUTE_MIN_PREFIX, mark as selected
+             - build candidates_before = [{endpoint, kv_hits}, ...] (pre-routing view)
+             - find best_ep = argmax prefix_len (for observability only)
+             - for THIS ep, look at its own kv_hits (hits_for_this_ep)
+             - if hits_for_this_ep >= KV_ROUTE_MIN_PREFIX, mark as selected
+               for this endpoint.
              - everything else becomes 'leftover'.
           3) Push leftovers back into the queue in the same order.
           4) If we selected < want items, fill remainder via FIFO from the queue
              (KV-blind fallback so we don't starve non-KV traffic).
+
+        Returns:
+          List of (prompt, t_enq_client, kv_hits_before, req_id)
+          where kv_hits_before is prefix_len(ep, req_id) at selection
+          time (for KV-picked items), or 0 for FIFO fallback items.
         """
         if want <= 0:
             return []
@@ -416,26 +488,60 @@ class PullBatchingRouter:
             if not pool:
                 return []
 
-            # 2) Decide best endpoint per request
+            # 2) Decide per-endpoint KV-eligibility for THIS ep,
+            #    and record pre-routing candidates for logging.
             leftovers: List[Tuple[str, float, int]] = []
             for prompt, t_enq_client, req_id in pool:
-                best_ep = None
-                best_hits = -1
+                # pre-routing KV view for this request
+                candidates_before: List[Dict[str, int]] = []
+                best_ep: Optional[str] = None
+                best_hits: int = -1
+
+                # Build full KV view across endpoints
                 for ep2 in self.eps:
                     try:
                         h = int(prefix_len(ep2, int(req_id)))
                     except Exception:
                         h = 0
+                    if h <= 0:
+                        continue
+                    h = int(h)
+                    candidates_before.append({"endpoint": ep2, "kv_hits": h})
                     if h > best_hits:
                         best_hits = h
                         best_ep = ep2
 
+                # Normalize: empty view -> no best_ep / 0 hits
+                if not candidates_before:
+                    best_hits = 0
+                    best_ep = None
+                else:
+                    candidates_before.sort(
+                        key=lambda d: (-d["kv_hits"], d["endpoint"])
+                    )
+                    candidates_before = candidates_before[:8]
+
+                # KV eligibility is now per-endpoint:
+                # this ep is allowed to take the request if it has
+                # at least min_prefix hits for that key.
+                hits_for_this_ep = 0
+                for c in candidates_before:
+                    if c["endpoint"] == ep:
+                        hits_for_this_ep = int(c["kv_hits"])
+                        break
+
                 if (
-                    best_ep == ep
-                    and best_hits >= min_prefix
+                    hits_for_this_ep >= min_prefix
                     and len(selected) < want
                 ):
-                    selected.append((prompt, t_enq_client, None, req_id))
+                    # Remember pre-routing KV state for this req_id
+                    self._kv_pre_info[int(req_id)] = {
+                        "candidates": candidates_before,
+                        "best_ep": best_ep,
+                        "best_hits": int(best_hits),
+                    }
+                    # kv_hits_before = hits_for_this_ep on THIS endpoint
+                    selected.append((prompt, t_enq_client, int(hits_for_this_ep), req_id))
                 else:
                     leftovers.append((prompt, t_enq_client, req_id))
 
@@ -443,15 +549,16 @@ class PullBatchingRouter:
             for prompt, t_enq_client, req_id in leftovers:
                 self.q.put((prompt, t_enq_client, req_id))
 
-            # 4) Fallback: if we still need more, fill via FIFO
+            # 4) Fallback: if we still need more, fill via FIFO (kv_hits_before=0, no pre-info)
             while len(selected) < want:
                 try:
                     prompt, t_enq_client, req_id = self.q.get_nowait()
                 except Empty:
                     break
-                selected.append((prompt, t_enq_client, None, req_id))
+                selected.append((prompt, t_enq_client, 0, req_id))
 
         return selected
+
 
     # ------------- worker loop -------------
 
@@ -510,8 +617,10 @@ class PullBatchingRouter:
             )
 
             if server_kv_mode:
+                # selected = (prompt, t_enq_client, kv_hits_before, req_id)
                 selected = self._kv_select_for_endpoint(ep, want)
             else:
+                # selected = (prompt, t_enq_client, _pred_tok, req_id) from len_select/FIFO
                 if use_len_aware:
                     selected = select_batch(
                         self.q,
@@ -576,8 +685,14 @@ class PullBatchingRouter:
             if pulled_n == 0:
                 continue
 
-            for prompt, t_enq_client, _pred_tok, req_id in selected:
-                self._launch_one(ep, prompt, t_enq_client, req_id)
+            if server_kv_mode:
+                # selected: (prompt, t_enq_client, kv_hits_before, req_id)
+                for prompt, t_enq_client, kv_hits_before, req_id in selected:
+                    self._launch_one(ep, prompt, t_enq_client, req_id, kv_hits_before)
+            else:
+                # selected: (prompt, t_enq_client, _pred_tok, req_id)
+                for prompt, t_enq_client, _pred_tok, req_id in selected:
+                    self._launch_one(ep, prompt, t_enq_client, req_id, None)
 
     # ------------- router api -------------
 

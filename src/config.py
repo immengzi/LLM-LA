@@ -99,17 +99,17 @@ class RouterConfig:
     KV_LOG_EVERY_N: int = 30
     KV_LOG_SCORES: bool = True
 
-    # NEW: log-level for kv_watcher (used in kv_watcher._log)
+    # log-level for kv_watcher (used in kv_watcher._log)
     # "off"     : only start/stop + errors
     # "summary" : discovery + scan summary
     # "full"    : per-key logs + summary
     KV_LOG_KEYS: str = "summary"
 
-    # NEW: server-level KV routing knobs (used by PullBatchingRouter._kv_select_for_endpoint)
-    KV_ROUTE_POOL_FACTOR: int = 4   # multiplier for how many items to peek from the queue per EP (want * factor)
+    # server-level KV routing knobs (used by PullBatchingRouter._kv_select_for_endpoint)
+    KV_ROUTE_POOL_FACTOR: int = 1000   # multiplier for how many items to peek from the queue per EP (want * factor)
     KV_ROUTE_MIN_PREFIX: int = 1    # minimum prefix_len to treat KV match as "useful" for server selection
 
-    # NEW: timeout for CPU hash service (used when binding in router_modes)
+    # timeout for CPU hash service (used when binding in router_modes)
     KV_HASH_TIMEOUT_S: float = 10.0
 
     # KV watcher / Redis
@@ -254,7 +254,7 @@ class RouterConfig:
     HF_STREAMING: bool = False
     LMSYS_MIN_INPUT_TOKENS: int = 256   # or None
     LMSYS_MAX_INPUT_TOKENS: int = None  # or None
-    LMSYS_REPEAT_EACH: int = 16
+    LMSYS_REPEAT_EACH: int = 1
 
     # ---- AUTOSCALER ----
     AUTOSCALE_ENABLED: bool = False
@@ -266,7 +266,7 @@ class RouterConfig:
     AUTOSCALE_DEBOUNCE_S: float = 1.0
     AUTOSCALE_LOG_FILENAME: str = "autoscale.jsonl"
 
-    LOG_PAYLOAD_MODE: Literal["off", "head", "full"] = "off"
+    LOG_PAYLOAD_MODE: Literal["off", "head", "full"] = "head"
     LOG_HEAD_CHARS: int = 5
 
     # ---- Think/no think ----
