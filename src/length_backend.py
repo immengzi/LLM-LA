@@ -31,6 +31,16 @@ from config import get_config
 
 
 # ---------------------------------------------------------------------
+# Mode "enum" (just names; all values still come from config)
+# ---------------------------------------------------------------------
+MODE_LEGACY = "legacy"
+MODE_TARGET_OUTPUT = "target-output"
+MODE_TARGET_TOTAL = "target-total"
+MODE_REPLAY_OUTPUT = "replay-output"
+MODE_DIST_OUTPUT = "dist-output"
+
+
+# ---------------------------------------------------------------------
 # Shared tokenizer for logging real input token counts
 # ---------------------------------------------------------------------
 _logging_tokenizer = None
@@ -86,15 +96,21 @@ def _get_logging_tokenizer():
 
 
 # ---------------------------------------------------------------------
-# Deterministic per-run STRICT plan (size = number of enqueues)
+# Deterministic per-run STRICT histogram plan (size = number of enqueues)
 # ---------------------------------------------------------------------
 _plan_state: Dict[str, Dict[str, Any]] = {}
 _plan_lock = threading.Lock()
 
 
 def set_hist_plan(label: str, probs: List[float], n: int, seed_base: int):
-    """Precompute a deterministic histogram plan of exact size n."""
+    """
+    Precompute a deterministic histogram plan of exact size n.
+
+    Produces a shuffled sequence of class indices (0..len(probs)-1) of
+    length n, approximately respecting the target probabilities.
+    """
     with _plan_lock:
+        # rough counts
         counts = [int(round(float(p) * n)) for p in probs]
         delta = n - sum(counts)
         order = sorted(range(len(probs)), key=lambda i: -probs[i])
@@ -105,6 +121,7 @@ def set_hist_plan(label: str, probs: List[float], n: int, seed_base: int):
             delta += -1 if delta > 0 else 1
             i += 1
 
+        # expand counts to sequence
         seq = [i for i, c in enumerate(counts) for _ in range(max(0, c))]
         if len(seq) < n:
             j = max(range(len(probs)), key=lambda k: probs[k])
@@ -112,13 +129,19 @@ def set_hist_plan(label: str, probs: List[float], n: int, seed_base: int):
         elif len(seq) > n:
             seq = seq[:n]
 
+        # shuffle deterministically
         rng = random.Random(seed_for_name(seed_base, f"hist_plan::{label}"))
         rng.shuffle(seq)
         _plan_state[label] = {"seq": seq}
 
 
 def get_hist_index_for_req(label: str, req_id: int, default_fn: Callable[[], int]) -> int:
-    """Return planned class index for a given req_id, or default_fn() if no plan."""
+    """
+    Return planned class index for a given req_id, or default_fn() if no plan.
+
+    Uses the per-label precomputed plan; if it doesn't exist or is empty,
+    falls back to default_fn() (usually a PRNG-based draw).
+    """
     with _plan_lock:
         st = _plan_state.get(label)
         if not st:
@@ -130,14 +153,18 @@ def get_hist_index_for_req(label: str, req_id: int, default_fn: Callable[[], int
 
 
 # ---------------------------------------------------------------------
-# Deterministic PRNG fallback (non-STRICT)
+# Deterministic PRNG fallback (non-STRICT histogram sampling)
 # ---------------------------------------------------------------------
 _prng_state: Dict[str, Dict[str, Any]] = {}
 _prng_lock = threading.Lock()
 
 
 def _next_hist_index_prng(label: str, probs: List[float], seed_base: int) -> int:
-    """Stable categorical draw using a per-label seeded RNG."""
+    """
+    Stable categorical draw using a per-label seeded RNG.
+
+    This is used when STRICT hist is off, or as a fallback if no plan exists.
+    """
     key = f"prng:{label}"
     with _prng_lock:
         st = _prng_state.get(key)
@@ -146,8 +173,10 @@ def _next_hist_index_prng(label: str, probs: List[float], seed_base: int) -> int
             st = {"rng": random.Random(s)}
             _prng_state[key] = st
         rng: random.Random = st["rng"]
+
         total = sum(float(p) for p in probs) or 1.0
-        u, cum = rng.random(), 0.0
+        u = rng.random()
+        cum = 0.0
         for i, p in enumerate(probs):
             cum += float(p) / total
             if u <= cum:
@@ -159,16 +188,28 @@ def _next_hist_index_prng(label: str, probs: List[float], seed_base: int) -> int
 # Common helpers
 # ---------------------------------------------------------------------
 def seed_for_name(seed_base: int, name: str) -> int:
+    """Turn (seed_base, name) into a deterministic int seed."""
     h = hashlib.sha256(f"{seed_base}:{name}".encode("utf-8")).hexdigest()
     return int(h[:16], 16)
 
 
 def rng_for_prompt(seed_base: int, prompt: Optional[str], by_prompt: bool = True) -> random.Random:
+    """
+    Deterministic RNG keyed either by:
+      - (seed_base, prompt) if by_prompt and prompt is non-empty
+      - seed_base only otherwise
+    """
     s = seed_for_name(seed_base, prompt) if (by_prompt and prompt) else int(seed_base)
     return random.Random(s)
 
 
 def estimate_in_tokens_from_chars(prompt: str) -> int:
+    """
+    Rough heuristic for input tokens from character length.
+
+    Used only in SIM / replay metadata. Real token counts come from
+    count_input_tokens().
+    """
     cfg = get_config()
     if not cfg.SIM_VARY_IN_TOKENS:
         return int(cfg.SIM_IN_TOKENS)
@@ -203,36 +244,59 @@ def _get_replay_out_len(req_id: Optional[int]) -> Optional[int]:
 # Output token sampling (SIM) — accepts req_id for STRICT hist
 # ---------------------------------------------------------------------
 def sample_out_tokens_from_cfg(rng: random.Random, req_id: Optional[int] = None) -> int:
+    """
+    Sample a completion length (in tokens) from SIM_OUT_DIST, respecting:
+
+      - SIM_VARY_OUT_TOKENS
+      - kind: lognormal / gamma / pareto / hist
+      - LENGTH_DIST_STRICT_HIST (strict vs PRNG)
+      - MAX_TOKENS as an upper cap
+
+    All config comes from get_config() / RouterConfig.
+    """
     cfg = get_config()
     if not cfg.SIM_VARY_OUT_TOKENS:
         return int(cfg.SIM_OUT_TOKENS)
 
-    d = dict(cfg.SIM_OUT_DIST or {})
-    kind = str(d.get("kind", "lognormal")).lower()
-    lo = int(d.get("min", 1))
-    hi = int(d.get("max", cfg.MAX_TOKENS or 4096))
+    dist_cfg = dict(cfg.SIM_OUT_DIST or {})
+    kind = str(dist_cfg.get("kind", "lognormal")).lower()
+    lo = int(dist_cfg.get("min", 1))
+    hi = int(dist_cfg.get("max", cfg.MAX_TOKENS or 4096))
 
     x = None
+
+    # ---- Continuous distributions ------------------------------------
     if kind == "lognormal":
-        mu = float(d.get("mu", 4.8))
-        sigma = float(d.get("sigma", 0.8))
+        mu = float(dist_cfg.get("mu", 4.8))
+        sigma = float(dist_cfg.get("sigma", 0.8))
         x = rng.lognormvariate(mu, sigma)
+
     elif kind == "gamma":
-        k = float(d.get("k", 2.0))
-        theta = float(d.get("theta", 64.0 / max(k, 1e-9)))
+        k = float(dist_cfg.get("k", 2.0))
+        theta = float(dist_cfg.get("theta", 64.0 / max(k, 1e-9)))
         x = rng.gammavariate(k, theta)
+
     elif kind == "pareto":
-        alpha = float(d.get("alpha", 1.5))
-        xm = float(d.get("xm", 16.0))
+        alpha = float(dist_cfg.get("alpha", 1.5))
+        xm = float(dist_cfg.get("xm", 16.0))
         x = xm * rng.paretovariate(alpha)
+
+    # ---- Discrete histogram -----------------------------------------
     elif kind == "hist":
-        values = list(map(int, d.get("values", [])))
-        probs = d.get("probs") or [1.0 / max(1, len(values))] * max(1, len(values))
+        values = list(map(int, dist_cfg.get("values", [])))
+        probs = dist_cfg.get("probs") or [1.0 / max(1, len(values))] * max(1, len(values))
+
         if not values:
+            # No histogram values ⇒ fall back to fixed SIM_OUT_TOKENS
             return int(cfg.SIM_OUT_TOKENS)
-        if bool(getattr(cfg, "LENGTH_DIST_STRICT_HIST", False)) and req_id is not None:
+
+        strict = bool(getattr(cfg, "LENGTH_DIST_STRICT_HIST", False))
+
+        if strict and req_id is not None:
+            # STRICT hist: precomputed plan if available, otherwise deterministic PRNG
             label = str(getattr(cfg, "LENGTH_HIST_SERIES_LABEL", "default"))
             seed_base = int(getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0)
+
             idx = get_hist_index_for_req(
                 label,
                 int(req_id),
@@ -240,7 +304,9 @@ def sample_out_tokens_from_cfg(rng: random.Random, req_id: Optional[int] = None)
             )
             idx = max(0, min(idx, len(values) - 1))
             x = int(values[idx])
+
         else:
+            # Non-strict: simple categorical draw with the provided RNG
             p = float(rng.random())
             cum = 0.0
             for v, w in zip(values, probs):
@@ -250,14 +316,246 @@ def sample_out_tokens_from_cfg(rng: random.Random, req_id: Optional[int] = None)
                     break
             if x is None:
                 x = int(values[-1])
+
+    # ---- Fallback: fixed length -------------------------------------
     else:
         return int(cfg.SIM_OUT_TOKENS)
 
+    # Clamp inside [lo, hi]
     return max(lo, min(hi, int(round(x if x is not None else cfg.SIM_OUT_TOKENS))))
 
 
 # ---------------------------------------------------------------------
-# Compute per-request cap/targets
+# Plan helpers (small, linear, mode-specific)
+# ---------------------------------------------------------------------
+def _make_plan(
+    *,
+    eff_mode: str,
+    eff_max: int,
+    forced_out: Optional[int],
+    forced_tot: Optional[int],
+    eff_ignore_eos: bool,
+    meta: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Single place for the plan dict, so structure is obvious."""
+    return {
+        "eff_mode": eff_mode,
+        "eff_max": int(max(0, eff_max)),
+        "forced_out": forced_out,
+        "forced_tot": forced_tot,
+        "eff_ignore_eos": eff_ignore_eos,
+        "meta": meta,
+    }
+
+
+def _plan_explicit_overrides(
+    *,
+    eff_mode: str,
+    base_cap: int,
+    eff_ignore_eos: bool,
+    target_output_tokens: Optional[int],
+    target_total_tokens: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    """
+    If per-request target_output/target_total are set, use them directly.
+
+    This behaves exactly like your original "Explicit override modes" block:
+    it ignores LENGTH_MODE and returns immediately.
+    """
+    if target_output_tokens is None and target_total_tokens is None:
+        return None
+
+    forced_out: Optional[int] = None
+    forced_tot: Optional[int] = None
+
+    if target_output_tokens is not None:
+        forced_out = max(0, int(target_output_tokens))
+    if target_total_tokens is not None:
+        forced_tot = max(0, int(target_total_tokens))
+
+    eff_max = forced_out or forced_tot or base_cap
+
+    meta = {"_length_mode": eff_mode}
+    return _make_plan(
+        eff_mode=eff_mode,
+        eff_max=eff_max,
+        forced_out=forced_out,
+        forced_tot=forced_tot,
+        eff_ignore_eos=eff_ignore_eos,
+        meta=meta,
+    )
+
+
+def _plan_target_output(
+    *,
+    cfg,
+    base_cap: int,
+    eff_ignore_eos: bool,
+    meta: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Handle LENGTH_MODE == target-output."""
+    tgt = getattr(cfg, "TARGET_OUTPUT_TOKENS", None)
+    if tgt is None:
+        return None
+
+    tgt = int(tgt)
+    eff_max = min(tgt, base_cap)
+    meta["_target_completion_tokens"] = tgt
+
+    return _make_plan(
+        eff_mode=MODE_TARGET_OUTPUT,
+        eff_max=eff_max,
+        forced_out=tgt,
+        forced_tot=None,
+        eff_ignore_eos=eff_ignore_eos,
+        meta=meta,
+    )
+
+
+def _plan_target_total(
+    *,
+    cfg,
+    base_cap: int,
+    eff_ignore_eos: bool,
+    meta: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Handle LENGTH_MODE == target-total."""
+    tgt = getattr(cfg, "TARGET_TOTAL_TOKENS", None)
+    if tgt is None:
+        return None
+
+    tgt = int(tgt)
+    eff_max = min(tgt, base_cap)
+    meta["_target_total_tokens"] = tgt
+
+    return _make_plan(
+        eff_mode=MODE_TARGET_TOTAL,
+        eff_max=eff_max,
+        forced_out=None,
+        forced_tot=tgt,
+        eff_ignore_eos=eff_ignore_eos,
+        meta=meta,
+    )
+
+
+def _plan_replay_output(
+    *,
+    plain_prompt: str,
+    base_cap: int,
+    eff_ignore_eos: bool,
+    meta: Dict[str, Any],
+    req_id: Optional[int],
+) -> Dict[str, Any]:
+    """
+    Handle LENGTH_MODE == replay-output (including fallback to legacy).
+
+    Behaviour matches your original code: if we don't find a replay length,
+    we fall back to 'legacy' in eff_mode but keep meta['_length_mode'] as
+    whatever the requested mode was.
+    """
+    v = _get_replay_out_len(req_id)
+    if v is None:
+        # No replay length known → behave like legacy with same cap
+        return _make_plan(
+            eff_mode=MODE_LEGACY,
+            eff_max=base_cap,
+            forced_out=None,
+            forced_tot=None,
+            eff_ignore_eos=eff_ignore_eos,
+            meta=meta,
+        )
+
+    v = int(v)
+    est_in = int(estimate_in_tokens_from_chars(plain_prompt))
+    out_budget = v if base_cap == 0 else min(v, base_cap)
+
+    meta.update(
+        {
+            "_replay_mode": True,
+            "_replay_out_len": v,
+            "_replay_total_tokens_target": int(est_in + out_budget),
+            "_req_id": (None if req_id is None else int(req_id)),
+        }
+    )
+
+    return _make_plan(
+        eff_mode=MODE_REPLAY_OUTPUT,
+        eff_max=out_budget,
+        forced_out=v,
+        forced_tot=None,
+        eff_ignore_eos=eff_ignore_eos,
+        meta=meta,
+    )
+
+
+def _plan_dist_output(
+    *,
+    cfg,
+    plain_prompt: str,
+    base_cap: int,
+    eff_ignore_eos: bool,
+    meta: Dict[str, Any],
+    req_id: Optional[int],
+) -> Dict[str, Any]:
+    """Handle LENGTH_MODE == dist-output."""
+    seed_base = int(
+        getattr(cfg, "LENGTH_DIST_SEED", None)
+        or getattr(cfg, "SEED", 0)
+        or 0
+    )
+    by_prompt = bool(getattr(cfg, "LENGTH_DIST_BY_PROMPT", True))
+
+    rng = rng_for_prompt(
+        seed_base,
+        (plain_prompt if by_prompt else None),
+        by_prompt=by_prompt,
+    )
+
+    sampled_out = int(sample_out_tokens_from_cfg(rng, req_id=req_id))
+    est_in = int(estimate_in_tokens_from_chars(plain_prompt))
+    out_budget = min(sampled_out, base_cap)
+
+    meta.update(
+        {
+            "_dist_mode": True,
+            "_dist_seed_base": seed_base,
+            "_dist_by_prompt": by_prompt,
+            "_dist_prompt_tokens_est": est_in,
+            "_dist_completion_tokens_target": out_budget,
+            "_dist_total_tokens_target": est_in + out_budget,
+            "_req_id": req_id,
+        }
+    )
+
+    return _make_plan(
+        eff_mode=MODE_DIST_OUTPUT,
+        eff_max=out_budget,
+        forced_out=sampled_out,
+        forced_tot=None,
+        eff_ignore_eos=eff_ignore_eos,
+        meta=meta,
+    )
+
+
+def _plan_legacy(
+    *,
+    base_cap: int,
+    eff_ignore_eos: bool,
+    meta: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Handle legacy / fallback."""
+    return _make_plan(
+        eff_mode=MODE_LEGACY,
+        eff_max=base_cap,
+        forced_out=None,
+        forced_tot=None,
+        eff_ignore_eos=eff_ignore_eos,
+        meta=meta,
+    )
+
+
+# ---------------------------------------------------------------------
+# Compute per-request cap/targets (refactored using helpers)
 # ---------------------------------------------------------------------
 def compute_length_plan(
     *,
@@ -269,171 +567,174 @@ def compute_length_plan(
     length_mode: Optional[str],
     req_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    cfg = get_config()
-    eff_mode = (length_mode or getattr(cfg, "LENGTH_MODE", "legacy") or "legacy").lower().strip()
-    eff_ignore_eos = bool(ignore_eos if ignore_eos is not None else getattr(cfg, "IGNORE_EOS", False))
+    """
+    Compute the effective length plan for a single request.
 
+    Returns a dict with keys:
+      - eff_mode:        effective mode (may be 'legacy' even if replay-output fell back)
+      - eff_max:         max completion tokens to allow
+      - forced_out:      if not None, fixed completion length
+      - forced_tot:      if not None, fixed total tokens (in + out)
+      - eff_ignore_eos:  final ignore_eos flag
+      - meta:            extra metadata for logging/debugging
+
+    Behaviour matches the original implementation; all values come from
+    RouterConfig via get_config() plus the function arguments.
+    """
+    cfg = get_config()
+
+    # ------------------------------
+    # Step 1: normalize mode & caps
+    # ------------------------------
+    # EXACTLY the same pattern you used originally:
+    #   (length_mode or cfg.LENGTH_MODE or "legacy").lower().strip()
+    eff_mode = (
+        length_mode
+        or getattr(cfg, "LENGTH_MODE", MODE_LEGACY)
+        or MODE_LEGACY
+    )
+    eff_mode = eff_mode.lower().strip()
+
+    eff_ignore_eos = bool(
+        ignore_eos if ignore_eos is not None else getattr(cfg, "IGNORE_EOS", False)
+    )
+
+    # base_cap: if <=0 or None, use cfg.MAX_TOKENS if >0
     cfg_cap = int(getattr(cfg, "MAX_TOKENS", 0) or 0)
     if base_cap is None or base_cap < 0:
         base_cap = 0
     if base_cap == 0 and cfg_cap > 0:
         base_cap = cfg_cap
+    base_cap = int(max(0, base_cap))
 
-    # Explicit override modes
-    if target_output_tokens is not None or target_total_tokens is not None:
-        forced_out = forced_tot = None
-        if target_output_tokens is not None:
-            forced_out = max(0, int(target_output_tokens))
-        if target_total_tokens is not None:
-            forced_tot = max(0, int(target_total_tokens))
-        eff_max = forced_out or forced_tot or base_cap
-        return {
-            "eff_mode": eff_mode,
-            "eff_max": int(max(0, eff_max)),
-            "forced_out": forced_out,
-            "forced_tot": forced_tot,
-            "eff_ignore_eos": eff_ignore_eos,
-            "meta": {"_length_mode": eff_mode},
-        }
+    # ------------------------------
+    # Step 2: explicit overrides
+    # ------------------------------
+    override_plan = _plan_explicit_overrides(
+        eff_mode=eff_mode,
+        base_cap=base_cap,
+        eff_ignore_eos=eff_ignore_eos,
+        target_output_tokens=target_output_tokens,
+        target_total_tokens=target_total_tokens,
+    )
+    if override_plan is not None:
+        return override_plan
 
+    # mode-specific metadata starts with just the requested mode
     meta: Dict[str, Any] = {"_length_mode": eff_mode}
 
-    # Target-output
-    if eff_mode == "target-output":
-        tgt = getattr(cfg, "TARGET_OUTPUT_TOKENS", None)
-        if tgt is not None:
-            tgt = int(tgt)
-            eff_max = min(tgt, base_cap)
-            meta["_target_completion_tokens"] = tgt
-            return {
-                "eff_mode": eff_mode,
-                "eff_max": eff_max,
-                "forced_out": tgt,
-                "forced_tot": None,
-                "eff_ignore_eos": eff_ignore_eos,
-                "meta": meta,
-            }
-
-    # Target-total
-    if eff_mode == "target-total":
-        tgt = getattr(cfg, "TARGET_TOTAL_TOKENS", None)
-        if tgt is not None:
-            tgt = int(tgt)
-            eff_max = min(tgt, base_cap)
-            meta["_target_total_tokens"] = tgt
-            return {
-                "eff_mode": eff_mode,
-                "eff_max": eff_max,
-                "forced_out": None,
-                "forced_tot": tgt,
-                "eff_ignore_eos": eff_ignore_eos,
-                "meta": meta,
-            }
-
-    # replay-output
-    if eff_mode == "replay-output":
-        v = _get_replay_out_len(req_id)
-        if v is not None:
-            est_in = int(estimate_in_tokens_from_chars(plain_prompt))
-            out_budget = v if base_cap == 0 else min(int(v), base_cap)
-            meta.update(
-                {
-                    "_replay_mode": True,
-                    "_replay_out_len": int(v),
-                    "_replay_total_tokens_target": int(est_in + out_budget),
-                    "_req_id": (None if req_id is None else int(req_id)),
-                }
-            )
-            return {
-                "eff_mode": eff_mode,
-                "eff_max": int(max(0, out_budget)),
-                "forced_out": int(v),
-                "forced_tot": None,
-                "eff_ignore_eos": eff_ignore_eos,
-                "meta": meta,
-            }
-        # fallback to legacy if no replay length
-        return {
-            "eff_mode": "legacy",
-            "eff_max": base_cap,
-            "forced_out": None,
-            "forced_tot": None,
-            "eff_ignore_eos": eff_ignore_eos,
-            "meta": meta,
-        }
-
-    # Distribution-based
-    if eff_mode == "dist-output":
-        seed_base = int(getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0)
-        by_prompt = bool(getattr(cfg, "LENGTH_DIST_BY_PROMPT", True))
-        rng = rng_for_prompt(seed_base, (plain_prompt if by_prompt else None), by_prompt=by_prompt)
-
-        sampled_out = int(sample_out_tokens_from_cfg(rng, req_id=req_id))
-        est_in = int(estimate_in_tokens_from_chars(plain_prompt))
-        out_budget = min(sampled_out, base_cap)
-        meta.update(
-            {
-                "_dist_mode": True,
-                "_dist_seed_base": seed_base,
-                "_dist_by_prompt": by_prompt,
-                "_dist_prompt_tokens_est": est_in,
-                "_dist_completion_tokens_target": out_budget,
-                "_dist_total_tokens_target": est_in + out_budget,
-                "_req_id": req_id,
-            }
+    # ------------------------------
+    # Step 3: target-output mode
+    # ------------------------------
+    if eff_mode == MODE_TARGET_OUTPUT:
+        plan = _plan_target_output(
+            cfg=cfg,
+            base_cap=base_cap,
+            eff_ignore_eos=eff_ignore_eos,
+            meta=meta,
         )
-        return {
-            "eff_mode": eff_mode,
-            "eff_max": out_budget,
-            "forced_out": sampled_out,
-            "forced_tot": None,
-            "eff_ignore_eos": eff_ignore_eos,
-            "meta": meta,
-        }
+        if plan is not None:
+            return plan
 
-    # legacy fallback
-    return {
-        "eff_mode": "legacy",
-        "eff_max": base_cap,
-        "forced_out": None,
-        "forced_tot": None,
-        "eff_ignore_eos": eff_ignore_eos,
-        "meta": meta,
-    }
+    # ------------------------------
+    # Step 4: target-total mode
+    # ------------------------------
+    if eff_mode == MODE_TARGET_TOTAL:
+        plan = _plan_target_total(
+            cfg=cfg,
+            base_cap=base_cap,
+            eff_ignore_eos=eff_ignore_eos,
+            meta=meta,
+        )
+        if plan is not None:
+            return plan
+
+    # ------------------------------
+    # Step 5: replay-output mode
+    # ------------------------------
+    if eff_mode == MODE_REPLAY_OUTPUT:
+        return _plan_replay_output(
+            plain_prompt=plain_prompt,
+            base_cap=base_cap,
+            eff_ignore_eos=eff_ignore_eos,
+            meta=meta,
+            req_id=req_id,
+        )
+
+    # ------------------------------
+    # Step 6: dist-output mode
+    # ------------------------------
+    if eff_mode == MODE_DIST_OUTPUT:
+        return _plan_dist_output(
+            cfg=cfg,
+            plain_prompt=plain_prompt,
+            base_cap=base_cap,
+            eff_ignore_eos=eff_ignore_eos,
+            meta=meta,
+            req_id=req_id,
+        )
+
+    # ------------------------------
+    # Step 7: legacy / fallback
+    # ------------------------------
+    return _plan_legacy(
+        base_cap=base_cap,
+        eff_ignore_eos=eff_ignore_eos,
+        meta=meta,
+    )
 
 
 # ---------------------------------------------------------------------
 # Predictor preview — side-effect-free
 # ---------------------------------------------------------------------
 def preview_out_tokens_for_prompt(*, plain_prompt: str, req_id: int) -> int:
-    cfg = get_config()
-    mode = str(getattr(cfg, "LENGTH_MODE", "legacy") or "legacy").lower().strip()
+    """
+    Side-effect-free preview of completion length.
 
-    if mode == "target-output":
+    Behaviour matches the original implementation:
+    - honours LENGTH_MODE, TARGET_*_TOKENS, replay-output, dist-output;
+    - falls back to MAX_TOKENS for legacy/unknown modes.
+    """
+    cfg = get_config()
+    # Same pattern as original:
+    #   str(cfg.LENGTH_MODE or "legacy").lower().strip()
+    mode = str(getattr(cfg, "LENGTH_MODE", MODE_LEGACY) or MODE_LEGACY).lower().strip()
+
+    # target-output → fixed completion length
+    if mode == MODE_TARGET_OUTPUT:
         tgt = getattr(cfg, "TARGET_OUTPUT_TOKENS", None)
         if tgt is not None:
             return int(tgt)
-    if mode == "target-total":
+
+    # target-total → just return the total target as a rough preview
+    if mode == MODE_TARGET_TOTAL:
         tgt = getattr(cfg, "TARGET_TOTAL_TOKENS", None)
         if tgt is not None:
             return int(tgt)
 
-    if mode == "replay-output":
+    # replay-output → use recorded length if available, else fall back to cap
+    if mode == MODE_REPLAY_OUTPUT:
         v = _get_replay_out_len(req_id)
         if v is not None:
             return int(v)
         cap = int(getattr(cfg, "MAX_TOKENS", 0) or 0)
         return int(cap if cap > 0 else 0)
 
-    if mode == "dist-output":
+    # dist-output → mirror SIM_OUT_DIST behaviour
+    if mode == MODE_DIST_OUTPUT:
         d = dict(getattr(cfg, "SIM_OUT_DIST", {}) or {})
         kind = str(d.get("kind", "lognormal")).lower()
+
+        # Histogram handled explicitly
         if kind == "hist":
             values = list(map(int, d.get("values", [])))
             probs = d.get("probs") or ([1.0 / max(1, len(values))] * len(values))
             if not values:
                 return int(getattr(cfg, "SIM_OUT_TOKENS", 0) or 0)
-            if bool(getattr(cfg, "LENGTH_DIST_STRICT_HIST", False)):
+
+            strict = bool(getattr(cfg, "LENGTH_DIST_STRICT_HIST", False))
+
+            if strict:
                 label = str(getattr(cfg, "LENGTH_HIST_SERIES_LABEL", "default"))
                 seed_base = int(getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0)
                 idx = get_hist_index_for_req(
@@ -444,9 +745,14 @@ def preview_out_tokens_for_prompt(*, plain_prompt: str, req_id: int) -> int:
                 idx = max(0, min(idx, len(values) - 1))
                 return int(values[idx])
             else:
+                # non-strict hist: draw once from a deterministic RNG
                 seed_base = int(getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0)
                 by_prompt = bool(getattr(cfg, "LENGTH_DIST_BY_PROMPT", True))
-                rng = rng_for_prompt(seed_base, (plain_prompt if by_prompt else None), by_prompt=by_prompt)
+                rng = rng_for_prompt(
+                    seed_base,
+                    (plain_prompt if by_prompt else None),
+                    by_prompt=by_prompt,
+                )
                 total = sum(float(p) for p in probs) or 1.0
                 u, cum = rng.random(), 0.0
                 for v, w in zip(values, probs):
@@ -454,15 +760,25 @@ def preview_out_tokens_for_prompt(*, plain_prompt: str, req_id: int) -> int:
                     if u <= cum:
                         return int(v)
                 return int(values[-1])
+
+        # Non-hist distributions: just reuse the same sampler as SIM
         seed_base = int(getattr(cfg, "LENGTH_DIST_SEED", None) or getattr(cfg, "SEED", 0) or 0)
         by_prompt = bool(getattr(cfg, "LENGTH_DIST_BY_PROMPT", True))
-        rng = rng_for_prompt(seed_base, (plain_prompt if by_prompt else None), by_prompt=by_prompt)
+        rng = rng_for_prompt(
+            seed_base,
+            (plain_prompt if by_prompt else None),
+            by_prompt=by_prompt,
+        )
         return int(sample_out_tokens_from_cfg(rng))
 
+    # legacy / anything else → just use the cap
     cap = int(getattr(cfg, "MAX_TOKENS", 0) or 0)
     return int(cap if cap > 0 else 0)
 
 
+# ---------------------------------------------------------------------
+# Input token counting
+# ---------------------------------------------------------------------
 def count_input_tokens(plain_prompt: str, req_id: Optional[int] = 0) -> int:
     """
     Return input token count using the same tokenizer as the model

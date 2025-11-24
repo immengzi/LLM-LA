@@ -19,20 +19,21 @@ SIM_MODE: "off"
 
 # ------- Global caps / general -------
 MAX_TOKENS: 8192        # Medium cap (default). For HIGH use 2048; VERY LARGE use 8192; LOW use 256
-IGNORE_EOS: false
+IGNORE_EOS: false       # set true if you want to *ignore* EOS and push to the full target
 
 # ------- Length policy -------
-LENGTH_MODE: "legacy"      # Distribution mode (default for this file)
-TARGET_OUTPUT_TOKENS: null
+LENGTH_MODE: "target-output"   # <-- FIXED-length mode
+TARGET_OUTPUT_TOKENS: 1      # <-- desired fixed completion length
 TARGET_TOTAL_TOKENS: null
 
-# Distribution RNG
+# Distribution RNG (mostly irrelevant in target-output mode)
 LENGTH_DIST_SEED: 2025
 LENGTH_DIST_BY_PROMPT: true
-SIM_VARY_OUT_TOKENS: false
+SIM_VARY_OUT_TOKENS: false     # <-- do NOT vary; target-output drives the length
 
 # =======================
 # DISTRO: pick ONE block
+# (ignored in target-output, kept for convenience if you switch back to dist-output)
 # =======================
 
 # ---- MEDIUM tokens (default) ----
