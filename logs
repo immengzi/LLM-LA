@@ -1235,6 +1235,103 @@ real outptus
 tokenizer: Qwen/Qwen3-8B
 outcome: 8% better in p99 and throughput and batch occupancy about 3% better
 
+197-200
+
+201 - pull batching:
+8 replicas
+npu
+dataset: lmsys fake output of 1 token - mimicing prefill only workloads
+batch size on the vLLM server 8
+100 requests only above 256 tokens
+load: dump
+tokenizer: Qwen/Qwen3-8B
+without prefix on an empty kv cache server
+
+202 - pull batching:
+8 replicas
+npu
+dataset: lmsys fake output of 1 token - mimicing prefill only workloads
+batch size on the vLLM server 8
+100 requests only above 256 tokens
+load: dump
+tokenizer: Qwen/Qwen3-8B
+with prefix 
+outcome of 201-202: 50 % reduction in both mean and p99 latency
+
+203 - pull batching:
+8 replicas
+npu
+dataset: lmsys fake output of 1 token - mimicing prefill only workloads
+batch size on the vLLM server 8
+1000 requests only above 256 tokens
+load: dump
+tokenizer: Qwen/Qwen3-8B
+without prefix on an empty kv cache server
+
+204 - pull batching:
+8 replicas
+npu
+dataset: lmsys fake output of 1 token - mimicing prefill only workloads
+batch size on the vLLM server 8
+1000 requests only above 256 tokens
+load: dump
+tokenizer: Qwen/Qwen3-8B
+with prefix 
+outcome of 203-204: 50 % reduction in p99 latency but not in mean latency. The reason is that the cache hits only happens on the first few hits and then stops hitting.
+
+205 - pull batching:
+8 replicas
+npu
+dataset: lmsys fake output of 1 token - mimicing prefill only workloads
+batch size on the vLLM server 8
+1024 requests rolling of repeated 32 only above 256 tokens
+load: dump
+tokenizer: Qwen/Qwen3-8B
+without prefix on an empty kv cache server
+
+
+206 - pull batching:
+8 replicas
+npu
+dataset: lmsys fake output of 1 token - mimicing prefill only workloads
+batch size on the vLLM server 8
+1024 requests rolling of repeated 32 only above 256 tokens
+load: dump
+tokenizer: Qwen/Qwen3-8B
+with prefix 
+outcome of 205-206: Full cache hits and completely better lantency by 50% in both P99 and mean latency
+
+207 - pull batching:
+8 replicas
+npu
+dataset: lmsys real
+batch size on the vLLM server 8
+1024 requests rolling of repeated 32 only above 256 tokens
+load: dump
+tokenizer: Qwen/Qwen3-8B
+without prefix 
+
+208 - pull batching:
+8 replicas
+npu
+dataset: lmsys real
+batch size on the vLLM server 8
+1024 requests rolling of repeated 32 only above 256 tokens
+load: dump
+tokenizer: Qwen/Qwen3-8B
+with prefix 
+outcome of 207-208: Full cache hits and completely better lantency by 50% in P99
+
+209 - pull batching:
+8 replicas
+npu
+dataset: lmsys real
+batch size on the vLLM server 8
+1024 requests rolling of repeated 32 only above 256 tokens
+load: dump
+tokenizer: Qwen/Qwen3-8B
+with prefix 
+outcome of 207-209: Full cache hits and completely better lantency by 50% in P99 but the kv hits is smaller than expected
 
 =============================
 |         Profiling         |

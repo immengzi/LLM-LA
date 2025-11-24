@@ -234,7 +234,7 @@ class RouterConfig:
     RAND_EPOCH_S: float = 5.0               # how often to resample RPS
     RAND_KIND: Literal["poisson", "det"] = "poisson"
 
-    # Repeatability controls (NEW)
+    # Repeatability controls
     LOADGEN_SEED: int = 12345               # seeds loadgen RNG for Poisson/rand/bursty/steps
     RANDOM_ROUTER_SEED: int = 12345         # used by Random router (if applicable)
 
@@ -254,7 +254,7 @@ class RouterConfig:
     HF_STREAMING: bool = False
     LMSYS_MIN_INPUT_TOKENS: int = 256   # or None
     LMSYS_MAX_INPUT_TOKENS: int = None  # or None
-    LMSYS_REPEAT_EACH: int = 1
+    LMSYS_REPEAT_EACH: int = 32
 
     # ---- AUTOSCALER ----
     AUTOSCALE_ENABLED: bool = False
