@@ -1277,7 +1277,7 @@ batch size on the vLLM server 8
 load: dump
 tokenizer: Qwen/Qwen3-8B
 with prefix 
-outcome of 203-204: 50 % reduction in p99 latency but not in mean latency. The reason is that the cache hits only happens on the first few hits and then stops hitting.
+outcome of 203-204: 25 % reduction in p99 latency but not in mean latency. The reason is that the cache hits only happens on the first few hits and then stops hitting.
 
 205 - pull batching:
 8 replicas
