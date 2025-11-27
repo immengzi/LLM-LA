@@ -33,7 +33,7 @@ spec:
   volumeName: qwen-local-pv
 
 # =====================================================================
-# Redis Deployment + Service (NodePort)
+# Redis deployment and service (NodePort)
 # =====================================================================
 ---
 apiVersion: apps/v1
@@ -93,7 +93,7 @@ spec:
   type: NodePort
 
 # =====================================================================
-# CPU vLLM hash service (block-hash computing)
+# CPU hash service (prefix / block hashing)
 # =====================================================================
 ---
 apiVersion: apps/v1
@@ -168,7 +168,128 @@ spec:
   type: NodePort
 
 # =====================================================================
-# vLLM Ascend Deployment WITH KV-EVENTS + SIDECAR
+# Router service (API + KV-aware scheduling)
+# =====================================================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kv-router-sa
+  namespace: vllm
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kv-router-role
+  namespace: vllm
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kv-router-rolebinding
+  namespace: vllm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kv-router-role
+subjects:
+  - kind: ServiceAccount
+    name: kv-router-sa
+    namespace: vllm
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: router-service
+  namespace: vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: router-service
+  template:
+    metadata:
+      labels:
+        app: router-service
+    spec:
+      serviceAccountName: kv-router-sa
+      containers:
+        - name: router
+          image: kv-router:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: MODEL_NAME
+              value: "served-model"
+            - name: NAMESPACE
+              value: "vllm"
+            - name: LABEL_SELECTOR
+              value: "app=vllm-qwen"
+            - name: VLLM_PORT
+              value: "8200"
+            - name: HASH_SERVICE_URL
+              value: "http://vllm-cpu-hash:9095"
+            - name: KV_AWARE
+              value: "true"
+            - name: LEN_AWARE
+              value: "true"
+            - name: LEN_POLICY
+              value: "short_first"
+            - name: ROUTER_MODE
+              value: "pull"      # "pull", "push-rr", "push-random", "push-leastq"
+            - name: SIDECAR_PORT
+              value: "9000"
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: router-service
+  namespace: vllm
+spec:
+  type: NodePort
+  selector:
+    app: router-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080
+
+# =====================================================================
+# vLLM Ascend deployment with KV events and sidecar
 # =====================================================================
 ---
 apiVersion: apps/v1
@@ -189,7 +310,6 @@ spec:
       restartPolicy: Always
       containers:
         - name: vllm
-          # image: quay.io/ascend/vllm-ascend:v0.10.1rc1
           image: quay.io/ascend/vllm-ascend:v0.11.0rc0
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-c"]
@@ -236,7 +356,6 @@ spec:
             - name: model
               mountPath: /model
               readOnly: true
-            # NPU-related host paths
             - name: dcmi-volume
               mountPath: /usr/local/dcmi
             - name: npu-smi-volume
@@ -271,13 +390,27 @@ spec:
               huawei.com/Ascend910: 1
               ephemeral-storage: "4Gi"
 
-        # KV event listener sidecar (one per vLLM pod)
-        - name: kv-listener
-          image: kv_cache_event_listener:latest
+        - name: kv-sidecar
+          image: kv-sidecar:latest
           imagePullPolicy: IfNotPresent
-          workingDir: /app
-          command: ["python", "-u", "zmq_subscriber.py"]
           env:
+            # Router and vLLM endpoints
+            - name: ROUTER_URL
+              value: "http://router-service:8080"
+            - name: VLLM_URL
+              value: "http://127.0.0.1:8200"
+            - name: MODEL_NAME
+              value: "served-model"
+
+            # Sidecar HTTP and concurrency
+            - name: SIDECAR_PORT
+              value: "9000"
+            - name: VLLM_CONCURRENCY
+              value: "8"
+            - name: SIDECAR_MODE
+              value: "pull"
+
+            # ZMQ → Redis KV sync
             - name: VLLM_HOST
               value: "127.0.0.1"
             - name: VLLM_SUB_PORT
@@ -286,29 +419,28 @@ spec:
               value: "redis"
             - name: REDIS_PORT
               value: "6379"
-            - name: KV_DEBUG
-              value: "1"   # ON: compute kv_summary
-            # - name: KV_DEBUG
-            #   value: "0" # OFF: skip kv_summary
             - name: CONTAINER_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: MODEL_NAME
-              value: "served-model"  # must match --served-model-name
+            - name: MODEL_NAME_REDIS
+              value: "served-model"
+          ports:
+            - containerPort: 9000
+              name: sidecar-http
+              protocol: TCP
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"
-            limits:
-              cpu: "500m"
+              cpu: "200m"
               memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
 
       volumes:
         - name: model
           persistentVolumeClaim:
             claimName: qwen-local-pvc
-        # HostPath volumes for Ascend/NPU integration
         - name: dcmi-volume
           hostPath:
             path: /usr/local/dcmi
@@ -351,7 +483,6 @@ spec:
       nodePort: 30034
 
 ---
-# PodMonitor: scrape vLLM pods exposing /metrics on named port "http"
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:

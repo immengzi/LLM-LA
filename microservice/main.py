@@ -1,226 +1,292 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# main.py
-import os
-import click
-import json
-import itertools
+"""
+main.py – Unified load-testing client for vLLM.
+
+Supports:
+  • PROMPTS_FILE_PATH (JSON/JSONL)
+  • LMSYS dataset (HF or local)
+  • LENGTH_MODE replay-output
+  • All load patterns (det, poisson, bursty, steps, rand, dump)
+
+Produces:
+  • results/client/<run_id>/output.jsonl     – per-request logs
+  • results/client/<run_id>/load.jsonl       – arrival schedule logs
+  • results/client/<run_id>/configs.json     – snapshot of config
+
+Config keys used:
+  CLIENT_ENDPOINT
+  CLIENT_MODE / CLIENT_USE_LMSYS
+  PROMPTS_FILE_PATH, PROMPTS_LIMIT
+  LOAD_PATTERN, LOAD_RATE_RPS, LOAD_WARMUP_S, LOAD_DURATION_S
+  LOAD_BURST_ON_S, LOAD_BURST_OFF_S, LOAD_BURST_RPS_ON, LOAD_BURST_RPS_OFF
+  LOAD_STEP_SCHEDULE
+  LOAD_RAND_RPS_MIN, LOAD_RAND_RPS_MAX, LOAD_RAND_EPOCH_S, LOAD_RAND_KIND
+  LENGTH_MODE
+  HF_DATASET_NAME, HF_DATASET_SPLIT, HF_TOKENIZER_NAME, HF_STREAMING
+  LMSYS_MIN_INPUT_TOKENS, LMSYS_MAX_INPUT_TOKENS, LMSYS_REPEAT_EACH
+"""
+
+from __future__ import annotations
+
+import argparse
+import time
 from collections import deque
-from itertools import islice
-# import weakref
-# import atexit
+from typing import List, Tuple, Optional
 
-# try:
-#     atexit.unregister(weakref.finalize._exitfunc)
-# except Exception:
-#     pass
-
-from kubernetes import client
-
-from utils_k8s import load_kube
-from config import load_config, set_config, dump_config_dict
-
-# shim for discovery in SIM_MODE=only
-from sim_backend_http_shim import (
-    configure as sim_http_configure,
-    endpoints as sim_http_endpoints,
-)
+from config import get_config
+from utils import load_prompts, log_result, send_chat_request
+from lmsys_loader import iter_lmsys_pairs
+from length_backend import register_replay_out_len
+from loadgen import drive_load
 
 
-@click.command()
-@click.option(
-    "--mode",
-    type=click.Choice(
-        [
-            "rr-batching",
-            "random-batching",
-            "least-queue-batching",
-            "pull-batching",
-        ],
-        case_sensitive=False,
-    ),
-    default="rr-batching",
-    show_default=True,
-)
-@click.option("--prompts-file", type=str, default="mix", show_default=False)
-@click.option(
-    "--metrics-interval",
-    type=float,
-    default=float(os.getenv("METRICS_LOG_INTERVAL", "1.0")),
-    show_default=True,
-)
-@click.option(
-    "--config",
-    "config_path",
-    type=str,
-    default="real_distro",
-    help="Path to experiment config.(yaml|yml|json)",
-)
-@click.option(
-    "--length-mode",
-    type=click.Choice(
-        ["legacy", "target-output", "target-total", "dist-output", "replay-output"],
-        case_sensitive=False,
-    ),
-    default=None,
-    show_default=False,
-)
-@click.option("--target-output", type=int, default=None, show_default=False)
-@click.option("--target-total", type=int, default=None, show_default=False)
-@click.option("--ignore-eos/--no-ignore-eos", default=None)
-@click.option(
-    "--prompts-limit",
-    type=int,
-    default=None,
-    show_default=False,
-    help="Max prompts to use. For PROMPTS_SOURCE=file this slices the local list. "
-         "For PROMPTS_SOURCE=hf-lmsys this is passed as the on-the-fly cap.",
-)
-@click.option(
-    "--predictor-name",
-    type=click.Choice(["none", "oracle"], case_sensitive=False),
-    default=None,
-    help="Optional: choose token length predictor (none|oracle).",
-    show_default=False,
-)
-# ---- HF live dataset knobs (backward compatible; defaults still 'file') ----
-@click.option(
-    "--prompts-source",
-    type=click.Choice(["file", "hf-lmsys"], case_sensitive=False),
-    default=None,
-    help='Prompt source. If omitted or "file", loads local prompts JSON. '
-         'If "hf-lmsys", pulls prompts on-the-fly from LMSYS.',
-    show_default=False,
-)
-@click.option("--hf-name", type=str, default=None, help='HF dataset name (e.g. "lmsys/lmsys-chat-1m").')
-@click.option("--hf-split", type=str, default=None, help='HF dataset split (e.g. "train").')
-@click.option("--hf-tokenizer", type=str, default=None, help='Tokenizer used to estimate reply length (e.g. "gpt2").')
-@click.option("--hf-streaming/--no-hf-streaming", default=None, help="Use HF streaming loader (config default).")
-def cli(
-    mode: str,
-    prompts_file: str,
-    metrics_interval: float,
-    config_path: str,
-    length_mode: str,
-    target_output: int,
-    target_total: int,
-    ignore_eos: bool,
-    prompts_limit: int,
-    predictor_name: str,
-    prompts_source: str,
-    hf_name: str,
-    hf_split: str,
-    hf_tokenizer: str,
-    hf_streaming: bool,
-):
-    if not load_kube():
-        return
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
 
-    cfg = load_config(config_path)
+def _build_lmsys_payloads(max_items: Optional[int]) -> Tuple[List[str], List[int]]:
+    """
+    Convert LMSYS (prompt,out_len) iterator into aligned lists.
+    Respects PROMPTS_LIMIT unless explicitly overridden.
+    """
+    cfg = get_config()
+    limit = max_items or getattr(cfg, "PROMPTS_LIMIT", None) or 10000
 
-    # apply CLI overrides (existing)
-    if prompts_file:
-        cfg.PROMPTS_FILE = prompts_file
-    if prompts_limit is not None:
-        cfg.PROMPTS_LIMIT = int(prompts_limit)
-    if length_mode is not None:
-        cfg.LENGTH_MODE = length_mode
-    if target_output is not None:
-        cfg.TARGET_OUTPUT_TOKENS = int(target_output)
-    if target_total is not None:
-        cfg.TARGET_TOTAL_TOKENS = int(target_total)
-    if ignore_eos is not None:
-        cfg.IGNORE_EOS = bool(ignore_eos)
-    if predictor_name is not None:
-        cfg.PREDICTOR_NAME = predictor_name
+    prompts: List[str] = []
+    out_lens: List[int] = []
 
-    # ---- HF loader overrides (only applied if provided) ----
-    if prompts_source is not None:
-        cfg.PROMPTS_SOURCE = prompts_source  # "file" or "hf-lmsys"
-    if hf_name is not None:
-        cfg.HF_DATASET_NAME = hf_name
-    if hf_split is not None:
-        cfg.HF_DATASET_SPLIT = hf_split
-    if hf_tokenizer is not None:
-        cfg.HF_TOKENIZER_NAME = hf_tokenizer
-    if hf_streaming is not None:
-        cfg.HF_STREAMING = bool(hf_streaming)
+    for prompt, out_len in iter_lmsys_pairs(
+        max_n=limit,
+        progress=True,
+        progress_desc="LMSYS→client"
+    ):
+        prompts.append(prompt)
+        out_lens.append(int(max(0, out_len)))
 
-    set_config(cfg)
+    return prompts, out_lens
 
-    # Lazy imports
-    from utils import load_prompts, DEFAULT_PROMPTS_FILE
-    import router_modes  # uses discover_endpoints internally
 
-    # SIM shim
-    if str(cfg.SIM_MODE).lower() == "only":
-        sim_http_configure(config_path)
+def _build_plain_prompts(max_items: Optional[int]) -> List[str]:
+    """
+    Load prompts from PROMPTS_FILE_PATH using utils.load_prompts().
+    """
+    cfg = get_config()
+    dq = load_prompts(cfg.PROMPTS_FILE_PATH)
+    items = list(dq)
 
-        def _shim_discover_endpoints(_core, _ns, _label, _port):
-            return sim_http_endpoints()
+    if max_items is not None and max_items >= 0:
+        items = items[:max_items]
 
-        router_modes.discover_endpoints = _shim_discover_endpoints
+    return items
 
-    # Load prompts
-    source_kind = str(getattr(cfg, "PROMPTS_SOURCE", "file")).lower()
-    try:
-        if source_kind == "hf-lmsys":
-            # On-the-fly HF loader (first user turn of LMSYS convos) — LAZY
-            from utils_lmsys_loader import iter_lmsys_pairs  # helper module
 
-            ds_name   = getattr(cfg, "HF_DATASET_NAME", "lmsys/lmsys-chat-1m")
-            ds_split  = getattr(cfg, "HF_DATASET_SPLIT", "train")
-            tok_name  = getattr(cfg, "HF_TOKENIZER_NAME", "gpt2")
-            streaming = bool(getattr(cfg, "HF_STREAMING", False))
-            limit     = getattr(cfg, "PROMPTS_LIMIT", None)
-            max_n     = int(limit) if limit is not None else None  # None => unbounded
+# ---------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------
 
-            # Build a generator of (prompt, out_len) — do NOT materialize
-            def _stream_prompts():
-                it = iter_lmsys_pairs(
-                    dataset_name=ds_name,
-                    split=ds_split,
-                    tokenizer_name=tok_name,
-                    max_n=max_n if max_n is not None else 10**12,  # guard upper-bound
-                    streaming=streaming,
-                )
-                for utext, out_len in it:
-                    yield (utext, int(out_len))
+def main(argv: Optional[list[str]] = None) -> int:
+    cfg = get_config()
 
-            prompts = _stream_prompts() if max_n is None else itertools.islice(_stream_prompts(), max_n)
-            # Note: leave as iterator; loadgen & router_modes handle iterables now.
-            print(
-                f"[PROMPTS/HF] Streaming prompts from {ds_name}:{ds_split} "
-                f"(limit={limit}, streaming={streaming})"
-            )
+    # ---------------------------------------------------------
+    # CLI
+    # ---------------------------------------------------------
+    parser = argparse.ArgumentParser(
+        description="vLLM load-testing client – prompts or LMSYS dataset."
+    )
+
+    parser.add_argument("--mode", choices=["prompts", "lmsys"], default=None,
+                        help="Force mode. If omitted, uses CLIENT_MODE or CLIENT_USE_LMSYS.")
+
+    parser.add_argument("--endpoint", default=None,
+                        help="Override CLIENT_ENDPOINT (base URL, no /v1/chat/completions).")
+
+    parser.add_argument("--pattern", default=None,
+                        help="Load pattern: det | poisson | bursty | steps | rand | dump")
+
+    parser.add_argument("--rate", type=float, default=None,
+                        help="Base RPS for det/poisson/steps/rand patterns.")
+
+    parser.add_argument("--duration", type=float, default=None,
+                        help="Main duration in seconds (excluding warmup).")
+
+    parser.add_argument("--warmup", type=float, default=None,
+                        help="Warmup duration in seconds.")
+
+    parser.add_argument("--max-requests", type=int, default=None,
+                        help="Optional cap on request count (overrides PROMPTS_LIMIT).")
+
+    parser.add_argument("--verbose", action="store_true",
+                        help="Verbose stdout.")
+
+    args = parser.parse_args(argv)
+
+    # ---------------------------------------------------------
+    # Determine mode (prompts vs LMSYS)
+    # ---------------------------------------------------------
+    cfg_mode = getattr(cfg, "CLIENT_MODE", None)
+    cfg_use_lmsys = bool(getattr(cfg, "CLIENT_USE_LMSYS", False))
+
+    if args.mode:
+        mode = args.mode
+    else:
+        if cfg_use_lmsys:
+            mode = "lmsys"
+        elif cfg_mode in ("prompts", "lmsys"):
+            mode = cfg_mode
         else:
-            # Original file-based path (kept as before; this is finite so deque is fine)
-            path = DEFAULT_PROMPTS_FILE
-            prompts = load_prompts(path)
-            limit = getattr(cfg, "PROMPTS_LIMIT", None)
-            if limit is not None:
-                prompts = deque(islice(prompts, int(limit)))
-            print(
-                f"[PROMPTS] Loaded {len(prompts)} prompts from {path} (limit={limit})"
+            mode = "prompts"
+
+    using_lmsys = (mode == "lmsys")
+
+    # ---------------------------------------------------------
+    # Load pattern parameters
+    # ---------------------------------------------------------
+    pattern = args.pattern or getattr(cfg, "LOAD_PATTERN", "det")
+    rate_rps = float(args.rate or getattr(cfg, "LOAD_RATE_RPS", 5.0))
+    warmup_s = float(args.warmup or getattr(cfg, "LOAD_WARMUP_S", 0.0))
+    duration_s = float(args.duration or getattr(cfg, "LOAD_DURATION_S", 60.0))
+
+    burst_on_s = float(getattr(cfg, "LOAD_BURST_ON_S", 2.0))
+    burst_off_s = float(getattr(cfg, "LOAD_BURST_OFF_S", 2.0))
+    burst_rps_on = float(getattr(cfg, "LOAD_BURST_RPS_ON", 10.0))
+    burst_rps_off = float(getattr(cfg, "LOAD_BURST_RPS_OFF", 0.0))
+    step_schedule = str(getattr(cfg, "LOAD_STEP_SCHEDULE", "") or "")
+
+    rand_rps_min = getattr(cfg, "LOAD_RAND_RPS_MIN", None)
+    rand_rps_max = getattr(cfg, "LOAD_RAND_RPS_MAX", None)
+    rand_epoch_s = float(getattr(cfg, "LOAD_RAND_EPOCH_S", 5.0))
+    rand_kind = str(getattr(cfg, "LOAD_RAND_KIND", "poisson") or "poisson")
+
+    # ---------------------------------------------------------
+    # Endpoint
+    # ---------------------------------------------------------
+    endpoint = args.endpoint or getattr(cfg, "CLIENT_ENDPOINT", None)
+    if not endpoint:
+        endpoint = "http://127.0.0.1:8200"
+
+    # ---------------------------------------------------------
+    # Load prompts
+    # ---------------------------------------------------------
+    max_reqs = args.max_requests or getattr(cfg, "PROMPTS_LIMIT", None)
+
+    if using_lmsys:
+        prompts, out_lens = _build_lmsys_payloads(max_reqs)
+    else:
+        prompts = _build_plain_prompts(max_reqs)
+        out_lens = []
+
+    total = len(prompts)
+    if total == 0:
+        print("[CLIENT] No prompts found. Exiting.")
+        return 0
+
+    # ---------------------------------------------------------
+    # LENGTH_MODE: replay-output
+    # ---------------------------------------------------------
+    length_mode = str(getattr(cfg, "LENGTH_MODE", "legacy")).lower().strip()
+    use_replay = using_lmsys and length_mode == "replay-output"
+
+    if use_replay and len(out_lens) != len(prompts):
+        raise RuntimeError("Replay-output requires aligned LMSYS output lengths.")
+
+    # ---------------------------------------------------------
+    # Enqueue callback
+    # ---------------------------------------------------------
+    next_req_id = 0
+
+    def enqueue_one(prompt: str, t_enq_client: float) -> None:
+        nonlocal next_req_id
+        req_id = next_req_id
+        next_req_id += 1
+
+        if use_replay:
+            register_replay_out_len(req_id, out_lens[req_id])
+
+        messages = [{"role": "user", "content": prompt}]
+        t0 = time.time()
+
+        try:
+            resp = send_chat_request(
+                endpoint=endpoint,
+                messages=messages,
+                max_tokens=None,
+                length_mode=None,
+                req_id=req_id,
             )
-    except Exception as e:
-        print(f"[ERROR] Failed to load prompts ({source_kind}): {e}")
-        return
+            t1 = time.time()
 
-    print("[CONFIG] Effective config:\n" + json.dumps(dump_config_dict(), indent=2))
+            # extract text
+            text = None
+            try:
+                choices = resp.get("choices") or []
+                if choices:
+                    msg = (choices[0] or {}).get("message") or {}
+                    text = msg.get("content")
+            except Exception:
+                pass
 
-    core = client.CoreV1Api()
-    mode = mode.lower().strip()
+            log_result(
+                mode="client",
+                endpoint=endpoint,
+                model=getattr(cfg, "MODEL_NAME", "unknown"),
+                status="ok",
+                prompt=prompt,
+                response=text,
+                latency_s=t1 - t0,
+                extra={
+                    "req_id": req_id,
+                    "using_lmsys": using_lmsys,
+                    "length_mode": length_mode,
+                },
+            )
 
-    if mode == "rr-batching":
-        router_modes.run_rr_batching(core, prompts, metrics_interval)
-    elif mode == "random-batching":
-        router_modes.run_random_batching(core, prompts, metrics_interval)
-    elif mode == "least-queue-batching":
-        router_modes.run_least_queue_batching(core, prompts, metrics_interval)
-    elif mode == "pull-batching":
-        router_modes.run_pull_batching(core, prompts, metrics_interval)
+        except Exception as e:
+            t1 = time.time()
+            log_result(
+                mode="client",
+                endpoint=endpoint,
+                model=getattr(cfg, "MODEL_NAME", "unknown"),
+                status="error",
+                prompt=prompt,
+                response=None,
+                latency_s=t1 - t0,
+                error=str(e),
+                extra={"req_id": req_id},
+            )
+
+    # ---------------------------------------------------------
+    # Run load generation
+    # ---------------------------------------------------------
+    print(
+        f"[CLIENT] mode={mode}, total_prompts={total}, "
+        f"pattern={pattern}, endpoint={endpoint}, "
+        f"LENGTH_MODE={length_mode}, replay={use_replay}"
+    )
+
+    drive_load(
+        pattern=pattern,
+        prompts=deque(prompts),
+        enqueue_one=enqueue_one,
+        rate_rps=rate_rps,
+        warmup_s=warmup_s,
+        duration_s=duration_s,
+        burst_on_s=burst_on_s,
+        burst_off_s=burst_off_s,
+        burst_rps_on=burst_rps_on,
+        burst_rps_off=burst_rps_off,
+        step_schedule=step_schedule,
+        rand_rps_min=rand_rps_min,
+        rand_rps_max=rand_rps_max,
+        rand_epoch_s=rand_epoch_s,
+        rand_kind=rand_kind,
+        router_mode="client",
+        log_every=1,
+        verbose=args.verbose,
+    )
+
+    print("[CLIENT] Done.")
+    return 0
 
 
 if __name__ == "__main__":
-    cli()
+    raise SystemExit(main())

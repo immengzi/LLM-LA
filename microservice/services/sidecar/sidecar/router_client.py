@@ -14,14 +14,17 @@ _cfg = get_config()
 class RouterPullWorker:
     """
     Periodically:
-      1) compute want from local queue
+      1) compute 'want' from local inflight vs VLLM_CONCURRENCY
       2) call router /pull
       3) push jobs into local queue
+
+    NOTE: endpoint_id here is the endpoint *identity* used by the router/KV layer,
+    i.e. the pod name (must match kv_watcher _endpoint_for_pod).
     """
 
-    def __init__(self, local_q: LocalQueue, endpoint_url: str):
+    def __init__(self, local_q: LocalQueue, endpoint_id: str):
         self.local_q = local_q
-        self.endpoint_url = endpoint_url  # this sidecar's vLLM endpoint
+        self.endpoint_id = endpoint_id  # pod identity used as 'endpoint' in /pull
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -31,7 +34,7 @@ class RouterPullWorker:
         self._stop_evt.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        print("[sidecar] RouterPullWorker started")
+        print(f"[sidecar] RouterPullWorker started (endpoint_id={self.endpoint_id})")
 
     def stop(self):
         self._stop_evt.set()
@@ -42,13 +45,22 @@ class RouterPullWorker:
 
     def _loop(self):
         session = requests.Session()
+        max_inflight = _cfg.VLLM_CONCURRENCY
+
         while not self._stop_evt.is_set():
-            want = self.local_q.compute_want(_cfg.TARGET_LOCAL_QUEUE)
+            pending, inflight = self.local_q.state()
+
+            # Cap purely on in-flight requests; pending is just backlog.
+            if inflight < max_inflight:
+                want = max_inflight - inflight
+            else:
+                want = 0
+
             if want > 0:
                 try:
                     resp = session.post(
                         f"{_cfg.ROUTER_URL}/pull",
-                        json={"endpoint": self.endpoint_url, "want": want},
+                        json={"endpoint": self.endpoint_id, "want": want},
                         timeout=1.0,
                     )
                     if resp.ok:
