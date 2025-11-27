@@ -15,7 +15,8 @@ class EnqueueResponse(BaseModel):
 
 
 class PullRequest(BaseModel):
-    endpoint: str             # full URL of sidecar or vLLM endpoint
+    # endpoint identity (e.g. pod name) – must match KVWatcher register_block_owners()
+    endpoint: str
     want: int                 # sidecar-computed capacity
 
 

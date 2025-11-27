@@ -18,6 +18,12 @@ class RouterState:
     Central queue of pending jobs + KV + length-aware selection.
 
     Queue entries: (req_id, prompt, t_enq_client, meta)
+
+    In pull mode:
+      - enqueue() appends to _queue and pull_for_endpoint() selects.
+
+    In push-* modes:
+      - next_req_id() is used to allocate IDs, _queue is not used.
     """
 
     def __init__(self):
@@ -25,7 +31,19 @@ class RouterState:
         self._next_req_id = 0
         self._queue: Deque[Tuple[int, str, float, dict]] = deque()
 
-    # ------------- enqueue -------------
+    # ------------- ID allocation (used by push modes) -------------
+
+    def next_req_id(self) -> int:
+        """
+        Allocate a new monotonically increasing req_id without
+        enqueuing into the central queue (for push-* modes).
+        """
+        with self._lock:
+            rid = self._next_req_id
+            self._next_req_id += 1
+            return rid
+
+    # ------------- enqueue (used by pull mode) -------------
 
     def enqueue(self, prompt: str, t_enq_client: float | None, meta: dict) -> int:
         with self._lock:
@@ -35,7 +53,7 @@ class RouterState:
             self._queue.append((rid, prompt, ts, meta or {}))
             return rid
 
-    # ------------- pull for endpoint -------------
+    # ------------- pull for endpoint (pull mode only) -------------
 
     def pull_for_endpoint(self, endpoint: str, want: int) -> List[JobItem]:
         if want <= 0:
@@ -88,10 +106,6 @@ class RouterState:
             # Reconstruct main queue: leftovers + everything that wasn’t scanned
             for rid, prompt, ts, meta in leftovers:
                 self._queue.appendleft((rid, prompt, ts, meta))  # prepend leftovers
-
-            # move remaining not-scanned tail after that
-            # NOTE: we've already consumed max_scan from the left; the rest of
-            # the original queue is still there, so we just leave it.
 
             # 6) Build JobItem list to return
             items: List[JobItem] = []

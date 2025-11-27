@@ -1,9 +1,7 @@
 # util.py
 import json
 import os
-import time
 from enum import Enum
-import re
 import threading
 import random
 from collections import deque
@@ -14,7 +12,7 @@ import requests
 from urllib.parse import urlparse
 
 from config import get_config, dump_config_dict
-from length_backend import compute_length_plan, rng_for_prompt, sample_out_tokens_from_cfg
+from length_backend import compute_length_plan
 
 _cfg = get_config()
 
@@ -660,9 +658,6 @@ def compute_hashes_for_prompt(
     token_ids = [int(t) for t in (data.get("token_ids") or [])]
 
     return block_hashes, token_ids
-
-
-DEFAULT_PROMPTS_FILE = _cfg.PROMPTS_FILE_PATH
 
 
 def _read_json_or_jsonl(path: str) -> List[str]:

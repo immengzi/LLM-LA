@@ -3,9 +3,8 @@
 #  Precompute full schedule (times + RPS) for all patterns, then execute.
 #  IMPORTANT: per-second fixed-count, evenly-spaced arrivals are used for all patterns.
 
-import time, random, os, math
+import time, random, os
 from typing import Callable, Deque, Tuple, Optional, Iterable, Iterator, List
-from collections import deque
 
 # Structured loggers
 from utils import log_load, get_run_dir

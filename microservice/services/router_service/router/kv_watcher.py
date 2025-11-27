@@ -75,10 +75,10 @@ def _discover_pods() -> Dict[str, str]:
 
 
 def _endpoint_for_pod(pod_name: str, pods: Dict[str, str]) -> Optional[str]:
-    ip = pods.get(pod_name)
-    if not ip:
-        return None
-    return f"http://{ip}:{_cfg.VLLM_PORT}"
+    # We only care about identity here; HTTP URL is only used in sidecar.
+    # So we just use pod_name as the endpoint key.
+    return pod_name if pod_name in pods else None
+
 
 
 class KVWatcher:
