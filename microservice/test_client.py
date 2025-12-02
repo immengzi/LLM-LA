@@ -78,7 +78,7 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=1,
+        default=10,
         help="max_tokens to pass in meta",
     )
     parser.add_argument(
