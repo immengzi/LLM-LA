@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from collections import deque
-from threading import RLock
-from typing import Deque, Dict, Tuple, List
+from threading import RLock, Event
+from typing import Deque, Dict, Tuple, List, Any, Optional
 
 from .config import get_config
 from .kv_aware import prefix_len
@@ -11,6 +11,22 @@ from .models import JobItem, now_s
 
 _cfg = get_config()
 _pred = get_length_predictor()
+
+
+def _log_req(msg: str, *, level: str = "summary") -> None:
+    """
+    Centralized logging for pull-routing decisions.
+    Uses _cfg.REQ_LOG_MODE directly (no local copy).
+    """
+    mode = str(_cfg.REQ_LOG_MODE).lower()
+
+    if mode == "off":
+        return
+
+    if level == "summary":
+        print(f"[PullRouter] {msg}")
+    elif level == "full" and mode == "full":
+        print(f"[PullRouter] {msg}")
 
 
 class RouterState:
@@ -24,6 +40,9 @@ class RouterState:
 
     In push-* modes:
       - next_req_id() is used to allocate IDs, _queue is not used.
+
+    Also tracks per-request result waiters so that /enqueue can block
+    until the sidecar posts the result.
     """
 
     def __init__(self):
@@ -31,19 +50,23 @@ class RouterState:
         self._next_req_id = 0
         self._queue: Deque[Tuple[int, str, float, dict]] = deque()
 
-    # ------------- ID allocation (used by push modes) -------------
+        # Result tracking: req_id -> Event / result payload
+        self._result_events: Dict[int, Event] = {}
+        self._result_values: Dict[int, Any] = {}
+
+    # -------------------------------------------------------
+    # ID allocation (for push modes)
+    # -------------------------------------------------------
 
     def next_req_id(self) -> int:
-        """
-        Allocate a new monotonically increasing req_id without
-        enqueuing into the central queue (for push-* modes).
-        """
         with self._lock:
             rid = self._next_req_id
             self._next_req_id += 1
             return rid
 
-    # ------------- enqueue (used by pull mode) -------------
+    # -------------------------------------------------------
+    # Enqueue (pull mode)
+    # -------------------------------------------------------
 
     def enqueue(self, prompt: str, t_enq_client: float | None, meta: dict) -> int:
         with self._lock:
@@ -53,7 +76,9 @@ class RouterState:
             self._queue.append((rid, prompt, ts, meta or {}))
             return rid
 
-    # ------------- pull for endpoint (pull mode only) -------------
+    # -------------------------------------------------------
+    # Pull selection (pull mode)
+    # -------------------------------------------------------
 
     def pull_for_endpoint(self, endpoint: str, want: int) -> List[JobItem]:
         if want <= 0:
@@ -66,13 +91,19 @@ class RouterState:
             pool_factor = max(1, int(_cfg.POOL_FACTOR))
             max_scan = min(len(self._queue), want * pool_factor)
 
-            # 1) Build a pool (copy, keep original queue intact for the moment)
+            # 1) Build pool
             pool: List[Tuple[int, str, float, dict]] = []
             for _ in range(max_scan):
                 rid, prompt, ts, meta = self._queue.popleft()
                 pool.append((rid, prompt, ts, meta))
 
-            # 2) Score by KV first (if enabled)
+            _log_req(
+                f"endpoint={endpoint} want={want} pool_size={len(pool)} "
+                f"queue_remaining={len(self._queue)}",
+                level="full",
+            )
+
+            # 2) KV scoring
             kv_enabled = bool(_cfg.KV_AWARE)
             len_enabled = bool(_cfg.LEN_AWARE)
             len_policy = _cfg.LEN_POLICY
@@ -80,41 +111,95 @@ class RouterState:
             if kv_enabled:
                 scored: List[Tuple[int, str, float, dict, int]] = []
                 for rid, prompt, ts, meta in pool:
-                    hits = prefix_len(endpoint, rid)
-                    scored.append((rid, prompt, ts, meta, hits))
+                    kv_hits = prefix_len(endpoint, rid)
+                    scored.append((rid, prompt, ts, meta, kv_hits))
 
-                # KV-first: sort by kv_hits desc, then FIFO
                 scored.sort(key=lambda x: (-x[4], x[0]))
                 ordered = [(r, p, t, m) for (r, p, t, m, _) in scored]
+
+                _log_req(
+                    f"KV order endpoint={endpoint}: "
+                    f"{[(r, kv) for (r, _p, _t, _m, kv) in scored]}",
+                    level="full",
+                )
             else:
-                # KV off -> FIFO order
                 ordered = list(pool)
 
-            # 3) Length-aware refinement inside the KV-ordered pool
+            # 3) Length-aware refinement
             if len_enabled and len_policy:
-                ordered = select_len_aware(ordered, _pred, len_policy)
+                refined = select_len_aware(ordered, _pred, len_policy)
+                _log_req(
+                    f"Len policy='{len_policy}' ordering: "
+                    f"{[r for (r, _p, _t, _m) in refined]}",
+                    level="full",
+                )
+                ordered = refined
 
-            # 4) Take the first `want` items as chosen
+            # 4) Choose first `want`
             chosen = ordered[:want]
-            chosen_ids = {rid for (rid, _p, _t, _m) in chosen}
+            chosen_ids = [rid for (rid, _p, _t, _m) in chosen]
 
-            # 5) Everything else goes back into the queue (preserving order)
-            leftovers: List[Tuple[int, str, float, dict]] = []
-            for item in ordered[want:]:
-                leftovers.append(item)
+            _log_req(
+                f"chosen endpoint={endpoint}: {chosen_ids}",
+                level="summary",
+            )
 
-            # Reconstruct main queue: leftovers + everything that wasn’t scanned
+            # 5) Put leftovers back
+            leftovers = ordered[want:]
             for rid, prompt, ts, meta in leftovers:
-                self._queue.appendleft((rid, prompt, ts, meta))  # prepend leftovers
+                self._queue.appendleft((rid, prompt, ts, meta))
 
-            # 6) Build JobItem list to return
-            items: List[JobItem] = []
-            for rid, prompt, ts, meta in chosen:
-                items.append(JobItem(req_id=rid, prompt=prompt, t_enq_client=ts, meta=meta))
+            if leftovers:
+                _log_req(
+                    f"leftovers requeued: {[r for (r, _p, _t, _m) in leftovers]}",
+                    level="full",
+                )
+
+            # 6) Build JobItem list
+            items = [
+                JobItem(req_id=rid, prompt=prompt, t_enq_client=ts, meta=meta)
+                for (rid, prompt, ts, meta) in chosen
+            ]
 
             return items
 
-    # ------------- metrics / debug -------------
+    # -------------------------------------------------------
+    # Result wait/notify
+    # -------------------------------------------------------
+
+    def register_waiter(self, req_id: int) -> None:
+        with self._lock:
+            if req_id not in self._result_events:
+                self._result_events[req_id] = Event()
+
+    def store_result(self, req_id: int, result: Any) -> None:
+        evt: Optional[Event] = None
+        with self._lock:
+            self._result_values[req_id] = result
+            evt = self._result_events.get(req_id)
+        if evt is not None:
+            evt.set()
+
+    def wait_for_result(self, req_id: int, timeout_s: float) -> Optional[Any]:
+        with self._lock:
+            evt = self._result_events.get(req_id)
+            if evt is None:
+                evt = Event()
+                self._result_events[req_id] = evt
+
+        ok = evt.wait(timeout_s)
+        if not ok:
+            return None
+
+        with self._lock:
+            result = self._result_values.get(req_id)
+            self._result_events.pop(req_id, None)
+            self._result_values.pop(req_id, None)
+            return result
+
+    # -------------------------------------------------------
+    # Metrics
+    # -------------------------------------------------------
 
     def size(self) -> int:
         with self._lock:

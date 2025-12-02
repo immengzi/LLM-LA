@@ -25,22 +25,23 @@ from .config import get_config
 from .kv_aware import register_block_owners
 
 _cfg = get_config()
-_KV_LOG_MODE = str(getattr(_cfg, "KV_LOG_KEYS", "summary")).lower()
 
 
 def _log(msg: str, *, level: str = "summary") -> None:
+    mode = str(_cfg.KV_LOG_KEYS).lower()
+
     if level == "always":
         print(f"[KVWatcher] {msg}")
         return
 
-    if _KV_LOG_MODE == "off":
+    if mode == "off":
         return
 
     if level == "summary":
         print(f"[KVWatcher] {msg}")
         return
 
-    if level == "full" and _KV_LOG_MODE == "full":
+    if level == "full" and mode == "full":
         print(f"[KVWatcher] {msg}")
 
 
@@ -80,7 +81,6 @@ def _endpoint_for_pod(pod_name: str, pods: Dict[str, str]) -> Optional[str]:
     return pod_name if pod_name in pods else None
 
 
-
 class KVWatcher:
     def __init__(self):
         self.redis_url = f"redis://{_cfg.REDIS_HOST}:{_cfg.REDIS_PORT}"
@@ -104,7 +104,7 @@ class KVWatcher:
         _log(
             f"Started (redis={self.redis_url}, model={self.model_name}, "
             f"interval_s={self.interval_s}, max_keys={self.max_keys}, "
-            f"log_mode={_KV_LOG_MODE})",
+            f"log_mode={_cfg.KV_LOG_KEYS})",
             level="always",
         )
 

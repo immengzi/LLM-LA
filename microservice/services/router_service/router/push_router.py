@@ -12,6 +12,22 @@ from .config import get_config
 _cfg = get_config()
 
 
+def _log_req(msg: str, *, level: str = "summary") -> None:
+    """
+    Centralized logging for push-routing decisions.
+    Uses _cfg.REQ_LOG_MODE directly.
+    """
+    mode = str(_cfg.REQ_LOG_MODE).lower()
+
+    if mode == "off":
+        return
+
+    if level == "summary":
+        print(f"[PushRouter] {msg}")
+    elif level == "full" and mode == "full":
+        print(f"[PushRouter] {msg}")
+
+
 class PushRouter:
     def __init__(self, mode: str):
         self.mode = mode  # "push-rr", "push-random", "push-leastq"
@@ -20,6 +36,10 @@ class PushRouter:
         self._rr_idx: int = 0
         self._last_discovery = 0.0
         self._discovery_interval_s = float(getattr(_cfg, "KV_DISCOVERY_INTERVAL_S", 5.0))
+
+    # ---------------------------------------------------------
+    # Pod discovery
+    # ---------------------------------------------------------
 
     def _discover_pods(self) -> Dict[str, str]:
         running_in_cluster = os.getenv("KUBERNETES_SERVICE_HOST") is not None
@@ -52,6 +72,7 @@ class PushRouter:
         now = time.time()
         if self._eps and (now - self._last_discovery) < self._discovery_interval_s:
             return
+
         pods = self._discover_pods()
         self._eps = list(pods.keys())
         self._urls = {
@@ -59,31 +80,43 @@ class PushRouter:
             for pod, ip in pods.items()
         }
         self._last_discovery = now
-        print(f"[PushRouter] discovered {len(self._eps)} pods")
+
+        _log_req(f"discovered {len(self._eps)} pods: {self._eps}", level="summary")
+
+    # ---------------------------------------------------------
+    # Endpoint selection
+    # ---------------------------------------------------------
 
     def _pick_endpoint_rr(self) -> Optional[str]:
         if not self._eps:
             return None
-        n = len(self._eps)
-        ep = self._eps[self._rr_idx % n]
-        self._rr_idx = (self._rr_idx + 1) % n
+        ep = self._eps[self._rr_idx % len(self._eps)]
+        self._rr_idx = (self._rr_idx + 1) % len(self._eps)
+
+        _log_req(f"RR pick → {ep}", level="full")
         return ep
 
     def _pick_endpoint_random(self) -> Optional[str]:
         if not self._eps:
             return None
-        return random.choice(self._eps)
+        ep = random.choice(self._eps)
+
+        _log_req(f"Random pick → {ep}", level="full")
+        return ep
 
     async def _pick_endpoint_leastq(self) -> Optional[str]:
         if not self._eps:
             return None
+
         best_ep = None
         best_score = None
+
         async with httpx.AsyncClient(timeout=2.0) as client:
             for ep in self._eps:
                 url = self._urls.get(ep)
                 if not url:
                     continue
+
                 try:
                     r = await client.get(f"{url}/health")
                     if r.status_code != 200:
@@ -92,9 +125,12 @@ class PushRouter:
                     score = int(data.get("logical", data.get("queue_len", 0)))
                 except Exception:
                     continue
+
                 if best_score is None or score < best_score:
                     best_score = score
                     best_ep = ep
+
+        _log_req(f"LeastQ pick → {best_ep} (score={best_score})", level="full")
         return best_ep
 
     async def _pick_endpoint(self) -> Optional[str]:
@@ -106,6 +142,10 @@ class PushRouter:
             return await self._pick_endpoint_leastq()
         # fallback
         return self._pick_endpoint_rr()
+
+    # ---------------------------------------------------------
+    # Push operation
+    # ---------------------------------------------------------
 
     async def route_and_push(self, req_id: int, prompt: str, meta: dict) -> None:
         self._ensure_endpoints()
@@ -126,7 +166,21 @@ class PushRouter:
             "meta": meta or {},
         }
 
+        _log_req(
+            f"push req_id={req_id} → {ep} ({url})",
+            level="summary",
+        )
+
         async with httpx.AsyncClient(timeout=2.0) as client:
-            r = await client.post(f"{url}/push", json=payload)
+            try:
+                r = await client.post(f"{url}/push", json=payload)
+            except Exception as e:
+                _log_req(f"push failed for {ep}: {e}", level="full")
+                raise
+
             if r.status_code != 200:
+                _log_req(
+                    f"push to {ep} failed: {r.status_code} {r.text}",
+                    level="full",
+                )
                 raise RuntimeError(f"push to {ep} failed: {r.status_code} {r.text}")

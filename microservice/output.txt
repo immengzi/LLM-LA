@@ -1,0 +1,1359 @@
+===== FOLDER STRUCTURE =====
+.
+├── build.sh
+├── crawl.sh
+├── Dockerfile
+├── entrypoint.sh
+├── output.txt
+├── requirements.txt
+└── router
+    ├── api.py
+    ├── config.py
+    ├── __init__.py
+    ├── kv_aware.py
+    ├── kv_watcher.py
+    ├── len_select.py
+    ├── models.py
+    ├── predictors.py
+    ├── push_router.py
+    └── router_state.py
+
+1 directory, 16 files
+
+===== FILE CONTENTS =====
+
+---------------- FILE: ./output.txt ----------------
+
+===== FOLDER STRUCTURE =====
+.
+├── build.sh
+├── crawl.sh
+├── Dockerfile
+├── entrypoint.sh
+├── output.txt
+├── requirements.txt
+└── router
+    ├── api.py
+    ├── config.py
+    ├── __init__.py
+    ├── kv_aware.py
+    ├── kv_watcher.py
+    ├── len_select.py
+    ├── models.py
+    ├── predictors.py
+    ├── push_router.py
+    └── router_state.py
+
+1 directory, 16 files
+
+===== FILE CONTENTS =====
+
+---------------- FILE: ./output.txt ----------------
+
+
+---------------- END FILE: ./output.txt ----------------
+
+---------------- FILE: ./entrypoint.sh ----------------
+
+#!/usr/bin/env bash
+set -e
+
+HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-8080}"
+
+# ACCESS_LOG defaults to true if not set
+ACCESS_LOG="${ACCESS_LOG:-true}"
+
+if [ "$ACCESS_LOG" = "true" ]; then
+  echo "[entrypoint] Starting uvicorn WITH access log (ACCESS_LOG=true)"
+  exec uvicorn router.api:app --host "$HOST" --port "$PORT"
+else
+  echo "[entrypoint] Starting uvicorn with NO access log (ACCESS_LOG=false)"
+  exec uvicorn router.api:app --host "$HOST" --port "$PORT" --no-access-log
+fi
+
+---------------- END FILE: ./entrypoint.sh ----------------
+
+---------------- FILE: ./crawl.sh ----------------
+
+#!/usr/bin/env bash
+# Usage:
+#   ./crawl.sh /path/to/folder            # print only
+#   ./crawl.sh /path/to/folder -o out.txt # print + save to file
+
+ROOT="${1:-.}"
+OUTFILE=""
+shift 1 || true  # shift args if provided
+
+# parse optional flags
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output)
+      OUTFILE="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+run_crawl() {
+  echo "===== FOLDER STRUCTURE ====="
+  tree -a -I ".git" "$ROOT"
+
+  echo ""
+  echo "===== FILE CONTENTS ====="
+  find "$ROOT" -type f -not -path "*/.git/*" | while read -r file; do
+      echo ""
+      echo "---------------- FILE: $file ----------------"
+      echo ""
+      cat "$file"
+      echo ""
+      echo "---------------- END FILE: $file ----------------"
+  done
+}
+
+# If outfile provided, pipe through tee
+if [[ -n "$OUTFILE" ]]; then
+  run_crawl | tee "$OUTFILE"
+else
+  run_crawl
+fi
+
+---------------- END FILE: ./crawl.sh ----------------
+
+---------------- FILE: ./router/len_select.py ----------------
+
+# -*- coding: utf-8 -*-
+"""
+Length-aware selection over a *local pool* of candidates.
+
+Input is a list of (req_id, prompt, t_enq_client, meta)
+plus a predictor and policy.
+"""
+
+from typing import List, Tuple, Dict
+from .predictors import SimpleLengthPredictor
+from .config import get_config
+
+_cfg = get_config()
+
+
+def select_len_aware(
+    candidates: List[Tuple[int, str, float, Dict]],
+    predictor: SimpleLengthPredictor,
+    policy: str,
+) -> List[Tuple[int, str, float, Dict]]:
+    """
+    Return candidates sorted according to a length policy.
+
+    policy: "short_first" or "long_first"
+    """
+    scored = []
+    for req_id, prompt, t_enq, meta in candidates:
+        pred_out = predictor.predict_out_tokens(prompt, req_id=req_id)
+        score = pred_out or _cfg.DEFAULT_MAX_TOKENS
+        scored.append((req_id, prompt, t_enq, meta, score))
+
+    reverse = (policy == "long_first")
+    scored.sort(key=lambda x: x[4], reverse=reverse)
+    return [(r, p, t, m) for (r, p, t, m, _) in scored]
+
+---------------- END FILE: ./router/len_select.py ----------------
+
+---------------- FILE: ./router/config.py ----------------
+
+# -*- coding: utf-8 -*-
+from dataclasses import dataclass, asdict
+import os
+
+# Global singleton to avoid recomputing config multiple times
+_CONFIG = None
+
+
+@dataclass
+class RouterConfig:
+    # Basic
+    HOST: str = "0.0.0.0"
+    PORT: int = 8080
+
+    # Redis (for KV watcher)
+    REDIS_HOST: str = "redis"
+    REDIS_PORT: int = 6379
+    MODEL_NAME: str = "served-model"
+
+    # Hash service
+    HASH_SERVICE_URL: str = "http://prefix-hash-service:9095"
+
+    # vLLM discovery (for KV watcher to map pod -> endpoint)
+    NAMESPACE: str = "vllm"
+    LABEL_SELECTOR: str = "app=vllm-qwen"
+    VLLM_PORT: int = 8200
+
+    # KV watcher controls
+    KV_WATCH_INTERVAL_S: float = 1.0
+    KV_WATCH_MAX_KEYS: int = 200
+    KV_DISCOVERY_INTERVAL_S: float = 5.0
+    KV_LOG_KEYS: str = "summary"  # off | summary | full
+
+    # Routing knobs
+    KV_AWARE: bool = True
+    LEN_AWARE: bool = True
+    LEN_POLICY: str = "short_first"  # short_first | long_first
+
+    # how many items to scan vs want
+    POOL_FACTOR: int = 4
+
+    # batch size proxy: expected output tokens (for predictor)
+    DEFAULT_MAX_TOKENS: int = 1024
+
+    # router mode + sidecar port
+    ROUTER_MODE: str = "pull"        # "pull", "push-rr", "push-random", "push-leastq"
+    SIDECAR_PORT: int = 9000         # sidecar FastAPI port
+
+    # -------------------------------
+    # Synchronous response flow
+    # -------------------------------
+    RESULT_TIMEOUT_S: float = 60.0
+    RESULT_POLL_INTERVAL_S: float = 0.02
+
+    # -------------------------------
+    # Per-request routing logs
+    # -------------------------------
+    REQ_LOG_MODE: str = "off"   # off | summary | full
+
+
+def get_config() -> RouterConfig:
+    """
+    Return a singleton RouterConfig with env overrides applied.
+    Does NOT print anything (printing is done explicitly by callers).
+    """
+    global _CONFIG
+    if _CONFIG is not None:
+        return _CONFIG
+
+    cfg = RouterConfig()
+
+    # Allow simple env overrides
+    cfg.REDIS_HOST = os.getenv("REDIS_HOST", cfg.REDIS_HOST)
+    cfg.REDIS_PORT = int(os.getenv("REDIS_PORT", cfg.REDIS_PORT))
+    cfg.MODEL_NAME = os.getenv("MODEL_NAME", cfg.MODEL_NAME)
+    cfg.NAMESPACE = os.getenv("NAMESPACE", cfg.NAMESPACE)
+    cfg.LABEL_SELECTOR = os.getenv("LABEL_SELECTOR", cfg.LABEL_SELECTOR)
+    cfg.VLLM_PORT = int(os.getenv("VLLM_PORT", cfg.VLLM_PORT))
+    cfg.KV_LOG_KEYS = os.getenv("KV_LOG_KEYS", cfg.KV_LOG_KEYS)
+
+    cfg.KV_AWARE = os.getenv("KV_AWARE", "true").lower() == "true"
+    cfg.LEN_AWARE = os.getenv("LEN_AWARE", "true").lower() == "true"
+    cfg.LEN_POLICY = os.getenv("LEN_POLICY", cfg.LEN_POLICY)
+    cfg.POOL_FACTOR = int(os.getenv("POOL_FACTOR", cfg.POOL_FACTOR))
+    cfg.DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", cfg.DEFAULT_MAX_TOKENS))
+    cfg.HASH_SERVICE_URL = os.getenv("HASH_SERVICE_URL", cfg.HASH_SERVICE_URL)
+
+    cfg.ROUTER_MODE = os.getenv("ROUTER_MODE", cfg.ROUTER_MODE)
+    cfg.SIDECAR_PORT = int(os.getenv("SIDECAR_PORT", cfg.SIDECAR_PORT))
+
+    cfg.RESULT_TIMEOUT_S = float(os.getenv("RESULT_TIMEOUT_S", cfg.RESULT_TIMEOUT_S))
+    cfg.RESULT_POLL_INTERVAL_S = float(
+        os.getenv("RESULT_POLL_INTERVAL_S", cfg.RESULT_POLL_INTERVAL_S)
+    )
+
+    cfg.REQ_LOG_MODE = os.getenv("REQ_LOG_MODE", cfg.REQ_LOG_MODE)
+
+    _CONFIG = cfg
+    return cfg
+
+
+def print_config(cfg: RouterConfig) -> None:
+    """
+    Generic config dumper: prints all fields of RouterConfig.
+    Any added/removed fields are automatically reflected.
+    """
+    import sys
+    data = asdict(cfg)
+
+    print("\n================== RouterConfig (effective) ==================")
+    # Sort keys just to have stable ordering
+    for key in sorted(data.keys()):
+        value = data[key]
+        print(f" {key:22s} = {value}")
+    # Also show ACCESS_LOG env since it's used outside RouterConfig
+    access_log = os.getenv("ACCESS_LOG", "true")
+    print(f" {'ACCESS_LOG':22s} = {access_log}")
+    print("=============================================================\n")
+
+    sys.stdout.flush()
+
+
+---------------- END FILE: ./router/config.py ----------------
+
+---------------- FILE: ./router/kv_aware.py ----------------
+
+# -*- coding: utf-8 -*-
+"""
+Minimal KV-aware state for router:
+
+- register_request_blocks(req_id, [block_hashes])
+- register_block_owners(block_hash, [endpoint_urls])
+- prefix_len(endpoint_url, req_id) -> int
+"""
+
+from typing import Dict, List, Iterable
+from threading import RLock
+
+# req_id -> [block_hashes...]
+_REQ_BLOCKS: Dict[int, List[int]] = {}
+# block_hash -> { endpoint_url: True }
+_BLOCK_OWNERS: Dict[int, Dict[str, bool]] = {}
+
+_LOCK = RLock()
+
+
+def register_request_blocks(req_id: int, block_hashes: Iterable[int]) -> None:
+    with _LOCK:
+        _REQ_BLOCKS[req_id] = list(block_hashes)
+
+
+def register_block_owners(block_hash: int, owners: Iterable[str]) -> None:
+    with _LOCK:
+        entry = _BLOCK_OWNERS.get(block_hash, {})
+        for ep in owners:
+            entry[ep] = True
+        _BLOCK_OWNERS[block_hash] = entry
+
+
+def prefix_len(endpoint: str, req_id: int) -> int:
+    """
+    How many prefix blocks of this request are owned by this endpoint?
+    """
+    with _LOCK:
+        blocks = _REQ_BLOCKS.get(req_id)
+        if not blocks:
+            return 0
+        owners = _BLOCK_OWNERS
+        count = 0
+        for h in blocks:
+            ep_map = owners.get(h)
+            if not ep_map or endpoint not in ep_map:
+                break
+            count += 1
+        return count
+
+---------------- END FILE: ./router/kv_aware.py ----------------
+
+---------------- FILE: ./router/kv_watcher.py ----------------
+
+# -*- coding: utf-8 -*-
+# kv_watcher.py
+"""
+Background KV watcher:
+- Periodically scans Redis kvblock keys.
+- Maps pod_name -> pod_ip -> router endpoint URL.
+- Calls register_block_owners(block_hash, owners).
+
+Verbosity controlled by config.KV_LOG_KEYS:
+  - "off"     : only start/stop + errors
+  - "summary" : discovery + scan summary
+  - "full"    : per-key logs + summary
+"""
+
+import os
+import time
+import threading
+from typing import Dict, Optional
+
+import asyncio
+import redis.asyncio as aioredis
+from kubernetes import client as k8s_client, config as k8s_config
+
+from .config import get_config
+from .kv_aware import register_block_owners
+
+_cfg = get_config()
+
+
+def _log(msg: str, *, level: str = "summary") -> None:
+    mode = str(_cfg.KV_LOG_KEYS).lower()
+
+    if level == "always":
+        print(f"[KVWatcher] {msg}")
+        return
+
+    if mode == "off":
+        return
+
+    if level == "summary":
+        print(f"[KVWatcher] {msg}")
+        return
+
+    if level == "full" and mode == "full":
+        print(f"[KVWatcher] {msg}")
+
+
+def _discover_pods() -> Dict[str, str]:
+    running_in_cluster = os.getenv("KUBERNETES_SERVICE_HOST") is not None
+
+    try:
+        if running_in_cluster:
+            k8s_config.load_incluster_config()
+        else:
+            k8s_config.load_kube_config()
+    except Exception as e:
+        _log(f"Failed to load K8s config: {e}", level="always")
+        return {}
+
+    v1 = k8s_client.CoreV1Api()
+
+    try:
+        pods = v1.list_namespaced_pod(
+            namespace=_cfg.NAMESPACE,
+            label_selector=_cfg.LABEL_SELECTOR,
+        ).items
+    except Exception as e:
+        _log(f"list_namespaced_pod failed: {e}", level="always")
+        return {}
+
+    out: Dict[str, str] = {}
+    for pod in pods:
+        if pod.status.phase == "Running" and pod.status.pod_ip:
+            out[pod.metadata.name] = pod.status.pod_ip
+    return out
+
+
+def _endpoint_for_pod(pod_name: str, pods: Dict[str, str]) -> Optional[str]:
+    # We only care about identity here; HTTP URL is only used in sidecar.
+    # So we just use pod_name as the endpoint key.
+    return pod_name if pod_name in pods else None
+
+
+class KVWatcher:
+    def __init__(self):
+        self.redis_url = f"redis://{_cfg.REDIS_HOST}:{_cfg.REDIS_PORT}"
+        self.model_name = _cfg.MODEL_NAME
+        self.interval_s = float(_cfg.KV_WATCH_INTERVAL_S)
+        self.max_keys = int(_cfg.KV_WATCH_MAX_KEYS)
+        self.discovery_interval_s = float(_cfg.KV_DISCOVERY_INTERVAL_S)
+
+        self._stop_evt = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._stop_evt.clear()
+        self._thread = threading.Thread(
+            target=self._thread_main,
+            daemon=True,
+        )
+        self._thread.start()
+        _log(
+            f"Started (redis={self.redis_url}, model={self.model_name}, "
+            f"interval_s={self.interval_s}, max_keys={self.max_keys}, "
+            f"log_mode={_cfg.KV_LOG_KEYS})",
+            level="always",
+        )
+
+    def stop(self):
+        self._stop_evt.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        _log("Stopped", level="always")
+
+    def _thread_main(self):
+        try:
+            asyncio.run(self._run_async())
+        except Exception as e:
+            _log(f"async loop crashed: {e}", level="always")
+
+    async def _run_async(self):
+        redis = aioredis.from_url(self.redis_url, decode_responses=True)
+        pods: Dict[str, str] = {}
+        last_discovery = 0.0
+
+        try:
+            while not self._stop_evt.is_set():
+                now = time.time()
+
+                if now - last_discovery >= self.discovery_interval_s:
+                    pods = _discover_pods()
+                    last_discovery = now
+                    _log(f"discovered {len(pods)} pods", level="summary")
+
+                if pods:
+                    await self._scan_once(redis, pods)
+
+                await asyncio.sleep(self.interval_s)
+
+        finally:
+            try:
+                await redis.close()
+            except Exception:
+                pass
+
+    async def _scan_once(self, redis, pods: Dict[str, str]):
+        pattern = f"{self.model_name}:kvblock:*"
+        seen = 0
+
+        try:
+            async for key in redis.scan_iter(match=pattern, count=100):
+                mapping = await redis.hgetall(key)
+                if not mapping:
+                    continue
+
+                try:
+                    block_hash = int(key.rsplit(":", 1)[1])
+                except Exception:
+                    continue
+
+                pod_owners = list(mapping.keys())
+                ep_owners = []
+                for pod_name in pod_owners:
+                    ep = _endpoint_for_pod(pod_name, pods)
+                    if ep:
+                        ep_owners.append(ep)
+
+                if ep_owners:
+                    register_block_owners(block_hash, ep_owners)
+
+                _log(f"key={key} pods={pod_owners} eps={ep_owners}", level="full")
+
+                seen += 1
+                if seen >= self.max_keys:
+                    break
+
+            if seen > 0:
+                _log(
+                    f"scan complete: scanned={seen} keys",
+                    level="summary",
+                )
+            else:
+                _log("scan complete: no kvblock keys found", level="summary")
+
+        except Exception as e:
+            _log(f"scan failed: {e}", level="always")
+
+---------------- END FILE: ./router/kv_watcher.py ----------------
+
+---------------- FILE: ./router/predictors.py ----------------
+
+# -*- coding: utf-8 -*-
+"""
+Very simple length predictor: use character length as proxy for tokens.
+You can later swap this for a proper model.
+"""
+
+from typing import Optional
+
+
+class SimpleLengthPredictor:
+    name = "char-len"
+
+    def predict_out_tokens(self, prompt: str, req_id: int) -> Optional[int]:
+        # "medium" guess: input length / 2
+        return max(1, len(prompt) // 2)
+
+
+_predictor = SimpleLengthPredictor()
+
+
+def get_length_predictor() -> SimpleLengthPredictor:
+    return _predictor
+
+---------------- END FILE: ./router/predictors.py ----------------
+
+---------------- FILE: ./router/__init__.py ----------------
+
+
+---------------- END FILE: ./router/__init__.py ----------------
+
+---------------- FILE: ./router/api.py ----------------
+
+# -*- coding: utf-8 -*-
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+import httpx
+import asyncio
+import time
+
+from .config import get_config, print_config
+from .models import (
+    EnqueueRequest,
+    EnqueueResponse,
+    PullRequest,
+    PullResponse,
+)
+from .router_state import router_state
+from .kv_watcher import KVWatcher
+from .kv_aware import register_request_blocks
+from .push_router import PushRouter
+
+_cfg = get_config()
+app = FastAPI(title="KV-aware Router Service")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_kv_watcher: KVWatcher | None = None
+_push_router: PushRouter | None = None
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
+def _is_push_mode() -> bool:
+    """Return True if the router is running in a push-* mode."""
+    return _cfg.ROUTER_MODE.startswith("push-")
+
+
+async def _maybe_register_kv_blocks(req_id: int, prompt: str) -> None:
+    """
+    If KV-aware routing is enabled, call the hash service and register
+    KV blocks for the given request ID.
+
+    Any errors are swallowed and logged (best-effort behavior).
+    """
+    if not _cfg.KV_AWARE:
+        return
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{_cfg.HASH_SERVICE_URL}/compute_hashes",
+                json={"prompt": prompt},
+                timeout=2.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            block_hashes = data.get("block_hashes") or []
+            if block_hashes:
+                register_request_blocks(req_id, block_hashes)
+    except Exception as e:
+        # Preserve original behavior: log warning, do not fail the request
+        print(f"[router] WARNING: KV hash compute failed for req_id={req_id}: {e}")
+
+
+# ============================================================
+# Startup / Shutdown
+# ============================================================
+
+@app.on_event("startup")
+async def _startup():
+    global _kv_watcher, _push_router
+
+    print_config(_cfg)
+
+    _kv_watcher = KVWatcher()
+    _kv_watcher.start()
+    print("[router] KVWatcher started.")
+
+    if _is_push_mode():
+        _push_router = PushRouter(mode=_cfg.ROUTER_MODE)
+        print(f"[router] PushRouter started in mode={_cfg.ROUTER_MODE}")
+    else:
+        print("[router] running in PULL mode.")
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    global _kv_watcher, _push_router
+
+    if _kv_watcher:
+        _kv_watcher.stop()
+        print("[router] KVWatcher stopped.")
+
+    _push_router = None
+    print("[router] PushRouter cleared.")
+
+
+# ============================================================
+# Health
+# ============================================================
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "queue_len": router_state.size()}
+
+
+# ============================================================
+# MAIN: enqueue + synchronous wait for result
+# ============================================================
+
+@app.post("/enqueue")  # you *could* add response_model=EnqueueResponse here if it matches
+async def enqueue(req: EnqueueRequest):
+    """
+    Synchronous enqueue:
+
+    - Allocate req_id
+    - If in pull mode: enqueue into central queue
+    - If in push mode: only allocate ID, push directly to a sidecar
+    - Register a waiter for this req_id
+    - Block until /result arrives (or timeout), then return it
+    """
+
+    # 1) Allocate req_id + enqueue if in pull mode
+    if _is_push_mode():
+        # push-* modes don't use central queue for dispatch
+        rid = router_state.next_req_id()
+    else:
+        # pull mode: put job into central queue for /pull
+        t_enq = req.t_enq_client or time.time()
+        rid = router_state.enqueue(req.prompt, t_enq, req.meta or {})
+
+    # Ensure there's a waiter for this req_id
+    router_state.register_waiter(rid)
+
+    # 2) Optionally compute KV-block hashes (best-effort)
+    await _maybe_register_kv_blocks(rid, req.prompt)
+
+    # 3) Route work to sidecars (only in push mode)
+    if _is_push_mode():
+        if _push_router is None:
+            raise HTTPException(status_code=500, detail="PushRouter not initialized")
+        try:
+            await _push_router.route_and_push(rid, req.prompt, req.meta or {})
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"push failed: {e}")
+    # In pull mode, sidecars will eventually call /pull and get this job
+
+    # 4) Wait synchronously for vLLM result without blocking the event loop
+    result = await asyncio.to_thread(
+        router_state.wait_for_result,
+        rid,
+        _cfg.RESULT_TIMEOUT_S,
+    )
+
+    if result is None:
+        # No result within timeout
+        raise HTTPException(status_code=504, detail="timeout waiting for vLLM result")
+
+    # 5) Return the model output
+    return {"req_id": rid, "result": result}
+
+
+# ============================================================
+# SIDE CAR → ROUTER RESULT CALLBACK
+# ============================================================
+
+@app.post("/result")
+async def result_callback(payload: dict):
+    """
+    Called by sidecars after vLLM completes a request.
+
+    Expected payload (flexible):
+
+      Preferred:
+        {
+            "req_id": 17,
+            "result": {... full payload ...}
+        }
+
+      Legacy/simple:
+        {
+            "req_id": 17,
+            "output": "the text"
+        }
+    """
+    req_id_raw = payload.get("req_id")
+    if req_id_raw is None:
+        return {"status": "missing req_id"}
+
+    try:
+        rid = int(req_id_raw)
+    except (TypeError, ValueError):
+        return {"status": "invalid req_id"}
+
+    result = payload.get("result")
+
+    # Backward-compatible: if sidecar sends just "output"
+    if result is None and "output" in payload:
+        result = {"output": payload.get("output")}
+
+    if result is None:
+        return {"status": "missing result"}
+
+    router_state.store_result(rid, result)
+    return {"status": "ok"}
+
+
+# ============================================================
+# SIDE CAR → ROUTER /pull
+# ============================================================
+
+@app.post("/pull", response_model=PullResponse)
+async def pull(req: PullRequest):
+    items = router_state.pull_for_endpoint(
+        endpoint=req.endpoint,
+        want=req.want,
+    )
+    return PullResponse(items=items)
+
+---------------- END FILE: ./router/api.py ----------------
+
+---------------- FILE: ./router/models.py ----------------
+
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+import time
+
+
+# -------------------------
+# Client → Router
+# -------------------------
+
+class EnqueueRequest(BaseModel):
+    prompt: str
+    req_id: Optional[int] = None
+    t_enq_client: Optional[float] = None
+    meta: Dict[str, Any] = {}
+
+
+class EnqueueResponse(BaseModel):
+    """
+    In the new synchronous design, the router blocks until vLLM has
+    produced an answer and sidecar pushed it back.
+
+    So this response includes the model output.
+    """
+    req_id: int
+    output: Optional[str] = None             # text from vLLM
+    finish_reason: Optional[str] = None      # e.g. "stop"
+    latency_s: Optional[float] = None        # model roundtrip
+    raw: Optional[Dict[str, Any]] = None     # full vLLM response if desired
+
+
+# -------------------------
+# Sidecar → Router (pull mode)
+# -------------------------
+
+class PullRequest(BaseModel):
+    # endpoint identity (e.g. pod name) – must match KVWatcher register_block_owners()
+    endpoint: str
+    want: int                 # sidecar-computed capacity
+
+
+class JobItem(BaseModel):
+    req_id: int
+    prompt: str
+    t_enq_client: float
+    meta: Dict[str, Any] = {}
+
+
+class PullResponse(BaseModel):
+    items: List[JobItem]
+
+
+# -------------------------
+# Sidecar → Router (result callback)
+# -------------------------
+
+class ResultRequest(BaseModel):
+    """
+    Internal API: sidecar posts vLLM output back to router.
+
+    Example payload:
+    {
+        "req_id": 17,
+        "result": {
+            "output": "hello ...",
+            "finish_reason": "stop",
+            "latency_s": 0.342,
+            "raw": {... full vLLM JSON ...}
+        }
+    }
+    """
+    req_id: int
+    result: Dict[str, Any]
+
+
+# -------------------------
+# Helpers
+# -------------------------
+
+def now_s() -> float:
+    return time.time()
+
+---------------- END FILE: ./router/models.py ----------------
+
+---------------- FILE: ./router/router_state.py ----------------
+
+# -*- coding: utf-8 -*-
+from collections import deque
+from threading import RLock, Event
+from typing import Deque, Dict, Tuple, List, Any, Optional
+
+from .config import get_config
+from .kv_aware import prefix_len
+from .predictors import get_length_predictor
+from .len_select import select_len_aware
+from .models import JobItem, now_s
+
+_cfg = get_config()
+_pred = get_length_predictor()
+
+
+def _log_req(msg: str, *, level: str = "summary") -> None:
+    """
+    Centralized logging for pull-routing decisions.
+    Uses _cfg.REQ_LOG_MODE directly (no local copy).
+    """
+    mode = str(_cfg.REQ_LOG_MODE).lower()
+
+    if mode == "off":
+        return
+
+    if level == "summary":
+        print(f"[PullRouter] {msg}")
+    elif level == "full" and mode == "full":
+        print(f"[PullRouter] {msg}")
+
+
+class RouterState:
+    """
+    Central queue of pending jobs + KV + length-aware selection.
+
+    Queue entries: (req_id, prompt, t_enq_client, meta)
+
+    In pull mode:
+      - enqueue() appends to _queue and pull_for_endpoint() selects.
+
+    In push-* modes:
+      - next_req_id() is used to allocate IDs, _queue is not used.
+
+    Also tracks per-request result waiters so that /enqueue can block
+    until the sidecar posts the result.
+    """
+
+    def __init__(self):
+        self._lock = RLock()
+        self._next_req_id = 0
+        self._queue: Deque[Tuple[int, str, float, dict]] = deque()
+
+        # Result tracking: req_id -> Event / result payload
+        self._result_events: Dict[int, Event] = {}
+        self._result_values: Dict[int, Any] = {}
+
+    # -------------------------------------------------------
+    # ID allocation (for push modes)
+    # -------------------------------------------------------
+
+    def next_req_id(self) -> int:
+        with self._lock:
+            rid = self._next_req_id
+            self._next_req_id += 1
+            return rid
+
+    # -------------------------------------------------------
+    # Enqueue (pull mode)
+    # -------------------------------------------------------
+
+    def enqueue(self, prompt: str, t_enq_client: float | None, meta: dict) -> int:
+        with self._lock:
+            rid = self._next_req_id
+            self._next_req_id += 1
+            ts = float(t_enq_client) if t_enq_client else now_s()
+            self._queue.append((rid, prompt, ts, meta or {}))
+            return rid
+
+    # -------------------------------------------------------
+    # Pull selection (pull mode)
+    # -------------------------------------------------------
+
+    def pull_for_endpoint(self, endpoint: str, want: int) -> List[JobItem]:
+        if want <= 0:
+            return []
+
+        with self._lock:
+            if not self._queue:
+                return []
+
+            pool_factor = max(1, int(_cfg.POOL_FACTOR))
+            max_scan = min(len(self._queue), want * pool_factor)
+
+            # 1) Build pool
+            pool: List[Tuple[int, str, float, dict]] = []
+            for _ in range(max_scan):
+                rid, prompt, ts, meta = self._queue.popleft()
+                pool.append((rid, prompt, ts, meta))
+
+            _log_req(
+                f"endpoint={endpoint} want={want} pool_size={len(pool)} "
+                f"queue_remaining={len(self._queue)}",
+                level="full",
+            )
+
+            # 2) KV scoring
+            kv_enabled = bool(_cfg.KV_AWARE)
+            len_enabled = bool(_cfg.LEN_AWARE)
+            len_policy = _cfg.LEN_POLICY
+
+            if kv_enabled:
+                scored: List[Tuple[int, str, float, dict, int]] = []
+                for rid, prompt, ts, meta in pool:
+                    kv_hits = prefix_len(endpoint, rid)
+                    scored.append((rid, prompt, ts, meta, kv_hits))
+
+                scored.sort(key=lambda x: (-x[4], x[0]))
+                ordered = [(r, p, t, m) for (r, p, t, m, _) in scored]
+
+                _log_req(
+                    f"KV order endpoint={endpoint}: "
+                    f"{[(r, kv) for (r, _p, _t, _m, kv) in scored]}",
+                    level="full",
+                )
+            else:
+                ordered = list(pool)
+
+            # 3) Length-aware refinement
+            if len_enabled and len_policy:
+                refined = select_len_aware(ordered, _pred, len_policy)
+                _log_req(
+                    f"Len policy='{len_policy}' ordering: "
+                    f"{[r for (r, _p, _t, _m) in refined]}",
+                    level="full",
+                )
+                ordered = refined
+
+            # 4) Choose first `want`
+            chosen = ordered[:want]
+            chosen_ids = [rid for (rid, _p, _t, _m) in chosen]
+
+            _log_req(
+                f"chosen endpoint={endpoint}: {chosen_ids}",
+                level="summary",
+            )
+
+            # 5) Put leftovers back
+            leftovers = ordered[want:]
+            for rid, prompt, ts, meta in leftovers:
+                self._queue.appendleft((rid, prompt, ts, meta))
+
+            if leftovers:
+                _log_req(
+                    f"leftovers requeued: {[r for (r, _p, _t, _m) in leftovers]}",
+                    level="full",
+                )
+
+            # 6) Build JobItem list
+            items = [
+                JobItem(req_id=rid, prompt=prompt, t_enq_client=ts, meta=meta)
+                for (rid, prompt, ts, meta) in chosen
+            ]
+
+            return items
+
+    # -------------------------------------------------------
+    # Result wait/notify
+    # -------------------------------------------------------
+
+    def register_waiter(self, req_id: int) -> None:
+        with self._lock:
+            if req_id not in self._result_events:
+                self._result_events[req_id] = Event()
+
+    def store_result(self, req_id: int, result: Any) -> None:
+        evt: Optional[Event] = None
+        with self._lock:
+            self._result_values[req_id] = result
+            evt = self._result_events.get(req_id)
+        if evt is not None:
+            evt.set()
+
+    def wait_for_result(self, req_id: int, timeout_s: float) -> Optional[Any]:
+        with self._lock:
+            evt = self._result_events.get(req_id)
+            if evt is None:
+                evt = Event()
+                self._result_events[req_id] = evt
+
+        ok = evt.wait(timeout_s)
+        if not ok:
+            return None
+
+        with self._lock:
+            result = self._result_values.get(req_id)
+            self._result_events.pop(req_id, None)
+            self._result_values.pop(req_id, None)
+            return result
+
+    # -------------------------------------------------------
+    # Metrics
+    # -------------------------------------------------------
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._queue)
+
+
+# single global state for the FastAPI app
+router_state = RouterState()
+
+---------------- END FILE: ./router/router_state.py ----------------
+
+---------------- FILE: ./router/push_router.py ----------------
+
+# -*- coding: utf-8 -*-
+import os
+import random
+import time
+from typing import Dict, List, Optional
+
+import httpx
+from kubernetes import client as k8s_client, config as k8s_config
+
+from .config import get_config
+
+_cfg = get_config()
+
+
+def _log_req(msg: str, *, level: str = "summary") -> None:
+    """
+    Centralized logging for push-routing decisions.
+    Uses _cfg.REQ_LOG_MODE directly.
+    """
+    mode = str(_cfg.REQ_LOG_MODE).lower()
+
+    if mode == "off":
+        return
+
+    if level == "summary":
+        print(f"[PushRouter] {msg}")
+    elif level == "full" and mode == "full":
+        print(f"[PushRouter] {msg}")
+
+
+class PushRouter:
+    def __init__(self, mode: str):
+        self.mode = mode  # "push-rr", "push-random", "push-leastq"
+        self._eps: List[str] = []       # pod names
+        self._urls: Dict[str, str] = {} # pod_name -> sidecar base URL
+        self._rr_idx: int = 0
+        self._last_discovery = 0.0
+        self._discovery_interval_s = float(getattr(_cfg, "KV_DISCOVERY_INTERVAL_S", 5.0))
+
+    # ---------------------------------------------------------
+    # Pod discovery
+    # ---------------------------------------------------------
+
+    def _discover_pods(self) -> Dict[str, str]:
+        running_in_cluster = os.getenv("KUBERNETES_SERVICE_HOST") is not None
+        try:
+            if running_in_cluster:
+                k8s_config.load_incluster_config()
+            else:
+                k8s_config.load_kube_config()
+        except Exception as e:
+            print(f"[PushRouter] failed to load K8s config: {e}")
+            return {}
+
+        v1 = k8s_client.CoreV1Api()
+        try:
+            pods = v1.list_namespaced_pod(
+                namespace=_cfg.NAMESPACE,
+                label_selector=_cfg.LABEL_SELECTOR,
+            ).items
+        except Exception as e:
+            print(f"[PushRouter] list_namespaced_pod failed: {e}")
+            return {}
+
+        out: Dict[str, str] = {}
+        for pod in pods:
+            if pod.status.phase == "Running" and pod.status.pod_ip:
+                out[pod.metadata.name] = pod.status.pod_ip
+        return out
+
+    def _ensure_endpoints(self):
+        now = time.time()
+        if self._eps and (now - self._last_discovery) < self._discovery_interval_s:
+            return
+
+        pods = self._discover_pods()
+        self._eps = list(pods.keys())
+        self._urls = {
+            pod: f"http://{ip}:{_cfg.SIDECAR_PORT}"
+            for pod, ip in pods.items()
+        }
+        self._last_discovery = now
+
+        _log_req(f"discovered {len(self._eps)} pods: {self._eps}", level="summary")
+
+    # ---------------------------------------------------------
+    # Endpoint selection
+    # ---------------------------------------------------------
+
+    def _pick_endpoint_rr(self) -> Optional[str]:
+        if not self._eps:
+            return None
+        ep = self._eps[self._rr_idx % len(self._eps)]
+        self._rr_idx = (self._rr_idx + 1) % len(self._eps)
+
+        _log_req(f"RR pick → {ep}", level="full")
+        return ep
+
+    def _pick_endpoint_random(self) -> Optional[str]:
+        if not self._eps:
+            return None
+        ep = random.choice(self._eps)
+
+        _log_req(f"Random pick → {ep}", level="full")
+        return ep
+
+    async def _pick_endpoint_leastq(self) -> Optional[str]:
+        if not self._eps:
+            return None
+
+        best_ep = None
+        best_score = None
+
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            for ep in self._eps:
+                url = self._urls.get(ep)
+                if not url:
+                    continue
+
+                try:
+                    r = await client.get(f"{url}/health")
+                    if r.status_code != 200:
+                        continue
+                    data = r.json()
+                    score = int(data.get("logical", data.get("queue_len", 0)))
+                except Exception:
+                    continue
+
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_ep = ep
+
+        _log_req(f"LeastQ pick → {best_ep} (score={best_score})", level="full")
+        return best_ep
+
+    async def _pick_endpoint(self) -> Optional[str]:
+        if self.mode == "push-rr":
+            return self._pick_endpoint_rr()
+        if self.mode == "push-random":
+            return self._pick_endpoint_random()
+        if self.mode == "push-leastq":
+            return await self._pick_endpoint_leastq()
+        # fallback
+        return self._pick_endpoint_rr()
+
+    # ---------------------------------------------------------
+    # Push operation
+    # ---------------------------------------------------------
+
+    async def route_and_push(self, req_id: int, prompt: str, meta: dict) -> None:
+        self._ensure_endpoints()
+        if not self._eps:
+            raise RuntimeError("No endpoints available for push routing")
+
+        ep = await self._pick_endpoint()
+        if not ep:
+            raise RuntimeError("Failed to pick endpoint")
+
+        url = self._urls.get(ep)
+        if not url:
+            raise RuntimeError(f"No sidecar URL for endpoint {ep}")
+
+        payload = {
+            "req_id": int(req_id),
+            "prompt": str(prompt),
+            "meta": meta or {},
+        }
+
+        _log_req(
+            f"push req_id={req_id} → {ep} ({url})",
+            level="summary",
+        )
+
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            try:
+                r = await client.post(f"{url}/push", json=payload)
+            except Exception as e:
+                _log_req(f"push failed for {ep}: {e}", level="full")
+                raise
+
+            if r.status_code != 200:
+                _log_req(
+                    f"push to {ep} failed: {r.status_code} {r.text}",
+                    level="full",
+                )
+                raise RuntimeError(f"push to {ep} failed: {r.status_code} {r.text}")
+
+---------------- END FILE: ./router/push_router.py ----------------
+
+---------------- FILE: ./build.sh ----------------
+
+#!/bin/bash
+set -e
+
+PROXY_URL="http://peulerosweb:EulerOS_123@172.18.100.92:8080"
+
+docker build \
+  -f Dockerfile \
+  --build-arg HTTP_PROXY="$PROXY_URL" \
+  --build-arg HTTPS_PROXY="$PROXY_URL" \
+  -t kv-router:latest .
+
+---------------- END FILE: ./build.sh ----------------
+
+---------------- FILE: ./Dockerfile ----------------
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# ---------- Proxy only for build ----------
+# Build args (provided at `docker build` time)
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+
+# Make them visible to pip/urllib3 during build
+ENV http_proxy=${HTTP_PROXY}
+ENV https_proxy=${HTTPS_PROXY}
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+# ------------------------------------------
+
+# Install deps
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ---------- Clear proxy for runtime ----------
+ENV http_proxy=""
+ENV https_proxy=""
+ENV HTTP_PROXY=""
+ENV HTTPS_PROXY=""
+# ---------------------------------------------
+
+# Copy app code
+COPY router ./router
+
+# Uvicorn config (can still be overridden in K8s)
+ENV HOST=0.0.0.0
+ENV PORT=8080
+
+# Add entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+CMD ["/entrypoint.sh"]
+
+---------------- END FILE: ./Dockerfile ----------------
+
+---------------- FILE: ./requirements.txt ----------------
+
+fastapi
+uvicorn[standard]
+httpx
+redis
+kubernetes
+
+---------------- END FILE: ./requirements.txt ----------------
