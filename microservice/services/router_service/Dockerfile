@@ -32,4 +32,8 @@ COPY router ./router
 ENV HOST=0.0.0.0
 ENV PORT=8080
 
-CMD ["uvicorn", "router.api:app", "--host", "0.0.0.0", "--port", "8080"]
+# Add entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+CMD ["/entrypoint.sh"]

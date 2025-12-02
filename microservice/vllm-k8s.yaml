@@ -225,6 +225,12 @@ spec:
           image: kv-router:latest
           imagePullPolicy: IfNotPresent
           env:
+            - name: ACCESS_LOG
+              value: "false"
+            - name: KV_LOG_KEYS
+              value: "off"
+            - name: REQ_LOG_MODE
+              value: "summary"
             - name: REDIS_HOST
               value: "redis"
             - name: REDIS_PORT
@@ -298,7 +304,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 8
+  replicas: 4
   selector:
     matchLabels:
       app: vllm-qwen
@@ -405,7 +411,7 @@ spec:
             # Sidecar HTTP and concurrency
             - name: SIDECAR_PORT
               value: "9000"
-            - name: VLLM_CONCURRENCY
+            - name: BATCH_SIZE
               value: "8"
             - name: SIDECAR_MODE
               value: "pull"
