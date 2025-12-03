@@ -204,6 +204,7 @@ subjects:
     namespace: vllm
 
 ---
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -225,36 +226,78 @@ spec:
           image: kv-router:latest
           imagePullPolicy: IfNotPresent
           env:
+            # Uvicorn / API host + port
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8080"
+
+            # Entry-point / uvicorn access log
             - name: ACCESS_LOG
               value: "false"
+
+            # Router logging
             - name: KV_LOG_KEYS
-              value: "off"
+              value: "off"        # off | summary | full
             - name: REQ_LOG_MODE
-              value: "summary"
+              value: "summary"    # off | summary | full
+
+            # Redis + model identity
             - name: REDIS_HOST
               value: "redis"
             - name: REDIS_PORT
               value: "6379"
             - name: MODEL_NAME
               value: "served-model"
+
+            # K8s discovery for vLLM pods
             - name: NAMESPACE
               value: "vllm"
             - name: LABEL_SELECTOR
               value: "app=vllm-qwen"
             - name: VLLM_PORT
               value: "8200"
+
+            # KV watcher tuning
+            - name: KV_WATCH_INTERVAL_S
+              value: "1.0"
+            - name: KV_WATCH_MAX_KEYS
+              value: "200"
+            - name: KV_DISCOVERY_INTERVAL_S
+              value: "5.0"
+
+            # Hash service
             - name: HASH_SERVICE_URL
               value: "http://vllm-cpu-hash:9095"
+
+            # Routing features
             - name: KV_AWARE
               value: "true"
             - name: LEN_AWARE
               value: "true"
             - name: LEN_POLICY
-              value: "short_first"
+              value: "short_first"   # short_first | long_first
+
+            # Length selection pool size
+            - name: POOL_FACTOR
+              value: "4"
+
+            # Predictor default max tokens (batch proxy)
+            - name: DEFAULT_MAX_TOKENS
+              value: "1024"
+
+            # Router mode + sidecar port
             - name: ROUTER_MODE
-              value: "pull"      # "pull", "push-rr", "push-random", "push-leastq"
+              value: "pull"          # "pull", "push-rr", "push-random", "push-leastq"
             - name: SIDECAR_PORT
               value: "9000"
+
+            # Synchronous wait behavior
+            - name: RESULT_TIMEOUT_S
+              value: "60.0"
+            - name: RESULT_POLL_INTERVAL_S
+              value: "0.02"
+
           ports:
             - containerPort: 8080
               name: http
@@ -277,6 +320,7 @@ spec:
             limits:
               cpu: "1000m"
               memory: "1Gi"
+
 
 ---
 apiVersion: v1
