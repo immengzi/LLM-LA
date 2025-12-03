@@ -2,6 +2,7 @@
 from collections import deque
 from threading import RLock, Event
 from typing import Deque, Dict, Tuple, List, Any, Optional
+import sys
 
 from .config import get_config
 from .kv_aware import prefix_len
@@ -16,7 +17,7 @@ _pred = get_length_predictor()
 def _log_req(msg: str, *, level: str = "summary") -> None:
     """
     Centralized logging for pull-routing decisions.
-    Uses _cfg.REQ_LOG_MODE directly (no local copy).
+    Honors _cfg.REQ_LOG_MODE: off | summary | full
     """
     mode = str(_cfg.REQ_LOG_MODE).lower()
 
@@ -25,24 +26,15 @@ def _log_req(msg: str, *, level: str = "summary") -> None:
 
     if level == "summary":
         print(f"[PullRouter] {msg}")
+        sys.stdout.flush()
     elif level == "full" and mode == "full":
         print(f"[PullRouter] {msg}")
+        sys.stdout.flush()
 
 
 class RouterState:
     """
     Central queue of pending jobs + KV + length-aware selection.
-
-    Queue entries: (req_id, prompt, t_enq_client, meta)
-
-    In pull mode:
-      - enqueue() appends to _queue and pull_for_endpoint() selects.
-
-    In push-* modes:
-      - next_req_id() is used to allocate IDs, _queue is not used.
-
-    Also tracks per-request result waiters so that /enqueue can block
-    until the sidecar posts the result.
     """
 
     def __init__(self):
@@ -50,12 +42,12 @@ class RouterState:
         self._next_req_id = 0
         self._queue: Deque[Tuple[int, str, float, dict]] = deque()
 
-        # Result tracking: req_id -> Event / result payload
+        # Result tracking
         self._result_events: Dict[int, Event] = {}
         self._result_values: Dict[int, Any] = {}
 
     # -------------------------------------------------------
-    # ID allocation (for push modes)
+    # ID allocation
     # -------------------------------------------------------
 
     def next_req_id(self) -> int:
@@ -65,7 +57,7 @@ class RouterState:
             return rid
 
     # -------------------------------------------------------
-    # Enqueue (pull mode)
+    # Enqueue
     # -------------------------------------------------------
 
     def enqueue(self, prompt: str, t_enq_client: float | None, meta: dict) -> int:
@@ -77,7 +69,7 @@ class RouterState:
             return rid
 
     # -------------------------------------------------------
-    # Pull selection (pull mode)
+    # Pull (KV-aware + length-aware)
     # -------------------------------------------------------
 
     def pull_for_endpoint(self, endpoint: str, want: int) -> List[JobItem]:
@@ -103,48 +95,57 @@ class RouterState:
                 level="full",
             )
 
-            # 2) KV scoring
             kv_enabled = bool(_cfg.KV_AWARE)
             len_enabled = bool(_cfg.LEN_AWARE)
             len_policy = _cfg.LEN_POLICY
 
+            # 2) KV scoring
             if kv_enabled:
-                scored: List[Tuple[int, str, float, dict, int]] = []
+                kv_pairs = []
+                scored = []
                 for rid, prompt, ts, meta in pool:
                     kv_hits = prefix_len(endpoint, rid)
+                    kv_pairs.append((rid, kv_hits))
                     scored.append((rid, prompt, ts, meta, kv_hits))
+
+                _log_req(
+                    f"KV raw endpoint={endpoint}: {kv_pairs}",
+                    level="full",
+                )
 
                 scored.sort(key=lambda x: (-x[4], x[0]))
                 ordered = [(r, p, t, m) for (r, p, t, m, _) in scored]
 
                 _log_req(
-                    f"KV order endpoint={endpoint}: "
-                    f"{[(r, kv) for (r, _p, _t, _m, kv) in scored]}",
+                    f"KV sorted endpoint={endpoint}: {[(r, kv) for (r, _p, _t, _m, kv) in scored]}",
                     level="full",
                 )
             else:
+                kv_pairs = []
                 ordered = list(pool)
 
             # 3) Length-aware refinement
             if len_enabled and len_policy:
                 refined = select_len_aware(ordered, _pred, len_policy)
+                ordered = refined
                 _log_req(
-                    f"Len policy='{len_policy}' ordering: "
-                    f"{[r for (r, _p, _t, _m) in refined]}",
+                    f"Len policy='{len_policy}' ordering: {[r for (r, _p, _t, _m) in refined]}",
                     level="full",
                 )
-                ordered = refined
 
-            # 4) Choose first `want`
+            # 4) Choose
             chosen = ordered[:want]
             chosen_ids = [rid for (rid, _p, _t, _m) in chosen]
 
+            # KV stats for chosen items — available in summary mode
+            chosen_kv_hits = [(rid, prefix_len(endpoint, rid)) for rid in chosen_ids]
+
             _log_req(
-                f"chosen endpoint={endpoint}: {chosen_ids}",
+                f"chosen endpoint={endpoint}: {chosen_ids} kv_hits={chosen_kv_hits}",
                 level="summary",
             )
 
-            # 5) Put leftovers back
+            # 5) Requeue leftovers
             leftovers = ordered[want:]
             for rid, prompt, ts, meta in leftovers:
                 self._queue.appendleft((rid, prompt, ts, meta))
@@ -155,7 +156,7 @@ class RouterState:
                     level="full",
                 )
 
-            # 6) Build JobItem list
+            # 6) Build output
             items = [
                 JobItem(req_id=rid, prompt=prompt, t_enq_client=ts, meta=meta)
                 for (rid, prompt, ts, meta) in chosen
@@ -206,5 +207,5 @@ class RouterState:
             return len(self._queue)
 
 
-# single global state for the FastAPI app
+# global instance
 router_state = RouterState()
