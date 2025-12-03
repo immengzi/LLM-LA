@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import asyncio
 import time
-import sys  # flush stdout
+import sys
 
 from .config import get_config, print_config
 from .models import (
@@ -52,24 +52,25 @@ def _log_api_req(msg: str, *, level: str = "summary") -> None:
     """
     mode = str(_cfg.REQ_LOG_MODE).lower()
 
-    # logging disabled entirely
     if mode == "off":
         return
+
+    try:
+        qlen = router_state.size()
+        msg = f"{msg} (queue_len={qlen})"
+    except Exception:
+        pass
 
     prefix = "[API]"
 
     if mode == "summary":
-        # Only print summary events
         if level == "summary":
             print(f"{prefix} {msg}")
             sys.stdout.flush()
-            return
         return
 
-    # mode == "full"
     print(f"{prefix} {msg}")
     sys.stdout.flush()
-
 
 
 async def _maybe_register_kv_blocks(req_id: int, prompt: str) -> None:
@@ -157,7 +158,6 @@ async def enqueue(req: EnqueueRequest):
 
     t_start = time.time()
 
-    # Choose ID + queue or not
     if _is_push_mode():
         rid = router_state.next_req_id()
         mode_str = "push"
@@ -176,7 +176,6 @@ async def enqueue(req: EnqueueRequest):
 
     await _maybe_register_kv_blocks(rid, req.prompt)
 
-    # Push routing
     if _is_push_mode():
         if _push_router is None:
             raise HTTPException(500, "PushRouter not initialized")
@@ -185,7 +184,6 @@ async def enqueue(req: EnqueueRequest):
         except Exception as e:
             raise HTTPException(503, f"push failed: {e}")
 
-    # Wait for result
     result = await asyncio.to_thread(
         router_state.wait_for_result,
         rid,
@@ -244,7 +242,6 @@ async def result_callback(payload: dict):
 
 @app.post("/pull", response_model=PullResponse)
 async def pull(req: PullRequest):
-    # Only visible in FULL mode
     _log_api_req(
         f"/pull endpoint={req.endpoint} want={req.want}",
         level="full",
@@ -263,7 +260,6 @@ async def pull(req: PullRequest):
             level="summary",
         )
     else:
-        # Only visible in FULL mode
         _log_api_req(
             f"/pull IDLE endpoint={req.endpoint} want={req.want} -> 0 items",
             level="full",
