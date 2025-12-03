@@ -23,3 +23,5 @@ ncu_runs
 nsys_runs
 _len_cache
 tiny-model
+ascend-device-plugin
+uv.tar.gz

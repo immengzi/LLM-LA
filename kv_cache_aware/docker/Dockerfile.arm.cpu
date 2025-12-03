@@ -5,19 +5,19 @@ FROM ubuntu:24.04 AS base
 #ARG http_proxy
 #ARG https_proxy
 #ENV http_proxy=http://:3128
-#ENV http_proxy=http://192.0.0.1:3128
-#ENV https_proxy=http://192.0.0.1:3128
+ENV http_proxy=http://192.0.0.1:3128
+ENV https_proxy=http://192.0.0.1:3128
 #ENV https_proxy=http://7.242.102.243:3128
 #ENV no_proxy=localhost,127.0.0.1
-#ENV HTTP_PROXY=${http_proxy}
-#ENV HTTPS_PROXY=${https_proxy}
+ENV HTTP_PROXY=${http_proxy}
+ENV HTTPS_PROXY=${https_proxy}
 
 RUN sed -i "s@http://.*.ubuntu.com@http://mirrors.tools.huawei.com@g" /etc/apt/sources.list
 
 RUN apt update && \
     apt install -y ca-certificates && \
     update-ca-certificates 
-#RUN apt install -y wget
+RUN apt install -y wget
 
 # Fetch huawei ssl certificates
 COPY certs/HuaweiITRootCA.crt  /usr/local/share/ca-certificates/HuaweiITRootCA.crt
