@@ -1,9 +1,9 @@
 # http_client.py
-# Thin wrapper around POST /enqueue.
+# Thin wrapper around POST /enqueue, returning both req_id and result.
 
 from __future__ import annotations
 
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, Optional
 import time
 
 import requests
@@ -15,7 +15,25 @@ def send_one(
     router_url: str,
     prompt: str,
     meta: Dict[str, Any] | None = None,
-) -> int:
+) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """
+    Send one synchronous /enqueue request.
+
+    The router blocks until the sidecar posts /result or timeout.
+    Response shape (happy path):
+
+        {
+          "req_id": 123,
+          "result": {
+            "output": "...",
+            "finish_reason": "stop",
+            "latency_s": 0.342,
+            "raw": { ... full vLLM payload ... }
+          }
+        }
+
+    We return (req_id, result_dict_or_None).
+    """
     t_enq = time.time()
     payload: Dict[str, Any] = {
         "prompt": prompt,
@@ -39,5 +57,15 @@ def send_one(
     except Exception:
         raise RuntimeError(f"/enqueue returned non-JSON body: {resp.text!r}")
 
+    if "req_id" not in data:
+        raise RuntimeError(f"/enqueue response missing 'req_id': {data!r}")
+
     rid = int(data["req_id"])
-    return rid
+    result = data.get("result")
+
+    # Sanity: result should be a dict, but don't crash if it's not
+    if result is not None and not isinstance(result, dict):
+        print(f"[client] WARNING: unexpected 'result' type for req_id={rid}: {type(result)}")
+        result = None
+
+    return rid, result

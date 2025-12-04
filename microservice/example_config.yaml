@@ -24,9 +24,11 @@ load_pattern:
   # dump | det | poisson | bursty | steps | rand
   pattern: "det"
 
-  rate_rps: 10.0
-  warmup_s: 5.0
+  rate_rps: 1.0
   duration_s: 60.0
+
+  # Number of dummy warmup requests before timed load
+  warmup_reqs: 2
 
   burst_on_s: 2.0
   burst_off_s: 2.0

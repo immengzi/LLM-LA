@@ -70,7 +70,6 @@ def _build_schedule_steps_even(
 
     end_mono = start_mono + duration_s
 
-    # Build segments: [(seg_start, seg_end, rps_int)]
     segs: List[Tuple[float, float, int]] = []
     for i, (off, rps) in enumerate(steps):
         seg_start = start_mono + off
@@ -178,7 +177,6 @@ def build_schedule(
     pattern: str,
     total_items: int,
     rate_rps: float,
-    warmup_s: float,
     duration_s: float,
     burst_on_s: float,
     burst_off_s: float,
@@ -198,7 +196,7 @@ def build_schedule(
 
     rnd = random.Random(seed)
     t0 = time.monotonic()
-    start_main = t0 + (0.0 if pattern == "dump" else max(0.0, warmup_s))
+    start_main = t0
 
     if pattern == "dump":
         plan_times = _build_schedule_dump(t0, total_items)
@@ -211,16 +209,7 @@ def build_schedule(
             rps_int=rps_i,
             max_items=total_items,
         )
-        warm_missing = max(0, total_items - len(main_times))
-        warm_times: List[float] = []
-        if warm_missing > 0 and warmup_s > 0:
-            warm_times = _build_schedule_per_second_even(
-                start_mono=t0,
-                duration_s=warmup_s,
-                rps_int=rps_i,
-                max_items=warm_missing,
-            )
-        plan_times = (warm_times + main_times)[:total_items]
+        plan_times = main_times[:total_items]
 
     elif pattern == "bursty":
         main_times = _build_schedule_bursty_even(
@@ -232,17 +221,7 @@ def build_schedule(
             rps_off=burst_rps_off,
             max_items=total_items,
         )
-        warm_missing = max(0, total_items - len(main_times))
-        warm_times: List[float] = []
-        if warm_missing > 0 and warmup_s > 0:
-            rps_i = int(round(max(0.0, burst_rps_on)))
-            warm_times = _build_schedule_per_second_even(
-                start_mono=t0,
-                duration_s=warmup_s,
-                rps_int=rps_i,
-                max_items=warm_missing,
-            )
-        plan_times = (warm_times + main_times)[:total_items]
+        plan_times = main_times[:total_items]
 
     elif pattern == "steps":
         steps = _parse_steps(step_schedule) or [(0.0, rate_rps)]
@@ -252,17 +231,7 @@ def build_schedule(
             steps=steps,
             max_items=total_items,
         )
-        warm_missing = max(0, total_items - len(main_times))
-        warm_times: List[float] = []
-        if warm_missing > 0 and warmup_s > 0:
-            rps_i = int(round(max(0.0, steps[0][1])))
-            warm_times = _build_schedule_per_second_even(
-                start_mono=t0,
-                duration_s=warmup_s,
-                rps_int=rps_i,
-                max_items=warm_missing,
-            )
-        plan_times = (warm_times + main_times)[:total_items]
+        plan_times = main_times[:total_items]
 
     elif pattern == "rand":
         lo = int(rand_rps_min if rand_rps_min is not None else max(0.0, min(rate_rps, burst_rps_off)))
@@ -277,17 +246,7 @@ def build_schedule(
             rnd=rnd,
             max_items=total_items,
         )
-        warm_missing = max(0, total_items - len(main_times))
-        warm_times: List[float] = []
-        if warm_missing > 0 and warmup_s > 0:
-            rps_i = int(round((lo + hi) / 2.0))
-            warm_times = _build_schedule_per_second_even(
-                start_mono=t0,
-                duration_s=warmup_s,
-                rps_int=max(0, rps_i),
-                max_items=warm_missing,
-            )
-        plan_times = (warm_times + main_times)[:total_items]
+        plan_times = main_times[:total_items]
 
     else:
         raise ValueError(f"Unknown pattern '{pattern}'")

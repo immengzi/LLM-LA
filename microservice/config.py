@@ -29,8 +29,10 @@ class HFLmsysConfig:
 class LoadPatternConfig:
     pattern: str = "dump"  # dump | det | poisson | bursty | steps | rand
     rate_rps: float = 5.0
-    warmup_s: float = 5.0
     duration_s: float = 60.0
+
+    # Number of dummy warmup requests to send before timed load
+    warmup_reqs: int = 0
 
     burst_on_s: float = 2.0
     burst_off_s: float = 2.0
@@ -50,7 +52,8 @@ class LoadPatternConfig:
 class GenerationConfig:
     max_tokens: int = 256
     temperature: float = 0.0
-    length_mode: str = "legacy"  # legacy | target-output | target-total
+    # legacy | target-output | target-total
+    length_mode: str = "legacy"
     target_output_tokens: Optional[int] = None
     target_total_tokens: Optional[int] = None
 
@@ -59,9 +62,10 @@ class GenerationConfig:
 class ClientConfig:
     router_url: str = "http://127.0.0.1:30080"
     total_requests: int = 50
-    prompt_source: str = "file"  # file | hf-lmsys
+    # "file" or "hf-lmsys"
+    prompt_source: str = "file"
 
-    # IMPORTANT: use default_factory for nested dataclasses
+    # nested sections
     file_prompts: FilePromptsConfig = field(default_factory=FilePromptsConfig)
     hf_lmsys: HFLmsysConfig = field(default_factory=HFLmsysConfig)
     load_pattern: LoadPatternConfig = field(default_factory=LoadPatternConfig)
@@ -74,7 +78,6 @@ def _merge_dataclass(dc_cls, data_dict: dict):
     for field_name in dc_cls.__dataclass_fields__.keys():
         if field_name in data_dict:
             kwargs[field_name] = data_dict[field_name]
-    # Start from defaults, then override what was provided
     base = dc_cls()
     for k, v in kwargs.items():
         setattr(base, k, v)
