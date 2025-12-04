@@ -3,6 +3,7 @@ from collections import deque
 from threading import RLock, Event
 from typing import Deque, Dict, Tuple, List, Any, Optional
 import sys
+import uuid
 
 from .config import get_config
 from .kv_aware import prefix_len
@@ -39,31 +40,27 @@ class RouterState:
 
     def __init__(self):
         self._lock = RLock()
-        self._next_req_id = 0
-        self._queue: Deque[Tuple[int, str, float, dict]] = deque()
+        self._queue: Deque[Tuple[str, str, float, dict]] = deque()
 
         # Result tracking
-        self._result_events: Dict[int, Event] = {}
-        self._result_values: Dict[int, Any] = {}
+        self._result_events: Dict[str, Event] = {}
+        self._result_values: Dict[str, Any] = {}
 
     # -------------------------------------------------------
     # ID allocation
     # -------------------------------------------------------
 
-    def next_req_id(self) -> int:
+    def next_req_id(self) -> str:
         with self._lock:
-            rid = self._next_req_id
-            self._next_req_id += 1
-            return rid
+            return uuid.uuid4().hex
 
     # -------------------------------------------------------
     # Enqueue
     # -------------------------------------------------------
 
-    def enqueue(self, prompt: str, t_enq_client: float | None, meta: dict) -> int:
+    def enqueue(self, prompt: str, t_enq_client: float | None, meta: dict) -> str:
         with self._lock:
-            rid = self._next_req_id
-            self._next_req_id += 1
+            rid = self.next_req_id()
             ts = float(t_enq_client) if t_enq_client else now_s()
             self._queue.append((rid, prompt, ts, meta or {}))
             return rid
@@ -84,7 +81,7 @@ class RouterState:
             max_scan = min(len(self._queue), want * pool_factor)
 
             # 1) Build pool
-            pool: List[Tuple[int, str, float, dict]] = []
+            pool: List[Tuple[str, str, float, dict]] = []
             for _ in range(max_scan):
                 rid, prompt, ts, meta = self._queue.popleft()
                 pool.append((rid, prompt, ts, meta))
@@ -168,12 +165,12 @@ class RouterState:
     # Result wait/notify
     # -------------------------------------------------------
 
-    def register_waiter(self, req_id: int) -> None:
+    def register_waiter(self, req_id: str) -> None:
         with self._lock:
             if req_id not in self._result_events:
                 self._result_events[req_id] = Event()
 
-    def store_result(self, req_id: int, result: Any) -> None:
+    def store_result(self, req_id: str, result: Any) -> None:
         evt: Optional[Event] = None
         with self._lock:
             self._result_values[req_id] = result
@@ -181,7 +178,7 @@ class RouterState:
         if evt is not None:
             evt.set()
 
-    def wait_for_result(self, req_id: int, timeout_s: float) -> Optional[Any]:
+    def wait_for_result(self, req_id: str, timeout_s: float) -> Optional[Any]:
         with self._lock:
             evt = self._result_events.get(req_id)
             if evt is None:

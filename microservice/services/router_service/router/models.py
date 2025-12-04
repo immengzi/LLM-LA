@@ -9,7 +9,7 @@ import time
 
 class EnqueueRequest(BaseModel):
     prompt: str
-    req_id: Optional[int] = None
+    req_id: Optional[str] = None
     t_enq_client: Optional[float] = None
     meta: Dict[str, Any] = {}
 
@@ -21,7 +21,7 @@ class EnqueueResponse(BaseModel):
 
     So this response includes the model output.
     """
-    req_id: int
+    req_id: str
     output: Optional[str] = None             # text from vLLM
     finish_reason: Optional[str] = None      # e.g. "stop"
     latency_s: Optional[float] = None        # model roundtrip
@@ -39,7 +39,7 @@ class PullRequest(BaseModel):
 
 
 class JobItem(BaseModel):
-    req_id: int
+    req_id: str
     prompt: str
     t_enq_client: float
     meta: Dict[str, Any] = {}
@@ -68,7 +68,7 @@ class ResultRequest(BaseModel):
         }
     }
     """
-    req_id: int
+    req_id: str
     result: Dict[str, Any]
 
 

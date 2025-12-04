@@ -95,7 +95,6 @@ class RouterPullWorker:
 
             session = self._session
             if session is None:
-                # fallback session if start() has not run
                 session = requests.Session()
                 tmp_session = True
             else:
@@ -108,9 +107,7 @@ class RouterPullWorker:
                     timeout=1.0,
                 )
                 if not resp.ok:
-                    # Error response from router
                     if not self._first_success:
-                        # Initial phase: only print a single friendly line
                         if not self._printed_wait_msg:
                             print(
                                 "[sidecar] waiting for first successful /pull "
@@ -118,14 +115,12 @@ class RouterPullWorker:
                             )
                             self._printed_wait_msg = True
                     else:
-                        # After first success, show detailed error
                         print(f"[sidecar] /pull failed: {resp.status_code} {resp.text}")
                     return
 
                 data = resp.json()
                 items = data.get("items", [])
 
-                # Mark router as alive on first-ever successful /pull (any 200)
                 if not self._first_success:
                     print(
                         "[sidecar] first successful /pull from router-service; "
@@ -137,15 +132,13 @@ class RouterPullWorker:
                     return
 
                 for item in items:
-                    rid = int(item["req_id"])
+                    rid = str(item["req_id"])
                     prompt = str(item["prompt"])
                     meta: Dict[str, Any] = item.get("meta") or {}
                     self.local_q.put(rid, prompt, meta)
 
             except Exception as e:
-                # Network / connection-level errors
                 if not self._first_success:
-                    # Initial phase: just say we're waiting, once
                     if not self._printed_wait_msg:
                         print(
                             "[sidecar] waiting for first successful /pull "
@@ -153,7 +146,6 @@ class RouterPullWorker:
                         )
                         self._printed_wait_msg = True
                 else:
-                    # After first success, show detailed error
                     print(f"[sidecar] /pull error: {e}")
             finally:
                 if tmp_session:

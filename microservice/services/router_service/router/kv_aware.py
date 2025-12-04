@@ -11,14 +11,14 @@ from typing import Dict, List, Iterable
 from threading import RLock
 
 # req_id -> [block_hashes...]
-_REQ_BLOCKS: Dict[int, List[int]] = {}
+_REQ_BLOCKS: Dict[str, List[int]] = {}
 # block_hash -> { endpoint_url: True }
 _BLOCK_OWNERS: Dict[int, Dict[str, bool]] = {}
 
 _LOCK = RLock()
 
 
-def register_request_blocks(req_id: int, block_hashes: Iterable[int]) -> None:
+def register_request_blocks(req_id: str, block_hashes: Iterable[int]) -> None:
     with _LOCK:
         _REQ_BLOCKS[req_id] = list(block_hashes)
 
@@ -31,7 +31,7 @@ def register_block_owners(block_hash: int, owners: Iterable[str]) -> None:
         _BLOCK_OWNERS[block_hash] = entry
 
 
-def prefix_len(endpoint: str, req_id: int) -> int:
+def prefix_len(endpoint: str, req_id: str) -> int:
     """
     How many prefix blocks of this request are owned by this endpoint?
     """

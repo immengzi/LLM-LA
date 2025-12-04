@@ -67,6 +67,7 @@ def _request_thread(
             "max_tokens": int(gen_cfg.max_tokens),
             "temperature": float(gen_cfg.temperature),
             "length_mode": gen_cfg.length_mode,
+            "enable_thinking": bool(gen_cfg.think),
         }
         if gen_cfg.target_output_tokens is not None:
             meta["target_output_tokens"] = int(gen_cfg.target_output_tokens)
@@ -158,6 +159,7 @@ def run_open_loop_load(
             "max_tokens": int(gen_cfg.max_tokens),
             "temperature": float(gen_cfg.temperature),
             "length_mode": gen_cfg.length_mode,
+            "enable_thinking": bool(gen_cfg.think),
         }
         if gen_cfg.target_output_tokens is not None:
             meta["target_output_tokens"] = int(gen_cfg.target_output_tokens)

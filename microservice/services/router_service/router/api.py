@@ -73,7 +73,7 @@ def _log_api_req(msg: str, *, level: str = "summary") -> None:
     sys.stdout.flush()
 
 
-async def _maybe_register_kv_blocks(req_id: int, prompt: str) -> None:
+async def _maybe_register_kv_blocks(req_id: str, prompt: str) -> None:
     """Best-effort KV-block computation."""
     if not _cfg.KV_AWARE:
         return
@@ -217,10 +217,7 @@ async def result_callback(payload: dict):
     if req_id_raw is None:
         return {"status": "missing req_id"}
 
-    try:
-        rid = int(req_id_raw)
-    except:
-        return {"status": "invalid req_id"}
+    rid = str(req_id_raw)
 
     result = payload.get("result")
 
