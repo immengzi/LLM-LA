@@ -16,7 +16,7 @@ def bind_local_queue(q: LocalQueue):
 
 
 class PushItem(BaseModel):
-    req_id: int
+    req_id: str
     prompt: str
     meta: Dict[str, Any] = {}
 

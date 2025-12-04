@@ -43,7 +43,7 @@ def send_one(
 
     url = f"{router_url}/enqueue"
     try:
-        resp = session.post(url, json=payload, timeout=100.0)
+        resp = session.post(url, json=payload, timeout=1000000.0)
     except RequestException as e:
         print(f"[client] ✗ HTTP error talking to router: {e}")
         raise
@@ -60,7 +60,7 @@ def send_one(
     if "req_id" not in data:
         raise RuntimeError(f"/enqueue response missing 'req_id': {data!r}")
 
-    rid = int(data["req_id"])
+    rid = data["req_id"]
     result = data.get("result")
 
     # Sanity: result should be a dict, but don't crash if it's not

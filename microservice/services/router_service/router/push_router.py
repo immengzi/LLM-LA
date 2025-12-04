@@ -96,6 +96,7 @@ class PushRouter:
         _log_req(f"RR pick → {ep}", level="full")
         return ep
 
+
     def _pick_endpoint_random(self) -> Optional[str]:
         if not self._eps:
             return None
@@ -140,14 +141,13 @@ class PushRouter:
             return self._pick_endpoint_random()
         if self.mode == "push-leastq":
             return await self._pick_endpoint_leastq()
-        # fallback
         return self._pick_endpoint_rr()
 
     # ---------------------------------------------------------
     # Push operation
     # ---------------------------------------------------------
 
-    async def route_and_push(self, req_id: int, prompt: str, meta: dict) -> None:
+    async def route_and_push(self, req_id: str, prompt: str, meta: dict) -> None:
         self._ensure_endpoints()
         if not self._eps:
             raise RuntimeError("No endpoints available for push routing")
@@ -161,7 +161,7 @@ class PushRouter:
             raise RuntimeError(f"No sidecar URL for endpoint {ep}")
 
         payload = {
-            "req_id": int(req_id),
+            "req_id": req_id,
             "prompt": str(prompt),
             "meta": meta or {},
         }

@@ -210,6 +210,13 @@ Fields (see `GenerationConfig`):
 Only meaningful when a non-legacy length mode is used; otherwise they
 are ignored by the server side (but still sent in `meta`).
 
+- `think: bool`  
+  When `true`, the request includes `enable_thinking: true` and the model
+  is allowed to produce internal reasoning tokens before the final answer.
+  When `false`, thinking mode is disabled.
+
+
+
 ---
 
 ## Example configuration

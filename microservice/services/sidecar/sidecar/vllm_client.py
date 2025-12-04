@@ -53,7 +53,7 @@ class VLLMWorker:
         router_result_url = f"{_cfg.ROUTER_URL}/result"
 
         # Idle-poke configuration:
-        idle_sleep_s = 0.01                       # how long to sleep when idle
+        idle_sleep_s = 0.01
         spins_per_second = int(1.0 / idle_sleep_s)
 
         # Each worker pokes roughly once every (PULL_INTERVAL_S * BATCH_SIZE)
@@ -91,11 +91,18 @@ class VLLMWorker:
 
                 try:
                     # 1) Call vLLM
+                    max_tokens = meta.get("max_tokens", 128)
+                    temperature = meta.get("temperature", 0.0)
+                    enable_thinking = bool(meta.get("enable_thinking", False))
+
                     payload: Dict[str, Any] = {
                         "model": _cfg.MODEL_NAME,
                         "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": meta.get("max_tokens", 128),
-                        "temperature": meta.get("temperature", 0.0),
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                        "chat_template_kwargs": {
+                            "enable_thinking": enable_thinking,
+                        },
                     }
 
                     resp = session.post(vllm_url, json=payload, timeout=30.0)
@@ -120,7 +127,7 @@ class VLLMWorker:
                         r2 = session.post(
                             router_result_url,
                             json={
-                                "req_id": int(req_id),
+                                "req_id": req_id,
                                 "output": output_text,
                             },
                             timeout=5.0,
