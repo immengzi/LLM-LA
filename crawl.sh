@@ -2,13 +2,13 @@
 # Usage:
 #   ./crawl.sh /path/to/folder
 #   ./crawl.sh /path/to/folder -o out.txt
-#   ./crawl.sh /path/to/folder -x node_modules -x .venv
+#   ./crawl.sh /path/to/folder -x node_modules -x .venv -x README.md
 
 ROOT="${1:-.}"
 OUTFILE=""
 shift 1 || true  # shift root path
 
-EXCLUDES=()    # array to store folder names to exclude
+EXCLUDES=()    # array to store folder or file names to exclude
 
 # parse optional flags
 while [[ $# -gt 0 ]]; do
@@ -50,6 +50,9 @@ run_crawl() {
   # Build find exclusion arguments
   FIND_EXCLUDES=()
   for ex in "${EXCLUDES[@]}"; do
+    # Skip any file with this exact name
+    FIND_EXCLUDES+=( -not -name "$ex" )
+    # Skip everything under any directory with this name
     FIND_EXCLUDES+=( -not -path "*/${ex}/*" )
   done
 
