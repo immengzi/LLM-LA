@@ -269,6 +269,8 @@ spec:
             # Hash service
             - name: HASH_SERVICE_URL
               value: "http://vllm-cpu-hash:9095"
+            - name: HASH_TIMEOUT_S
+              value: "2.0"
 
             # Routing features
             - name: KV_AWARE
@@ -294,9 +296,13 @@ spec:
 
             # Synchronous wait behavior
             - name: RESULT_TIMEOUT_S
-              value: "60.0"
+              value: "1000.0"
             - name: RESULT_POLL_INTERVAL_S
               value: "0.02"
+
+            # Push-mode HTTP timeouts
+            - name: PUSH_HTTP_TIMEOUT_S
+              value: "2.0"
 
           ports:
             - containerPort: 8080
@@ -348,7 +354,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 4
+  replicas: 8
   selector:
     matchLabels:
       app: vllm-qwen
@@ -459,6 +465,16 @@ spec:
               value: "8"
             - name: SIDECAR_MODE
               value: "pull"
+            - name: PULL_INTERVAL_S
+              value: "0.05"
+
+            # Sidecar HTTP timeouts
+            - name: ROUTER_PULL_TIMEOUT_S
+              value: "1000.0"
+            - name: VLLM_TIMEOUT_S
+              value: "1000.0"
+            - name: ROUTER_RESULT_TIMEOUT_S
+              value: "1000.0"
 
             # ZMQ → Redis KV sync
             - name: VLLM_HOST
@@ -515,6 +531,7 @@ spec:
           hostPath:
             path: /root/.cache
             type: Directory
+
 
 ---
 apiVersion: v1

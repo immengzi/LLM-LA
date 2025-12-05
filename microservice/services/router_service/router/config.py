@@ -53,6 +53,12 @@ class RouterConfig:
     RESULT_POLL_INTERVAL_S: float = 0.02
 
     # -------------------------------
+    # HTTP timeouts
+    # -------------------------------
+    HASH_TIMEOUT_S: float = 2.0          # hash-service compute_hashes
+    PUSH_HTTP_TIMEOUT_S: float = 2.0     # push-mode health + push
+
+    # -------------------------------
     # Per-request routing logs
     # -------------------------------
     REQ_LOG_MODE: str = "off"   # off | summary | full
@@ -93,6 +99,9 @@ def get_config() -> RouterConfig:
         os.getenv("RESULT_POLL_INTERVAL_S", cfg.RESULT_POLL_INTERVAL_S)
     )
 
+    cfg.HASH_TIMEOUT_S = float(os.getenv("HASH_TIMEOUT_S", cfg.HASH_TIMEOUT_S))
+    cfg.PUSH_HTTP_TIMEOUT_S = float(os.getenv("PUSH_HTTP_TIMEOUT_S", cfg.PUSH_HTTP_TIMEOUT_S))
+
     cfg.REQ_LOG_MODE = os.getenv("REQ_LOG_MODE", cfg.REQ_LOG_MODE)
 
     _CONFIG = cfg
@@ -118,4 +127,3 @@ def print_config(cfg: RouterConfig) -> None:
     print("=============================================================\n")
 
     sys.stdout.flush()
-

@@ -31,8 +31,8 @@ def _log_req(msg: str, *, level: str = "summary") -> None:
 class PushRouter:
     def __init__(self, mode: str):
         self.mode = mode  # "push-rr", "push-random", "push-leastq"
-        self._eps: List[str] = []       # pod names
-        self._urls: Dict[str, str] = {} # pod_name -> sidecar base URL
+        self._eps: List[str] = []        # pod names
+        self._urls: Dict[str, str] = {}  # pod_name -> sidecar base URL
         self._rr_idx: int = 0
         self._last_discovery = 0.0
         self._discovery_interval_s = float(getattr(_cfg, "KV_DISCOVERY_INTERVAL_S", 5.0))
@@ -96,7 +96,6 @@ class PushRouter:
         _log_req(f"RR pick → {ep}", level="full")
         return ep
 
-
     def _pick_endpoint_random(self) -> Optional[str]:
         if not self._eps:
             return None
@@ -112,7 +111,7 @@ class PushRouter:
         best_ep = None
         best_score = None
 
-        async with httpx.AsyncClient(timeout=2.0) as client:
+        async with httpx.AsyncClient(timeout=_cfg.PUSH_HTTP_TIMEOUT_S) as client:
             for ep in self._eps:
                 url = self._urls.get(ep)
                 if not url:
@@ -171,7 +170,7 @@ class PushRouter:
             level="summary",
         )
 
-        async with httpx.AsyncClient(timeout=2.0) as client:
+        async with httpx.AsyncClient(timeout=_cfg.PUSH_HTTP_TIMEOUT_S) as client:
             try:
                 r = await client.post(f"{url}/push", json=payload)
             except Exception as e:

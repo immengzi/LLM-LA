@@ -1,3 +1,4 @@
+# sidecar/config.py
 # -*- coding: utf-8 -*-
 from dataclasses import dataclass
 import os
@@ -30,6 +31,11 @@ class SidecarConfig:
     SIDECAR_PORT: int = 9000                # where this sidecar FastAPI listens
     SIDECAR_MODE: str = "pull"              # "pull" or "push"
 
+    # HTTP timeouts (seconds)
+    ROUTER_PULL_TIMEOUT_S: float = 1.0      # /pull timeout
+    VLLM_TIMEOUT_S: float = 30.0            # vLLM generation timeout
+    ROUTER_RESULT_TIMEOUT_S: float = 5.0    # /result post timeout
+
 
 def get_config() -> SidecarConfig:
     cfg = SidecarConfig()
@@ -49,5 +55,15 @@ def get_config() -> SidecarConfig:
 
     cfg.SIDECAR_PORT = int(os.getenv("SIDECAR_PORT", cfg.SIDECAR_PORT))
     cfg.SIDECAR_MODE = os.getenv("SIDECAR_MODE", cfg.SIDECAR_MODE)
+
+    cfg.ROUTER_PULL_TIMEOUT_S = float(
+        os.getenv("ROUTER_PULL_TIMEOUT_S", cfg.ROUTER_PULL_TIMEOUT_S)
+    )
+    cfg.VLLM_TIMEOUT_S = float(
+        os.getenv("VLLM_TIMEOUT_S", cfg.VLLM_TIMEOUT_S)
+    )
+    cfg.ROUTER_RESULT_TIMEOUT_S = float(
+        os.getenv("ROUTER_RESULT_TIMEOUT_S", cfg.ROUTER_RESULT_TIMEOUT_S)
+    )
 
     return cfg
