@@ -108,3 +108,20 @@ On shutdown it stops workers, the pull helper, and the subscriber cleanly.
 
 Together, this makes each vLLM pod a self-contained worker with clear capacity,
 KV visibility, and a simple integration point for the central router-service.
+
+# Tracing (Sidecar)
+
+When `TRACE_ENABLED=true`, the sidecar records high-resolution timing for:
+
+- arrival (pull or push mode)
+- dequeue
+- sending request to vLLM
+- receiving response from vLLM
+- sending result back to router
+
+These fields are stored in:
+
+    meta["__trace__"]
+
+The sidecar forwards this object to the router’s `/result` endpoint, where the
+router merges it with its own timestamps.

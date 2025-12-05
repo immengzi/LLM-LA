@@ -284,7 +284,19 @@ Workers do not block each other.
 
 ---
 
-# 7. Running the Client
+# 7. Client Behavior (Load Runner)
+
+The client does not need configuration changes. If the server returns a trace
+object inside `result.trace`, the load runner prints it.
+
+There is no client flag for tracing; it is fully controlled by the server-side
+environment variable:
+
+    TRACE_ENABLED=true
+
+---
+
+# 8. Running the Client
 
 ```bash
 python main.py --config example_config.yaml
@@ -295,7 +307,7 @@ Ensure the correct router URL.
 
 ---
 
-# 8. Related Documentation
+# 9. Related Documentation
 
 - `docs/config_knobs.md`  
 - `services/router_service/`  
