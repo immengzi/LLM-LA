@@ -161,3 +161,30 @@ The router is therefore the **single point** that understands:
 - which requests exist,
 - which workers are best for them (KV + length),
 - how to expose a simple synchronous API to clients.
+
+# Tracing (Router Service)
+
+When `TRACE_ENABLED=true`, the router and sidecar attach timing fields to the
+final response. All timestamps appear under:
+
+    result.trace
+
+## Router-provided timestamps
+
+- t_enq_router_queue — request entered router queue
+- t_dispatch_router — router dispatched the request to a sidecar
+- t_router_result_recv — router received result from sidecar
+- t_enqueue_response — router responded to the client
+
+## Sidecar-provided timestamps (best-effort)
+
+- t_arrive_sidecar_pull or t_arrive_sidecar_push
+- t_dequeue_sidecar
+- t_vllm_send
+- t_vllm_recv
+- t_post_result_sidecar
+
+## /result callback
+
+If `TRACE_ENABLED=true` and the sidecar sends a trace object, the router merges
+it and appends `t_router_result_recv` before resolving the waiting client.
