@@ -1,6 +1,7 @@
 # sidecar/router_client.py
 # -*- coding: utf-8 -*-
 import threading
+import time
 from typing import Dict, Any
 
 import requests
@@ -19,21 +20,20 @@ class RouterPullWorker:
       - Compute capacity from local_q.state() and global BATCH_SIZE.
       - Call router /pull when there is spare capacity.
       - Never exceed BATCH_SIZE = pending + inflight on this pod.
-      - No periodic polling loop; pull() is triggered by workers
+      - No background polling; pull() is triggered by workers
         (busy-path and idle-poke).
 
-    NOTE: endpoint_id here is the endpoint identity used by the router/KV layer,
-    i.e. the pod name (must match kv_watcher _endpoint_for_pod).
+    NOTE: endpoint_id must match what the router sees as the endpoint identity.
     """
 
     def __init__(self, local_q: LocalQueue, endpoint_id: str):
         self.local_q = local_q
-        self.endpoint_id = endpoint_id  # pod identity used as 'endpoint' in /pull
+        self.endpoint_id = endpoint_id  # sidecar identity used by router
         self._stop_evt = threading.Event()
         self._lock = threading.RLock()
         self._session: requests.Session | None = None
 
-        # Initial “discovery” phase flags
+        # Initial “discovery” flags
         self._first_success: bool = False
         self._printed_wait_msg: bool = False
 
@@ -41,8 +41,7 @@ class RouterPullWorker:
 
     def start(self):
         """
-        Initialize HTTP session. No background polling thread is started:
-        all /pull calls are event-driven via pull_if_capacity().
+        Initialize HTTP session. No polling thread, all pulls are event-driven.
         """
         if self._session is not None:
             return
@@ -65,19 +64,8 @@ class RouterPullWorker:
     def pull_if_capacity(self) -> None:
         """
         Event-biased pull:
-          - Check local pending + inflight count.
-          - If below BATCH_SIZE, compute `want` and call /pull once.
-          - Push any returned jobs into the local queue.
-
-        Thread-safe and cheap to call from multiple worker threads.
-
-        Logging behavior:
-          - Before the first successful /pull:
-              * do NOT print raw connection errors
-              * print at most one:
-                  "[sidecar] waiting for first successful /pull from router-service ..."
-          - After the first successful /pull:
-              * print detailed errors as before
+          - If pending+inflight < BATCH_SIZE, compute want and /pull.
+          - Insert returned jobs into the local queue.
         """
         if self._stop_evt.is_set():
             return
@@ -95,19 +83,23 @@ class RouterPullWorker:
                 return
 
             session = self._session
+            tmp_session = False
             if session is None:
                 session = requests.Session()
                 tmp_session = True
-            else:
-                tmp_session = False
 
             try:
+                # ---------------------
+                # ROUTER /pull request
+                # ---------------------
                 resp = session.post(
                     f"{_cfg.ROUTER_URL}/pull",
                     json={"endpoint": self.endpoint_id, "want": want},
                     timeout=_cfg.ROUTER_PULL_TIMEOUT_S,
                 )
+
                 if not resp.ok:
+                    # Before first success: suppress raw spam
                     if not self._first_success:
                         if not self._printed_wait_msg:
                             print(
@@ -123,19 +115,29 @@ class RouterPullWorker:
                 items = data.get("items", [])
 
                 if not self._first_success:
-                    print(
-                        "[sidecar] first successful /pull from router-service; "
-                        "switching to normal logging"
-                    )
+                    print("[sidecar] first successful /pull; normal logging enabled.")
                     self._first_success = True
 
                 if not items:
                     return
 
+                # ---------------------
+                # Process returned jobs
+                # ---------------------
+                now_pull = time.time()
+
                 for item in items:
                     rid = str(item["req_id"])
                     prompt = str(item["prompt"])
                     meta: Dict[str, Any] = item.get("meta") or {}
+
+                    # Trace injection for pull arrival
+                    if getattr(_cfg, "TRACE_ENABLED", False):
+                        tr = dict(meta.get("__trace__") or {})
+                        tr["t_arrive_sidecar_pull"] = now_pull
+                        meta["__trace__"] = tr
+
+                    # Push into local queue
                     self.local_q.put(rid, prompt, meta)
 
             except Exception as e:
@@ -148,6 +150,7 @@ class RouterPullWorker:
                         self._printed_wait_msg = True
                 else:
                     print(f"[sidecar] /pull error: {e}")
+
             finally:
                 if tmp_session:
                     try:

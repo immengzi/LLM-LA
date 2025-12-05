@@ -2,6 +2,8 @@
 import os
 import random
 import time
+import asyncio
+from collections import defaultdict
 from typing import Dict, List, Optional
 
 import httpx
@@ -36,6 +38,9 @@ class PushRouter:
         self._rr_idx: int = 0
         self._last_discovery = 0.0
         self._discovery_interval_s = float(getattr(_cfg, "KV_DISCOVERY_INTERVAL_S", 5.0))
+        self._leastq_mode: str = getattr(_cfg, "PUSH_LEASTQ_MODE", "health")
+        # local logical queue lengths: sent - completed
+        self._logical_inflight = defaultdict(int)
 
     # ---------------------------------------------------------
     # Pod discovery
@@ -104,34 +109,63 @@ class PushRouter:
         _log_req(f"Random pick → {ep}", level="full")
         return ep
 
-    async def _pick_endpoint_leastq(self) -> Optional[str]:
+    async def _pick_endpoint_leastq_health(self) -> Optional[str]:
+        if not self._eps:
+            return None
+
+        async with httpx.AsyncClient(timeout=_cfg.PUSH_HTTP_TIMEOUT_S) as client:
+
+            async def fetch_score(ep: str):
+                url = self._urls.get(ep)
+                if not url:
+                    return ep, None
+                try:
+                    r = await client.get(f"{url}/health")
+                    if r.status_code != 200:
+                        return ep, None
+                    data = r.json()
+                    score = int(data.get("logical", data.get("queue_len", 0)))
+                    return ep, score
+                except Exception:
+                    return ep, None
+
+            results = await asyncio.gather(
+                *(fetch_score(ep) for ep in self._eps),
+                return_exceptions=False,
+            )
+
+        best_ep = None
+        best_score = None
+        for ep, score in results:
+            if score is None:
+                continue
+            if best_score is None or score < best_score:
+                best_score = score
+                best_ep = ep
+
+        _log_req(f"LeastQ(health) pick → {best_ep} (score={best_score})", level="full")
+        return best_ep
+
+    def _pick_endpoint_leastq_local(self) -> Optional[str]:
         if not self._eps:
             return None
 
         best_ep = None
         best_score = None
 
-        async with httpx.AsyncClient(timeout=_cfg.PUSH_HTTP_TIMEOUT_S) as client:
-            for ep in self._eps:
-                url = self._urls.get(ep)
-                if not url:
-                    continue
+        for ep in self._eps:
+            score = int(self._logical_inflight.get(ep, 0))
+            if best_score is None or score < best_score:
+                best_score = score
+                best_ep = ep
 
-                try:
-                    r = await client.get(f"{url}/health")
-                    if r.status_code != 200:
-                        continue
-                    data = r.json()
-                    score = int(data.get("logical", data.get("queue_len", 0)))
-                except Exception:
-                    continue
-
-                if best_score is None or score < best_score:
-                    best_score = score
-                    best_ep = ep
-
-        _log_req(f"LeastQ pick → {best_ep} (score={best_score})", level="full")
+        _log_req(f"LeastQ(local) pick → {best_ep} (score={best_score})", level="full")
         return best_ep
+
+    async def _pick_endpoint_leastq(self) -> Optional[str]:
+        if self._leastq_mode == "local":
+            return self._pick_endpoint_leastq_local()
+        return await self._pick_endpoint_leastq_health()
 
     async def _pick_endpoint(self) -> Optional[str]:
         if self.mode == "push-rr":
@@ -143,10 +177,14 @@ class PushRouter:
         return self._pick_endpoint_rr()
 
     # ---------------------------------------------------------
-    # Push operation
+    # Push operation (trace added)
     # ---------------------------------------------------------
 
     async def route_and_push(self, req_id: str, prompt: str, meta: dict) -> None:
+        """
+        Dispatch a request to a sidecar in PUSH mode.
+        Injects trace info into meta["__trace__"] if TRACE_ENABLED.
+        """
         self._ensure_endpoints()
         if not self._eps:
             raise RuntimeError("No endpoints available for push routing")
@@ -159,11 +197,34 @@ class PushRouter:
         if not url:
             raise RuntimeError(f"No sidecar URL for endpoint {ep}")
 
+        # Increment local inflight counter for local leastq
+        if self.mode == "push-leastq" and self._leastq_mode == "local":
+            self._logical_inflight[ep] += 1
+
+        dispatch_ts = time.time()
+
+        # ---------------------------------------------------------
+        # Inject trace into meta["__trace__"]
+        # ---------------------------------------------------------
+        if getattr(_cfg, "TRACE_ENABLED", False):
+            meta = dict(meta or {})
+            tr = dict(meta.get("__trace__") or {})
+
+            tr.setdefault("endpoint", ep)
+            tr.setdefault("t_enq_router_queue", dispatch_ts)
+            tr["t_dispatch_router"] = dispatch_ts
+
+            meta["__trace__"] = tr
+
         payload = {
             "req_id": req_id,
             "prompt": str(prompt),
             "meta": meta or {},
         }
+
+        # Helps leastq-local debugging (optional field)
+        if self._leastq_mode == "local":
+            payload["endpoint"] = ep
 
         _log_req(
             f"push req_id={req_id} → {ep} ({url})",
@@ -175,6 +236,9 @@ class PushRouter:
                 r = await client.post(f"{url}/push", json=payload)
             except Exception as e:
                 _log_req(f"push failed for {ep}: {e}", level="full")
+                if self.mode == "push-leastq" and self._leastq_mode == "local":
+                    if self._logical_inflight[ep] > 0:
+                        self._logical_inflight[ep] -= 1
                 raise
 
             if r.status_code != 200:
@@ -182,4 +246,20 @@ class PushRouter:
                     f"push to {ep} failed: {r.status_code} {r.text}",
                     level="full",
                 )
+                if self.mode == "push-leastq" and self._leastq_mode == "local":
+                    if self._logical_inflight[ep] > 0:
+                        self._logical_inflight[ep] -= 1
                 raise RuntimeError(f"push to {ep} failed: {r.status_code} {r.text}")
+
+    # ---------------------------------------------------------
+    # Result notification (for local leastq mode)
+    # ---------------------------------------------------------
+
+    def notify_result(self, endpoint: Optional[str]) -> None:
+        if not endpoint:
+            return
+        if endpoint not in self._eps:
+            return
+        current = self._logical_inflight.get(endpoint, 0)
+        if current > 0:
+            self._logical_inflight[endpoint] = current - 1

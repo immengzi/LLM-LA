@@ -40,6 +40,7 @@ class RouterState:
 
     def __init__(self):
         self._lock = RLock()
+        # queue entries: (req_id, prompt, t_enq_client_or_router, meta)
         self._queue: Deque[Tuple[str, str, float, dict]] = deque()
 
         # Result tracking
@@ -59,11 +60,39 @@ class RouterState:
     # -------------------------------------------------------
 
     def enqueue(self, prompt: str, t_enq_client: float | None, meta: dict) -> str:
+        """
+        Enqueue a new request in pull mode.
+
+        t_enq_client: client-side enqueue timestamp (if provided),
+        otherwise we stamp with router now().
+        """
         with self._lock:
             rid = self.next_req_id()
             ts = float(t_enq_client) if t_enq_client else now_s()
             self._queue.append((rid, prompt, ts, meta or {}))
             return rid
+
+    def update_meta(self, req_id: str, meta: dict) -> None:
+        """
+        In-place update of meta for a queued request.
+
+        Used by the API layer to inject trace info after enqueue without
+        changing queue order or timestamps.
+        """
+        with self._lock:
+            if not self._queue:
+                return
+
+            new_q: Deque[Tuple[str, str, float, dict]] = deque()
+            updated = False
+            while self._queue:
+                rid, prompt, ts, old_meta = self._queue.popleft()
+                if not updated and rid == req_id:
+                    new_q.append((rid, prompt, ts, meta or {}))
+                    updated = True
+                else:
+                    new_q.append((rid, prompt, ts, old_meta))
+            self._queue = new_q
 
     # -------------------------------------------------------
     # Pull (KV-aware + length-aware)
@@ -111,10 +140,13 @@ class RouterState:
                 )
 
                 scored.sort(key=lambda x: (-x[4], x[0]))
-                ordered = [(r, p, t, m) for (r, p, t, m, _) in scored]
+                ordered: List[Tuple[str, str, float, dict]] = [
+                    (r, p, t, m) for (r, p, t, m, _) in scored
+                ]
 
                 _log_req(
-                    f"KV sorted endpoint={endpoint}: {[(r, kv) for (r, _p, _t, _m, kv) in scored]}",
+                    f"KV sorted endpoint={endpoint}: "
+                    f"{[(r, kv) for (r, _p, _t, _m, kv) in scored]}",
                     level="full",
                 )
             else:
@@ -126,13 +158,14 @@ class RouterState:
                 refined = select_len_aware(ordered, _pred, len_policy)
                 ordered = refined
                 _log_req(
-                    f"Len policy='{len_policy}' ordering: {[r for (r, _p, _t, _m) in refined]}",
+                    f"Len policy='{len_policy}' ordering: "
+                    f"{[r for (r, _p, _t, _m) in refined]}",
                     level="full",
                 )
 
             # 4) Choose
-            chosen = ordered[:want]
-            chosen_ids = [rid for (rid, _p, _t, _m) in chosen]
+            chosen_raw = ordered[:want]
+            chosen_ids = [rid for (rid, _p, _t, _m) in chosen_raw]
 
             # KV stats for chosen items — available in summary mode
             chosen_kv_hits = [(rid, prefix_len(endpoint, rid)) for rid in chosen_ids]
@@ -142,6 +175,22 @@ class RouterState:
                 level="summary",
             )
 
+            # 4a) Attach trace info (if enabled)
+            chosen: List[Tuple[str, str, float, dict]] = []
+            dispatch_ts = now_s()
+            if getattr(_cfg, "TRACE_ENABLED", False):
+                for rid, prompt, ts, meta in chosen_raw:
+                    m = dict(meta or {})
+                    tr = dict(m.get("__trace__") or {})
+                    # Only set once if not already there
+                    tr.setdefault("t_enq_router_queue", ts)
+                    tr.setdefault("endpoint", endpoint)
+                    tr["t_dispatch_router"] = dispatch_ts
+                    m["__trace__"] = tr
+                    chosen.append((rid, prompt, ts, m))
+            else:
+                chosen = chosen_raw
+
             # 5) Requeue leftovers
             leftovers = ordered[want:]
             for rid, prompt, ts, meta in leftovers:
@@ -149,7 +198,8 @@ class RouterState:
 
             if leftovers:
                 _log_req(
-                    f"leftovers requeued: {[r for (r, _p, _t, _m) in leftovers]}",
+                    f"leftovers requeued: "
+                    f"{[r for (r, _p, _t, _m) in leftovers]}",
                     level="full",
                 )
 

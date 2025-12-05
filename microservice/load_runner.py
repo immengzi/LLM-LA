@@ -43,7 +43,7 @@ def _request_thread(
       - Log SEND event
       - Build meta
       - Call send_one() with its own Session (blocking until response)
-      - Log RECV event with timing and output preview
+      - Log RECV event with timing, output preview, and optional trace fields
     """
     session = requests.Session()
     try:
@@ -90,6 +90,7 @@ def _request_thread(
             output_preview: Optional[str] = None
 
             if isinstance(result, dict):
+                # --- main fields ---
                 if isinstance(result.get("latency_s"), (int, float)):
                     latency_s = float(result["latency_s"])
                 if isinstance(result.get("finish_reason"), str):
@@ -115,6 +116,27 @@ def _request_thread(
 
             if output_preview is not None:
                 print(f"[client][T{task.idx}]   output_preview={output_preview!r}")
+
+            # ==========================================================
+            # --- TRACE ADDITION: print detailed trace if server sent it
+            # ==========================================================
+            trace = None
+            if isinstance(result, dict):
+                trace = result.get("trace")
+
+            if trace:
+                print(f"[client][T{task.idx}]   trace_endpoint={trace.get('endpoint')}")
+
+                # Print all trace timestamps with nice formatting
+                for k, v in trace.items():
+                    if k == "endpoint":
+                        continue
+                    if isinstance(v, (int, float)):
+                        print(f"[client][T{task.idx}]   {k}={v:.6f}")
+                    else:
+                        print(f"[client][T{task.idx}]   {k}={v}")
+
+            # ==========================================================
 
         except Exception as e:
             print(f"[client][RECV][T{task.idx}] ✗ ERROR idx={task.idx}: {e}")

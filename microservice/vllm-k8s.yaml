@@ -290,9 +290,13 @@ spec:
 
             # Router mode + sidecar port
             - name: ROUTER_MODE
-              value: "pull"          # "pull", "push-rr", "push-random", "push-leastq"
+              value: "pull"     # instead of pull / push-rr / push-random
             - name: SIDECAR_PORT
               value: "9000"
+
+            # choose how least-queue gets its queue lengths
+            - name: PUSH_LEASTQ_MODE
+              value: "local"           # "health" (default) | "local"
 
             # Synchronous wait behavior
             - name: RESULT_TIMEOUT_S
@@ -303,6 +307,10 @@ spec:
             # Push-mode HTTP timeouts
             - name: PUSH_HTTP_TIMEOUT_S
               value: "2.0"
+
+            # Tracing (router-side timestamps, endpoint, etc.)
+            - name: TRACE_ENABLED
+              value: "true"
 
           ports:
             - containerPort: 8080
@@ -491,6 +499,11 @@ spec:
                   fieldPath: metadata.name
             - name: MODEL_NAME_REDIS
               value: "served-model"
+
+            # Tracing (sidecar + vLLM timestamps)
+            - name: TRACE_ENABLED
+              value: "true"
+
           ports:
             - containerPort: 9000
               name: sidecar-http

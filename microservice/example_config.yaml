@@ -2,7 +2,7 @@
 # Sample configuration for the microservice load client.
 
 router_url: "http://127.0.0.1:30080"
-total_requests: 100
+total_requests: 400
 
 prompt_source: "hf-lmsys"
 
