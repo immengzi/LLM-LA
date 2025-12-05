@@ -36,9 +36,16 @@ class SidecarConfig:
     VLLM_TIMEOUT_S: float = 30.0            # vLLM generation timeout
     ROUTER_RESULT_TIMEOUT_S: float = 5.0    # /result post timeout
 
+    # ------------------------------------------------
+    # Tracing controls (must match router side)
+    # ------------------------------------------------
+    TRACE_ENABLED: bool = False             # global on/off
+    TRACE_SAMPLE_RATE: float = 1.0          # 0.0–1.0, currently unused here but kept for symmetry
+
 
 def get_config() -> SidecarConfig:
     cfg = SidecarConfig()
+
     cfg.ROUTER_URL = os.getenv("ROUTER_URL", cfg.ROUTER_URL)
     cfg.VLLM_URL = os.getenv("VLLM_URL", cfg.VLLM_URL)
     cfg.MODEL_NAME = os.getenv("MODEL_NAME", cfg.MODEL_NAME)
@@ -64,6 +71,12 @@ def get_config() -> SidecarConfig:
     )
     cfg.ROUTER_RESULT_TIMEOUT_S = float(
         os.getenv("ROUTER_RESULT_TIMEOUT_S", cfg.ROUTER_RESULT_TIMEOUT_S)
+    )
+
+    # Tracing env overrides
+    cfg.TRACE_ENABLED = os.getenv("TRACE_ENABLED", "false").lower() == "true"
+    cfg.TRACE_SAMPLE_RATE = float(
+        os.getenv("TRACE_SAMPLE_RATE", getattr(cfg, "TRACE_SAMPLE_RATE", 1.0))
     )
 
     return cfg
