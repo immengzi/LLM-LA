@@ -83,7 +83,7 @@ async def _maybe_register_kv_blocks(req_id: str, prompt: str) -> None:
             resp = await client.post(
                 f"{_cfg.HASH_SERVICE_URL}/compute_hashes",
                 json={"prompt": prompt},
-                timeout=2.0,
+                timeout=_cfg.HASH_TIMEOUT_S,
             )
             resp.raise_for_status()
             data = resp.json()

@@ -1,3 +1,4 @@
+# sidecar/vllm_client.py
 # -*- coding: utf-8 -*-
 import time
 import threading
@@ -105,7 +106,11 @@ class VLLMWorker:
                         },
                     }
 
-                    resp = session.post(vllm_url, json=payload, timeout=30.0)
+                    resp = session.post(
+                        vllm_url,
+                        json=payload,
+                        timeout=_cfg.VLLM_TIMEOUT_S,
+                    )
                     if not resp.ok:
                         print(f"[sidecar] vLLM error: {resp.status_code} {resp.text}")
                         output_text = f"[vLLM error {resp.status_code}]"
@@ -130,7 +135,7 @@ class VLLMWorker:
                                 "req_id": req_id,
                                 "output": output_text,
                             },
-                            timeout=5.0,
+                            timeout=_cfg.ROUTER_RESULT_TIMEOUT_S,
                         )
                         if not r2.ok:
                             print(

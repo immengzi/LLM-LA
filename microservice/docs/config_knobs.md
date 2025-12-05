@@ -215,8 +215,6 @@ are ignored by the server side (but still sent in `meta`).
   is allowed to produce internal reasoning tokens before the final answer.
   When `false`, thinking mode is disabled.
 
-
-
 ---
 
 ## Example configuration
@@ -244,3 +242,174 @@ A small example (simplified):
       length_mode: "legacy"
 
 Use this as a template and adjust knobs to match your experiments.
+
+---
+
+## Router service environment variables
+
+These are loaded by `router/config.py` into `RouterConfig`. They are set as
+environment variables on the router deployment (e.g. in Kubernetes YAML).
+
+### Core networking
+
+- `HOST: str`  
+  Bind address for the FastAPI/uvicorn server (default `"0.0.0.0"`).
+
+- `PORT: int`  
+  Listen port for the router HTTP API (default `8080`).
+
+### Redis + model identity
+
+- `REDIS_HOST: str`  
+  Hostname of the Redis instance used for KV metadata.
+
+- `REDIS_PORT: int`  
+  Port for Redis (default `6379`).
+
+- `MODEL_NAME: str`  
+  Logical model name used to prefix KV keys in Redis.
+
+### Hash / KV services
+
+- `HASH_SERVICE_URL: str`  
+  Base URL of the prefix-hash service (used for `/compute_hashes`).
+
+### K8s / sidecar discovery
+
+- `NAMESPACE: str`  
+  Kubernetes namespace where vLLM pods live.
+
+- `LABEL_SELECTOR: str`  
+  Label selector used to discover vLLM pods (e.g. `app=vllm-qwen`).
+
+- `VLLM_PORT: int`  
+  vLLM HTTP port (for KV watcher’s pod → endpoint mapping).
+
+- `SIDECAR_PORT: int`  
+  Sidecar HTTP port (used by push router to call `/push` and `/health`).
+
+### KV watcher controls
+
+- `KV_WATCH_INTERVAL_S: float`  
+  Interval between Redis KV scans.
+
+- `KV_WATCH_MAX_KEYS: int`  
+  Max number of `kvblock` keys to scan per pass.
+
+- `KV_DISCOVERY_INTERVAL_S: float`  
+  Interval between Kubernetes pod discovery runs.
+
+- `KV_LOG_KEYS: str`  
+  Verbosity for KV watcher logs: `off | summary | full`.
+
+### Routing behaviour
+
+- `ROUTER_MODE: str`  
+  One of:
+  - `pull`
+  - `push-rr`
+  - `push-random`
+  - `push-leastq`
+
+- `KV_AWARE: bool`  
+  Enable/disable KV-aware scoring when assigning work.
+
+- `LEN_AWARE: bool`  
+  Enable/disable length-aware ordering inside the pool.
+
+- `LEN_POLICY: str`  
+  Length policy when `LEN_AWARE` is true:
+  - `short_first`
+  - `long_first`
+
+- `POOL_FACTOR: int`  
+  Pool size multiplier: router looks at `want * POOL_FACTOR` items
+  when building the candidate set for a pull.
+
+- `DEFAULT_MAX_TOKENS: int`  
+  Fallback predicted output length if the predictor returns no value.
+
+### Timeouts and synchronous wait
+
+- `RESULT_TIMEOUT_S: float`  
+  How long `/enqueue` waits for a `/result` before returning 504.
+
+- `RESULT_POLL_INTERVAL_S: float`  
+  Sleep interval between checks inside `wait_for_result`.
+
+- `HASH_TIMEOUT_S: float`  
+  Timeout for calls to the prefix-hash service.
+
+- `PUSH_TIMEOUT_S: float`  
+  Timeout for router → sidecar `/push` calls (push modes).
+
+- `LEASTQ_TIMEOUT_S: float`  
+  Timeout for sidecar `/health` probes in `push-leastq` mode.
+
+### Logging
+
+- `REQ_LOG_MODE: str`  
+  Per-request routing logs:
+  - `off`
+  - `summary`
+  - `full`
+
+Separately (in the Docker entrypoint):
+
+- `ACCESS_LOG: str`  
+  Controls uvicorn access log: `"true"` or `"false"`.
+
+---
+
+## Sidecar environment variables
+
+These are set on the sidecar container and read by `sidecar/config.py`.
+
+### Core endpoints
+
+- `ROUTER_URL: str`  
+  Base URL of the router (e.g. `http://router-service:8080`).
+
+- `VLLM_URL: str`  
+  Base URL of the local vLLM server in the same pod
+  (e.g. `http://127.0.0.1:8200`).
+
+- `MODEL_NAME: str`  
+  Logical model name (should match router / Redis configuration).
+
+### Sidecar HTTP + capacity
+
+- `SIDECAR_PORT: int`  
+  Port where the sidecar FastAPI server listens (for `/health`, `/push`).
+
+- `BATCH_SIZE: int`  
+  Maximum number of requests allowed in `pending + inflight` for this pod.
+  Also used as a target concurrency for worker threads.
+
+- `SIDECAR_MODE: str`  
+  Mode of operation, currently:
+  - `pull` (default) – sidecar pulls work from router via `/pull`.
+
+### KV events + Redis
+
+- `VLLM_HOST: str`  
+  Host used by the ZMQ subscriber to reach vLLM (typically `127.0.0.1`).
+
+- `VLLM_SUB_PORT: int`  
+  ZMQ subscription port exposed by vLLM (`kv-events-config`).
+
+- `REDIS_HOST: str`  
+  Hostname for Redis (same Redis as router).
+
+- `REDIS_PORT: int`  
+  Port for Redis (default `6379`).
+
+- `CONTAINER_NAME`  
+  Usually injected from pod metadata; used for logging / identification.
+
+- `MODEL_NAME_REDIS: str`  
+  Model name prefix for Redis keys (should match `MODEL_NAME`).
+
+Additional tuning knobs (if configured in code) may include worker counts and
+log verbosity, but the variables above are the core interface between the
+sidecar and the rest of the system.
