@@ -1,0 +1,46 @@
+{
+  "client_config": {
+    "file_prompts": {
+      "path": "prompts.json",
+      "variant": "short"
+    },
+    "generation": {
+      "length_mode": "legacy",
+      "max_tokens": 256,
+      "target_output_tokens": null,
+      "target_total_tokens": null,
+      "temperature": 0.0,
+      "think": false
+    },
+    "hf_lmsys": {
+      "dataset_name": "lmsys/lmsys-chat-1m",
+      "max_input_tokens": 512,
+      "min_input_tokens": 32,
+      "repeat_each": 1,
+      "split": "train",
+      "streaming": false,
+      "tokenizer_name": "gpt2"
+    },
+    "load_pattern": {
+      "burst_off_s": 2.0,
+      "burst_on_s": 2.0,
+      "burst_rps_off": 0.0,
+      "burst_rps_on": 40.0,
+      "duration_s": 60.0,
+      "loadgen_seed": 12345,
+      "pattern": "dump",
+      "rand_epoch_s": 5.0,
+      "rand_rps_max": 20.0,
+      "rand_rps_min": 5.0,
+      "rate_rps": 100.0,
+      "step_schedule": "0:5,30:15,60:3",
+      "warmup_reqs": 0
+    },
+    "prompt_source": "hf-lmsys",
+    "router_url": "http://127.0.0.1:30080",
+    "total_requests": 200
+  },
+  "config_name": "example_config",
+  "config_path": "/home/saeid/llm-lb/microservice/configs/example_config.yaml",
+  "created_at_unix": 1765210209.2832732
+}

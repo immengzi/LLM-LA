@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import time
+from pathlib import Path
 
 from config import load_config
 from prompts import load_prompts_from_file, build_prompts_from_lmsys
 from scheduler import build_schedule
 from load_runner import run_open_loop_load
+from experiment_io import init_experiment
 
 
 def main():
@@ -17,8 +19,15 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        required=True,
-        help="Path to YAML config file",
+        default=None,
+        help="Path to YAML config file (ignored if --config-name is set).",
+    )
+    parser.add_argument(
+        "--config-name",
+        type=str,
+        default=None,
+        help="Logical config name under ./configs (without extension). "
+             "If set, the client will load ./configs/<name>.yaml.",
     )
     parser.add_argument(
         "--n",
@@ -28,10 +37,22 @@ def main():
     )
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    # Resolve config path:
+    # - If --config-name is given, use ./configs/<name>.yaml
+    # - Else if --config is given, use that path
+    # - Else fall back to ./example_config.yaml
+    if args.config_name:
+        config_path = Path("configs") / f"{args.config_name}.yaml"
+    elif args.config:
+        config_path = Path(args.config)
+    else:
+        config_path = Path("example_config.yaml")
+
+    cfg = load_config(str(config_path))
     if args.n is not None:
         cfg.total_requests = int(args.n)
 
+    # Build prompts.
     if cfg.prompt_source == "file":
         prompts = load_prompts_from_file(
             path=cfg.file_prompts.path,
@@ -58,6 +79,15 @@ def main():
         f"warmup_reqs={cfg.load_pattern.warmup_reqs}"
     )
 
+    # Initialize experiment directory + logger:
+    exp_dir, exp_logger = init_experiment(
+        cfg,
+        config_path=str(config_path),
+        config_name=args.config_name,
+    )
+    print(f"[client] experiment_dir={exp_dir}")
+
+    # Build schedule.
     lp = cfg.load_pattern
     plan_times = build_schedule(
         pattern=lp.pattern,
@@ -82,13 +112,18 @@ def main():
 
     t_start_wall = time.time()
 
-    run_open_loop_load(
-        router_url=cfg.router_url,
-        prompts=prompts,
-        plan_times=plan_times,
-        gen_cfg=cfg.generation,
-        warmup_reqs=cfg.load_pattern.warmup_reqs,
-    )
+    try:
+        run_open_loop_load(
+            router_url=cfg.router_url,
+            prompts=prompts,
+            plan_times=plan_times,
+            gen_cfg=cfg.generation,
+            warmup_reqs=cfg.load_pattern.warmup_reqs,
+            logger=exp_logger,
+        )
+    finally:
+        # Ensure we always close the logger (flush + close logs.json).
+        exp_logger.close()
 
     dt = time.time() - t_start_wall
     print(f"[client] done. Total elapsed wall time = {dt:.3f}s")
