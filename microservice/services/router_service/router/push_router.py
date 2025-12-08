@@ -197,9 +197,13 @@ class PushRouter:
         if not url:
             raise RuntimeError(f"No sidecar URL for endpoint {ep}")
 
-        # Increment local inflight counter for local leastq
+        # ---------------------------------------------------------
+        # Logical queue length (for leastq-local)
+        # ---------------------------------------------------------
+        logical_before: Optional[int] = None
         if self.mode == "push-leastq" and self._leastq_mode == "local":
-            self._logical_inflight[ep] += 1
+            logical_before = int(self._logical_inflight.get(ep, 0))
+            self._logical_inflight[ep] = logical_before + 1
 
         dispatch_ts = time.time()
 
@@ -211,8 +215,13 @@ class PushRouter:
             tr = dict(meta.get("__trace__") or {})
 
             tr.setdefault("endpoint", ep)
-            tr.setdefault("t_enq_router_queue", dispatch_ts)
+            tr.setdefault("router_mode", self.mode)
             tr["t_dispatch_router"] = dispatch_ts
+
+            # Record queue length at dispatch (only meaningful in leastq-local mode)
+            if logical_before is not None:
+                tr["router_logical_inflight_before"] = logical_before
+                tr["router_logical_inflight_after"] = logical_before + 1
 
             meta["__trace__"] = tr
 
@@ -263,3 +272,4 @@ class PushRouter:
         current = self._logical_inflight.get(endpoint, 0)
         if current > 0:
             self._logical_inflight[endpoint] = current - 1
+

@@ -309,7 +309,8 @@ Ensure the correct router URL.
 
 # 9. Related Documentation
 
-- `docs/config_knobs.md`  
-- `services/router_service/`  
-- `services/sidecar/`  
-- `services/prefix_hash/`
+- [`docs/config_knobs.md`](docs/config_knobs.md)
+- [`docs/prefix_hash.md`](docs/prefix_hash.md)
+- [`docs/router_service.md`](docs/router_service.md)
+- [`docs/sidecar.md`](docs/sidecar.md)
+- [`docs/trace.md`](docs/trace.md)

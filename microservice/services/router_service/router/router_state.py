@@ -150,7 +150,6 @@ class RouterState:
                     level="full",
                 )
             else:
-                kv_pairs = []
                 ordered = list(pool)
 
             # 3) Length-aware refinement
@@ -167,7 +166,6 @@ class RouterState:
             chosen_raw = ordered[:want]
             chosen_ids = [rid for (rid, _p, _t, _m) in chosen_raw]
 
-            # KV stats for chosen items — available in summary mode
             chosen_kv_hits = [(rid, prefix_len(endpoint, rid)) for rid in chosen_ids]
 
             _log_req(
@@ -179,13 +177,20 @@ class RouterState:
             chosen: List[Tuple[str, str, float, dict]] = []
             dispatch_ts = now_s()
             if getattr(_cfg, "TRACE_ENABLED", False):
+                # ★ NEW: capture queue_length_at_dispatch
+                qlen_at_dispatch = len(self._queue)
+
                 for rid, prompt, ts, meta in chosen_raw:
                     m = dict(meta or {})
                     tr = dict(m.get("__trace__") or {})
-                    # Only set once if not already there
+
+                    # preserve earlier fields if any
                     tr.setdefault("t_enq_router_queue", ts)
                     tr.setdefault("endpoint", endpoint)
+
                     tr["t_dispatch_router"] = dispatch_ts
+                    tr["router_queue_len_at_dispatch"] = qlen_at_dispatch  # ★ NEW
+
                     m["__trace__"] = tr
                     chosen.append((rid, prompt, ts, m))
             else:

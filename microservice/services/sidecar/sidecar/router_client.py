@@ -66,6 +66,14 @@ class RouterPullWorker:
         Event-biased pull:
           - If pending+inflight < BATCH_SIZE, compute want and /pull.
           - Insert returned jobs into the local queue.
+
+        When TRACE_ENABLED=true, also stamps:
+          - t_arrive_sidecar_pull
+          - sidecar_queue_len_before_pull
+          - sidecar_inflight_before_pull
+          - sidecar_logical_before_pull
+          - sidecar_queue_len_after_pull
+          - sidecar_logical_after_pull
         """
         if self._stop_evt.is_set():
             return
@@ -126,15 +134,29 @@ class RouterPullWorker:
                 # ---------------------
                 now_pull = time.time()
 
+                # Snapshot queue state *before* enqueueing pulled items
+                pending_before, inflight_before = self.local_q.state()
+                logical_before = pending_before + inflight_before
+                queue_len_after = pending_before + len(items)
+                logical_after = logical_before + len(items)
+
                 for item in items:
                     rid = str(item["req_id"])
                     prompt = str(item["prompt"])
                     meta: Dict[str, Any] = item.get("meta") or {}
 
-                    # Trace injection for pull arrival
+                    # Trace injection for pull arrival + queue lengths
                     if getattr(_cfg, "TRACE_ENABLED", False):
                         tr = dict(meta.get("__trace__") or {})
                         tr["t_arrive_sidecar_pull"] = now_pull
+
+                        # Sidecar-local queue lengths at pull time
+                        tr["sidecar_queue_len_before_pull"] = pending_before
+                        tr["sidecar_inflight_before_pull"] = inflight_before
+                        tr["sidecar_logical_before_pull"] = logical_before
+                        tr["sidecar_queue_len_after_pull"] = queue_len_after
+                        tr["sidecar_logical_after_pull"] = logical_after
+
                         meta["__trace__"] = tr
 
                     # Push into local queue

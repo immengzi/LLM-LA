@@ -16,6 +16,7 @@ import requests
 
 from http_client import send_one
 from config import GenerationConfig
+from trace_utils import print_trace_block
 
 
 @dataclass
@@ -118,24 +119,10 @@ def _request_thread(
                 print(f"[client][T{task.idx}]   output_preview={output_preview!r}")
 
             # ==========================================================
-            # --- TRACE ADDITION: print detailed trace if server sent it
+            # --- TRACE ADDITION: derived latencies (no raw timestamps)
             # ==========================================================
-            trace = None
             if isinstance(result, dict):
-                trace = result.get("trace")
-
-            if trace:
-                print(f"[client][T{task.idx}]   trace_endpoint={trace.get('endpoint')}")
-
-                # Print all trace timestamps with nice formatting
-                for k, v in trace.items():
-                    if k == "endpoint":
-                        continue
-                    if isinstance(v, (int, float)):
-                        print(f"[client][T{task.idx}]   {k}={v:.6f}")
-                    else:
-                        print(f"[client][T{task.idx}]   {k}={v}")
-
+                print_trace_block(task.idx, result)
             # ==========================================================
 
         except Exception as e:

@@ -290,7 +290,7 @@ spec:
 
             # Router mode + sidecar port
             - name: ROUTER_MODE
-              value: "pull"     # instead of pull / push-rr / push-random
+              value: "pull"     # instead of pull / push-rr / push-random / push-least-queue
             - name: SIDECAR_PORT
               value: "9000"
 
@@ -362,7 +362,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 8
+  replicas: 6
   selector:
     matchLabels:
       app: vllm-qwen

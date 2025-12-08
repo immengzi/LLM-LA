@@ -25,6 +25,14 @@ class VLLMWorker:
       * t_vllm_send
       * t_vllm_recv
       * t_post_result_sidecar
+
+    Plus sidecar queue snapshots:
+      * sidecar_queue_len_at_dequeue
+      * sidecar_inflight_at_dequeue
+      * sidecar_logical_at_dequeue
+      * sidecar_queue_len_at_result
+      * sidecar_inflight_at_result
+      * sidecar_logical_at_result
     """
 
     def __init__(self, local_q: LocalQueue, pull_worker: Optional[RouterPullWorker] = None):
@@ -97,11 +105,17 @@ class VLLMWorker:
                 req_id, prompt, meta = item
 
                 # --------------------------------------------------------
-                # Trace: dequeue timestamp
+                # Trace: dequeue timestamp + queue snapshot
                 # --------------------------------------------------------
                 if getattr(_cfg, "TRACE_ENABLED", False):
+                    pending_dq, inflight_dq = self.local_q.state()
+                    logical_dq = pending_dq + inflight_dq
+
                     tr = dict(meta.get("__trace__") or {})
                     tr["t_dequeue_sidecar"] = time.time()
+                    tr["sidecar_queue_len_at_dequeue"] = pending_dq
+                    tr["sidecar_inflight_at_dequeue"] = inflight_dq
+                    tr["sidecar_logical_at_dequeue"] = logical_dq
                     meta["__trace__"] = tr
 
                 try:
@@ -164,6 +178,20 @@ class VLLMWorker:
                             output_text = "[parse error in vLLM response]"
 
                     # ----------------------------------------------------
+                    # Trace: queue snapshot at result time
+                    # ----------------------------------------------------
+                    if getattr(_cfg, "TRACE_ENABLED", False):
+                        pending_res, inflight_res = self.local_q.state()
+                        logical_res = pending_res + inflight_res
+
+                        tr = dict(meta.get("__trace__") or {})
+                        tr["sidecar_queue_len_at_result"] = pending_res
+                        tr["sidecar_inflight_at_result"] = inflight_res
+                        tr["sidecar_logical_at_result"] = logical_res
+                        tr["t_post_result_sidecar"] = time.time()
+                        meta["__trace__"] = tr
+
+                    # ----------------------------------------------------
                     # Send result back to router
                     # ----------------------------------------------------
                     result_payload = {
@@ -173,9 +201,8 @@ class VLLMWorker:
 
                     # Add trace fields to router callback payload
                     if getattr(_cfg, "TRACE_ENABLED", False):
-                        tr = dict(meta.get("__trace__") or {})
-                        tr["t_post_result_sidecar"] = time.time()
-                        result_payload["trace"] = tr  # router/api merges this
+                        # We already updated meta["__trace__"] above
+                        result_payload["trace"] = dict(meta.get("__trace__") or {})
 
                     try:
                         r2 = session.post(
