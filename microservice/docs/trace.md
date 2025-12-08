@@ -18,7 +18,8 @@ When tracing is enabled, each successful `/enqueue` response includes a trace ob
 The router and sidecar populate raw timestamps + queue metadata; the client converts them into derived latency metrics.
 
 ## 1. End-to-End Timeline Diagram
-```
+
+```bash
           t_enq_client                          t_enqueue_response
 Client  |--------------------------------------------*---------|
         |                                            ^         |
@@ -48,6 +49,7 @@ vLLM    |                                     t_vllm_send   t_vllm_recv
         |-------------------------------------> [compute] --------|
 
 ```
+
 The client never sees these raw timestamps directly; it only sees derived metrics printed by `load_runner.py`.
 
 ## 2. Raw Trace Fields (Server-Side)
@@ -112,66 +114,24 @@ Time when `http_client.send_one()` builds the `/enqueue` payload.
 
 ## 3. Client-Derived Latency Metrics
 
-The function `_compute_trace_metrics(trace: Dict[str, Any]) -> Dict[str, float>` in `load_runner.py` converts the raw timestamps into human-readable latencies (seconds).
+The function `_compute_trace_metrics(trace)` in `load_runner.py` converts the raw timestamps into human-readable latencies (seconds).
 
-Given the following extracted timestamps:
-* `t_enq_client`
-* `t_arrive_router`
-* `t_enq_router_queue`
-* `t_dispatch_router`
-* `t_arrive_sidecar_push`
-* `t_arrive_sidecar_pull`
-* `t_dequeue_sidecar`
-* `t_vllm_send`
-* `t_vllm_recv`
-* `t_post_result_sidecar`
-* `t_router_result_recv`
-* `t_enqueue_response`
+The following metrics are derived by the client:
 
-the client computes:
+| Metric Name | Calculation Formula | Description |
+| :--- | :--- | :--- |
+| **end_to_end_s** | `t_enqueue_response` - `t_enq_client` | **Total Roundtrip.** The full time elapsed from the client's perspective. |
+| **client_to_router_s** | `t_arrive_router` - `t_enq_client` | **Network Ingress.** Time from client construction to router arrival (network + front-end handling). |
+| **router_queue_s** | `t_dispatch_router` - `t_enq_router_queue` | **Router Wait.** Time spent waiting in the router’s internal queue. *(Falls back to `t_arrive_router` if queue timestamp is missing).* |
+| **router_to_sidecar_s** | `t_arrive_sidecar_*` - `t_dispatch_router` | **Dispatch Latency.** Time from router dispatch to sidecar receipt. *(Uses either `push` or `pull` arrival timestamp).* |
+| **sidecar_queue_s** | `t_dequeue_sidecar` - `t_arrive_sidecar_*` | **Sidecar Wait.** Time waiting in the sidecar’s local queue before a worker picks it up. |
+| **vllm_compute_s** | `t_vllm_recv` - `t_vllm_send` | **GPU Compute.** Pure model runtime latency on the vLLM server. |
+| **sidecar_post_s** | `t_post_result_sidecar` - `t_vllm_recv` | **Sidecar Overhead.** Time spent extracting the response, constructing the payload, and sending `/result`. |
+| **sidecar_to_router_s** | `t_router_result_recv` - `t_post_result_sidecar` | **Callback Network.** Network + router ingress time for the `/result` callback. |
+| **router_post_result_s** | `t_enqueue_response` - `t_router_result_recv` | **Router Overhead.** Time from router receiving the result to writing the HTTP response. |
+| **server_roundtrip_s** | `t_enqueue_response` - `t_arrive_router` | **Server Total.** "Server-side" latency excluding client-side network. |
 
-**end_to_end_s**
-`t_enqueue_response - t_enq_client`
-Full roundtrip as seen by the client.
-
-**client_to_router_s**
-`t_arrive_router - t_enq_client`
-Client → router ingress (network + front-end handling).
-
-**router_queue_s**
-`t_dispatch_router - t_enq_router_queue`
-Time spent waiting in the router’s internal queue (pull mode).
-If `t_enq_router_queue` is missing, the code falls back to `t_arrive_router`.
-
-**router_to_sidecar_s**
-`(t_arrive_sidecar_pull or t_arrive_sidecar_push) - t_dispatch_router`
-Router dispatch → arrival at sidecar for this request.
-
-**sidecar_queue_s**
-`t_dequeue_sidecar - (t_arrive_sidecar_pull or t_arrive_sidecar_push)`
-Time waiting in the sidecar’s local queue before a worker picks it up.
-
-**vllm_compute_s**
-`t_vllm_recv - t_vllm_send`
-Pure model runtime on vLLM.
-
-**sidecar_post_s**
-`t_post_result_sidecar - t_vllm_recv`
-Sidecar post-processing (extract response, construct payload, send `/result`).
-
-**sidecar_to_router_s**
-`t_router_result_recv - t_post_result_sidecar`
-Network + router ingress time for the `/result` callback.
-
-**router_post_result_s**
-`t_enqueue_response - t_router_result_recv`
-Router overhead from receiving `/result` to sending HTTP response.
-
-**server_roundtrip_s**
-`t_enqueue_response - t_arrive_router`
-“Server-side” roundtrip latency (router ingress → router response), excluding client-side network from client to router.
-
-All metrics are optional: each is only emitted if both endpoints of the interval are present and numeric.
+*Note: All metrics are optional: each is only emitted if both endpoints of the interval are present and numeric.*
 
 ## 4. Client Logging Behavior
 
@@ -179,11 +139,14 @@ When `result.trace` is present:
 
 The client prints the endpoint and router mode:
 
+```bash
     [client][T120]   trace_endpoint=vllm-qwen-5b7d457949-tcq6t
     [client][T120]   router_mode=pull
+```
 
 The client calls `_compute_trace_metrics(trace)` and prints each derived metric:
 
+```bash
     [client][T120]   end_to_end_s=38.330556s
     [client][T120]   client_to_router_s=2.684757s
     [client][T120]   router_queue_s=30.396861s
@@ -194,9 +157,11 @@ The client calls `_compute_trace_metrics(trace)` and prints each derived metric:
     [client][T120]   sidecar_to_router_s=0.002196s
     [client][T120]   router_post_result_s=0.000355s
     [client][T120]   server_roundtrip_s=35.645799s
+```
 
 The client then prints any non-timestamp extras from trace (queue lengths, inflight counts, etc.), skipping all keys starting with `t_`:
 
+```bash
     [client][T120]   router_queue_len_at_arrive=103
     [client][T120]   router_queue_len_at_dispatch=0
     [client][T120]   sidecar_queue_len_before_pull=0
@@ -210,6 +175,7 @@ The client then prints any non-timestamp extras from trace (queue lengths, infli
     [client][T120]   sidecar_queue_len_at_result=0
     [client][T120]   sidecar_inflight_at_result=1
     [client][T120]   sidecar_logical_at_result=1
+```
 
 Raw timestamps (`t_*`) are not printed in the client logs; they only exist inside `result.trace` for post-processing if needed.
 
@@ -227,16 +193,3 @@ The same trace schema is used for all router modes:
 * `t_arrive_sidecar_pull` is absent.
 
 `_compute_trace_metrics()` automatically chooses whichever sidecar-arrival timestamp exists (`t_arrive_sidecar_pull` or `t_arrive_sidecar_push`) and computes the same `router_to_sidecar_s` and `sidecar_queue_s` metrics for both styles.
-
-| Metric Name | Calculation Formula | Description |
-| :--- | :--- | :--- |
-| **end_to_end_s** | `t_enqueue_response` - `t_enq_client` | **Total Roundtrip.** The full time elapsed from the client's perspective. |
-| **client_to_router_s** | `t_arrive_router` - `t_enq_client` | **Network Ingress.** Time from client construction to router arrival (network + front-end handling). |
-| **router_queue_s** | `t_dispatch_router` - `t_enq_router_queue` | **Router Wait.** Time spent waiting in the router’s internal queue. *(Falls back to `t_arrive_router` if queue timestamp is missing).* |
-| **router_to_sidecar_s** | `t_arrive_sidecar_*` - `t_dispatch_router` | **Dispatch Latency.** Time from router dispatch to sidecar receipt. *(Uses either `push` or `pull` arrival timestamp).* |
-| **sidecar_queue_s** | `t_dequeue_sidecar` - `t_arrive_sidecar_*` | **Sidecar Wait.** Time waiting in the sidecar’s local queue before a worker picks it up. |
-| **vllm_compute_s** | `t_vllm_recv` - `t_vllm_send` | **GPU Compute.** Pure model runtime latency on the vLLM server. |
-| **sidecar_post_s** | `t_post_result_sidecar` - `t_vllm_recv` | **Sidecar Overhead.** Time spent extracting the response, constructing the payload, and sending `/result`. |
-| **sidecar_to_router_s** | `t_router_result_recv` - `t_post_result_sidecar` | **Callback Network.** Network + router ingress time for the `/result` callback. |
-| **router_post_result_s** | `t_enqueue_response` - `t_router_result_recv` | **Router Overhead.** Time from router receiving the result to writing the HTTP response. |
-| **server_roundtrip_s** | `t_enqueue_response` - `t_arrive_router` | **Server Total.** "Server-side" latency excluding client-side network. |
