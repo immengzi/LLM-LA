@@ -43,18 +43,38 @@ async def push(item: PushItem) -> dict:
     """
     Push-mode delivery from router → sidecar.
 
-    If TRACE_ENABLED=true, annotate arrival timestamp:
-        t_arrive_sidecar_push
+    If TRACE_ENABLED=true, annotate:
+      - t_arrive_sidecar_push
+      - sidecar_queue_len_before / after
+      - sidecar_inflight_before
+      - sidecar_logical_before / after
     """
     if _local_q is None:
         return {"status": "error", "msg": "local queue not bound"}
 
     meta = dict(item.meta or {})
 
+    # Snapshot queue state *before* enqueue
+    pending_before = 0
+    inflight_before = 0
+    if _local_q is not None:
+        pending_before, inflight_before = _local_q.state()
+    logical_before = pending_before + inflight_before
+
     if getattr(_cfg, "TRACE_ENABLED", False):
         now_push = time.time()
         tr = dict(meta.get("__trace__") or {})
         tr["t_arrive_sidecar_push"] = now_push
+
+        # Sidecar-local queue lengths
+        tr["sidecar_queue_len_before"] = pending_before
+        tr["sidecar_inflight_before"] = inflight_before
+        tr["sidecar_logical_before"] = logical_before
+
+        # After enqueue, pending increases by 1
+        tr["sidecar_queue_len_after"] = pending_before + 1
+        tr["sidecar_logical_after"] = logical_before + 1
+
         meta["__trace__"] = tr
 
     _local_q.put(item.req_id, item.prompt, meta)

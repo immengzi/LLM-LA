@@ -154,9 +154,13 @@ async def enqueue(req: EnqueueRequest):
     # -------------------------
     trace = None
     if _cfg.TRACE_ENABLED:
+        # ★ NEW: capture queue length at arrival
+        qlen = router_state.size()
+
         trace = {
             "t_enq_client": float(req.t_enq_client or t_start),
             "t_arrive_router": t_start,
+            "router_queue_len_at_arrive": qlen,   # ★ NEW
         }
 
     # -------------------------
