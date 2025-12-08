@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 import threading
 import time
 
@@ -16,7 +16,8 @@ import requests
 
 from http_client import send_one
 from config import GenerationConfig
-from trace_utils import print_trace_block
+from trace_utils import print_trace_block, compute_trace_metrics
+from experiment_io import ExperimentLogger
 
 
 @dataclass
@@ -36,6 +37,7 @@ def _request_thread(
     router_url: str,
     gen_cfg: GenerationConfig,
     t0_mono: float,
+    logger: Optional[ExperimentLogger] = None,
 ):
     """
     Per-request worker:
@@ -45,6 +47,7 @@ def _request_thread(
       - Build meta
       - Call send_one() with its own Session (blocking until response)
       - Log RECV event with timing, output preview, and optional trace fields
+      - Append a JSON record to logs.json via ExperimentLogger (if provided).
     """
     session = requests.Session()
     try:
@@ -121,12 +124,49 @@ def _request_thread(
             # ==========================================================
             # --- TRACE ADDITION: derived latencies (no raw timestamps)
             # ==========================================================
+            trace_dict: Optional[Dict[str, Any]] = None
+            trace_metrics: Optional[Dict[str, float]] = None
             if isinstance(result, dict):
                 print_trace_block(task.idx, result)
+                trace = result.get("trace")
+                if isinstance(trace, dict):
+                    trace_dict = trace
+                    trace_metrics = compute_trace_metrics(trace)
             # ==========================================================
+
+            # Persist per-request JSON record if logger is provided.
+            if logger is not None:
+                record: Dict[str, Any] = {
+                    "idx": task.idx,
+                    "req_id": rid,
+                    "prompt": task.prompt,
+                    "planned_ts_mono": task.ts_mono,
+                    "actual_send_ts_mono": now_send,
+                    "t0_wall": t0,
+                    "t1_wall": t1,
+                    "wait_wall_s": total_wait,
+                    "model_latency_s": latency_s,
+                    "finish_reason": finish_reason,
+                    "output_preview": output_preview,
+                }
+                if trace_dict is not None:
+                    record["trace"] = trace_dict
+                if trace_metrics is not None:
+                    record["trace_metrics"] = trace_metrics
+                logger.log_request(record)
 
         except Exception as e:
             print(f"[client][RECV][T{task.idx}] ✗ ERROR idx={task.idx}: {e}")
+            if logger is not None:
+                # Log error record as well.
+                err_record: Dict[str, Any] = {
+                    "idx": task.idx,
+                    "error": str(e),
+                    "prompt": task.prompt,
+                    "planned_ts_mono": task.ts_mono,
+                    "send_failed": True,
+                }
+                logger.log_request(err_record)
     finally:
         session.close()
 
@@ -138,6 +178,7 @@ def run_open_loop_load(
     plan_times: List[float],
     gen_cfg: GenerationConfig,
     warmup_reqs: int = 0,
+    logger: Optional[ExperimentLogger] = None,
 ):
     """
     Execute a precomputed schedule using one thread per request.
@@ -147,6 +188,8 @@ def run_open_loop_load(
     - plan_times: list of absolute monotonic timestamps (same length as prompts).
     - gen_cfg: generation config (max_tokens, temperature, etc.).
     - warmup_reqs: number of dummy warmup requests to send before the timed load.
+    - logger: optional ExperimentLogger; if provided, per-request JSON records
+      will be written into logs.json in the experiment directory.
 
     Each per-request thread blocks on /enqueue until the router has received a
     result from the sidecar, so RECV logs imply the response was actually received.
@@ -206,7 +249,7 @@ def run_open_loop_load(
         task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
         t = threading.Thread(
             target=_request_thread,
-            args=(task, router_url, gen_cfg, t0_mono),
+            args=(task, router_url, gen_cfg, t0_mono, logger),
             daemon=True,
         )
         t.start()
