@@ -15,6 +15,7 @@ from .models import (
     PullResponse,
 )
 from .router_state import router_state
+    ### unchanged ###
 from .kv_watcher import KVWatcher
 from .kv_aware import register_request_blocks
 from .push_router import PushRouter
@@ -154,13 +155,11 @@ async def enqueue(req: EnqueueRequest):
     # -------------------------
     trace = None
     if _cfg.TRACE_ENABLED:
-        # ★ NEW: capture queue length at arrival
         qlen = router_state.size()
-
         trace = {
             "t_enq_client": float(req.t_enq_client or t_start),
             "t_arrive_router": t_start,
-            "router_queue_len_at_arrive": qlen,   # ★ NEW
+            "router_queue_len_at_arrive": qlen,
         }
 
     # -------------------------
@@ -180,20 +179,19 @@ async def enqueue(req: EnqueueRequest):
     if trace is not None:
         meta = dict(meta)
         meta.setdefault("__trace__", trace)
-        # Update stored queue meta for pull-mode
         if not _is_push_mode():
             router_state.update_meta(rid, meta)
 
     _log_api_req(
-        f"enqueue rid={rid} mode={mode_str} "
-        f"len={len(req.prompt)} kv_aware={_cfg.KV_AWARE} len_aware={_cfg.LEN_AWARE}",
+        f"enqueue rid={rid} mode={mode_str} len={len(req.prompt)} "
+        f"kv_aware={_cfg.KV_AWARE} len_aware={_cfg.LEN_AWARE}",
         level="summary",
     )
 
     router_state.register_waiter(rid)
 
     # -------------------------
-    # KV-aware hashing
+    # KV hashing
     # -------------------------
     await _maybe_register_kv_blocks(rid, req.prompt)
 
@@ -203,7 +201,6 @@ async def enqueue(req: EnqueueRequest):
     if _is_push_mode():
         if _push_router is None:
             raise HTTPException(500, "PushRouter not initialized")
-
         try:
             await _push_router.route_and_push(rid, req.prompt, meta)
         except Exception as e:
@@ -218,19 +215,29 @@ async def enqueue(req: EnqueueRequest):
         _cfg.RESULT_TIMEOUT_S,
     )
 
-    latency = time.time() - t_start
+    router_latency = time.time() - t_start
 
     if result is None:
         _log_api_req(
-            f"timeout rid={rid} mode={mode_str} after {latency:.3f}s",
+            f"timeout rid={rid} mode={mode_str} after {router_latency:.3f}s",
             level="summary",
         )
         raise HTTPException(504, "timeout waiting for vLLM result")
 
-    # -------------------------
-    # Merge router final timestamp
-    # -------------------------
-    if _cfg.TRACE_ENABLED and isinstance(result, dict):
+    # ------------------------------------------------------
+    # MERGE FULL RESULT — NO TRUNCATION
+    # Everything from sidecar is preserved:
+    #   output, finish_reason, latency_s, usage, raw, trace
+    # ------------------------------------------------------
+
+    if not isinstance(result, dict):
+        result = {"output": result}
+
+    # Optionally record router-side latency
+    # result["router_latency_s"] = router_latency   # enable if you want
+
+    # Merge router final timestamp into trace
+    if _cfg.TRACE_ENABLED:
         tr = result.get("trace") or result.get("__trace__") or {}
         tr = dict(tr)
         tr["t_enqueue_response"] = time.time()
@@ -238,7 +245,7 @@ async def enqueue(req: EnqueueRequest):
         result.pop("__trace__", None)
 
     _log_api_req(
-        f"complete rid={rid} mode={mode_str} latency={latency:.3f}s",
+        f"complete rid={rid} mode={mode_str} latency={router_latency:.3f}s",
         level="summary",
     )
 
@@ -256,13 +263,11 @@ async def result_callback(payload: dict):
         return {"status": "missing req_id"}
 
     rid = str(req_id_raw)
-
     result = payload.get("result")
 
-    # Sidecar simple shape: {req_id, output, trace}
+    # Backward compatibility — sidecar might send: {output, trace}
     if result is None and "output" in payload:
         result = {"output": payload["output"]}
-        # ★ preserve sidecar trace ★
         if "trace" in payload and isinstance(payload["trace"], dict):
             result["trace"] = payload["trace"]
 
@@ -280,6 +285,7 @@ async def result_callback(payload: dict):
             print(f"[router] PushRouter notify_result failed for endpoint={endpoint}: {e}")
             sys.stdout.flush()
 
+    # Preserve full trace
     if _cfg.TRACE_ENABLED and isinstance(result, dict):
         tr = result.get("trace") or result.get("__trace__") or {}
         tr = dict(tr)

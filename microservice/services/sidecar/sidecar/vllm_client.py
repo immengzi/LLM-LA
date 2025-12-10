@@ -161,21 +161,51 @@ class VLLMWorker:
                         tr["t_vllm_recv"] = time.time()
                         meta["__trace__"] = tr
 
+                    # ----------------------------------------------------
+                    # Extract vLLM response, preserving EVERYTHING
+                    # ----------------------------------------------------
+                    output_text: str
+                    finish_reason: Optional[str] = None
+                    usage: Optional[Dict[str, Any]] = None
+                    raw_vllm: Optional[Dict[str, Any]] = None
+                    latency_s: Optional[float] = None
+
+                    # Try to get HTTP-level latency from requests
+                    try:
+                        latency_s = float(resp.elapsed.total_seconds())
+                    except Exception:
+                        latency_s = None
+
                     if not resp.ok:
                         print(f"[sidecar] vLLM error: {resp.status_code} {resp.text}")
                         output_text = f"[vLLM error {resp.status_code}]"
                     else:
-                        # Parse OpenAI-style output
                         try:
                             data = resp.json()
+                            raw_vllm = data
+
                             choices = data.get("choices") or []
-                            if choices and "message" in choices[0]:
-                                output_text = choices[0]["message"]["content"]
+                            if choices:
+                                first = choices[0]
+                                msg = first.get("message") or {}
+                                # Prefer message.content if present
+                                output_text = msg.get("content") or str(first)
+                                finish_reason = (
+                                    first.get("finish_reason")
+                                    or data.get("finish_reason")
+                                )
                             else:
+                                # Fallback: just stringify the whole payload
                                 output_text = str(data)
+
+                            if isinstance(data.get("usage"), dict):
+                                usage = data["usage"]
                         except Exception as e:
                             print(f"[sidecar] parse error for req_id={req_id}: {e}")
                             output_text = "[parse error in vLLM response]"
+                            raw_vllm = None
+                            finish_reason = None
+                            usage = None
 
                     # ----------------------------------------------------
                     # Trace: queue snapshot at result time
@@ -192,17 +222,38 @@ class VLLMWorker:
                         meta["__trace__"] = tr
 
                     # ----------------------------------------------------
+                    # Build result object (FULL vLLM info preserved)
+                    # ----------------------------------------------------
+                    result_obj: Dict[str, Any] = {
+                        "output": output_text,
+                    }
+
+                    if finish_reason is not None:
+                        result_obj["finish_reason"] = finish_reason
+
+                    # HTTP-level latency as seen by sidecar → vLLM
+                    if latency_s is not None:
+                        result_obj["latency_s"] = latency_s
+
+                    # Full raw OpenAI-compatible JSON from vLLM
+                    if raw_vllm is not None:
+                        result_obj["raw"] = raw_vllm
+
+                    # Token usage from vLLM (prompt/completion/total)
+                    if usage is not None:
+                        result_obj["usage"] = usage
+
+                    # Attach trace dictionary into result, if enabled
+                    if getattr(_cfg, "TRACE_ENABLED", False):
+                        result_obj["trace"] = dict(meta.get("__trace__") or {})
+
+                    # ----------------------------------------------------
                     # Send result back to router
                     # ----------------------------------------------------
                     result_payload = {
                         "req_id": req_id,
-                        "output": output_text,
+                        "result": result_obj,
                     }
-
-                    # Add trace fields to router callback payload
-                    if getattr(_cfg, "TRACE_ENABLED", False):
-                        # We already updated meta["__trace__"] above
-                        result_payload["trace"] = dict(meta.get("__trace__") or {})
 
                     try:
                         r2 = session.post(

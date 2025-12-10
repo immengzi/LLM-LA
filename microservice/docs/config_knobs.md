@@ -359,6 +359,16 @@ Separately (in the Docker entrypoint):
 - `ACCESS_LOG: str`  
   Controls uvicorn access log: `"true"` or `"false"`.
 
+- `output_log_mode: str`
+
+Controls how much of the model output is written into the client’s
+per-request log file (`logs.json`).
+
+- `"preview"`
+- `"full"`  
+
+
+
 ---
 
 ## Sidecar environment variables
