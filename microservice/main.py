@@ -20,14 +20,11 @@ def main():
         "--config",
         type=str,
         default=None,
-        help="Path to YAML config file (ignored if --config-name is set).",
-    )
-    parser.add_argument(
-        "--config-name",
-        type=str,
-        default=None,
-        help="Logical config name under ./configs (without extension). "
-             "If set, the client will load ./configs/<name>.yaml.",
+        help=(
+            "Config selector. "
+            "If it is a bare name (no directory, no suffix), the client loads ./configs/<name>.yaml. "
+            "If it has a directory or suffix, it is treated as a path."
+        ),
     )
     parser.add_argument(
         "--n",
@@ -38,17 +35,23 @@ def main():
     args = parser.parse_args()
 
     # Resolve config path:
-    # - If --config-name is given, use ./configs/<name>.yaml
-    # - Else if --config is given, use that path
-    # - Else fall back to ./example_config.yaml
-    if args.config_name:
-        config_path = Path("configs") / f"{args.config_name}.yaml"
-    elif args.config:
-        config_path = Path(args.config)
+    # - If --config is a bare name (no parent dir, no suffix): use ./configs/<name>.yaml
+    # - If --config has a parent dir or suffix: treat it as a path
+    # - Else fall back to ./configs/example_config.yaml
+    if args.config:
+        raw = Path(args.config)
+        if raw.parent != Path(".") or raw.suffix:
+            # Has a directory component or explicit suffix -> treat as given path
+            config_path = raw
+        else:
+            # Bare logical name -> assume under ./configs/<name>.yaml
+            config_path = Path("configs") / f"{args.config}.yaml"
     else:
-        config_path = Path("example_config.yaml")
+        # Default config under configs/
+        config_path = Path("configs") / "example_config.yaml"
 
     cfg = load_config(str(config_path))
+
     if args.n is not None:
         cfg.total_requests = int(args.n)
 
@@ -76,14 +79,16 @@ def main():
         f"[client] router-url={cfg.router_url}, "
         f"n={total}, pattern={cfg.load_pattern.pattern}, "
         f"prompt-source={cfg.prompt_source}, "
-        f"warmup_reqs={cfg.load_pattern.warmup_reqs}"
+        f"warmup_reqs={cfg.load_pattern.warmup_reqs}, "
+        f"output_log_mode={cfg.output_log_mode}, "
+        f"print_trace={cfg.print_trace}"
     )
 
     # Initialize experiment directory + logger:
     exp_dir, exp_logger = init_experiment(
         cfg,
         config_path=str(config_path),
-        config_name=args.config_name,
+        config_name=None,
     )
     print(f"[client] experiment_dir={exp_dir}")
 
@@ -120,6 +125,8 @@ def main():
             gen_cfg=cfg.generation,
             warmup_reqs=cfg.load_pattern.warmup_reqs,
             logger=exp_logger,
+            output_log_mode=cfg.output_log_mode,
+            print_trace=cfg.print_trace,  # <-- wire through config
         )
     finally:
         # Ensure we always close the logger (flush + close logs.json).

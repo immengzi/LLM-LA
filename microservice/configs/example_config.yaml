@@ -11,13 +11,13 @@ file_prompts:
   variant: "short"
 
 hf_lmsys:
-  dataset_name: "lmsys/lmsys-chat-1m"
-  split: "train"
-  tokenizer_name: "gpt2"
-  streaming: false
-  min_input_tokens: 32
+#   dataset_name: "lmsys/lmsys-chat-1m"
+#   split: "train"
+#   tokenizer_name: "gpt2"
+#   streaming: false
+  min_input_tokens: 256
   max_input_tokens: 512
-  repeat_each: 1
+#   repeat_each: 1
 
 load_pattern:
   pattern: "dump"
@@ -41,7 +41,7 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
-  max_tokens: 256
+  max_tokens: 2048
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null

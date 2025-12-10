@@ -38,6 +38,8 @@ def _request_thread(
     gen_cfg: GenerationConfig,
     t0_mono: float,
     logger: Optional[ExperimentLogger] = None,
+    output_log_mode: str = "preview",
+    print_trace: bool = True,
 ):
     """
     Per-request worker:
@@ -46,8 +48,16 @@ def _request_thread(
       - Log SEND event
       - Build meta
       - Call send_one() with its own Session (blocking until response)
-      - Log RECV event with timing, output preview, and optional trace fields
+      - Log RECV event with timing, optional output preview, and optional trace fields
       - Append a JSON record to logs.json via ExperimentLogger (if provided).
+
+    output_log_mode:
+      - "preview": logs truncated single-line output under key "output"
+      - "full":    logs full model output under key "output"
+
+    print_trace:
+      - If True: print trace metrics and output_preview to stdout.
+      - If False: do NOT print trace block or preview (logs.json unaffected).
     """
     session = requests.Session()
     try:
@@ -92,6 +102,12 @@ def _request_thread(
             latency_s: Optional[float] = None
             finish_reason: Optional[str] = None
             output_preview: Optional[str] = None
+            output_full: Optional[str] = None
+
+            # --- token usage fields (from result.usage or result.raw.usage) ---
+            usage_prompt_tokens: Optional[int] = None
+            usage_completion_tokens: Optional[int] = None
+            usage_total_tokens: Optional[int] = None
 
             if isinstance(result, dict):
                 # --- main fields ---
@@ -100,9 +116,44 @@ def _request_thread(
                 if isinstance(result.get("finish_reason"), str):
                     finish_reason = result["finish_reason"]
                 if isinstance(result.get("output"), str):
-                    output_preview = result["output"].replace("\n", " ")
+                    output_full = result["output"]
+                    # preview is single-line + truncated for logs/console
+                    output_preview = output_full.replace("\n", " ")
                     if len(output_preview) > 120:
                         output_preview = output_preview[:117] + "..."
+
+                # --- usage (tokens) ---
+                # Prefer top-level result["usage"], fall back to result["raw"]["usage"]
+                usage_dict: Optional[Dict[str, Any]] = None
+                u_top = result.get("usage")
+                if isinstance(u_top, dict):
+                    usage_dict = u_top
+                else:
+                    raw = result.get("raw")
+                    if isinstance(raw, dict):
+                        u_raw = raw.get("usage")
+                        if isinstance(u_raw, dict):
+                            usage_dict = u_raw
+
+                if isinstance(usage_dict, dict):
+                    pt = usage_dict.get("prompt_tokens")
+                    ct = usage_dict.get("completion_tokens")
+                    tt = usage_dict.get("total_tokens")
+                    try:
+                        if pt is not None:
+                            usage_prompt_tokens = int(pt)
+                    except Exception:
+                        pass
+                    try:
+                        if ct is not None:
+                            usage_completion_tokens = int(ct)
+                    except Exception:
+                        pass
+                    try:
+                        if tt is not None:
+                            usage_total_tokens = int(tt)
+                    except Exception:
+                        pass
 
             if latency_s is not None:
                 print(
@@ -118,7 +169,11 @@ def _request_thread(
             if finish_reason is not None:
                 print(f"[client][T{task.idx}]   finish_reason={finish_reason}")
 
-            if output_preview is not None:
+            # ----------------------------------------------------------
+            # Only show preview on stdout if print_trace is enabled.
+            # (Logs are controlled separately by output_log_mode.)
+            # ----------------------------------------------------------
+            if print_trace and output_preview is not None:
                 print(f"[client][T{task.idx}]   output_preview={output_preview!r}")
 
             # ==========================================================
@@ -127,15 +182,18 @@ def _request_thread(
             trace_dict: Optional[Dict[str, Any]] = None
             trace_metrics: Optional[Dict[str, float]] = None
             if isinstance(result, dict):
-                print_trace_block(task.idx, result)
                 trace = result.get("trace")
                 if isinstance(trace, dict):
+                    if print_trace:
+                        # Prints endpoint, router_mode, derived metrics, extras
+                        print_trace_block(task.idx, result)
                     trace_dict = trace
                     trace_metrics = compute_trace_metrics(trace)
             # ==========================================================
 
             # Persist per-request JSON record if logger is provided.
             if logger is not None:
+                # Common fields
                 record: Dict[str, Any] = {
                     "idx": task.idx,
                     "req_id": rid,
@@ -147,8 +205,36 @@ def _request_thread(
                     "wait_wall_s": total_wait,
                     "model_latency_s": latency_s,
                     "finish_reason": finish_reason,
-                    "output_preview": output_preview,
                 }
+
+                # Token usage (if present) — no "usage_" prefix in log keys
+                if usage_prompt_tokens is not None:
+                    record["prompt_tokens"] = usage_prompt_tokens
+                if usage_completion_tokens is not None:
+                    record["completion_tokens"] = usage_completion_tokens
+                if usage_total_tokens is not None:
+                    record["total_tokens"] = usage_total_tokens
+
+
+                # Decide what goes under "output"
+                log_output: Optional[str] = None
+                mode = output_log_mode or "preview"
+                if mode == "full":
+                    # Prefer full text; fall back to preview if for some reason we don't have it
+                    if output_full is not None:
+                        log_output = output_full
+                    elif output_preview is not None:
+                        log_output = output_preview
+                else:
+                    # preview mode: always truncated if we can
+                    if output_preview is not None:
+                        log_output = output_preview
+                    elif output_full is not None:
+                        log_output = output_full
+
+                if log_output is not None:
+                    record["output"] = log_output
+
                 if trace_dict is not None:
                     record["trace"] = trace_dict
                 if trace_metrics is not None:
@@ -179,6 +265,8 @@ def run_open_loop_load(
     gen_cfg: GenerationConfig,
     warmup_reqs: int = 0,
     logger: Optional[ExperimentLogger] = None,
+    output_log_mode: str = "preview",
+    print_trace: bool = True,
 ):
     """
     Execute a precomputed schedule using one thread per request.
@@ -190,6 +278,8 @@ def run_open_loop_load(
     - warmup_reqs: number of dummy warmup requests to send before the timed load.
     - logger: optional ExperimentLogger; if provided, per-request JSON records
       will be written into logs.json in the experiment directory.
+    - output_log_mode: "preview" or "full" (controls what goes into logs.json).
+    - print_trace: if False, do not print trace block or preview to stdout.
 
     Each per-request thread blocks on /enqueue until the router has received a
     result from the sidecar, so RECV logs imply the response was actually received.
@@ -249,7 +339,7 @@ def run_open_loop_load(
         task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
         t = threading.Thread(
             target=_request_thread,
-            args=(task, router_url, gen_cfg, t0_mono, logger),
+            args=(task, router_url, gen_cfg, t0_mono, logger, output_log_mode, print_trace),
             daemon=True,
         )
         t.start()

@@ -1,6 +1,3 @@
-# config.py
-# Simple YAML-backed config loader for the microservice load client.
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -16,9 +13,9 @@ class FilePromptsConfig:
 
 @dataclass
 class HFLmsysConfig:
-    dataset_name: str = "lmsys/lmsys-chat-1m"
+    dataset_name: str = "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
     split: str = "train"
-    tokenizer_name: str = "gpt2"
+    tokenizer_name: str = "/mnt/nvme1/saeid/models/qwen3-8b"
     streaming: bool = False
     min_input_tokens: Optional[int] = None
     max_input_tokens: Optional[int] = None
@@ -64,6 +61,8 @@ class ClientConfig:
     hf_lmsys: HFLmsysConfig = field(default_factory=HFLmsysConfig)
     load_pattern: LoadPatternConfig = field(default_factory=LoadPatternConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
+    output_log_mode: str = "full"
+    print_trace: bool = False
 
 
 def _merge_dataclass(dc_cls, data_dict: dict):
@@ -90,6 +89,11 @@ def load_config(path: str) -> ClientConfig:
     load_pattern = _merge_dataclass(LoadPatternConfig, raw.get("load_pattern", {}))
     generation = _merge_dataclass(GenerationConfig, raw.get("generation", {}))
 
+    # Only special-case: output_log_mode. Use the dataclass default if not in YAML.
+    output_log_mode = raw.get("output_log_mode", ClientConfig.output_log_mode)
+    print_trace = raw.get("print_trace", ClientConfig.print_trace)
+
+
     return ClientConfig(
         router_url=router_url,
         total_requests=total_requests,
@@ -98,4 +102,6 @@ def load_config(path: str) -> ClientConfig:
         hf_lmsys=hf_lmsys,
         load_pattern=load_pattern,
         generation=generation,
+        output_log_mode=output_log_mode,
+        print_trace=print_trace,
     )
