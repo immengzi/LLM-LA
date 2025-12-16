@@ -1,31 +1,22 @@
 #!/usr/bin/env python3
 # zmq_subscriber.py
 """
-KV Cache Event Listener Sidecar for vLLM
+KV Cache Event Listener Sidecar for vLLM (per-pod)
 
 - Subscribes to vLLM KV events over ZMQ
-- Decodes events using msgspec
+- Decodes msgpack KVEventBatch (same wire format as former centralized listener)
 - Stores KV block presence information in Redis
 
-Redis schema (per MODEL_NAME):
+Redis schema (per MODEL_NAME_REDIS):
   - {MODEL}:kvblock:{block_hash}        (HASH)  block -> { pod_name: timestamp }
   - {MODEL}:podblocks:{pod_name}        (SET)   pod   -> { block_hashes }
   - {MODEL}:kvblocks                    (HASH)  index of all block_hashes
-
-Environment variables:
-  - VLLM_HOST       : host of vLLM ZMQ publisher (inside pod, usually 127.0.0.1)
-  - VLLM_SUB_PORT   : ZMQ port (e.g. "5557")
-  - REDIS_HOST      : Redis hostname (e.g. "redis")
-  - REDIS_PORT      : Redis port (default "6379")
-  - CONTAINER_NAME  : Pod or container name, used as pod_name in Redis
-  - MODEL_NAME      : Model identifier used as prefix in Redis keys
 """
 
 import os
 import time
-import signal
 import threading
-from typing import Any
+from typing import Any, Optional, Union, NewType
 
 import zmq
 import msgspec
@@ -35,24 +26,66 @@ from .config import get_config
 
 _cfg = get_config()
 
+# ------------------------------
+# Type definitions (match old listener)
+# ------------------------------
 
-class KVEvent(msgspec.Struct, omit_defaults=True):
-    kind: str
-    block_hash: int
-    pod_name: str
+BlockHash = NewType("BlockHash", int)
+
+
+class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True, gc=False):
     ts: float
+    events: list[Any]
 
+
+class KVCacheEvent(msgspec.Struct, array_like=True, omit_defaults=True, gc=False, tag=True):
+    """Base class for KV cache events."""
+    pass
+
+
+class BlockStored(KVCacheEvent):
+    block_hashes: list[BlockHash]
+    parent_block_hash: Optional[BlockHash]
+    token_ids: list[int]
+    block_size: int
+    lora_id: Optional[int]
+
+
+class BlockRemoved(KVCacheEvent):
+    block_hashes: list[BlockHash]
+
+
+class AllBlocksCleared(KVCacheEvent):
+    pass
+
+
+class KVEventBatch(EventBatch):
+    events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
+
+
+# ------------------------------
+# Subscriber
+# ------------------------------
 
 class KVSubscriber:
     def __init__(self):
         self.vllm_host = _cfg.VLLM_HOST
         self.vllm_port = _cfg.VLLM_SUB_PORT
-        self.redis = redis.Redis(host=_cfg.REDIS_HOST, port=_cfg.REDIS_PORT, decode_responses=True)
+        self.redis = redis.Redis(
+            host=_cfg.REDIS_HOST,
+            port=_cfg.REDIS_PORT,
+            decode_responses=True,
+        )
         self.model = _cfg.MODEL_NAME_REDIS
         self.pod_name = _cfg.CONTAINER_NAME
+
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._decoder = msgspec.json.Decoder(list[KVEvent])
+
+        # IMPORTANT: msgpack + KVEventBatch, not JSON
+        self._decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
+
+    # ------------- lifecycle -------------
 
     def start(self):
         if self._thread is not None:
@@ -60,7 +93,10 @@ class KVSubscriber:
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        print(f"[KV-SUB] started (host={self.vllm_host}, port={self.vllm_port})")
+        print(
+            f"[KV-SUB] started (host={self.vllm_host}, port={self.vllm_port}, "
+            f"pod={self.pod_name}, model={self.model})"
+        )
 
     def stop(self):
         self._stop.set()
@@ -69,49 +105,102 @@ class KVSubscriber:
             self._thread = None
         print("[KV-SUB] stopped")
 
+    # ------------- core loop -------------
+
     def _loop(self):
         ctx = zmq.Context()
         sub = ctx.socket(zmq.SUB)
         sub.connect(f"tcp://{self.vllm_host}:{self.vllm_port}")
-        sub.setsockopt_string(zmq.SUBSCRIBE, "")
-        print("[KV-SUB] connected to vLLM publisher")
+
+        # Match old listener: subscribe only to KV topic prefix
+        sub.setsockopt_string(zmq.SUBSCRIBE, "kv@")
+
+        print("[KV-SUB] connected to vLLM publisher (topic prefix 'kv@')")
 
         try:
             while not self._stop.is_set():
                 try:
-                    msg = sub.recv(flags=zmq.NOBLOCK)
+                    # Publisher: [topic, seq_bytes, payload]
+                    frames = sub.recv_multipart(flags=zmq.NOBLOCK)
                 except zmq.Again:
                     time.sleep(0.01)
                     continue
-
-                try:
-                    events = self._decoder.decode(msg)
                 except Exception as e:
-                    print(f"[KV-SUB] decode error: {e}")
+                    print(f"[KV-SUB] ZMQ recv error: {e}")
+                    time.sleep(1.0)
                     continue
 
-                self._handle_events(events)
+                if len(frames) != 3:
+                    print(f"[KV-SUB] unexpected frame count: {len(frames)} (expected 3)")
+                    continue
+
+                topic, seq_bytes, payload = frames
+                # seq = int.from_bytes(seq_bytes, "big")  # unused but available
+
+                try:
+                    batch = self._decoder.decode(payload)
+                except Exception as e:
+                    print(f"[KV-SUB] decode error (msgpack KVEventBatch): {e}")
+                    continue
+
+                try:
+                    self._handle_batch(batch)
+                except Exception as e:
+                    print(f"[KV-SUB] error handling KV batch: {e}")
+
         finally:
-            sub.close(0)
+            try:
+                sub.close(0)
+            except Exception:
+                pass
             ctx.term()
 
-    def _handle_events(self, events: list[KVEvent]):
-        pipe = self.redis.pipeline()
-        now = time.time()
+    # ------------- Redis update -------------
 
-        for ev in events:
-            key_block = f"{self.model}:kvblock:{ev.block_hash}"
-            key_podblocks = f"{self.model}:podblocks:{ev.pod_name}"
-            key_kvblocks = f"{self.model}:kvblocks"
+    def _handle_batch(self, event_batch: KVEventBatch) -> None:
+        """
+        Update Redis for KV cache events.
 
-            if ev.kind == "BlockAdded":
-                pipe.hset(key_block, ev.pod_name, now)
-                pipe.sadd(key_podblocks, ev.block_hash)
-                pipe.hset(key_kvblocks, ev.block_hash, now)
-            elif ev.kind == "BlockRemoved":
-                pipe.hdel(key_block, ev.pod_name)
-                pipe.srem(key_podblocks, ev.block_hash)
-            # you can add more kinds if needed
+        Redis schema:
+          - {model}:kvblocks               -> HSET(block_hash -> "kvblock:{block_hash}")
+          - {model}:kvblock:{block_hash}   -> HSET(pod_name -> timestamp)
+          - {model}:podblocks:{pod_name}   -> SET(block_hashes held by pod)
+        """
+        key_prefix = f"{self.model}:" if self.model else ""
+        kvblocks_key = f"{key_prefix}kvblocks"
+        podblocks_key = f"{key_prefix}podblocks:{self.pod_name}"
+
+        pipe = self.redis.pipeline(transaction=False)
+        ts = int(time.time())
+
+        for ev in event_batch.events:
+            # BlockStored
+            if isinstance(ev, BlockStored):
+                for block_hash in ev.block_hashes:
+                    bh_str = str(block_hash)
+                    kvblock_key = f"{key_prefix}kvblock:{bh_str}"
+
+                    # block -> pod
+                    pipe.hset(kvblock_key, self.pod_name, ts)
+                    # pod -> block
+                    pipe.sadd(podblocks_key, bh_str)
+                    # index of all blocks
+                    pipe.hset(kvblocks_key, bh_str, kvblock_key)
+
+            # BlockRemoved
+            elif isinstance(ev, BlockRemoved):
+                for block_hash in ev.block_hashes:
+                    bh_str = str(block_hash)
+                    kvblock_key = f"{key_prefix}kvblock:{bh_str}"
+                    pipe.hdel(kvblock_key, self.pod_name)
+                    pipe.srem(podblocks_key, bh_str)
+
+            # AllBlocksCleared
+            elif isinstance(ev, AllBlocksCleared):
+                for bh_str in self.redis.sscan_iter(podblocks_key):
+                    kvblock_key = f"{key_prefix}kvblock:{bh_str}"
+                    pipe.hdel(kvblock_key, self.pod_name)
+                pipe.delete(podblocks_key)
 
         try:
             pipe.execute()

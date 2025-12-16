@@ -25,59 +25,61 @@ def _run_server():
 
 
 def main():
-    local_q = LocalQueue()
-    bind_local_queue(local_q)
+        local_q = LocalQueue()
+        bind_local_queue(local_q)
 
-    mode = (_cfg.SIDECAR_MODE or "pull").lower()
+        mode = (_cfg.SIDECAR_MODE or "pull").lower()
 
-    # For KV-aware routing: endpoint identity = pod name (matches KVWatcher register_block_owners)
-    endpoint_id = _cfg.CONTAINER_NAME
+        # For KV-aware routing: endpoint identity = pod name (matches KVWatcher register_block_owners)
+        endpoint_id = _cfg.CONTAINER_NAME
 
-    pull_worker = None
-    if mode == "pull":
-        # Router will see 'endpoint' = pod name, consistent with kv_watcher/_endpoint_for_pod
-        pull_worker = RouterPullWorker(local_q, endpoint_id)
+        pull_worker = None
+        if mode == "pull":
+            pull_worker = RouterPullWorker(local_q, endpoint_id)
+            pull_worker.start()  # initializes session; this is not a polling thread
 
-    # Concurrency: N workers = N concurrent vLLM requests per pod
-    vllm_workers = []
-    for _ in range(_cfg.VLLM_CONCURRENCY):
-        w = VLLMWorker(local_q)
-        w.start()
-        vllm_workers.append(w)
+        # Concurrency: N workers = N concurrent vLLM requests per pod
+        vllm_workers = []
+        for _ in range(_cfg.BATCH_SIZE):
+            w = VLLMWorker(local_q, pull_worker=pull_worker)
+            w.start()
+            vllm_workers.append(w)
 
-    kv_sub = KVSubscriber()
+        kv_sub = KVSubscriber()
 
-    stop_evt = threading.Event()
+        stop_evt = threading.Event()
 
-    def handle_sig(*_args):
-        stop_evt.set()
+        def handle_sig(*_args):
+            stop_evt.set()
 
-    signal.signal(signal.SIGINT, handle_sig)
-    signal.signal(signal.SIGTERM, handle_sig)
+        signal.signal(signal.SIGINT, handle_sig)
+        signal.signal(signal.SIGTERM, handle_sig)
 
-    # Start KV subscriber + router-pull (if in pull mode)
-    kv_sub.start()
-    if pull_worker:
-        pull_worker.start()
+        # Start KV subscriber
+        kv_sub.start()
 
-    # Start HTTP server in a background thread
-    server_thread = threading.Thread(target=_run_server, daemon=True)
-    server_thread.start()
+        # Start HTTP server in a background thread
+        server_thread = threading.Thread(target=_run_server, daemon=True)
+        server_thread.start()
 
-    print(
-        f"[sidecar] running in {mode.upper()} mode "
-        f"(VLLM_CONCURRENCY={_cfg.VLLM_CONCURRENCY}, port={_cfg.SIDECAR_PORT}, endpoint_id={endpoint_id})"
-    )
-    try:
-        while not stop_evt.is_set():
-            time.sleep(0.5)
-    finally:
-        print("[sidecar] shutting down")
-        if pull_worker:
-            pull_worker.stop()
-        for w in vllm_workers:
-            w.stop()
-        kv_sub.stop()
+        print(
+            f"[sidecar] running in {mode.upper()} mode "
+            f"(BATCH_SIZE={_cfg.BATCH_SIZE}, port={_cfg.SIDECAR_PORT}, endpoint_id={endpoint_id})"
+        )
+
+        try:
+            while not stop_evt.is_set():
+                time.sleep(0.5)
+        finally:
+            print("[sidecar] shutting down")
+
+            if pull_worker:
+                pull_worker.stop()
+
+            for w in vllm_workers:
+                w.stop()
+
+            kv_sub.stop()
 
 
 if __name__ == "__main__":

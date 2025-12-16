@@ -3,13 +3,22 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 import httpx
+import asyncio
+import time
+import sys
 
-from .config import get_config
-from .models import EnqueueRequest, EnqueueResponse, PullRequest, PullResponse
+from .config import get_config, print_config
+from .models import (
+    EnqueueRequest,
+    EnqueueResponse,
+    PullRequest,
+    PullResponse,
+)
 from .router_state import router_state
+    ### unchanged ###
 from .kv_watcher import KVWatcher
 from .kv_aware import register_request_blocks
-from .push_router import PushRouter  # NEW
+from .push_router import PushRouter
 
 _cfg = get_config()
 app = FastAPI(title="KV-aware Router Service")
@@ -25,92 +34,296 @@ _kv_watcher: KVWatcher | None = None
 _push_router: PushRouter | None = None
 
 
+# ============================================================
+# Helpers
+# ============================================================
+
+def _is_push_mode() -> bool:
+    """Return True if router is running in a push-* mode."""
+    return _cfg.ROUTER_MODE.startswith("push-")
+
+
+def _log_api_req(msg: str, *, level: str = "summary") -> None:
+    """
+    Logging controlled by REQ_LOG_MODE (off | summary | full)
+    """
+    mode = str(_cfg.REQ_LOG_MODE).lower()
+
+    if mode == "off":
+        return
+
+    try:
+        qlen = router_state.size()
+        msg = f"{msg} (queue_len={qlen})"
+    except Exception:
+        pass
+
+    prefix = "[API]"
+
+    if mode == "summary":
+        if level == "summary":
+            print(f"{prefix} {msg}")
+            sys.stdout.flush()
+        return
+
+    print(f"{prefix} {msg}")
+    sys.stdout.flush()
+
+
+async def _maybe_register_kv_blocks(req_id: str, prompt: str) -> None:
+    """Best-effort KV-block computation."""
+    if not _cfg.KV_AWARE:
+        return
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{_cfg.HASH_SERVICE_URL}/compute_hashes",
+                json={"prompt": prompt},
+                timeout=_cfg.HASH_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            block_hashes = data.get("block_hashes") or []
+            if block_hashes:
+                register_request_blocks(req_id, block_hashes)
+    except Exception as e:
+        print(f"[router] WARNING: KV hash compute failed for req_id={req_id}: {e}")
+        sys.stdout.flush()
+
+
+# ============================================================
+# Startup / Shutdown
+# ============================================================
+
 @app.on_event("startup")
 async def _startup():
     global _kv_watcher, _push_router
+
+    print_config(_cfg)
+    sys.stdout.flush()
+
     _kv_watcher = KVWatcher()
     _kv_watcher.start()
     print("[router] KVWatcher started.")
+    sys.stdout.flush()
 
-    if _cfg.ROUTER_MODE.startswith("push-"):
+    if _is_push_mode():
         _push_router = PushRouter(mode=_cfg.ROUTER_MODE)
         print(f"[router] PushRouter started in mode={_cfg.ROUTER_MODE}")
     else:
         print("[router] running in PULL mode.")
 
+    sys.stdout.flush()
+
 
 @app.on_event("shutdown")
 async def _shutdown():
     global _kv_watcher, _push_router
+
     if _kv_watcher:
         _kv_watcher.stop()
         print("[router] KVWatcher stopped.")
 
-    # nothing persistent to close in PushRouter right now,
-    # but we keep the variable for future extensions
     _push_router = None
     print("[router] PushRouter cleared.")
+    sys.stdout.flush()
 
+
+# ============================================================
+# Health
+# ============================================================
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "queue_len": router_state.size()}
 
 
-@app.post("/enqueue", response_model=EnqueueResponse)
+# ============================================================
+# MAIN: enqueue + synchronous wait for result
+# ============================================================
+
+@app.post("/enqueue")
 async def enqueue(req: EnqueueRequest):
     """
-    In pull mode:
-      - enqueue into central router queue (like old router_core)
-    In push-* modes:
-      - only allocate req_id, do NOT enqueue (sidecars own the work)
+    Synchronous enqueue with tracing support.
     """
-    # 1) Generate req_id and optionally enqueue
-    if _cfg.ROUTER_MODE.startswith("push-"):
-        # Push-mode: central queue is not used, we just allocate an ID
+    t_start = time.time()
+
+    # -------------------------
+    # Construct trace skeleton
+    # -------------------------
+    trace = None
+    if _cfg.TRACE_ENABLED:
+        qlen = router_state.size()
+        trace = {
+            "t_enq_client": float(req.t_enq_client or t_start),
+            "t_arrive_router": t_start,
+            "router_queue_len_at_arrive": qlen,
+        }
+
+    # -------------------------
+    # Push vs Pull behavior
+    # -------------------------
+    if _is_push_mode():
         rid = router_state.next_req_id()
+        mode_str = "push"
+        meta = req.meta or {}
     else:
-        # Pull-mode: behave like the old router_core, queue holds pending jobs
-        rid = router_state.enqueue(
-            prompt=req.prompt,
-            t_enq_client=req.t_enq_client,
-            meta=req.meta or {},
-        )
+        t_enq = req.t_enq_client or t_start
+        meta = req.meta or {}
+        rid = router_state.enqueue(req.prompt, t_enq, meta)
+        mode_str = "pull"
 
-    # 2) Optionally compute KV block hashes & register them
-    if _cfg.KV_AWARE:
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{_cfg.HASH_SERVICE_URL}/compute_hashes",
-                    json={"prompt": req.prompt},
-                    timeout=2.0,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                block_hashes = data.get("block_hashes") or []
-                if block_hashes:
-                    register_request_blocks(rid, block_hashes)
-        except Exception as e:
-            # Best-effort: we still accept the request; just lose KV-awareness for this req
-            print(f"[router] WARNING: failed to compute/register block hashes for req_id={rid}: {e}")
+    # Inject trace into meta if enabled
+    if trace is not None:
+        meta = dict(meta)
+        meta.setdefault("__trace__", trace)
+        if not _is_push_mode():
+            router_state.update_meta(rid, meta)
 
-    # 3) If in push mode, immediately route + push to a sidecar
-    if _cfg.ROUTER_MODE.startswith("push-"):
+    _log_api_req(
+        f"enqueue rid={rid} mode={mode_str} len={len(req.prompt)} "
+        f"kv_aware={_cfg.KV_AWARE} len_aware={_cfg.LEN_AWARE}",
+        level="summary",
+    )
+
+    router_state.register_waiter(rid)
+
+    # -------------------------
+    # KV hashing
+    # -------------------------
+    await _maybe_register_kv_blocks(rid, req.prompt)
+
+    # -------------------------
+    # Push-mode dispatch
+    # -------------------------
+    if _is_push_mode():
         if _push_router is None:
-            raise HTTPException(status_code=500, detail="PushRouter not initialized")
+            raise HTTPException(500, "PushRouter not initialized")
         try:
-            await _push_router.route_and_push(rid, req.prompt, req.meta or {})
+            await _push_router.route_and_push(rid, req.prompt, meta)
         except Exception as e:
-            raise HTTPException(status_code=503, detail=f"push failed: {e}")
+            raise HTTPException(503, f"push failed: {e}")
 
-    return EnqueueResponse(req_id=rid)
+    # -------------------------
+    # Wait for result
+    # -------------------------
+    result = await asyncio.to_thread(
+        router_state.wait_for_result,
+        rid,
+        _cfg.RESULT_TIMEOUT_S,
+    )
 
+    router_latency = time.time() - t_start
+
+    if result is None:
+        _log_api_req(
+            f"timeout rid={rid} mode={mode_str} after {router_latency:.3f}s",
+            level="summary",
+        )
+        raise HTTPException(504, "timeout waiting for vLLM result")
+
+    # ------------------------------------------------------
+    # MERGE FULL RESULT — NO TRUNCATION
+    # Everything from sidecar is preserved:
+    #   output, finish_reason, latency_s, usage, raw, trace
+    # ------------------------------------------------------
+
+    if not isinstance(result, dict):
+        result = {"output": result}
+
+    # Optionally record router-side latency
+    # result["router_latency_s"] = router_latency   # enable if you want
+
+    # Merge router final timestamp into trace
+    if _cfg.TRACE_ENABLED:
+        tr = result.get("trace") or result.get("__trace__") or {}
+        tr = dict(tr)
+        tr["t_enqueue_response"] = time.time()
+        result["trace"] = tr
+        result.pop("__trace__", None)
+
+    _log_api_req(
+        f"complete rid={rid} mode={mode_str} latency={router_latency:.3f}s",
+        level="summary",
+    )
+
+    return {"req_id": rid, "result": result}
+
+
+# ============================================================
+# SIDE CAR → ROUTER RESULT CALLBACK
+# ============================================================
+
+@app.post("/result")
+async def result_callback(payload: dict):
+    req_id_raw = payload.get("req_id")
+    if req_id_raw is None:
+        return {"status": "missing req_id"}
+
+    rid = str(req_id_raw)
+    result = payload.get("result")
+
+    # Backward compatibility — sidecar might send: {output, trace}
+    if result is None and "output" in payload:
+        result = {"output": payload["output"]}
+        if "trace" in payload and isinstance(payload["trace"], dict):
+            result["trace"] = payload["trace"]
+
+    if result is None:
+        return {"status": "missing result"}
+
+    endpoint = payload.get("endpoint")
+
+    _log_api_req(f"result callback rid={rid}", level="full")
+
+    if endpoint and _push_router is not None:
+        try:
+            _push_router.notify_result(endpoint)
+        except Exception as e:
+            print(f"[router] PushRouter notify_result failed for endpoint={endpoint}: {e}")
+            sys.stdout.flush()
+
+    # Preserve full trace
+    if _cfg.TRACE_ENABLED and isinstance(result, dict):
+        tr = result.get("trace") or result.get("__trace__") or {}
+        tr = dict(tr)
+        tr["t_router_result_recv"] = time.time()
+        result["trace"] = tr
+        result.pop("__trace__", None)
+
+    router_state.store_result(rid, result)
+    return {"status": "ok"}
+
+
+# ============================================================
+# SIDE CAR → ROUTER /pull
+# ============================================================
 
 @app.post("/pull", response_model=PullResponse)
 async def pull(req: PullRequest):
+    _log_api_req(
+        f"/pull endpoint={req.endpoint} want={req.want}",
+        level="full",
+    )
+
     items = router_state.pull_for_endpoint(
         endpoint=req.endpoint,
         want=req.want,
     )
+
+    if items:
+        ids = [it.req_id for it in items]
+        _log_api_req(
+            f"/pull ASSIGN endpoint={req.endpoint} want={req.want} "
+            f"-> {len(items)} items {ids}",
+            level="summary",
+        )
+    else:
+        _log_api_req(
+            f"/pull IDLE endpoint={req.endpoint} want={req.want} -> 0 items",
+            level="full",
+        )
+
     return PullResponse(items=items)

@@ -1,6 +1,7 @@
+# sidecar/router_client.py
 # -*- coding: utf-8 -*-
-import time
 import threading
+import time
 from typing import Dict, Any
 
 import requests
@@ -13,68 +14,168 @@ _cfg = get_config()
 
 class RouterPullWorker:
     """
-    Periodically:
-      1) compute 'want' from local inflight vs VLLM_CONCURRENCY
-      2) call router /pull
-      3) push jobs into local queue
+    Event-biased pull helper for a single vLLM pod.
 
-    NOTE: endpoint_id here is the endpoint *identity* used by the router/KV layer,
-    i.e. the pod name (must match kv_watcher _endpoint_for_pod).
+    Responsibilities:
+      - Compute capacity from local_q.state() and global BATCH_SIZE.
+      - Call router /pull when there is spare capacity.
+      - Never exceed BATCH_SIZE = pending + inflight on this pod.
+      - No background polling; pull() is triggered by workers
+        (busy-path and idle-poke).
+
+    NOTE: endpoint_id must match what the router sees as the endpoint identity.
     """
 
     def __init__(self, local_q: LocalQueue, endpoint_id: str):
         self.local_q = local_q
-        self.endpoint_id = endpoint_id  # pod identity used as 'endpoint' in /pull
+        self.endpoint_id = endpoint_id  # sidecar identity used by router
         self._stop_evt = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._lock = threading.RLock()
+        self._session: requests.Session | None = None
+
+        # Initial “discovery” flags
+        self._first_success: bool = False
+        self._printed_wait_msg: bool = False
+
+    # ---------------- lifecycle ----------------
 
     def start(self):
-        if self._thread is not None:
+        """
+        Initialize HTTP session. No polling thread, all pulls are event-driven.
+        """
+        if self._session is not None:
             return
         self._stop_evt.clear()
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-        print(f"[sidecar] RouterPullWorker started (endpoint_id={self.endpoint_id})")
+        self._session = requests.Session()
+        print(f"[sidecar] RouterPullWorker ready (endpoint_id={self.endpoint_id})")
 
     def stop(self):
         self._stop_evt.set()
-        if self._thread:
-            self._thread.join(timeout=2.0)
-            self._thread = None
+        session, self._session = self._session, None
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
         print("[sidecar] RouterPullWorker stopped")
 
-    def _loop(self):
-        session = requests.Session()
-        max_inflight = _cfg.VLLM_CONCURRENCY
+    # ---------------- core logic ----------------
 
-        while not self._stop_evt.is_set():
+    def pull_if_capacity(self) -> None:
+        """
+        Event-biased pull:
+          - If pending+inflight < BATCH_SIZE, compute want and /pull.
+          - Insert returned jobs into the local queue.
+
+        When TRACE_ENABLED=true, also stamps:
+          - t_arrive_sidecar_pull
+          - sidecar_queue_len_before_pull
+          - sidecar_inflight_before_pull
+          - sidecar_logical_before_pull
+          - sidecar_queue_len_after_pull
+          - sidecar_logical_after_pull
+        """
+        if self._stop_evt.is_set():
+            return
+
+        with self._lock:
             pending, inflight = self.local_q.state()
+            batch_size = _cfg.BATCH_SIZE
+            total_reserved = pending + inflight
 
-            # Cap purely on in-flight requests; pending is just backlog.
-            if inflight < max_inflight:
-                want = max_inflight - inflight
-            else:
-                want = 0
+            if total_reserved >= batch_size:
+                return
 
-            if want > 0:
-                try:
-                    resp = session.post(
-                        f"{_cfg.ROUTER_URL}/pull",
-                        json={"endpoint": self.endpoint_id, "want": want},
-                        timeout=1.0,
-                    )
-                    if resp.ok:
-                        data = resp.json()
-                        items = data.get("items", [])
-                        for item in items:
-                            rid = int(item["req_id"])
-                            prompt = str(item["prompt"])
-                            meta: Dict[str, Any] = item.get("meta") or {}
-                            self.local_q.put(rid, prompt, meta)
+            want = batch_size - total_reserved
+            if want <= 0:
+                return
+
+            session = self._session
+            tmp_session = False
+            if session is None:
+                session = requests.Session()
+                tmp_session = True
+
+            try:
+                # ---------------------
+                # ROUTER /pull request
+                # ---------------------
+                resp = session.post(
+                    f"{_cfg.ROUTER_URL}/pull",
+                    json={"endpoint": self.endpoint_id, "want": want},
+                    timeout=_cfg.ROUTER_PULL_TIMEOUT_S,
+                )
+
+                if not resp.ok:
+                    # Before first success: suppress raw spam
+                    if not self._first_success:
+                        if not self._printed_wait_msg:
+                            print(
+                                "[sidecar] waiting for first successful /pull "
+                                "from router-service ..."
+                            )
+                            self._printed_wait_msg = True
                     else:
                         print(f"[sidecar] /pull failed: {resp.status_code} {resp.text}")
-                except Exception as e:
+                    return
+
+                data = resp.json()
+                items = data.get("items", [])
+
+                if not self._first_success:
+                    print("[sidecar] first successful /pull; normal logging enabled.")
+                    self._first_success = True
+
+                if not items:
+                    return
+
+                # ---------------------
+                # Process returned jobs
+                # ---------------------
+                now_pull = time.time()
+
+                # Snapshot queue state *before* enqueueing pulled items
+                pending_before, inflight_before = self.local_q.state()
+                logical_before = pending_before + inflight_before
+                queue_len_after = pending_before + len(items)
+                logical_after = logical_before + len(items)
+
+                for item in items:
+                    rid = str(item["req_id"])
+                    prompt = str(item["prompt"])
+                    meta: Dict[str, Any] = item.get("meta") or {}
+
+                    # Trace injection for pull arrival + queue lengths
+                    if getattr(_cfg, "TRACE_ENABLED", False):
+                        tr = dict(meta.get("__trace__") or {})
+                        tr["t_arrive_sidecar_pull"] = now_pull
+
+                        # Sidecar-local queue lengths at pull time
+                        tr["sidecar_queue_len_before_pull"] = pending_before
+                        tr["sidecar_inflight_before_pull"] = inflight_before
+                        tr["sidecar_logical_before_pull"] = logical_before
+                        tr["sidecar_queue_len_after_pull"] = queue_len_after
+                        tr["sidecar_logical_after_pull"] = logical_after
+
+                        meta["__trace__"] = tr
+
+                    # Push into local queue
+                    self.local_q.put(rid, prompt, meta)
+
+            except Exception as e:
+                if not self._first_success:
+                    if not self._printed_wait_msg:
+                        print(
+                            "[sidecar] waiting for first successful /pull "
+                            "from router-service ..."
+                        )
+                        self._printed_wait_msg = True
+                else:
                     print(f"[sidecar] /pull error: {e}")
 
-            time.sleep(_cfg.PULL_INTERVAL_S)
-        session.close()
+            finally:
+                if tmp_session:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
