@@ -23,4 +23,5 @@ ncu_runs
 nsys_runs
 _len_cache
 tiny-model
-/pd-test/Mooncake/
+ascend-device-plugin
+uv.tar.gz
