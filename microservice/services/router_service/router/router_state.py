@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 from collections import deque
-from threading import RLock
-from typing import Deque, Dict, Tuple, List
+from threading import RLock, Event
+from typing import Deque, Dict, Tuple, List, Any, Optional
+import sys
+import uuid
 
 from .config import get_config
 from .kv_aware import prefix_len
@@ -13,47 +15,88 @@ _cfg = get_config()
 _pred = get_length_predictor()
 
 
+def _log_req(msg: str, *, level: str = "summary") -> None:
+    """
+    Centralized logging for pull-routing decisions.
+    Honors _cfg.REQ_LOG_MODE: off | summary | full
+    """
+    mode = str(_cfg.REQ_LOG_MODE).lower()
+
+    if mode == "off":
+        return
+
+    if level == "summary":
+        print(f"[PullRouter] {msg}")
+        sys.stdout.flush()
+    elif level == "full" and mode == "full":
+        print(f"[PullRouter] {msg}")
+        sys.stdout.flush()
+
+
 class RouterState:
     """
     Central queue of pending jobs + KV + length-aware selection.
-
-    Queue entries: (req_id, prompt, t_enq_client, meta)
-
-    In pull mode:
-      - enqueue() appends to _queue and pull_for_endpoint() selects.
-
-    In push-* modes:
-      - next_req_id() is used to allocate IDs, _queue is not used.
     """
 
     def __init__(self):
         self._lock = RLock()
-        self._next_req_id = 0
-        self._queue: Deque[Tuple[int, str, float, dict]] = deque()
+        # queue entries: (req_id, prompt, t_enq_client_or_router, meta)
+        self._queue: Deque[Tuple[str, str, float, dict]] = deque()
 
-    # ------------- ID allocation (used by push modes) -------------
+        # Result tracking
+        self._result_events: Dict[str, Event] = {}
+        self._result_values: Dict[str, Any] = {}
 
-    def next_req_id(self) -> int:
+    # -------------------------------------------------------
+    # ID allocation
+    # -------------------------------------------------------
+
+    def next_req_id(self) -> str:
+        with self._lock:
+            return uuid.uuid4().hex
+
+    # -------------------------------------------------------
+    # Enqueue
+    # -------------------------------------------------------
+
+    def enqueue(self, prompt: str, t_enq_client: float | None, meta: dict) -> str:
         """
-        Allocate a new monotonically increasing req_id without
-        enqueuing into the central queue (for push-* modes).
+        Enqueue a new request in pull mode.
+
+        t_enq_client: client-side enqueue timestamp (if provided),
+        otherwise we stamp with router now().
         """
         with self._lock:
-            rid = self._next_req_id
-            self._next_req_id += 1
-            return rid
-
-    # ------------- enqueue (used by pull mode) -------------
-
-    def enqueue(self, prompt: str, t_enq_client: float | None, meta: dict) -> int:
-        with self._lock:
-            rid = self._next_req_id
-            self._next_req_id += 1
+            rid = self.next_req_id()
             ts = float(t_enq_client) if t_enq_client else now_s()
             self._queue.append((rid, prompt, ts, meta or {}))
             return rid
 
-    # ------------- pull for endpoint (pull mode only) -------------
+    def update_meta(self, req_id: str, meta: dict) -> None:
+        """
+        In-place update of meta for a queued request.
+
+        Used by the API layer to inject trace info after enqueue without
+        changing queue order or timestamps.
+        """
+        with self._lock:
+            if not self._queue:
+                return
+
+            new_q: Deque[Tuple[str, str, float, dict]] = deque()
+            updated = False
+            while self._queue:
+                rid, prompt, ts, old_meta = self._queue.popleft()
+                if not updated and rid == req_id:
+                    new_q.append((rid, prompt, ts, meta or {}))
+                    updated = True
+                else:
+                    new_q.append((rid, prompt, ts, old_meta))
+            self._queue = new_q
+
+    # -------------------------------------------------------
+    # Pull (KV-aware + length-aware)
+    # -------------------------------------------------------
 
     def pull_for_endpoint(self, endpoint: str, want: int) -> List[JobItem]:
         if want <= 0:
@@ -66,60 +109,155 @@ class RouterState:
             pool_factor = max(1, int(_cfg.POOL_FACTOR))
             max_scan = min(len(self._queue), want * pool_factor)
 
-            # 1) Build a pool (copy, keep original queue intact for the moment)
-            pool: List[Tuple[int, str, float, dict]] = []
+            # 1) Build pool
+            pool: List[Tuple[str, str, float, dict]] = []
             for _ in range(max_scan):
                 rid, prompt, ts, meta = self._queue.popleft()
                 pool.append((rid, prompt, ts, meta))
 
-            # 2) Score by KV first (if enabled)
+            _log_req(
+                f"endpoint={endpoint} want={want} pool_size={len(pool)} "
+                f"queue_remaining={len(self._queue)}",
+                level="full",
+            )
+
             kv_enabled = bool(_cfg.KV_AWARE)
             len_enabled = bool(_cfg.LEN_AWARE)
             len_policy = _cfg.LEN_POLICY
 
+            # 2) KV scoring
             if kv_enabled:
-                scored: List[Tuple[int, str, float, dict, int]] = []
+                kv_pairs = []
+                scored = []
                 for rid, prompt, ts, meta in pool:
-                    hits = prefix_len(endpoint, rid)
-                    scored.append((rid, prompt, ts, meta, hits))
+                    kv_hits = prefix_len(endpoint, rid)
+                    kv_pairs.append((rid, kv_hits))
+                    scored.append((rid, prompt, ts, meta, kv_hits))
 
-                # KV-first: sort by kv_hits desc, then FIFO
+                _log_req(
+                    f"KV raw endpoint={endpoint}: {kv_pairs}",
+                    level="full",
+                )
+
                 scored.sort(key=lambda x: (-x[4], x[0]))
-                ordered = [(r, p, t, m) for (r, p, t, m, _) in scored]
+                ordered: List[Tuple[str, str, float, dict]] = [
+                    (r, p, t, m) for (r, p, t, m, _) in scored
+                ]
+
+                _log_req(
+                    f"KV sorted endpoint={endpoint}: "
+                    f"{[(r, kv) for (r, _p, _t, _m, kv) in scored]}",
+                    level="full",
+                )
             else:
-                # KV off -> FIFO order
                 ordered = list(pool)
 
-            # 3) Length-aware refinement inside the KV-ordered pool
+            # 3) Length-aware refinement
             if len_enabled and len_policy:
-                ordered = select_len_aware(ordered, _pred, len_policy)
+                refined = select_len_aware(ordered, _pred, len_policy)
+                ordered = refined
+                _log_req(
+                    f"Len policy='{len_policy}' ordering: "
+                    f"{[r for (r, _p, _t, _m) in refined]}",
+                    level="full",
+                )
 
-            # 4) Take the first `want` items as chosen
-            chosen = ordered[:want]
-            chosen_ids = {rid for (rid, _p, _t, _m) in chosen}
+            # 4) Choose
+            chosen_raw = ordered[:want]
+            chosen_ids = [rid for (rid, _p, _t, _m) in chosen_raw]
 
-            # 5) Everything else goes back into the queue (preserving order)
-            leftovers: List[Tuple[int, str, float, dict]] = []
-            for item in ordered[want:]:
-                leftovers.append(item)
+            chosen_kv_hits = [(rid, prefix_len(endpoint, rid)) for rid in chosen_ids]
 
-            # Reconstruct main queue: leftovers + everything that wasn’t scanned
+            _log_req(
+                f"chosen endpoint={endpoint}: {chosen_ids} kv_hits={chosen_kv_hits}",
+                level="summary",
+            )
+
+            # 4a) Attach trace info (if enabled)
+            chosen: List[Tuple[str, str, float, dict]] = []
+            dispatch_ts = now_s()
+            if getattr(_cfg, "TRACE_ENABLED", False):
+                # ★ NEW: capture queue_length_at_dispatch
+                qlen_at_dispatch = len(self._queue)
+
+                for rid, prompt, ts, meta in chosen_raw:
+                    m = dict(meta or {})
+                    tr = dict(m.get("__trace__") or {})
+
+                    # preserve earlier fields if any
+                    tr.setdefault("t_enq_router_queue", ts)
+                    tr.setdefault("endpoint", endpoint)
+
+                    tr["t_dispatch_router"] = dispatch_ts
+                    tr["router_queue_len_at_dispatch"] = qlen_at_dispatch  # ★ NEW
+
+                    m["__trace__"] = tr
+                    chosen.append((rid, prompt, ts, m))
+            else:
+                chosen = chosen_raw
+
+            # 5) Requeue leftovers
+            leftovers = ordered[want:]
             for rid, prompt, ts, meta in leftovers:
-                self._queue.appendleft((rid, prompt, ts, meta))  # prepend leftovers
+                self._queue.appendleft((rid, prompt, ts, meta))
 
-            # 6) Build JobItem list to return
-            items: List[JobItem] = []
-            for rid, prompt, ts, meta in chosen:
-                items.append(JobItem(req_id=rid, prompt=prompt, t_enq_client=ts, meta=meta))
+            if leftovers:
+                _log_req(
+                    f"leftovers requeued: "
+                    f"{[r for (r, _p, _t, _m) in leftovers]}",
+                    level="full",
+                )
+
+            # 6) Build output
+            items = [
+                JobItem(req_id=rid, prompt=prompt, t_enq_client=ts, meta=meta)
+                for (rid, prompt, ts, meta) in chosen
+            ]
 
             return items
 
-    # ------------- metrics / debug -------------
+    # -------------------------------------------------------
+    # Result wait/notify
+    # -------------------------------------------------------
+
+    def register_waiter(self, req_id: str) -> None:
+        with self._lock:
+            if req_id not in self._result_events:
+                self._result_events[req_id] = Event()
+
+    def store_result(self, req_id: str, result: Any) -> None:
+        evt: Optional[Event] = None
+        with self._lock:
+            self._result_values[req_id] = result
+            evt = self._result_events.get(req_id)
+        if evt is not None:
+            evt.set()
+
+    def wait_for_result(self, req_id: str, timeout_s: float) -> Optional[Any]:
+        with self._lock:
+            evt = self._result_events.get(req_id)
+            if evt is None:
+                evt = Event()
+                self._result_events[req_id] = evt
+
+        ok = evt.wait(timeout_s)
+        if not ok:
+            return None
+
+        with self._lock:
+            result = self._result_values.get(req_id)
+            self._result_events.pop(req_id, None)
+            self._result_values.pop(req_id, None)
+            return result
+
+    # -------------------------------------------------------
+    # Metrics
+    # -------------------------------------------------------
 
     def size(self) -> int:
         with self._lock:
             return len(self._queue)
 
 
-# single global state for the FastAPI app
+# global instance
 router_state = RouterState()

@@ -12,7 +12,7 @@ class LocalQueue:
     """
 
     def __init__(self):
-        self._q: "Queue[Tuple[int, str, Dict[str, Any]]]" = Queue()
+        self._q: "Queue[Tuple[str, str, Dict[str, Any]]]" = Queue()
         self._lock = RLock()
         self._inflight: int = 0
 
@@ -28,10 +28,10 @@ class LocalQueue:
             inflight = self._inflight
         return pending, inflight
 
-    def put(self, req_id: int, prompt: str, meta: Dict[str, Any]):
+    def put(self, req_id: str, prompt: str, meta: Dict[str, Any]):
         self._q.put((req_id, prompt, meta))
 
-    def get_nowait(self) -> Optional[Tuple[int, str, Dict[str, Any]]]:
+    def get_nowait(self) -> Optional[Tuple[str, str, Dict[str, Any]]]:
         try:
             item = self._q.get_nowait()
         except Empty:
