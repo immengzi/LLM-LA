@@ -94,7 +94,7 @@ def print_trace_block(idx: int, result: Dict[str, Any]) -> None:
         return
 
     # Endpoint identity
-    endpoint = trace.get("endpoint")
+    endpoint = trace.get("pod")
     print(f"[client][T{idx}]   trace_endpoint={endpoint}")
 
     # Router mode (if present)
@@ -109,7 +109,7 @@ def print_trace_block(idx: int, result: Dict[str, Any]) -> None:
 
     # Non-timestamp extras (queue lengths, inflight counts, etc.)
     for k, v in trace.items():
-        if k in ("endpoint", "router_mode"):
+        if k in ("pod", "router_mode"):
             continue
         if isinstance(k, str) and k.startswith("t_"):
             # Skip raw timestamps here – we only expose derived latencies.

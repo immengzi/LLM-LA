@@ -177,7 +177,7 @@ class RouterState:
             chosen: List[Tuple[str, str, float, dict]] = []
             dispatch_ts = now_s()
             if getattr(_cfg, "TRACE_ENABLED", False):
-                # ★ NEW: capture queue_length_at_dispatch
+                # capture queue_length_at_dispatch
                 qlen_at_dispatch = len(self._queue)
 
                 for rid, prompt, ts, meta in chosen_raw:

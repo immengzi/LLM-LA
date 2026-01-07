@@ -5,6 +5,10 @@ from typing import Optional
 import yaml
 
 
+# =========================
+# Prompt sources
+# =========================
+
 @dataclass
 class FilePromptsConfig:
     path: str = "prompts.json"
@@ -21,6 +25,10 @@ class HFLmsysConfig:
     max_input_tokens: Optional[int] = None
     repeat_each: int = 1
 
+
+# =========================
+# Load generation
+# =========================
 
 @dataclass
 class LoadPatternConfig:
@@ -42,6 +50,10 @@ class LoadPatternConfig:
     loadgen_seed: int = 12345
 
 
+# =========================
+# Generation parameters
+# =========================
+
 @dataclass
 class GenerationConfig:
     max_tokens: int = 256
@@ -52,18 +64,58 @@ class GenerationConfig:
     think: bool = False
 
 
+# =========================
+# Metrics / observability
+# =========================
+
+@dataclass
+class PrometheusMetricsConfig:
+    enabled: bool = True
+    # Base Prometheus HTTP endpoint
+    prometheus_base_url: str = "http://localhost:31190"
+
+    # Sampling interval (how often we query Prometheus)
+    scrape_interval_s: float = 2.0
+
+    # PromQL rate() / histogram window
+    window_s: float = 10.0
+
+    # Include extra research / debug metrics
+    include_debug_metrics: bool = False
+
+    # Optional label filtering (e.g. model name)
+    model_name: Optional[str] = None
+
+    # Safety: cap on how many vLLM instances we sample
+    max_instances: Optional[int] = None
+
+
+# =========================
+# Top-level client config
+# =========================
+
 @dataclass
 class ClientConfig:
     router_url: str = "http://127.0.0.1:30080"
     total_requests: int = 50
     prompt_source: str = "file"
+
     file_prompts: FilePromptsConfig = field(default_factory=FilePromptsConfig)
     hf_lmsys: HFLmsysConfig = field(default_factory=HFLmsysConfig)
     load_pattern: LoadPatternConfig = field(default_factory=LoadPatternConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
+
+    # Output / tracing
     output_log_mode: str = "full"
     print_trace: bool = False
 
+    # Metrics
+    metrics: PrometheusMetricsConfig = field(default_factory=PrometheusMetricsConfig)
+
+
+# =========================
+# Helpers
+# =========================
 
 def _merge_dataclass(dc_cls, data_dict: dict):
     kwargs = {}
@@ -75,6 +127,10 @@ def _merge_dataclass(dc_cls, data_dict: dict):
         setattr(base, k, v)
     return base
 
+
+# =========================
+# Config loader
+# =========================
 
 def load_config(path: str) -> ClientConfig:
     with open(path, "r") as f:
@@ -88,11 +144,11 @@ def load_config(path: str) -> ClientConfig:
     hf_lmsys = _merge_dataclass(HFLmsysConfig, raw.get("hf_lmsys", {}))
     load_pattern = _merge_dataclass(LoadPatternConfig, raw.get("load_pattern", {}))
     generation = _merge_dataclass(GenerationConfig, raw.get("generation", {}))
+    metrics = _merge_dataclass(PrometheusMetricsConfig, raw.get("metrics", {}))
 
     # Only special-case: output_log_mode. Use the dataclass default if not in YAML.
     output_log_mode = raw.get("output_log_mode", ClientConfig.output_log_mode)
     print_trace = raw.get("print_trace", ClientConfig.print_trace)
-
 
     return ClientConfig(
         router_url=router_url,
@@ -104,4 +160,5 @@ def load_config(path: str) -> ClientConfig:
         generation=generation,
         output_log_mode=output_log_mode,
         print_trace=print_trace,
+        metrics=metrics,
     )

@@ -44,6 +44,39 @@ def _build_schedule_per_second_even(
     return times
 
 
+def _build_schedule_poisson(
+    start_mono: float,
+    duration_s: float,
+    rate_rps: float,
+    max_items: int,
+    rnd: random.Random,
+) -> List[float]:
+    """
+    True Poisson process arrivals:
+      - inter-arrival times are exponential with mean 1/rate_rps
+      - stops when reaching duration or max_items
+    """
+    times: List[float] = []
+    if duration_s <= 0 or max_items <= 0 or rate_rps <= 0:
+        return times
+
+    end_mono = start_mono + duration_s
+    t = start_mono
+
+    # delta ~ Exp(rate_rps)
+    while len(times) < max_items:
+        u = rnd.random()
+        if u <= 0.0:
+            continue
+        delta = -math.log(u) / rate_rps
+        t = t + delta
+        if t >= end_mono:
+            break
+        times.append(t)
+
+    return times
+
+
 def _parse_steps(spec: str) -> List[Tuple[float, float]]:
     out: List[Tuple[float, float]] = []
     if not spec:
@@ -201,13 +234,23 @@ def build_schedule(
     if pattern == "dump":
         plan_times = _build_schedule_dump(t0, total_items)
 
-    elif pattern in ("det", "poisson"):
+    elif pattern == "det":
         rps_i = int(round(max(0.0, rate_rps)))
         main_times = _build_schedule_per_second_even(
             start_mono=start_main,
             duration_s=max(0.0, duration_s),
             rps_int=rps_i,
             max_items=total_items,
+        )
+        plan_times = main_times[:total_items]
+
+    elif pattern == "poisson":
+        main_times = _build_schedule_poisson(
+            start_mono=start_main,
+            duration_s=max(0.0, duration_s),
+            rate_rps=float(rate_rps),
+            max_items=total_items,
+            rnd=rnd,
         )
         plan_times = main_times[:total_items]
 

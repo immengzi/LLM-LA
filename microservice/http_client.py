@@ -30,9 +30,9 @@ def send_one(
              "finish_reason": "stop",
              "latency_s": 0.342,
 
-             # --- NEW (if server-side trace is enabled) ---
+             # ---  (if server-side trace is enabled) ---
              "trace": {
-                 "endpoint": "vllm-pod-xyz",
+                 "pod": "vllm-pod-xyz",
                  "t_enq_router": 1700000000.123456,
                  "t_dispatch_router": 1700000000.234567,
                  "t_arrive_sidecar_push": 1700000000.345678,
