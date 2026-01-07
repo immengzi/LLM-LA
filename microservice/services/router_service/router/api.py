@@ -244,6 +244,21 @@ async def enqueue(req: EnqueueRequest):
         result["trace"] = tr
         result.pop("__trace__", None)
 
+    # ------------------------------------------------------
+    # RESPONSE-ONLY rename: endpoint -> pod
+    # (does NOT affect sidecar payloads, /result, /pull, or internal routing)
+    # ------------------------------------------------------
+    if isinstance(result, dict):
+        # If endpoint appears as a top-level key in result
+        if "endpoint" in result and "pod" not in result:
+            result["pod"] = result.pop("endpoint")
+
+        # If endpoint appears inside trace
+        tr = result.get("trace")
+        if isinstance(tr, dict) and "endpoint" in tr and "pod" not in tr:
+            tr["pod"] = tr.pop("endpoint")
+            result["trace"] = tr
+
     _log_api_req(
         f"complete rid={rid} mode={mode_str} latency={router_latency:.3f}s",
         level="summary",

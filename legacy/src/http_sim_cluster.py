@@ -83,7 +83,7 @@ def _http_endpoints(cfg) -> List[str]:
     "--config",
     "config_path",
     type=str,
-    default="sim_distro",
+    default="sim_distro_token_length_false",
     show_default=True,
     help="Profile under BASE_CONFIGS_PATH (loads <name>.yaml)",
 )

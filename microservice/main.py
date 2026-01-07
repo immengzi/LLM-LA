@@ -13,6 +13,13 @@ from scheduler import build_schedule
 from load_runner import run_open_loop_load
 from experiment_io import init_experiment
 
+# Optional metrics
+try:
+    from metrics_prom import start_metrics_collection, stop_metrics_collection
+except Exception:
+    start_metrics_collection = None  # type: ignore
+    stop_metrics_collection = None   # type: ignore
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -34,20 +41,14 @@ def main():
     )
     args = parser.parse_args()
 
-    # Resolve config path:
-    # - If --config is a bare name (no parent dir, no suffix): use ./configs/<name>.yaml
-    # - If --config has a parent dir or suffix: treat it as a path
-    # - Else fall back to ./configs/example_config.yaml
+    # Resolve config path
     if args.config:
         raw = Path(args.config)
         if raw.parent != Path(".") or raw.suffix:
-            # Has a directory component or explicit suffix -> treat as given path
             config_path = raw
         else:
-            # Bare logical name -> assume under ./configs/<name>.yaml
             config_path = Path("configs") / f"{args.config}.yaml"
     else:
-        # Default config under configs/
         config_path = Path("configs") / "example_config.yaml"
 
     cfg = load_config(str(config_path))
@@ -55,7 +56,7 @@ def main():
     if args.n is not None:
         cfg.total_requests = int(args.n)
 
-    # Build prompts.
+    # Build prompts
     if cfg.prompt_source == "file":
         prompts = load_prompts_from_file(
             path=cfg.file_prompts.path,
@@ -81,10 +82,11 @@ def main():
         f"prompt-source={cfg.prompt_source}, "
         f"warmup_reqs={cfg.load_pattern.warmup_reqs}, "
         f"output_log_mode={cfg.output_log_mode}, "
-        f"print_trace={cfg.print_trace}"
+        f"print_trace={cfg.print_trace}, "
+        f"metrics_enabled={bool(cfg.metrics.enabled)}"
     )
 
-    # Initialize experiment directory + logger:
+    # Initialize experiment directory + logger
     exp_dir, exp_logger = init_experiment(
         cfg,
         config_path=str(config_path),
@@ -92,7 +94,7 @@ def main():
     )
     print(f"[client] experiment_dir={exp_dir}")
 
-    # Build schedule.
+    # Build schedule
     lp = cfg.load_pattern
     plan_times = build_schedule(
         pattern=lp.pattern,
@@ -115,6 +117,22 @@ def main():
         total = len(prompts)
         print(f"[client] schedule shorter than prompts; trimming to {total} events")
 
+    # Start metrics (best-effort)
+    metrics_started = False
+    if cfg.metrics.enabled:
+        if start_metrics_collection is None:
+            print("[metrics] enabled but metrics_prom.py not available; skipping.")
+        else:
+            try:
+                start_metrics_collection(
+                    run_dir=str(exp_dir),
+                    cfg=cfg.metrics,
+                )
+                metrics_started = True
+                print("[metrics] collection started")
+            except Exception as e:
+                print(f"[metrics] failed to start metrics collection: {e}")
+
     t_start_wall = time.time()
 
     try:
@@ -126,10 +144,17 @@ def main():
             warmup_reqs=cfg.load_pattern.warmup_reqs,
             logger=exp_logger,
             output_log_mode=cfg.output_log_mode,
-            print_trace=cfg.print_trace,  # <-- wire through config
+            print_trace=cfg.print_trace,
         )
     finally:
-        # Ensure we always close the logger (flush + close logs.json).
+        # Stop metrics first (flush), then close request logger
+        if metrics_started and stop_metrics_collection is not None:
+            try:
+                stop_metrics_collection()
+                print("[metrics] collection stopped")
+            except Exception as e:
+                print(f"[metrics] failed to stop metrics collection: {e}")
+
         exp_logger.close()
 
     dt = time.time() - t_start_wall
