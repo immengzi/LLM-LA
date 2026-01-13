@@ -1,5 +1,6 @@
 # experiment_analysis.py
 # Utilities for loading experiment logs and computing per-request latency metrics.
+# + minimal helpers for loading Prometheus samples recorded in metrics.jsonl.
 #
 # Usage from a notebook, for example:
 #
@@ -7,12 +8,17 @@
 #   df = load_experiment_latencies(exp_id=3)
 #   df.head()
 #
+#   from experiment_analysis import load_experiment_prom_samples
+#   prom = load_experiment_prom_samples(exp_id=3)
+#   prom.head()
+#
 # This expects the directory layout produced by experiment_io.init_experiment():
 #
 #   ./experiments/
 #       1/
 #         config.json
-#         logs.json   <-- NDJSON (one JSON object per line)
+#         logs.json         <-- NDJSON (one JSON object per line)
+#         metrics.jsonl     <-- NDJSON (Prometheus samples; optional)
 #       2/
 #         ...
 #
@@ -148,7 +154,9 @@ def load_experiment_latencies(
             "wait_wall_s": rec.get("wait_wall_s"),
             "model_latency_s": rec.get("model_latency_s"),
             "finish_reason": rec.get("finish_reason"),
-            # You can add more here if you care (prompt length, output length, etc.)
+            "prompt_tokens": rec.get("prompt_tokens"),
+            "completion_tokens": rec.get("completion_tokens"),
+            "total_tokens": rec.get("total_tokens"),
         }
 
         trace = rec.get("trace")
@@ -183,5 +191,67 @@ def load_experiment_latencies(
         df["idx"] = pd.to_numeric(df["idx"], errors="coerce").astype("Int64")
     if "send_failed" in df.columns:
         df["send_failed"] = df["send_failed"].astype(bool)
+
+    return df
+
+
+# ============================================================
+# NEW: Minimal Prometheus metrics loader (metrics.jsonl)
+# ============================================================
+
+def load_experiment_prom_samples(
+    *,
+    exp_id: Optional[Union[int, str]] = None,
+    exp_dir: Optional[PathLike] = None,
+    experiments_root: PathLike = "experiments",
+) -> pd.DataFrame:
+    """
+    Load metrics.jsonl (written by metrics_prom.py) and flatten into a DataFrame.
+
+    Each JSONL tick typically looks like:
+      {"ts": "...", "mode": "...", "instances": [...], "samples": [ {instance/pod + fields...}, ... ]}
+
+    This function returns one row per (tick, sample), i.e. per instance per tick.
+
+    Output columns (depending on what's present in your metrics_prom catalog):
+      - ts (datetime64[ns, UTC])
+      - instance (host:port)
+      - pod (optional)
+      - requests_running, requests_waiting, gen_tokens_per_sec, ... (optional)
+      - any other fields in the "samples" objects
+    """
+    exp_path = _resolve_experiment_dir(exp_id=exp_id, exp_dir=exp_dir, experiments_root=experiments_root)
+    metrics_path = exp_path / "metrics.jsonl"
+
+    if not metrics_path.is_file():
+        return pd.DataFrame()
+
+    flat: List[JsonDict] = []
+
+    for rec in _read_ndjson(metrics_path):
+        # Skip error ticks written by metrics_prom.py
+        if rec.get("type") == "metrics_error":
+            continue
+
+        ts = rec.get("ts")
+        samples = rec.get("samples")
+        if not isinstance(samples, list) or not samples:
+            continue
+
+        for s in samples:
+            if not isinstance(s, dict):
+                continue
+            row: JsonDict = {"ts": ts}
+            # includes instance/pod and metric fields
+            row.update(s)
+            flat.append(row)
+
+    if not flat:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(flat)
+
+    if "ts" in df.columns:
+        df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
 
     return df

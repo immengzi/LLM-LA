@@ -1,0 +1,84 @@
+# test_config.yaml
+# Clean test config (explicit knobs, values close to example_config.yaml)
+
+router_url: "http://127.0.0.1:30080"
+total_requests: 10000
+prompt_source: "hf-lmsys"
+
+
+# =========================
+# Prompt sources
+# =========================
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
+  split: "train"
+  tokenizer_name: "/mnt/nvme1/saeid/models/qwen3-8b"
+  streaming: false
+  min_input_tokens: 1
+  max_input_tokens: 10000000
+  repeat_each: 1
+
+
+# =========================
+# Load generation
+# =========================
+
+load_pattern:
+  pattern: "det"
+
+  rate_rps: 4.0
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+
+  loadgen_seed: 12345
+
+
+# =========================
+# Generation parameters
+# =========================
+
+generation:
+  max_tokens: 8192
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+
+
+# =========================
+# Output / tracing
+# =========================
+
+output_log_mode: "summary"
+print_trace: false
+
+
+# =========================
+# Metrics / observability
+# =========================
+
+metrics:
+  enabled: true
+  prometheus_base_url: "http://localhost:31190"
+  scrape_interval_s: 1.0
+  window_s: 2.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null

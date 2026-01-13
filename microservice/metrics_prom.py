@@ -647,7 +647,7 @@ def stop_metrics_collection() -> Dict[str, Any]:
         return {}
 
     s.stop()
-    time.sleep(min(0.25, float(s.interval_s)))
+    s.join(timeout=2)
 
     try:
         with (s.run_dir / "metrics_summary.json").open("r", encoding="utf-8") as f:
