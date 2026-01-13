@@ -1,0 +1,163 @@
+# example_config.yaml
+# Sample configuration for the microservice load client.
+#
+# This file is meant to be BOTH:
+#   (1) a reference for every supported config key, and
+#   (2) a runnable example (the "active" keys are uncommented).
+#
+# Notes
+# - Any key you omit will fall back to the dataclass default in config.py.
+# - The schedule patterns are implemented in scheduler.py:
+#     dump | det | poisson | bursty | steps | rand
+# - "total_requests" is the hard cap on how many requests the client will send.
+#   For patterns that also take duration/rate, the actual sent requests is still capped by total_requests.
+
+
+# =========================
+# Top-level client config
+# =========================
+
+router_url: "http://127.0.0.1:30080"
+total_requests: 200
+
+# prompt_source: "file" | "hf-lmsys"
+prompt_source: "hf-lmsys"
+
+
+# =========================
+# Prompt sources
+# =========================
+
+# --- File prompts (used when prompt_source: "file") ---
+file_prompts:
+  # path: "prompts.json"
+  # variant: "short" | "medium" | "long"
+  path: "prompts.json"
+  variant: "short"
+
+# --- HF LMSYS dataset (used when prompt_source: "hf-lmsys") ---
+hf_lmsys:
+  # dataset_name: "/path/to/dataset" (local) OR "lmsys/lmsys-chat-1m" (HF hub, if your code supports it)
+  # dataset_name: "lmsys/lmsys-chat-1m"
+  # split: "train"
+  # tokenizer_name: "gpt2"
+  # streaming: false
+  #
+  # Optional filters (input token count constraints):
+  min_input_tokens: 256
+  max_input_tokens: 512
+  #
+  # repeat_each: repeat each sampled prompt N times (helps reduce dataset variance)
+  # repeat_each: 1
+
+
+# =========================
+# Load generation (open-loop)
+# =========================
+
+load_pattern:
+  # pattern: one of
+  #   - "dump"    : fire all requests immediately (timestamps all == t0)
+  #   - "det"     : deterministic even arrivals per second at ~rate_rps for duration_s
+  #   - "poisson" : Poisson arrivals with mean rate_rps for duration_s
+  #   - "bursty"  : alternate ON/OFF windows at burst_rps_on/burst_rps_off for duration_s
+  #   - "steps"   : piecewise constant RPS defined by step_schedule for duration_s
+  #   - "rand"    : choose a random integer RPS each epoch in [rand_rps_min, rand_rps_max]
+  #
+  # Tip: total_requests is always a cap; schedules will not exceed it.
+  pattern: "dump"
+
+  # --- Shared knobs (used by det/poisson/steps; also as fallbacks for rand) ---
+  # Target average requests/sec for det/poisson/steps.
+  rate_rps: 100.0
+  # Duration of the schedule window (seconds). Schedules stop at start+duration_s.
+  duration_s: 60.0
+
+  # Warmup requests before the measured run (client-side; runner-dependent).
+  warmup_reqs: 0
+
+  # --- Bursty knobs (pattern: "bursty") ---
+  # Alternate ON for burst_on_s, then OFF for burst_off_s, repeating until duration_s.
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  # During ON windows, emit at burst_rps_on. During OFF windows, emit at burst_rps_off.
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  # --- Steps knobs (pattern: "steps") ---
+  # Format: "t:rps,t:rps,..."
+  # Meaning: starting at offset t seconds from start, use that RPS until the next step.
+  # Example: "0:5,30:15,60:3"
+  step_schedule: "0:5,30:15,60:3"
+
+  # --- Rand knobs (pattern: "rand") ---
+  # For each epoch of length rand_epoch_s, sample an integer RPS uniformly in [min, max].
+  # If min/max are null, scheduler.py derives defaults using rate_rps + burst_rps_*.
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+
+  # Seed used by poisson/rand (and any other randomized schedule parts).
+  loadgen_seed: 12345
+
+
+# =========================
+# Generation parameters
+# =========================
+
+generation:
+  max_tokens: 2048
+  temperature: 0.0
+
+  # length_mode:
+  #   - "legacy"
+  #   - "target-output" : use target_output_tokens
+  #   - "target-total"  : use target_total_tokens
+  #   - "dist-output"   : (if your stack supports it) sample output lengths from a distribution
+  length_mode: "legacy"
+
+  target_output_tokens: null
+  target_total_tokens: null
+
+  # think: model-dependent (some stacks use this to enable "thinking"/reasoning tokens)
+  think: false
+
+
+# =========================
+# Output / tracing
+# =========================
+
+# output_log_mode: "full" | "summary" | "none"  (depends on your client implementation)
+# output_log_mode: "full"
+# print_trace: true to print derived per-request trace latencies (trace_utils.py)
+# print_trace: false
+
+
+# =========================
+# Metrics / observability
+# =========================
+
+metrics:
+  enabled: true
+
+  # Base Prometheus HTTP endpoint (the "server" that exposes /api/v1/query).
+  prometheus_base_url: "http://localhost:31190"
+
+  # How often to query Prometheus while the run is active.
+  scrape_interval_s: 2.0
+
+  # PromQL rate()/histogram averaging window (rounded to int seconds internally).
+  window_s: 10.0
+
+  # Include extra research/debug vLLM counters (request_total, timeout_total, etc.).
+  include_debug_metrics: false
+
+  # Optionally filter series by model name if vLLM exports model_name label.
+  # model_name: "qwen3-8b"
+
+  # Safety: cap number of instances to sample (useful when discovery returns many pods).
+  # max_instances: 16
+
+  # Optional (supported by metrics_prom.py):
+  # include_gpu_metrics: true    # requires dcgm-exporter scraped by Prometheus
+  # prometheus_timeout_s: 5.0    # HTTP timeout for Prometheus queries

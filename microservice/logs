@@ -1,0 +1,448 @@
+Legend:
+↓ lower is better  ↑ higher is better  
+Values are real metrics.  
+Percentages in parentheses show **Pull’s improvement (+) or regression (−)** relative to the method.
+
+Series1:
+Setup:
+- 8 servers
+- Request response size limit: 2048 tokens
+- Input tokens: 256–512
+- pattern: "dump"
+- Total requests: 200
+- Methods:
+  1) Pull
+  2) Push-RR
+  3) Push-Random
+  4) Push-Least-Queue
+
+Purpose: check the pull method under capped input/output token (prefill visible)
+Findings: With bounded prefill and decode, batching efficiency dominates. Pull consistently wins latency and tail metrics because admission is aligned with GPU availability, while push methods over-admit and inflate queues without throughput benefit.
+
+
+Observations:
+Metric (stat)               | Pull (exp1) | Push-RR (exp2)           | Push-Random (exp3)       | Push-LQ (exp4)           | Winner
+----------------------------|-------------|--------------------------|--------------------------|--------------------------|--------
+↓ Latency mean (s)          | 57.80*      | 66.02 (+14.2%)           | 69.20 (+19.7%)           | 67.46 (+16.7%)           | Pull
+↓ Latency p99 (s)           | 112.46*     | 117.09 (+4.1%)           | 117.07 (+4.1%)           | 113.79 (+1.2%)           | Pull
+
+↑ Decode TPS mean           | 739.23      | 644.20 (−12.9%)          | 633.36 (−14.3%)          | 741.91* (+0.4%)          | Push-LQ
+↑ Prefill TPS mean          | 615.16*     | 462.53 (−24.8%)          | 494.12 (−19.7%)          | 552.89 (−10.1%)          | Pull
+
+↑ Requests running mean     | 35.32       | 32.08 (−9.2%)            | 31.12 (−11.9%)           | 36.03* (+2.0%)           | Push-LQ
+
+↓ TTFT mean (s)             | 6.30        | 6.20 (−1.6%)             | 5.33* (−15.4%)           | 6.32 (+0.2%)             | Push-Random
+↓ TTFT p99 (s)              | 25.35*      | 35.12 (+38.6%)           | 36.98 (+45.9%)           | 38.35 (+51.3%)           | Pull
+
+↓ TPOT mean (s)             | 0.462       | 0.426* (−8.0%)           | 0.449 (−3.0%)            | 0.480 (+3.8%)            | Push-RR
+↓ TPOT p99 (s)              | 1.946*      | 2.129 (+9.4%)            | 2.810 (+44.4%)           | 2.008 (+3.2%)            | Pull
+
+
+
+------------------------------------------------
+
+Series2:
+Setup:
+- 8 servers
+- Request response length: unlimited (until EOS)
+- Input tokens: 256–512
+- Total requests: 200
+- pattern: "dump"
+- Methods:
+  5) Pull
+  6) Push-RR
+  7) Push-Random
+  8) Push-Least-Queue
+
+Purpose: check the pull method under none-capped on input and output token (prefill visible but less heavy since the decode is dominant)
+Findings: Once decode dominates, early admission helps. Push methods improve TTFT and TPOT by starting work sooner, while Pull remains competitive on throughput but slightly slower in responsiveness due to conservative gating.
+
+Observations:
+Metric (stat)               | Pull (exp5) | Push-RR (exp6)           | Push-Random (exp7)       | Push-LQ (exp8)           | Winner
+----------------------------|-------------|--------------------------|--------------------------|--------------------------|--------
+↓ Latency mean (s)          | 70.27       | 70.21* (−0.1%)           | 70.44 (+0.2%)            | 73.80 (+5.0%)            | Push-RR
+↓ Latency p99 (s)           | 287.42      | 285.26* (−0.8%)          | 290.30 (+1.0%)           | 307.23 (+6.9%)           | Push-RR
+
+↑ Decode TPS mean           | 370.91*     | 337.30 (−9.1%)           | 363.17 (−2.1%)           | 323.80 (−12.7%)          | Pull
+↑ Prefill TPS mean          | 246.10*     | 180.76 (−26.6%)          | 222.36 (−9.7%)           | 206.14 (−16.2%)          | Pull
+
+↑ Requests running mean     | 17.28*      | 15.59 (−9.8%)            | 16.34 (−5.5%)            | 14.39 (−16.8%)           | Pull
+
+↓ TTFT mean (s)             | 6.83        | 6.14 (−10.2%)            | 5.50 (−19.6%)            | 4.90* (−28.3%)           | Push-LQ
+↓ TTFT p99 (s)              | 40.62       | 31.90* (−21.5%)          | 36.02 (−11.3%)           | 37.11 (−8.6%)            | Push-RR
+
+↓ TPOT mean (s)             | 0.235       | 0.203 (−13.7%)           | 0.214 (−9.0%)            | 0.179* (−24.0%)          | Push-LQ
+↓ TPOT p99 (s)              | 1.695       | 1.467 (−13.4%)           | 1.437* (−15.2%)          | 1.493 (−12.0%)           | Push-Random
+
+
+------------------------------------------------
+
+Series3:
+Setup:
+- 8 servers
+- No cap on input tokens
+- Request response length: unlimited
+- Total requests: 200
+- pattern: "dump"
+- Methods:
+  9) Pull
+  10) Push-RR
+  11) Push-Random
+  12) Push-Least-Queue
+
+Purpose: check the pull method under none-capped input and output token (natural prefill and decode scenario)
+Findings: Unbounded prefills expose scheduling trade-offs, Pull stabilizes mean latency and TPOT by pacing heavy requests, while push reduces TTFT but increases variance from uncontrolled overlap.
+
+Observations:
+Metric (stat)               | Pull (exp9) | Push-RR (exp10)          | Push-Random (exp11)      | Push-LQ (exp12)          | Winner
+----------------------------|-------------|--------------------------|--------------------------|--------------------------|--------
+↓ Latency mean (s)          | 40.01*      | 45.14 (+12.8%)           | 43.37 (+8.4%)            | 41.52 (+3.8%)            | Pull
+↓ Latency p99 (s)           | 132.31      | 119.69* (−9.5%)          | 144.27 (+9.0%)           | 137.95 (+4.3%)           | Push-RR
+
+↑ Decode TPS mean           | 458.23*     | 452.54 (−1.2%)           | 451.19 (−1.5%)           | 432.11 (−5.7%)           | Pull
+↑ Prefill TPS mean          | 63.09       | 63.72* (+1.0%)           | 55.49 (−12.1%)           | 60.78 (−3.7%)            | Push-RR
+
+↑ Requests running mean     | 15.02*      | 14.82 (−1.4%)            | 14.73 (−2.0%)            | 14.31 (−4.8%)            | Pull
+
+↓ TTFT mean (s)             | 1.76        | 1.34 (−23.7%)            | 1.14* (−35.5%)           | 1.63 (−7.6%)             | Push-Random
+↓ TTFT p99 (s)              | 9.85        | 8.90 (−9.7%)             | 7.40* (−24.9%)           | 10.86 (+10.2%)           | Push-Random
+
+↓ TPOT mean (s)             | 0.126       | 0.124* (−1.1%)           | 0.132 (+4.8%)            | 0.128 (+2.0%)            | Push-RR
+↓ TPOT p99 (s)              | 0.430*      | 0.486 (+13.2%)           | 0.623 (+45.1%)           | 0.515 (+19.8%)           | Pull
+
+
+------------------------------------------------
+
+Series4:
+Setup:
+- 8 servers
+- No cap on input tokens
+- Request response length: unlimited
+- Total requests: 10000
+- pattern: "det"
+- rate_rps: 1
+- Methods:
+  9) Pull
+  10) Push-RR
+  11) Push-Random
+  12) Push-Least-Queue
+
+Purpose: check the pull method under none-capped input and output token (natural prefill and decode scenario) on rps 1
+Findings: At very low load, scheduling policy is irrelevant. GPUs are idle, queues are empty, and all methods converge, confirming no structural advantage in the underutilized regime.
+
+Observations:
+Metric (stat)               | Pull (exp13) | Push-RR (exp14)          | Push-Random (exp15)      | Push-LQ (exp16)          | Winner
+----------------------------|--------------|--------------------------|--------------------------|--------------------------|--------
+↓ Latency mean (s)          | 18.07*       | 18.18 (+0.6%)            | 18.18 (+0.6%)            | 18.16 (+0.5%)            | Pull
+↓ Latency p99 (s)           | 247.33       | 247.43 (+0.0%)           | 246.83* (−0.2%)          | 248.31 (+0.4%)           | Push-Random
+
+↑ Decode TPS mean           | 581.30       | 581.39* (+0.0%)          | 578.40 (−0.5%)           | 580.92 (−0.1%)           | Push-RR
+↑ Prefill TPS mean          | 82.02        | 81.94 (−0.1%)            | 83.37* (+1.6%)           | 82.75 (+0.9%)            | Push-Random
+
+↑ Requests running mean     | 17.53*       | 17.52 (−0.1%)            | 17.46 (−0.4%)            | 17.46 (−0.4%)            | Pull
+
+↓ TTFT mean (s)             | 0.263*       | 0.266 (+1.2%)            | 0.273 (+4.1%)            | 0.289 (+9.9%)            | Pull
+↓ TTFT p99 (s)              | 1.413        | 1.564 (+10.7%)           | 1.507 (+6.7%)            | 1.567 (+10.9%)           | Pull
+
+↓ TPOT mean (s)             | 0.211        | 0.216 (+2.4%)            | 0.207* (−1.7%)           | 0.216 (+2.2%)            | Push-Random
+↓ TPOT p99 (s)              | 0.284        | 0.304 (+7.4%)            | 0.297 (+4.9%)            | 0.311 (+9.8%)            | Pull
+
+
+------------------------------------------------
+
+Series5:
+Setup:
+- 8 servers
+- No cap on input tokens
+- Request response length: unlimited
+- Total requests: 200
+- pattern: "det"
+- rate_rps: 2
+- Methods:
+  9) Pull
+  10) Push-RR
+  11) Push-Random
+  12) Push-Least-Queue
+
+Purpose: check the pull method under none-capped input and output token (natural prefill and decode scenario) on rps 2
+Findings: Light load favors responsiveness: push improves TTFT, while Pull already begins to reduce tail amplification from occasional long requests.
+
+Observations:
+Metric (stat)               | Pull (exp17) | Push-RR (exp18)          | Push-Random (exp19)      | Push-LQ (exp20)          | Winner
+----------------------------|--------------|--------------------------|--------------------------|--------------------------|--------
+↓ Latency mean (s)          | 18.97*       | 22.28 (+17.4%)           | 19.32 (+1.8%)            | 19.65 (+3.6%)            | Pull
+↓ Latency p99 (s)           | 108.79*      | 121.54 (+11.7%)          | 113.17 (+4.0%)           | 118.11 (+8.6%)           | Pull
+
+↑ Decode TPS mean           | 380.90       | 383.37 (+0.6%)           | 387.13 (+1.6%)*          | 382.52 (+0.4%)           | Push-Random
+↑ Prefill TPS mean          | 50.37        | 48.30 (−4.1%)            | 56.25 (+11.7%)           | 57.21 (+13.6%)*          | Push-LQ
+
+↑ Requests running mean     | 11.72        | 11.81 (+0.7%)            | 11.87 (+1.3%)*           | 11.70 (−0.2%)            | Push-Random
+
+↓ TTFT mean (s)             | 0.53         | 0.60 (+12.4%)            | 0.52 (−1.8%)*            | 0.62 (+16.3%)            | Push-Random
+↓ TTFT p99 (s)              | 2.54*        | 3.31 (+30.5%)            | 2.61 (+3.1%)             | 2.96 (+16.7%)            | Pull
+
+↓ TPOT mean (s)             | 0.126        | 0.116 (−7.8%)*           | 0.127 (+0.8%)            | 0.125 (−0.8%)            | Push-RR
+↓ TPOT p99 (s)              | 0.340        | 0.300 (−11.8%)*          | 0.325 (−4.4%)            | 0.334 (−1.7%)            | Push-RR
+
+
+
+
+------------------------------------------------
+
+Series6:
+Setup:
+- 8 servers
+- No cap on input tokens
+- Request response length: unlimited
+- Total requests: 200
+- pattern: "det"
+- rate_rps: 3
+- Methods:
+  9) Pull
+  10) Push-RR
+  11) Push-Random
+  12) Push-Least-Queue
+
+Purpose: check the pull method under none-capped input and output token (natural prefill and decode scenario) on rps 3
+Findings: Near saturation, the core trade-off appears: Pull protects tail latency via admission control, while push improves start time by admitting more work at the cost of queue growth.
+
+Observations:
+Metric (stat)               | Pull (exp21) | Push-RR (exp22)          | Push-Random (exp23)      | Push-LQ (exp24)          | Winner
+----------------------------|--------------|--------------------------|--------------------------|--------------------------|--------
+↓ Latency mean (s)          | 20.90*       | 31.57 (+51.1%)           | 27.12 (+29.8%)           | 21.95 (+5.0%)            | Pull
+↓ Latency p99 (s)           | 100.87*      | 159.22 (+57.9%)          | 114.34 (+13.4%)          | 113.58 (+12.6%)          | Pull
+
+↑ Decode TPS mean           | 414.96       | 414.06 (−0.2%)           | 415.18* (+0.05%)         | 413.15 (−0.4%)           | Push-Random
+↑ Prefill TPS mean          | 55.35        | 47.54 (−14.1%)           | 55.83 (+0.9%)            | 60.12* (+8.6%)           | Push-LQ
+
+↑ Requests running mean     | 12.86        | 13.27* (+3.2%)           | 13.08 (+1.7%)            | 13.08 (+1.7%)            | Push-RR
+
+↓ TTFT mean (s)             | 0.652        | 0.876 (+34.5%)           | 0.611* (−6.2%)           | 0.806 (+23.7%)           | Push-Random
+↓ TTFT p99 (s)              | 3.247        | 6.907 (+112.8%)          | 2.623* (−19.2%)          | 2.982 (−8.1%)            | Push-Random
+
+↓ TPOT mean (s)             | 0.126        | 0.116* (−8.7%)           | 0.118 (−6.7%)            | 0.133 (+4.8%)            | Push-RR
+↓ TPOT p99 (s)              | 0.336        | 0.304* (−9.5%)           | 0.382 (+13.8%)           | 0.571 (+70.0%)           | Push-RR
+
+
+
+
+------------------------------------------------
+
+Series7:
+Setup:
+- 8 servers
+- No cap on input tokens
+- Request response length: unlimited
+- Total requests: 200
+- pattern: "det"
+- rate_rps: 4
+- Methods:
+  9) Pull
+  10) Push-RR
+  11) Push-Random
+  12) Push-Least-Queue
+
+Purpose: check the pull method under none-capped input and output token (natural prefill and decode scenario) on rps 4
+Findings: At sustained high load, speculative admission breaks down. Pull clearly dominates latency and tails by preventing overload, while push suffers from queue inflation.
+
+Observations:
+Metric (stat)               | Pull (exp25) | Push-RR (exp26)          | Push-Random (exp27)      | Push-LQ (exp28)          | Winner
+----------------------------|--------------|--------------------------|--------------------------|--------------------------|--------
+↓ Latency mean (s)          | 23.46*       | 39.33 (+67.6%)           | 38.76 (+65.2%)           | 24.72 (+5.4%)            | Pull
+↓ Latency p99 (s)           | 111.08*      | 140.54 (+26.5%)          | 114.79 (+3.3%)           | 112.92 (+1.7%)           | Pull
+
+↑ Decode TPS mean           | 442.06*      | 432.18 (−2.2%)           | 422.11 (−4.5%)           | 429.90 (−2.8%)           | Pull
+↑ Prefill TPS mean          | 64.24*       | 58.56 (−8.8%)            | 56.41 (−12.2%)           | 63.62 (−1.0%)            | Pull
+
+↑ Requests running mean     | 14.13*       | 13.85 (−2.0%)            | 13.77 (−2.6%)            | 13.70 (−3.1%)            | Pull
+
+↓ TTFT mean (s)             | 0.98         | 0.83* (−15.2%)           | 0.84 (−13.7%)            | 0.97 (−1.0%)             | Push-RR
+↓ TTFT p99 (s)              | 3.78*        | 6.02 (+59.3%)            | 7.00 (+85.2%)            | 3.89 (+2.9%)             | Pull
+
+↓ TPOT mean (s)             | 0.129        | 0.120 (−7.5%)            | 0.115* (−11.1%)          | 0.126 (−2.7%)            | Push-Random
+↓ TPOT p99 (s)              | 0.486        | 0.425 (−12.6%)           | 0.412 (−15.3%)           | 0.374* (−23.0%)          | Push-LQ
+
+
+
+
+------------------------------------------------
+
+Series8:
+Setup:
+- 8 servers
+- No cap on input tokens
+- Request response length: unlimited
+- Total requests: 200
+- pattern: "det"
+- rate_rps: 5
+- Methods:
+  9) Pull
+  10) Push-RR
+  11) Push-Random
+  12) Push-Least-Queue
+
+Purpose: check the pull method under none-capped input and output token (natural prefill and decode scenario) on rps 5
+Findings: Under heavy decode pressure, push maximizes utilization and TTFT but worsens TPOT stability. Pull sacrifices responsiveness to maintain predictable per-token latency.
+
+Observations:
+Metric (stat)               | Pull (exp29) | Push-RR (exp30)          | Push-Random (exp31)      | Push-LQ (exp32)          | Winner
+----------------------------|--------------|--------------------------|--------------------------|--------------------------|--------
+↓ Latency mean (s)          | 25.62*       | 26.65 (+4.0%)            | 31.85 (+24.3%)           | 26.65 (+4.0%)            | Pull
+↓ Latency p99 (s)           | 110.15       | 105.17 (−4.5%)*          | 125.07 (+13.6%)          | 113.35 (+2.9%)           | Push-RR
+
+↑ Decode TPS mean           | 418.68       | 439.78 (+5.0%)           | 437.76 (+4.6%)           | 447.61 (+6.9%)*          | Push-LQ
+↑ Prefill TPS mean          | 57.25        | 62.53 (+9.2%)*           | 58.59 (+2.3%)            | 56.38 (−1.5%)            | Push-RR
+
+↑ Requests running mean     | 13.72        | 14.16 (+3.2%)            | 14.31 (+4.3%)*           | 14.19 (+3.5%)            | Push-Random
+
+↓ TTFT mean (s)             | 1.08         | 1.02 (−5.1%)             | 0.95 (−11.9%)            | 0.93 (−13.5%)*           | Push-LQ
+↓ TTFT p99 (s)              | 3.72*        | 4.06 (+9.2%)             | 6.16 (+65.3%)            | 3.89 (+4.6%)             | Pull
+
+↓ TPOT mean (s)             | 0.104*       | 0.137 (+31.8%)           | 0.131 (+26.2%)           | 0.133 (+27.8%)           | Pull
+↓ TPOT p99 (s)              | 0.396*       | 0.643 (+62.4%)           | 0.742 (+87.6%)           | 0.490 (+23.7%)           | Pull
+
+
+
+------------------------------------------------
+
+Series9:
+Setup:
+- 8 servers
+- No cap on input tokens
+- Request response length: unlimited
+- Total requests: 200
+- pattern: "det"
+- rate_rps: 6
+- Methods:
+  9) Pull
+  10) Push-RR
+  11) Push-Random
+  12) Push-Least-Queue
+
+Purpose: check the pull method under none-capped input and output token (natural prefill and decode scenario) on rps 6
+Findings: At extreme load, push optimizes throughput and responsiveness but amplifies tail risk. Pull remains the safer policy for latency-critical workloads.
+
+Observations:
+Metric (stat)               | Pull (exp33) | Push-RR (exp34)          | Push-Random (exp35)      | Push-LQ (exp36)          | Winner
+----------------------------|--------------|--------------------------|--------------------------|--------------------------|--------
+↓ Latency mean (s)          | 26.93*       | 28.40 (+5.4%)            | 33.09 (+22.9%)           | 38.91 (+44.5%)           | Pull
+↓ Latency p99 (s)           | 107.03       | 105.47 (−1.5%)*          | 119.70 (+11.8%)          | 123.91 (+15.8%)          | Push-RR
+
+↑ Decode TPS mean           | 444.00       | 443.04 (−0.2%)           | 452.73 (+2.0%)*          | 443.46 (−0.1%)           | Push-Random
+↑ Prefill TPS mean          | 60.83        | 66.72 (+9.7%)*           | 61.88 (+1.7%)            | 63.60 (+4.6%)            | Push-RR
+
+↑ Requests running mean     | 14.44        | 14.60 (+1.1%)            | 14.80 (+2.5%)*           | 14.24 (−1.4%)            | Push-Random
+
+↓ TTFT mean (s)             | 1.25         | 0.98 (−21.4%)            | 0.81 (−35.4%)            | 0.80 (−35.8%)*           | Push-LQ
+↓ TTFT p99 (s)              | 4.46         | 3.97 (−11.0%)            | 3.00 (−32.8%)*           | 3.31 (−25.8%)            | Push-Random
+
+↓ TPOT mean (s)             | 0.128        | 0.128 (+0.5%)            | 0.141 (+10.2%)           | 0.125 (−2.1%)*           | Push-LQ
+↓ TPOT p99 (s)              | 0.455*       | 0.511 (+12.3%)           | 0.574 (+26.0%)           | 0.443 (−2.7%)            | Pull
+
+
+------------------------------------------------
+
+Series10:
+Setup:
+- 8 servers
+- No cap on input tokens
+- Request response length: unlimited
+- Total requests: 200
+- pattern: "dump"
+- Methods:
+  9) Pull
+  10) Push-RR
+  11) Push-Random
+  12) Push-Least-Queue
+
+Purpose: check the pull method under none-capped input and output token (natural prefill and decode scenario) on dump
+Findings: Burst arrivals favor controlled batching. Pull absorbs bursts cleanly, while push reacts faster but destabilizes queues and tail latency.
+
+Observations:
+Metric (stat)               | Pull (exp37) | Push-RR (exp38)          | Push-Random (exp39)      | Push-LQ (exp40)          | Winner
+----------------------------|--------------|--------------------------|--------------------------|--------------------------|--------
+↓ Latency mean (s)          | 40.48*       | 42.53 (+5.1%)            | 57.03 (+40.8%)           | 61.63 (+52.2%)           | Pull
+↓ Latency p99 (s)           | 130.79*      | 141.09 (+7.9%)           | 143.76 (+9.9%)           | 158.97 (+21.6%)          | Pull
+
+↑ Decode TPS mean           | 443.51*      | 422.56 (−4.7%)           | 392.44 (−11.5%)          | 416.49 (−6.1%)           | Pull
+↑ Prefill TPS mean          | 62.03*       | 59.52 (−4.0%)            | 49.03 (−21.0%)           | 48.17 (−22.3%)           | Pull
+
+↑ Requests running mean     | 14.26*       | 13.89 (−2.6%)            | 12.67 (−11.2%)           | 13.30 (−6.7%)            | Pull
+
+↓ TTFT mean (s)             | 1.46         | 1.45 (−1.1%)             | 0.72 (−50.6%)*           | 0.93 (−36.4%)            | Push-Random
+↓ TTFT p99 (s)              | 6.53         | 7.42 (+13.6%)            | 3.93 (−39.9%)*           | 5.69 (−12.8%)            | Push-Random
+
+↓ TPOT mean (s)             | 0.123        | 0.120 (−2.3%)            | 0.114 (−7.3%)            | 0.112 (−8.8%)*           | Push-LQ
+↓ TPOT p99 (s)              | 0.510        | 0.472 (−7.4%)            | 0.533 (+4.6%)            | 0.356 (−30.2%)*          | Push-LQ
+
+------------------------------------------------
+
+Series11:
+Setup:
+- 8 servers
+- No cap on input tokens
+- Request response length: unlimited
+- Total requests: 200
+- pattern: "det"
+- rate_rps: 3
+- Methods:
+  9) Pull
+  10) Push-RR
+  11) Push-Random
+  12) Push-Least-Queue
+
+Purpose: check the pull method under none-capped input and output token (natural prefill and decode scenario) on rps 3 repeat of series 6  and 10
+Findings: Results are consistent, Pull is latency-stable, push is responsiveness-biased, and Least-Queue is brittle under heterogeneous service times.
+
+Metric (stat)               | Pull (exp41) | Push-RR (exp42)          | Push-Random (exp43)      | Push-LQ (exp44)          | Winner
+----------------------------|--------------|--------------------------|--------------------------|--------------------------|--------
+↓ Latency mean (s)          | 20.85*       | 22.07 (+5.9%)            | 29.39 (+41.0%)           | 29.12 (+39.7%)           | Pull
+↓ Latency p99 (s)           | 100.54*      | 112.86 (+12.3%)          | 125.56 (+24.9%)          | 136.77 (+36.0%)          | Pull
+
+↑ Decode TPS mean           | 421.66*      | 413.66 (−1.9%)           | 411.05 (−2.5%)           | 416.34 (−1.3%)           | Pull
+↑ Prefill TPS mean          | 61.51*       | 57.60 (−6.4%)            | 60.33 (−1.9%)            | 50.20 (−18.4%)           | Pull
+
+↑ Requests running mean     | 13.04        | 13.04 (−0.1%)            | 13.19 (+1.1%)            | 13.26 (+1.6%)*           | Push-LQ
+
+↓ TTFT mean (s)             | 0.77         | 0.79 (+2.9%)             | 0.76 (−0.6%)*            | 0.89 (+16.1%)            | Push-Random
+↓ TTFT p99 (s)              | 3.26         | 3.07 (−5.9%)*            | 3.86 (+18.5%)            | 7.22 (+121.4%)           | Push-RR
+
+↓ TPOT mean (s)             | 0.129        | 0.126 (−2.7%)            | 0.114 (−12.1%)*          | 0.120 (−7.2%)            | Push-Random
+↓ TPOT p99 (s)              | 0.345*       | 0.464 (+34.8%)           | 0.357 (+3.5%)            | 0.488 (+41.6%)           | Pull
+
+
+------------------------------------------------
+
+Series12:
+Setup:
+- 8 servers
+- No cap on input tokens
+- Request response length: unlimited
+- Total requests: 10000
+- pattern: "det"
+- rate_rps: 3
+- Methods:
+  9) Pull
+  10) Push-RR
+  11) Push-Random
+  12) Push-Least-Queue
+
+Purpose: check the pull method under none-capped input and output token (natural prefill and decode scenario) on rps 3 repeat of series 6  and 10
+Findings: Results are consistent, Pull is latency-stable, push is responsiveness-biased, and Least-Queue is brittle under heterogeneous service times.
+
+Metric (stat)               | Pull (exp45) | Push-RR (exp46)          | Push-Random (exp47)      | Push-LQ (exp48)          | Winner
+----------------------------|--------------|--------------------------|--------------------------|--------------------------|--------
+↓ Latency mean (s)          | 21.47*       | 21.97 (+2.4%)            | 26.18 (+22.0%)           | 30.64 (+42.7%)           | Pull
+↓ Latency p99 (s)           | 100.22*      | 113.54 (+13.3%)          | 110.34 (+10.1%)          | 140.16 (+39.8%)          | Pull
+
+↑ Decode TPS mean           | 416.09       | 417.02* (+0.2%)          | 414.96 (−0.3%)           | 410.30 (−1.4%)           | Push-RR
+↑ Prefill TPS mean          | 55.41        | 62.15* (+12.2%)          | 60.49 (+9.2%)            | 61.45 (+10.9%)           | Push-RR
+
+↑ Requests running mean     | 13.11        | 13.06 (−0.4%)            | 13.43* (+2.5%)           | 13.16 (+0.4%)            | Push-Random
+
+↓ TTFT mean (s)             | 0.836        | 0.860 (+2.9%)            | 0.814* (−2.6%)           | 0.943 (+12.8%)           | Push-Random
+↓ TTFT p99 (s)              | 3.53*        | 4.31 (+22.0%)            | 4.71 (+33.4%)            | 6.27 (+77.5%)            | Pull
+
+↓ TPOT mean (s)             | 0.133        | 0.132 (−0.7%)            | 0.130 (−2.5%)            | 0.121* (−9.3%)           | Push-LQ
+↓ TPOT p99 (s)              | 0.465        | 0.582 (+25.1%)           | 0.478 (+2.8%)            | 0.468 (+0.7%)            | Pull
+

@@ -1,0 +1,30 @@
+# config-1.yaml:
+  # - pull
+  # - push-rr
+  # - push-random
+  # - push-least-queue
+
+
+config-1.yaml:
+  - pull
+  - push-rr
+  - push-random
+  - push-least-queue
+
+config-2.yaml:
+  - pull
+  - push-rr
+  - push-random
+  - push-least-queue
+
+# config-3.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+# config-4.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue

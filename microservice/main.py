@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -134,6 +135,8 @@ def main():
                 print(f"[metrics] failed to start metrics collection: {e}")
 
     t_start_wall = time.time()
+    t_start_load = time.time()
+    t_end_load = None
 
     try:
         run_open_loop_load(
@@ -147,6 +150,8 @@ def main():
             print_trace=cfg.print_trace,
         )
     finally:
+        t_end_load = time.time()
+
         # Stop metrics first (flush), then close request logger
         if metrics_started and stop_metrics_collection is not None:
             try:
@@ -157,8 +162,22 @@ def main():
 
         exp_logger.close()
 
-    dt = time.time() - t_start_wall
-    print(f"[client] done. Total elapsed wall time = {dt:.3f}s")
+    dt_wall = time.time() - t_start_wall
+    dt_load = (t_end_load - t_start_load) if t_end_load is not None else None
+
+    # Persist a small, machine-readable run summary for reproducibility
+    run_summary = {
+        "total_requests": int(total),
+        "load_runner_duration_s": round(float(dt_load), 3) if dt_load is not None else None,
+        "wall_time_s": round(float(dt_wall), 3),
+    }
+    try:
+        with (Path(exp_dir) / "run_summary.json").open("w", encoding="utf-8") as f:
+            json.dump(run_summary, f, indent=2, sort_keys=True)
+    except Exception as e:
+        print(f"[client] WARN: failed to write run_summary.json: {e}")
+
+    print(f"[client] done. Total elapsed wall time = {dt_wall:.3f}s")
 
 
 if __name__ == "__main__":

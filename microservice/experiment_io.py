@@ -1,6 +1,7 @@
 # Helpers for experiment I/O:
 # - Choose next experiment directory under ./experiments
 # - Persist the effective client config as config.json
+# - Copy reproducibility artifacts (exact YAML used, deployment manifest)
 # - Provide a thread-safe ExperimentLogger for per-request logs (logs.json)
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Tuple, Optional
 import json
+import shutil
 import threading
 import time
 
@@ -62,6 +64,21 @@ def _next_experiment_dir(root: Path) -> Path:
     return exp_dir
 
 
+def _copy_file_if_exists(src: Path, dst: Path) -> bool:
+    """
+    Best-effort copy that preserves metadata (mtime) via copy2.
+    Returns True if copied, False otherwise.
+    """
+    try:
+        if src.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def init_experiment(
     cfg: ClientConfig,
     *,
@@ -72,8 +89,10 @@ def init_experiment(
 ) -> Tuple[Path, ExperimentLogger]:
     """
     Create a new experiment directory and persist:
-      - config.json : frozen view of the effective ClientConfig.
-      - logs.json   : per-request JSON-lines (append-only via ExperimentLogger).
+      - config.json        : frozen view of the effective ClientConfig.
+      - config_used.yaml   : exact YAML file used to run this experiment.
+      - vllm-k8s.yaml      : deployment manifest snapshot (if present).
+      - logs.json          : per-request JSON-lines (append-only via ExperimentLogger).
 
     Returns:
       (experiment_dir_path, ExperimentLogger)
@@ -85,7 +104,7 @@ def init_experiment(
 
     exp_dir = _next_experiment_dir(exps_root)
 
-    # Persist the effective config for this run.
+    # Persist the effective config for this run (resolved + defaults applied).
     config_out = {
         "created_at_unix": time.time(),
         "config_path": str(Path(config_path).resolve()),
@@ -95,6 +114,25 @@ def init_experiment(
     config_json_path = exp_dir / "config.json"
     with config_json_path.open("w", encoding="utf-8") as f:
         json.dump(config_out, f, indent=2, sort_keys=True)
+
+    # --- Reproducibility artifacts ---
+    # 1) Copy the *exact* YAML file used (byte-for-byte).
+    src_cfg = Path(config_path).expanduser()
+    if not src_cfg.is_absolute():
+        src_cfg = (Path.cwd() / src_cfg)
+    src_cfg = src_cfg.resolve()
+    _copy_file_if_exists(src_cfg, exp_dir / "config_used.yaml")
+
+    # 2) Copy deployment manifest snapshot, if present.
+    # Try repo root (same directory as this file) first, then CWD.
+    here = Path(__file__).resolve().parent
+    candidates = [
+        (here / "vllm-k8s.yaml").resolve(),
+        (Path.cwd() / "vllm-k8s.yaml").resolve(),
+    ]
+    for c in candidates:
+        if _copy_file_if_exists(c, exp_dir / "vllm-k8s.yaml"):
+            break
 
     # Prepare logger for per-request logs.
     logs_path = exp_dir / "logs.json"
