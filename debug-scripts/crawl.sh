@@ -28,20 +28,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Build tree exclude pattern (| separated)
-TREE_EXCLUDE_PATTERN=""
-if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
-  TREE_EXCLUDE_PATTERN=$(printf "%s|" "${EXCLUDES[@]}")
-  TREE_EXCLUDE_PATTERN="${TREE_EXCLUDE_PATTERN%|}"   # remove trailing |
-fi
-
 run_crawl() {
 
   echo "===== FOLDER STRUCTURE ====="
-  if [[ -n "$TREE_EXCLUDE_PATTERN" ]]; then
-    tree -a -I "$TREE_EXCLUDE_PATTERN" "$ROOT"
-  else
-    tree -a "$ROOT"
+  tree -a "$ROOT"
+
+  if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
+    echo ""
+    echo "===== EXCLUDED PATHS (still shown above) ====="
+    for ex in "${EXCLUDES[@]}"; do
+      echo "  - $ex"
+    done
   fi
 
   echo ""

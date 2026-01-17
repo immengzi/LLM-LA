@@ -9,6 +9,7 @@ import requests
 from .config import get_config
 from .local_queue import LocalQueue
 from .router_client import RouterPullWorker
+from .result_poster import ResultPoster  # NEW
 
 _cfg = get_config()
 
@@ -18,7 +19,7 @@ class VLLMWorker:
     Worker loop:
       - Pop from local queue
       - POST to vLLM /v1/chat/completions
-      - POST result back to router /result
+      - Enqueue result for async posting back to router /result (ResultPoster)
 
     Trace fields added (if TRACE_ENABLED):
       * t_dequeue_sidecar
@@ -35,9 +36,15 @@ class VLLMWorker:
       * sidecar_logical_at_result
     """
 
-    def __init__(self, local_q: LocalQueue, pull_worker: Optional[RouterPullWorker] = None):
+    def __init__(
+        self,
+        local_q: LocalQueue,
+        pull_worker: Optional[RouterPullWorker] = None,
+        result_poster: Optional[ResultPoster] = None,  # NEW
+    ):
         self.local_q = local_q
         self._pull_worker = pull_worker
+        self._result_poster = result_poster  # NEW
 
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
@@ -64,6 +71,8 @@ class VLLMWorker:
     def _loop(self):
         session = requests.Session()
         vllm_url = f"{_cfg.VLLM_URL}/v1/chat/completions"
+
+        # Keep router_result_url only for fallback mode (if poster not provided)
         router_result_url = f"{_cfg.ROUTER_URL}/result"
 
         # Idle-poke configuration
@@ -248,26 +257,31 @@ class VLLMWorker:
                         result_obj["trace"] = dict(meta.get("__trace__") or {})
 
                     # ----------------------------------------------------
-                    # Send result back to router
+                    # Send result back to router (ASYNC via ResultPoster)
                     # ----------------------------------------------------
                     result_payload = {
                         "req_id": req_id,
                         "result": result_obj,
                     }
 
-                    try:
-                        r2 = session.post(
-                            router_result_url,
-                            json=result_payload,
-                            timeout=_cfg.ROUTER_RESULT_TIMEOUT_S,
-                        )
-                        if not r2.ok:
-                            print(
-                                f"[sidecar] router /result error for req_id={req_id}: "
-                                f"{r2.status_code} {r2.text}"
+                    if self._result_poster is not None:
+                        # Non-blocking: avoids tying up vLLM workers on router backpressure / TCP resets
+                        self._result_poster.submit(result_payload)
+                    else:
+                        # Fallback: original synchronous behavior (kept for safety)
+                        try:
+                            r2 = session.post(
+                                router_result_url,
+                                json=result_payload,
+                                timeout=_cfg.ROUTER_RESULT_TIMEOUT_S,
                             )
-                    except Exception as e:
-                        print(f"[sidecar] router /result failed for req_id={req_id}: {e}")
+                            if not r2.ok:
+                                print(
+                                    f"[sidecar] router /result error for req_id={req_id}: "
+                                    f"{r2.status_code} {r2.text}"
+                                )
+                        except Exception as e:
+                            print(f"[sidecar] router /result failed for req_id={req_id}: {e}")
 
                 except Exception as e:
                     print(f"[sidecar] vLLM request failed for req_id={req_id}: {e}")

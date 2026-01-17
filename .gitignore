@@ -28,3 +28,5 @@ uv.tar.gz
 /pd-test/Mooncake/
 /pd-test/vllm
 /pd-test/vllm-ascend
+experiments
+.ipynb_checkpoints

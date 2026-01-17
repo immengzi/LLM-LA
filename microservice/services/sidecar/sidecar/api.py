@@ -48,6 +48,9 @@ async def push(item: PushItem) -> dict:
       - sidecar_queue_len_before / after
       - sidecar_inflight_before
       - sidecar_logical_before / after
+
+    Also stamps a receipt marker so this can be surfaced in experiment logs:
+      - rcpt_push_recv_wall
     """
     if _local_q is None:
         return {"status": "error", "msg": "local queue not bound"}
@@ -64,7 +67,12 @@ async def push(item: PushItem) -> dict:
     if getattr(_cfg, "TRACE_ENABLED", False):
         now_push = time.time()
         tr = dict(meta.get("__trace__") or {})
+
+        # Existing trace
         tr["t_arrive_sidecar_push"] = now_push
+
+        # receipt marker (lets you audit "did sidecar receive it?" from experiment logs)
+        tr["rcpt_push_recv_wall"] = now_push
 
         # Sidecar-local queue lengths
         tr["sidecar_queue_len_before"] = pending_before
