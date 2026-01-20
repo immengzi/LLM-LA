@@ -9,7 +9,7 @@ import requests
 from .config import get_config
 from .local_queue import LocalQueue
 from .router_client import RouterPullWorker
-from .result_poster import ResultPoster  # NEW
+from .result_poster import ResultPoster
 
 _cfg = get_config()
 

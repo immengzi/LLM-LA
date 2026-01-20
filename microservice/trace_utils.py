@@ -26,13 +26,23 @@ def compute_trace_metrics(trace: Dict[str, Any]) -> Dict[str, float]:
     t_arrive_router = _get_ts(trace, "t_arrive_router")
     t_enq_router_queue = _get_ts(trace, "t_enq_router_queue") or t_arrive_router
     t_dispatch_router = _get_ts(trace, "t_dispatch_router")
+
     t_arrive_sidecar_push = _get_ts(trace, "t_arrive_sidecar_push")
     t_arrive_sidecar_pull = _get_ts(trace, "t_arrive_sidecar_pull")
     t_dequeue_sidecar = _get_ts(trace, "t_dequeue_sidecar")
+
     t_vllm_send = _get_ts(trace, "t_vllm_send")
     t_vllm_recv = _get_ts(trace, "t_vllm_recv")
+
     t_post_result_sidecar = _get_ts(trace, "t_post_result_sidecar")
     t_router_result_recv = _get_ts(trace, "t_router_result_recv")
+
+    # NEW router post-result split points (added in router/api.py)
+    t_router_result_store = _get_ts(trace, "t_router_result_store")
+    t_enqueue_unblocked = _get_ts(trace, "t_enqueue_unblocked")
+    t_enqueue_about_to_return = _get_ts(trace, "t_enqueue_about_to_return")
+
+    # Existing final router timestamp
     t_enqueue_response = _get_ts(trace, "t_enqueue_response")
 
     # End-to-end as seen by client
@@ -68,9 +78,36 @@ def compute_trace_metrics(trace: Dict[str, Any]) -> Dict[str, float]:
     if t_post_result_sidecar is not None and t_router_result_recv is not None:
         metrics["sidecar_to_router_s"] = t_router_result_recv - t_post_result_sidecar
 
-    # Router post-result overhead
+    # Router post-result overhead (coarse; kept for backwards compat)
     if t_router_result_recv is not None and t_enqueue_response is not None:
         metrics["router_post_result_s"] = t_enqueue_response - t_router_result_recv
+
+    # ------------------------------------------------------------------
+    # break router_post_result_s into sub-stages (when timestamps exist)
+    # ------------------------------------------------------------------
+    # 1) /result handler work + store_result path (router result handling)
+    if t_router_result_recv is not None and t_router_result_store is not None:
+        metrics["router_result_handler_s"] = t_router_result_store - t_router_result_recv
+
+    # 2) Wake-up + scheduling delay until /enqueue unblocks
+    # (event.set() -> waiter thread returns -> asyncio resumes)
+    if t_router_result_store is not None and t_enqueue_unblocked is not None:
+        metrics["router_wakeup_s"] = t_enqueue_unblocked - t_router_result_store
+    elif t_router_result_recv is not None and t_enqueue_unblocked is not None:
+        # fallback if store ts not present
+        metrics["router_wakeup_s"] = t_enqueue_unblocked - t_router_result_recv
+
+    # 3) Python-side response assembly / trace merge / rename before returning
+    if t_enqueue_unblocked is not None and t_enqueue_about_to_return is not None:
+        metrics["router_response_build_s"] = t_enqueue_about_to_return - t_enqueue_unblocked
+
+    # 4) Any remaining gap until the final router timestamp
+    # (depending on where you stamp t_enqueue_response, this may represent
+    # late processing or be ~0; it helps detect "mystery gap".)
+    if t_enqueue_about_to_return is not None and t_enqueue_response is not None:
+        metrics["router_after_return_stamp_s"] = t_enqueue_response - t_enqueue_about_to_return
+    elif t_enqueue_unblocked is not None and t_enqueue_response is not None:
+        metrics["router_after_unblock_s"] = t_enqueue_response - t_enqueue_unblocked
 
     # Router-centric "server roundtrip" (excluding client net)
     if t_arrive_router is not None and t_enqueue_response is not None:

@@ -1,3 +1,4 @@
+# router/api.py
 # -*- coding: utf-8 -*-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +16,6 @@ from .models import (
     PullResponse,
 )
 from .router_state import router_state
-    ### unchanged ###
 from .kv_watcher import KVWatcher
 from .kv_aware import register_request_blocks
 from .push_router import PushRouter
@@ -188,6 +188,7 @@ async def enqueue(req: EnqueueRequest):
         level="summary",
     )
 
+    # Ensure an async waiter exists for this rid (no threads)
     router_state.register_waiter(rid)
 
     # -------------------------
@@ -207,13 +208,21 @@ async def enqueue(req: EnqueueRequest):
             raise HTTPException(503, f"push failed: {e}")
 
     # -------------------------
-    # Wait for result
+    # Wait for result (ASYNC, no threadpool)
     # -------------------------
-    result = await asyncio.to_thread(
-        router_state.wait_for_result,
+    result = await router_state.wait_for_result_async(
         rid,
         _cfg.RESULT_TIMEOUT_S,
     )
+
+    # ---------------------------------------------------------
+    # TRACE: when /enqueue unblocks (critical for diagnosing the gap)
+    # ---------------------------------------------------------
+    if _cfg.TRACE_ENABLED and isinstance(result, dict):
+        tr = result.get("trace") or result.get("__trace__") or {}
+        tr = dict(tr)
+        tr["t_enqueue_unblocked"] = time.time()
+        result["trace"] = tr
 
     router_latency = time.time() - t_start
 
@@ -233,14 +242,17 @@ async def enqueue(req: EnqueueRequest):
     if not isinstance(result, dict):
         result = {"output": result}
 
-    # Optionally record router-side latency
-    # result["router_latency_s"] = router_latency   # enable if you want
-
     # Merge router final timestamp into trace
     if _cfg.TRACE_ENABLED:
         tr = result.get("trace") or result.get("__trace__") or {}
         tr = dict(tr)
+
+        # Optional extra split: right before returning response object
+        tr["t_enqueue_about_to_return"] = time.time()
+
+        # Existing "response timestamp" (kept for compatibility)
         tr["t_enqueue_response"] = time.time()
+
         result["trace"] = tr
         result.pop("__trace__", None)
 
@@ -305,6 +317,10 @@ async def result_callback(payload: dict):
         tr = result.get("trace") or result.get("__trace__") or {}
         tr = dict(tr)
         tr["t_router_result_recv"] = time.time()
+
+        # Optional: mark immediately before we signal the waiter
+        tr["t_router_result_store"] = time.time()
+
         result["trace"] = tr
         result.pop("__trace__", None)
 
