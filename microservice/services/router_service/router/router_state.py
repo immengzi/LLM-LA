@@ -1,9 +1,14 @@
+# router/router_state.py
 # -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
 from collections import deque
-from threading import RLock, Event
+from threading import RLock
 from typing import Deque, Dict, Tuple, List, Any, Optional
 import sys
 import uuid
+import asyncio
 
 from .config import get_config
 from .kv_aware import prefix_len
@@ -36,6 +41,10 @@ def _log_req(msg: str, *, level: str = "summary") -> None:
 class RouterState:
     """
     Central queue of pending jobs + KV + length-aware selection.
+
+      - Result waiters are asyncio Futures
+      - This avoids the router enqueue handler blocking in asyncio.to_thread(...)
+        and eliminates massive router_wakeup_s artifacts under load.
     """
 
     def __init__(self):
@@ -43,8 +52,10 @@ class RouterState:
         # queue entries: (req_id, prompt, t_enq_client_or_router, meta)
         self._queue: Deque[Tuple[str, str, float, dict]] = deque()
 
-        # Result tracking
-        self._result_events: Dict[str, Event] = {}
+        # Result tracking (async-native)
+        # req_id -> asyncio.Future that will hold the result
+        self._result_futs: Dict[str, asyncio.Future] = {}
+        # req_id -> stored result (for early-arriving /result before waiter exists)
         self._result_values: Dict[str, Any] = {}
 
     # -------------------------------------------------------
@@ -165,7 +176,6 @@ class RouterState:
             # 4) Choose
             chosen_raw = ordered[:want]
             chosen_ids = [rid for (rid, _p, _t, _m) in chosen_raw]
-
             chosen_kv_hits = [(rid, prefix_len(endpoint, rid)) for rid in chosen_ids]
 
             _log_req(
@@ -177,19 +187,17 @@ class RouterState:
             chosen: List[Tuple[str, str, float, dict]] = []
             dispatch_ts = now_s()
             if getattr(_cfg, "TRACE_ENABLED", False):
-                # capture queue_length_at_dispatch
                 qlen_at_dispatch = len(self._queue)
 
                 for rid, prompt, ts, meta in chosen_raw:
                     m = dict(meta or {})
                     tr = dict(m.get("__trace__") or {})
 
-                    # preserve earlier fields if any
                     tr.setdefault("t_enq_router_queue", ts)
                     tr.setdefault("endpoint", endpoint)
 
                     tr["t_dispatch_router"] = dispatch_ts
-                    tr["router_queue_len_at_dispatch"] = qlen_at_dispatch  # ★ NEW
+                    tr["router_queue_len_at_dispatch"] = qlen_at_dispatch
 
                     m["__trace__"] = tr
                     chosen.append((rid, prompt, ts, m))
@@ -213,42 +221,122 @@ class RouterState:
                 JobItem(req_id=rid, prompt=prompt, t_enq_client=ts, meta=meta)
                 for (rid, prompt, ts, meta) in chosen
             ]
-
             return items
 
     # -------------------------------------------------------
-    # Result wait/notify
+    # Result wait/notify (ASYNC)
     # -------------------------------------------------------
 
     def register_waiter(self, req_id: str) -> None:
+        """
+        Ensure an asyncio Future exists for this req_id.
+        If a result already arrived (early /result), resolve immediately.
+        """
         with self._lock:
-            if req_id not in self._result_events:
-                self._result_events[req_id] = Event()
+            if req_id in self._result_futs:
+                return
+
+            loop = None
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            # If called outside an event loop (shouldn't happen from API),
+            # we still create a Future-like placeholder by deferring creation.
+            # The async waiter will create it again if needed.
+            if loop is None:
+                # Store a sentinel None; async path will fix it up.
+                self._result_futs[req_id] = None  # type: ignore[assignment]
+                return
+
+            fut: asyncio.Future = loop.create_future()
+            self._result_futs[req_id] = fut
+
+            # If result already stored, resolve right away
+            if req_id in self._result_values and not fut.done():
+                fut.set_result(self._result_values[req_id])
 
     def store_result(self, req_id: str, result: Any) -> None:
-        evt: Optional[Event] = None
+        """
+        Store result and resolve any waiting Future.
+        Safe to call from either sync or async context (FastAPI endpoint is async).
+        """
+        fut: Optional[asyncio.Future] = None
+        loop = None
         with self._lock:
             self._result_values[req_id] = result
-            evt = self._result_events.get(req_id)
-        if evt is not None:
-            evt.set()
+            fut = self._result_futs.get(req_id)
 
-    def wait_for_result(self, req_id: str, timeout_s: float) -> Optional[Any]:
+        # If there's no future yet (enqueue hasn't registered), that's fine.
+        if fut is None:
+            return
+
+        # If we stored a sentinel because register_waiter ran outside loop, ignore here.
+        if not isinstance(fut, asyncio.Future):
+            return
+
+        if fut.done():
+            return
+
+        # Resolve on the loop thread safely
+        try:
+            loop = fut.get_loop()
+        except Exception:
+            loop = None
+
+        if loop is None:
+            # Best-effort direct resolve
+            try:
+                fut.set_result(result)
+            except Exception:
+                pass
+            return
+
+        def _set():
+            if not fut.done():
+                fut.set_result(result)
+
+        try:
+            loop.call_soon_threadsafe(_set)
+        except Exception:
+            # Best-effort fallback
+            try:
+                _set()
+            except Exception:
+                pass
+
+    async def wait_for_result_async(self, req_id: str, timeout_s: float) -> Optional[Any]:
+        """
+        Await the result for req_id up to timeout_s.
+        Cleans up waiter + stored result after completion (or timeout).
+        """
+        # Ensure a real Future exists on THIS running loop
+        loop = asyncio.get_running_loop()
+
         with self._lock:
-            evt = self._result_events.get(req_id)
-            if evt is None:
-                evt = Event()
-                self._result_events[req_id] = evt
+            fut = self._result_futs.get(req_id)
 
-        ok = evt.wait(timeout_s)
-        if not ok:
+            if not isinstance(fut, asyncio.Future) or fut.get_loop() is not loop:
+                # Create loop-local future and replace
+                fut = loop.create_future()
+                self._result_futs[req_id] = fut
+
+                # If result already stored, resolve immediately
+                if req_id in self._result_values and not fut.done():
+                    fut.set_result(self._result_values[req_id])
+
+        try:
+            result = await asyncio.wait_for(fut, timeout=float(timeout_s))
+        except asyncio.TimeoutError:
             return None
+        finally:
+            # Cleanup (avoid unbounded growth)
+            with self._lock:
+                self._result_futs.pop(req_id, None)
+                self._result_values.pop(req_id, None)
 
-        with self._lock:
-            result = self._result_values.get(req_id)
-            self._result_events.pop(req_id, None)
-            self._result_values.pop(req_id, None)
-            return result
+        return result
 
     # -------------------------------------------------------
     # Metrics
