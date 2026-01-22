@@ -576,3 +576,39 @@ spec:
     - path: /metrics
       port: http
       interval: 1s
+
+# =====================================================================
+# PodMonitor for router-service (scrape router /metrics on port 8080)
+# =====================================================================
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kv-router
+  namespace: vllm
+spec:
+  selector:
+    matchLabels:
+      app: router-service
+  podMetricsEndpoints:
+    - path: /metrics
+      port: http
+      interval: 1s
+
+# =====================================================================
+# PodMonitor for kv-sidecar (scrape sidecar /metrics on port 9000)
+# =====================================================================
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kv-sidecar
+  namespace: vllm
+spec:
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  podMetricsEndpoints:
+    - path: /metrics
+      port: sidecar-http
+      interval: 1s

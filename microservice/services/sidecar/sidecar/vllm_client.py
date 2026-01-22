@@ -10,6 +10,7 @@ from .config import get_config
 from .local_queue import LocalQueue
 from .router_client import RouterPullWorker
 from .result_poster import ResultPoster
+from .metrics import inc_completed
 
 _cfg = get_config()
 
@@ -263,6 +264,9 @@ class VLLMWorker:
                         "req_id": req_id,
                         "result": result_obj,
                     }
+
+                    # Prom: completed (sidecar produced a result payload)
+                    inc_completed(_cfg.CONTAINER_NAME)
 
                     if self._result_poster is not None:
                         # Non-blocking: avoids tying up vLLM workers on router backpressure / TCP resets

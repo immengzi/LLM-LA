@@ -8,6 +8,7 @@ import requests
 
 from .config import get_config
 from .local_queue import LocalQueue
+from .metrics import inc_received
 
 _cfg = get_config()
 
@@ -144,6 +145,9 @@ class RouterPullWorker:
                     rid = str(item["req_id"])
                     prompt = str(item["prompt"])
                     meta: Dict[str, Any] = item.get("meta") or {}
+
+                    # Prom: received (router -> sidecar) for each pulled item
+                    inc_received(self.endpoint_id)
 
                     # Trace injection for pull arrival + queue lengths
                     if getattr(_cfg, "TRACE_ENABLED", False):

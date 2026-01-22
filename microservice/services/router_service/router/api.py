@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 import httpx
 import asyncio
 import time
 import sys
+
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from .config import get_config, print_config
 from .models import (
@@ -19,6 +22,7 @@ from .router_state import router_state
 from .kv_watcher import KVWatcher
 from .kv_aware import register_request_blocks
 from .push_router import PushRouter
+from .metrics import inc_admission
 
 _cfg = get_config()
 app = FastAPI(title="KV-aware Router Service")
@@ -140,6 +144,15 @@ async def health():
 
 
 # ============================================================
+# Prometheus
+# ============================================================
+
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# ============================================================
 # MAIN: enqueue + synchronous wait for result
 # ============================================================
 
@@ -149,6 +162,9 @@ async def enqueue(req: EnqueueRequest):
     Synchronous enqueue with tracing support.
     """
     t_start = time.time()
+
+    # Prom: admission (incoming)
+    inc_admission()
 
     # -------------------------
     # Construct trace skeleton

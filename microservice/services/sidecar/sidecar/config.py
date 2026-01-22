@@ -37,10 +37,30 @@ class SidecarConfig:
     ROUTER_RESULT_TIMEOUT_S: float = 5.0    # /result post timeout
 
     # ------------------------------------------------
+    # Connection pooling (requests / urllib3)
+    # ------------------------------------------------
+    # Default urllib3 pool_maxsize is only 10; increase it to avoid churn
+    # when you have many threads or bursts.
+    ROUTER_POOL_CONNECTIONS: int = 50
+    ROUTER_POOL_MAXSIZE: int = 200
+
+    VLLM_POOL_CONNECTIONS: int = 10
+    VLLM_POOL_MAXSIZE: int = 50
+
+    # ------------------------------------------------
+    # Result posting behavior
+    # ------------------------------------------------
+    # You said: "I don't want to retry". So default is OFF.
+    RESULT_POST_RETRY: bool = False
+    RESULT_POST_MAX_RETRIES: int = 0  # if RESULT_POST_RETRY=True, cap retries
+    RESULT_POST_BACKOFF_BASE_S: float = 0.05
+    RESULT_POST_BACKOFF_CAP_S: float = 2.0
+
+    # ------------------------------------------------
     # Tracing controls (must match router side)
     # ------------------------------------------------
-    TRACE_ENABLED: bool = False             # global on/off
-    TRACE_SAMPLE_RATE: float = 1.0          # 0.0–1.0, currently unused here but kept for symmetry
+    TRACE_ENABLED: bool = False
+    TRACE_SAMPLE_RATE: float = 1.0
 
 
 def get_config() -> SidecarConfig:
@@ -63,20 +83,24 @@ def get_config() -> SidecarConfig:
     cfg.SIDECAR_PORT = int(os.getenv("SIDECAR_PORT", cfg.SIDECAR_PORT))
     cfg.SIDECAR_MODE = os.getenv("SIDECAR_MODE", cfg.SIDECAR_MODE)
 
-    cfg.ROUTER_PULL_TIMEOUT_S = float(
-        os.getenv("ROUTER_PULL_TIMEOUT_S", cfg.ROUTER_PULL_TIMEOUT_S)
-    )
-    cfg.VLLM_TIMEOUT_S = float(
-        os.getenv("VLLM_TIMEOUT_S", cfg.VLLM_TIMEOUT_S)
-    )
-    cfg.ROUTER_RESULT_TIMEOUT_S = float(
-        os.getenv("ROUTER_RESULT_TIMEOUT_S", cfg.ROUTER_RESULT_TIMEOUT_S)
-    )
+    cfg.ROUTER_PULL_TIMEOUT_S = float(os.getenv("ROUTER_PULL_TIMEOUT_S", cfg.ROUTER_PULL_TIMEOUT_S))
+    cfg.VLLM_TIMEOUT_S = float(os.getenv("VLLM_TIMEOUT_S", cfg.VLLM_TIMEOUT_S))
+    cfg.ROUTER_RESULT_TIMEOUT_S = float(os.getenv("ROUTER_RESULT_TIMEOUT_S", cfg.ROUTER_RESULT_TIMEOUT_S))
+
+    # Pool knobs
+    cfg.ROUTER_POOL_CONNECTIONS = int(os.getenv("ROUTER_POOL_CONNECTIONS", cfg.ROUTER_POOL_CONNECTIONS))
+    cfg.ROUTER_POOL_MAXSIZE = int(os.getenv("ROUTER_POOL_MAXSIZE", cfg.ROUTER_POOL_MAXSIZE))
+    cfg.VLLM_POOL_CONNECTIONS = int(os.getenv("VLLM_POOL_CONNECTIONS", cfg.VLLM_POOL_CONNECTIONS))
+    cfg.VLLM_POOL_MAXSIZE = int(os.getenv("VLLM_POOL_MAXSIZE", cfg.VLLM_POOL_MAXSIZE))
+
+    # Result posting retry knobs
+    cfg.RESULT_POST_RETRY = os.getenv("RESULT_POST_RETRY", str(cfg.RESULT_POST_RETRY)).lower() == "true"
+    cfg.RESULT_POST_MAX_RETRIES = int(os.getenv("RESULT_POST_MAX_RETRIES", cfg.RESULT_POST_MAX_RETRIES))
+    cfg.RESULT_POST_BACKOFF_BASE_S = float(os.getenv("RESULT_POST_BACKOFF_BASE_S", cfg.RESULT_POST_BACKOFF_BASE_S))
+    cfg.RESULT_POST_BACKOFF_CAP_S = float(os.getenv("RESULT_POST_BACKOFF_CAP_S", cfg.RESULT_POST_BACKOFF_CAP_S))
 
     # Tracing env overrides
     cfg.TRACE_ENABLED = os.getenv("TRACE_ENABLED", "false").lower() == "true"
-    cfg.TRACE_SAMPLE_RATE = float(
-        os.getenv("TRACE_SAMPLE_RATE", getattr(cfg, "TRACE_SAMPLE_RATE", 1.0))
-    )
+    cfg.TRACE_SAMPLE_RATE = float(os.getenv("TRACE_SAMPLE_RATE", getattr(cfg, "TRACE_SAMPLE_RATE", 1.0)))
 
     return cfg

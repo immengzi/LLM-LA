@@ -1,0 +1,1438 @@
+===== FOLDER STRUCTURE =====
+.
+├── build.sh
+├── crawl.sh
+├── Dockerfile
+├── output.txt
+├── requirements.txt
+└── sidecar
+    ├── api.py
+    ├── config.py
+    ├── __init__.py
+    ├── local_queue.py
+    ├── main.py
+    ├── metrics.py
+    ├── result_poster.py
+    ├── router_client.py
+    ├── vllm_client.py
+    └── zmq_subscriber.py
+
+1 directory, 15 files
+
+===== FILE CONTENTS =====
+
+---------------- FILE: ./output.txt ----------------
+
+===== FOLDER STRUCTURE =====
+.
+├── build.sh
+├── crawl.sh
+├── Dockerfile
+├── output.txt
+├── requirements.txt
+└── sidecar
+    ├── api.py
+    ├── config.py
+    ├── __init__.py
+    ├── local_queue.py
+    ├── main.py
+    ├── metrics.py
+    ├── result_poster.py
+    ├── router_client.py
+    ├── vllm_client.py
+    └── zmq_subscriber.py
+
+1 directory, 15 files
+
+===== FILE CONTENTS =====
+
+---------------- FILE: ./output.txt ----------------
+
+
+---------------- END FILE: ./output.txt ----------------
+
+---------------- FILE: ./crawl.sh ----------------
+
+#!/usr/bin/env bash
+# Usage:
+#   ./crawl.sh /path/to/folder
+#   ./crawl.sh /path/to/folder -o out.txt
+#   ./crawl.sh /path/to/folder -x node_modules -x .venv -x README.md
+
+ROOT="${1:-.}"
+OUTFILE=""
+shift 1 || true  # shift root path
+
+EXCLUDES=()    # array to store folder or file names to exclude
+
+# parse optional flags
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output)
+      OUTFILE="$2"
+      shift 2
+      ;;
+    -x|--exclude)
+      EXCLUDES+=("$2")
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+run_crawl() {
+
+  echo "===== FOLDER STRUCTURE ====="
+  tree -a "$ROOT"
+
+  if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
+    echo ""
+    echo "===== EXCLUDED PATHS (still shown above) ====="
+    for ex in "${EXCLUDES[@]}"; do
+      echo "  - $ex"
+    done
+  fi
+
+  echo ""
+  echo "===== FILE CONTENTS ====="
+
+  # Build find exclusion arguments
+  FIND_EXCLUDES=()
+  for ex in "${EXCLUDES[@]}"; do
+    # Skip any file with this exact name
+    FIND_EXCLUDES+=( -not -name "$ex" )
+    # Skip everything under any directory with this name
+    FIND_EXCLUDES+=( -not -path "*/${ex}/*" )
+  done
+
+  # Execute the find with dynamic exclusions
+  find "$ROOT" -type f "${FIND_EXCLUDES[@]}" | while read -r file; do
+      echo ""
+      echo "---------------- FILE: $file ----------------"
+      echo ""
+      cat "$file"
+      echo ""
+      echo "---------------- END FILE: $file ----------------"
+  done
+}
+
+# output logic
+if [[ -n "$OUTFILE" ]]; then
+  run_crawl | tee "$OUTFILE"
+else
+  run_crawl
+fi
+
+---------------- END FILE: ./crawl.sh ----------------
+
+---------------- FILE: ./sidecar/zmq_subscriber.py ----------------
+
+#!/usr/bin/env python3
+# zmq_subscriber.py
+"""
+KV Cache Event Listener Sidecar for vLLM (per-pod)
+
+- Subscribes to vLLM KV events over ZMQ
+- Decodes msgpack KVEventBatch (same wire format as former centralized listener)
+- Stores KV block presence information in Redis
+
+Redis schema (per MODEL_NAME_REDIS):
+  - {MODEL}:kvblock:{block_hash}        (HASH)  block -> { pod_name: timestamp }
+  - {MODEL}:podblocks:{pod_name}        (SET)   pod   -> { block_hashes }
+  - {MODEL}:kvblocks                    (HASH)  index of all block_hashes
+"""
+
+import os
+import time
+import threading
+from typing import Any, Optional, Union, NewType
+
+import zmq
+import msgspec
+import redis
+
+from .config import get_config
+
+_cfg = get_config()
+
+# ------------------------------
+# Type definitions (match old listener)
+# ------------------------------
+
+BlockHash = NewType("BlockHash", int)
+
+
+class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True, gc=False):
+    ts: float
+    events: list[Any]
+
+
+class KVCacheEvent(msgspec.Struct, array_like=True, omit_defaults=True, gc=False, tag=True):
+    """Base class for KV cache events."""
+    pass
+
+
+class BlockStored(KVCacheEvent):
+    block_hashes: list[BlockHash]
+    parent_block_hash: Optional[BlockHash]
+    token_ids: list[int]
+    block_size: int
+    lora_id: Optional[int]
+
+
+class BlockRemoved(KVCacheEvent):
+    block_hashes: list[BlockHash]
+
+
+class AllBlocksCleared(KVCacheEvent):
+    pass
+
+
+class KVEventBatch(EventBatch):
+    events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
+
+
+# ------------------------------
+# Subscriber
+# ------------------------------
+
+class KVSubscriber:
+    def __init__(self):
+        self.vllm_host = _cfg.VLLM_HOST
+        self.vllm_port = _cfg.VLLM_SUB_PORT
+        self.redis = redis.Redis(
+            host=_cfg.REDIS_HOST,
+            port=_cfg.REDIS_PORT,
+            decode_responses=True,
+        )
+        self.model = _cfg.MODEL_NAME_REDIS
+        self.pod_name = _cfg.CONTAINER_NAME
+
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+        # IMPORTANT: msgpack + KVEventBatch, not JSON
+        self._decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
+
+    # ------------- lifecycle -------------
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        print(
+            f"[KV-SUB] started (host={self.vllm_host}, port={self.vllm_port}, "
+            f"pod={self.pod_name}, model={self.model})"
+        )
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        print("[KV-SUB] stopped")
+
+    # ------------- core loop -------------
+
+    def _loop(self):
+        ctx = zmq.Context()
+        sub = ctx.socket(zmq.SUB)
+        sub.connect(f"tcp://{self.vllm_host}:{self.vllm_port}")
+
+        # Match old listener: subscribe only to KV topic prefix
+        sub.setsockopt_string(zmq.SUBSCRIBE, "kv@")
+
+        print("[KV-SUB] connected to vLLM publisher (topic prefix 'kv@')")
+
+        try:
+            while not self._stop.is_set():
+                try:
+                    # Publisher: [topic, seq_bytes, payload]
+                    frames = sub.recv_multipart(flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    time.sleep(0.01)
+                    continue
+                except Exception as e:
+                    print(f"[KV-SUB] ZMQ recv error: {e}")
+                    time.sleep(1.0)
+                    continue
+
+                if len(frames) != 3:
+                    print(f"[KV-SUB] unexpected frame count: {len(frames)} (expected 3)")
+                    continue
+
+                topic, seq_bytes, payload = frames
+                # seq = int.from_bytes(seq_bytes, "big")  # unused but available
+
+                try:
+                    batch = self._decoder.decode(payload)
+                except Exception as e:
+                    print(f"[KV-SUB] decode error (msgpack KVEventBatch): {e}")
+                    continue
+
+                try:
+                    self._handle_batch(batch)
+                except Exception as e:
+                    print(f"[KV-SUB] error handling KV batch: {e}")
+
+        finally:
+            try:
+                sub.close(0)
+            except Exception:
+                pass
+            ctx.term()
+
+    # ------------- Redis update -------------
+
+    def _handle_batch(self, event_batch: KVEventBatch) -> None:
+        """
+        Update Redis for KV cache events.
+
+        Redis schema:
+          - {model}:kvblocks               -> HSET(block_hash -> "kvblock:{block_hash}")
+          - {model}:kvblock:{block_hash}   -> HSET(pod_name -> timestamp)
+          - {model}:podblocks:{pod_name}   -> SET(block_hashes held by pod)
+        """
+        key_prefix = f"{self.model}:" if self.model else ""
+        kvblocks_key = f"{key_prefix}kvblocks"
+        podblocks_key = f"{key_prefix}podblocks:{self.pod_name}"
+
+        pipe = self.redis.pipeline(transaction=False)
+        ts = int(time.time())
+
+        for ev in event_batch.events:
+            # BlockStored
+            if isinstance(ev, BlockStored):
+                for block_hash in ev.block_hashes:
+                    bh_str = str(block_hash)
+                    kvblock_key = f"{key_prefix}kvblock:{bh_str}"
+
+                    # block -> pod
+                    pipe.hset(kvblock_key, self.pod_name, ts)
+                    # pod -> block
+                    pipe.sadd(podblocks_key, bh_str)
+                    # index of all blocks
+                    pipe.hset(kvblocks_key, bh_str, kvblock_key)
+
+            # BlockRemoved
+            elif isinstance(ev, BlockRemoved):
+                for block_hash in ev.block_hashes:
+                    bh_str = str(block_hash)
+                    kvblock_key = f"{key_prefix}kvblock:{bh_str}"
+                    pipe.hdel(kvblock_key, self.pod_name)
+                    pipe.srem(podblocks_key, bh_str)
+
+            # AllBlocksCleared
+            elif isinstance(ev, AllBlocksCleared):
+                for bh_str in self.redis.sscan_iter(podblocks_key):
+                    kvblock_key = f"{key_prefix}kvblock:{bh_str}"
+                    pipe.hdel(kvblock_key, self.pod_name)
+                pipe.delete(podblocks_key)
+
+        try:
+            pipe.execute()
+        except Exception as e:
+            print(f"[KV-SUB] redis error: {e}")
+
+---------------- END FILE: ./sidecar/zmq_subscriber.py ----------------
+
+---------------- FILE: ./sidecar/config.py ----------------
+
+# sidecar/config.py
+# -*- coding: utf-8 -*-
+from dataclasses import dataclass
+import os
+
+
+@dataclass
+class SidecarConfig:
+    # Where the router-service lives
+    ROUTER_URL: str = "http://router-service:8080"
+
+    # Where vLLM OpenAI-compatible API lives (inside the same pod)
+    VLLM_URL: str = "http://127.0.0.1:8000"
+
+    MODEL_NAME: str = "served-model"
+
+    # Local queue / batching
+    BATCH_SIZE: int = 8
+    PULL_INTERVAL_S: float = 0.05
+
+    # ZMQ → Redis kv sync (same as you had)
+    VLLM_HOST: str = "127.0.0.1"
+    VLLM_SUB_PORT: int = 5557
+
+    REDIS_HOST: str = "redis"
+    REDIS_PORT: int = 6379
+    CONTAINER_NAME: str = os.getenv("CONTAINER_NAME", "vllm-pod")
+    MODEL_NAME_REDIS: str = "served-model"
+
+    # sidecar HTTP + concurrency + mode
+    SIDECAR_PORT: int = 9000                # where this sidecar FastAPI listens
+    SIDECAR_MODE: str = "pull"              # "pull" or "push"
+
+    # HTTP timeouts (seconds)
+    ROUTER_PULL_TIMEOUT_S: float = 1.0      # /pull timeout
+    VLLM_TIMEOUT_S: float = 30.0            # vLLM generation timeout
+    ROUTER_RESULT_TIMEOUT_S: float = 5.0    # /result post timeout
+
+    # ------------------------------------------------
+    # Tracing controls (must match router side)
+    # ------------------------------------------------
+    TRACE_ENABLED: bool = False             # global on/off
+    TRACE_SAMPLE_RATE: float = 1.0          # 0.0–1.0, currently unused here but kept for symmetry
+
+
+def get_config() -> SidecarConfig:
+    cfg = SidecarConfig()
+
+    cfg.ROUTER_URL = os.getenv("ROUTER_URL", cfg.ROUTER_URL)
+    cfg.VLLM_URL = os.getenv("VLLM_URL", cfg.VLLM_URL)
+    cfg.MODEL_NAME = os.getenv("MODEL_NAME", cfg.MODEL_NAME)
+
+    cfg.BATCH_SIZE = int(os.getenv("BATCH_SIZE", getattr(cfg, "BATCH_SIZE", 8)))
+    cfg.PULL_INTERVAL_S = float(os.getenv("PULL_INTERVAL_S", cfg.PULL_INTERVAL_S))
+
+    cfg.VLLM_HOST = os.getenv("VLLM_HOST", cfg.VLLM_HOST)
+    cfg.VLLM_SUB_PORT = int(os.getenv("VLLM_SUB_PORT", cfg.VLLM_SUB_PORT))
+    cfg.REDIS_HOST = os.getenv("REDIS_HOST", cfg.REDIS_HOST)
+    cfg.REDIS_PORT = int(os.getenv("REDIS_PORT", cfg.REDIS_PORT))
+    cfg.CONTAINER_NAME = os.getenv("CONTAINER_NAME", cfg.CONTAINER_NAME)
+    cfg.MODEL_NAME_REDIS = os.getenv("MODEL_NAME_REDIS", cfg.MODEL_NAME_REDIS)
+
+    cfg.SIDECAR_PORT = int(os.getenv("SIDECAR_PORT", cfg.SIDECAR_PORT))
+    cfg.SIDECAR_MODE = os.getenv("SIDECAR_MODE", cfg.SIDECAR_MODE)
+
+    cfg.ROUTER_PULL_TIMEOUT_S = float(
+        os.getenv("ROUTER_PULL_TIMEOUT_S", cfg.ROUTER_PULL_TIMEOUT_S)
+    )
+    cfg.VLLM_TIMEOUT_S = float(
+        os.getenv("VLLM_TIMEOUT_S", cfg.VLLM_TIMEOUT_S)
+    )
+    cfg.ROUTER_RESULT_TIMEOUT_S = float(
+        os.getenv("ROUTER_RESULT_TIMEOUT_S", cfg.ROUTER_RESULT_TIMEOUT_S)
+    )
+
+    # Tracing env overrides
+    cfg.TRACE_ENABLED = os.getenv("TRACE_ENABLED", "false").lower() == "true"
+    cfg.TRACE_SAMPLE_RATE = float(
+        os.getenv("TRACE_SAMPLE_RATE", getattr(cfg, "TRACE_SAMPLE_RATE", 1.0))
+    )
+
+    return cfg
+
+---------------- END FILE: ./sidecar/config.py ----------------
+
+---------------- FILE: ./sidecar/router_client.py ----------------
+
+# sidecar/router_client.py
+# -*- coding: utf-8 -*-
+import threading
+import time
+from typing import Dict, Any
+
+import requests
+
+from .config import get_config
+from .local_queue import LocalQueue
+from .metrics import inc_received
+
+_cfg = get_config()
+
+
+class RouterPullWorker:
+    """
+    Event-biased pull helper for a single vLLM pod.
+
+    Responsibilities:
+      - Compute capacity from local_q.state() and global BATCH_SIZE.
+      - Call router /pull when there is spare capacity.
+      - Never exceed BATCH_SIZE = pending + inflight on this pod.
+      - No background polling; pull() is triggered by workers
+        (busy-path and idle-poke).
+
+    NOTE: endpoint_id must match what the router sees as the endpoint identity.
+    """
+
+    def __init__(self, local_q: LocalQueue, endpoint_id: str):
+        self.local_q = local_q
+        self.endpoint_id = endpoint_id  # sidecar identity used by router
+        self._stop_evt = threading.Event()
+        self._lock = threading.RLock()
+        self._session: requests.Session | None = None
+
+        # Initial “discovery” flags
+        self._first_success: bool = False
+        self._printed_wait_msg: bool = False
+
+    # ---------------- lifecycle ----------------
+
+    def start(self):
+        """
+        Initialize HTTP session. No polling thread, all pulls are event-driven.
+        """
+        if self._session is not None:
+            return
+        self._stop_evt.clear()
+        self._session = requests.Session()
+        print(f"[sidecar] RouterPullWorker ready (endpoint_id={self.endpoint_id})")
+
+    def stop(self):
+        self._stop_evt.set()
+        session, self._session = self._session, None
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+        print("[sidecar] RouterPullWorker stopped")
+
+    # ---------------- core logic ----------------
+
+    def pull_if_capacity(self) -> None:
+        """
+        Event-biased pull:
+          - If pending+inflight < BATCH_SIZE, compute want and /pull.
+          - Insert returned jobs into the local queue.
+
+        When TRACE_ENABLED=true, also stamps:
+          - t_arrive_sidecar_pull
+          - sidecar_queue_len_before_pull
+          - sidecar_inflight_before_pull
+          - sidecar_logical_before_pull
+          - sidecar_queue_len_after_pull
+          - sidecar_logical_after_pull
+        """
+        if self._stop_evt.is_set():
+            return
+
+        with self._lock:
+            pending, inflight = self.local_q.state()
+            batch_size = _cfg.BATCH_SIZE
+            total_reserved = pending + inflight
+
+            if total_reserved >= batch_size:
+                return
+
+            want = batch_size - total_reserved
+            if want <= 0:
+                return
+
+            session = self._session
+            tmp_session = False
+            if session is None:
+                session = requests.Session()
+                tmp_session = True
+
+            try:
+                # ---------------------
+                # ROUTER /pull request
+                # ---------------------
+                resp = session.post(
+                    f"{_cfg.ROUTER_URL}/pull",
+                    json={"endpoint": self.endpoint_id, "want": want},
+                    timeout=_cfg.ROUTER_PULL_TIMEOUT_S,
+                )
+
+                if not resp.ok:
+                    # Before first success: suppress raw spam
+                    if not self._first_success:
+                        if not self._printed_wait_msg:
+                            print(
+                                "[sidecar] waiting for first successful /pull "
+                                "from router-service ..."
+                            )
+                            self._printed_wait_msg = True
+                    else:
+                        print(f"[sidecar] /pull failed: {resp.status_code} {resp.text}")
+                    return
+
+                data = resp.json()
+                items = data.get("items", [])
+
+                if not self._first_success:
+                    print("[sidecar] first successful /pull; normal logging enabled.")
+                    self._first_success = True
+
+                if not items:
+                    return
+
+                # ---------------------
+                # Process returned jobs
+                # ---------------------
+                now_pull = time.time()
+
+                # Snapshot queue state *before* enqueueing pulled items
+                pending_before, inflight_before = self.local_q.state()
+                logical_before = pending_before + inflight_before
+                queue_len_after = pending_before + len(items)
+                logical_after = logical_before + len(items)
+
+                for item in items:
+                    rid = str(item["req_id"])
+                    prompt = str(item["prompt"])
+                    meta: Dict[str, Any] = item.get("meta") or {}
+
+                    # Prom: received (router -> sidecar) for each pulled item
+                    inc_received(self.endpoint_id)
+
+                    # Trace injection for pull arrival + queue lengths
+                    if getattr(_cfg, "TRACE_ENABLED", False):
+                        tr = dict(meta.get("__trace__") or {})
+                        tr["t_arrive_sidecar_pull"] = now_pull
+
+                        # Sidecar-local queue lengths at pull time
+                        tr["sidecar_queue_len_before_pull"] = pending_before
+                        tr["sidecar_inflight_before_pull"] = inflight_before
+                        tr["sidecar_logical_before_pull"] = logical_before
+                        tr["sidecar_queue_len_after_pull"] = queue_len_after
+                        tr["sidecar_logical_after_pull"] = logical_after
+
+                        meta["__trace__"] = tr
+
+                    # Push into local queue
+                    self.local_q.put(rid, prompt, meta)
+
+            except Exception as e:
+                if not self._first_success:
+                    if not self._printed_wait_msg:
+                        print(
+                            "[sidecar] waiting for first successful /pull "
+                            "from router-service ..."
+                        )
+                        self._printed_wait_msg = True
+                else:
+                    print(f"[sidecar] /pull error: {e}")
+
+            finally:
+                if tmp_session:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+
+---------------- END FILE: ./sidecar/router_client.py ----------------
+
+---------------- FILE: ./sidecar/local_queue.py ----------------
+
+# -*- coding: utf-8 -*-
+from queue import Queue, Empty
+from threading import RLock
+from typing import Tuple, Dict, Any, Optional
+
+from .metrics import set_sidecar_queue_length
+
+
+class LocalQueue:
+    """
+    Local queue next to vLLM. Holds (req_id, prompt, meta).
+    Tracks pending (in queue) and inflight (being processed) so
+    the sidecar can enforce a max concurrency per pod.
+
+    Prom metric:
+      sidecar_queue_length{endpoint} = pending + inflight   (logical)
+    """
+
+    def __init__(self, endpoint_id: str):
+        self.endpoint_id = str(endpoint_id)
+        self._q: "Queue[Tuple[str, str, Dict[str, Any]]]" = Queue()
+        self._lock = RLock()
+        self._inflight: int = 0
+
+        # initialize gauge
+        set_sidecar_queue_length(self.endpoint_id, 0)
+
+    def _update_gauge_locked(self) -> None:
+        pending = self._q.qsize()
+        logical = pending + self._inflight
+        set_sidecar_queue_length(self.endpoint_id, logical)
+
+    def size(self) -> int:
+        return self._q.qsize()
+
+    def state(self) -> Tuple[int, int]:
+        """
+        Return (pending, inflight).
+        """
+        with self._lock:
+            pending = self._q.qsize()
+            inflight = self._inflight
+        return pending, inflight
+
+    def put(self, req_id: str, prompt: str, meta: Dict[str, Any]):
+        self._q.put((req_id, prompt, meta))
+        with self._lock:
+            self._update_gauge_locked()
+
+    def get_nowait(self) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+        try:
+            item = self._q.get_nowait()
+        except Empty:
+            return None
+        # mark as inflight
+        with self._lock:
+            self._inflight += 1
+            self._update_gauge_locked()
+        return item
+
+    def task_done(self):
+        try:
+            self._q.task_done()
+        except Exception:
+            pass
+        with self._lock:
+            self._inflight = max(0, self._inflight - 1)
+            self._update_gauge_locked()
+
+---------------- END FILE: ./sidecar/local_queue.py ----------------
+
+---------------- FILE: ./sidecar/metrics.py ----------------
+
+# sidecar/metrics.py
+# -*- coding: utf-8 -*-
+
+from prometheus_client import Counter, Gauge
+
+# --------------------------------
+# Sidecar metrics (minimal set)
+# --------------------------------
+# We label by endpoint (pod/container name) so dashboards are easy.
+
+SIDECAR_QUEUE_LENGTH = Gauge(
+    "sidecar_queue_length",
+    "Current logical length of the sidecar queue (pending + inflight)",
+    ["endpoint"],
+)
+
+SIDECAR_RECEIVED_REQUESTS_TOTAL = Counter(
+    "sidecar_received_requests_total",
+    "Total requests received by sidecar (router -> sidecar)",
+    ["endpoint"],
+)
+
+SIDECAR_COMPLETED_REQUESTS_TOTAL = Counter(
+    "sidecar_completed_requests_total",
+    "Total requests completed by sidecar (result produced and queued for return)",
+    ["endpoint"],
+)
+
+
+def set_sidecar_queue_length(endpoint: str, n: int) -> None:
+    try:
+        SIDECAR_QUEUE_LENGTH.labels(endpoint=str(endpoint)).set(int(n))
+    except Exception:
+        pass
+
+
+def inc_received(endpoint: str) -> None:
+    try:
+        SIDECAR_RECEIVED_REQUESTS_TOTAL.labels(endpoint=str(endpoint)).inc()
+    except Exception:
+        pass
+
+
+def inc_completed(endpoint: str) -> None:
+    try:
+        SIDECAR_COMPLETED_REQUESTS_TOTAL.labels(endpoint=str(endpoint)).inc()
+    except Exception:
+        pass
+
+---------------- END FILE: ./sidecar/metrics.py ----------------
+
+---------------- FILE: ./sidecar/__init__.py ----------------
+
+
+---------------- END FILE: ./sidecar/__init__.py ----------------
+
+---------------- FILE: ./sidecar/result_poster.py ----------------
+
+# sidecar/result_poster.py
+# -*- coding: utf-8 -*-
+import queue
+import threading
+import time
+import random
+from typing import Dict, Any, Optional
+
+import requests
+
+from .config import get_config
+
+_cfg = get_config()
+
+
+class ResultPoster:
+    """
+    Async poster for sidecar -> router /result.
+
+    Key property: vLLM workers never block on router /result.
+    This prevents worker starvation and reduces TCP reset sensitivity.
+
+    Semantics preserved:
+      - same payload eventually sent to router /result
+      - ordering is preserved (single worker poster thread) unless you increase workers
+    """
+
+    def __init__(self, maxsize: int = 100000):
+        self._q: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=maxsize)
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._session: Optional[requests.Session] = None
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._stop.clear()
+        self._session = requests.Session()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        print("[sidecar] ResultPoster started")
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        if self._session is not None:
+            try:
+                self._session.close()
+            except Exception:
+                pass
+            self._session = None
+        print("[sidecar] ResultPoster stopped")
+
+    def submit(self, payload: Dict[str, Any]) -> None:
+        # No blocking: never stall vLLM workers.
+        try:
+            self._q.put_nowait(payload)
+        except queue.Full:
+            # If this happens, router can't accept results fast enough.
+            # We keep logic unchanged (no backpressure), but we must avoid deadlock.
+            # Dropping is noisy but safer than blocking compute threads.
+            rid = payload.get("req_id", "?")
+            print(f"[sidecar] ResultPoster queue FULL; dropping result for req_id={rid}")
+
+    def _loop(self):
+        session = self._session or requests.Session()
+        url = f"{_cfg.ROUTER_URL}/result"
+
+        while not self._stop.is_set():
+            try:
+                payload = self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            attempt = 0
+            while not self._stop.is_set():
+                attempt += 1
+                try:
+                    r = session.post(url, json=payload, timeout=_cfg.ROUTER_RESULT_TIMEOUT_S)
+                    if r.ok:
+                        break
+                except Exception:
+                    pass
+
+                # Retry with jittered exponential backoff (bounded)
+                sleep_s = min(2.0, 0.05 * (2 ** min(attempt, 6)))
+                sleep_s *= (0.8 + 0.4 * random.random())
+                time.sleep(sleep_s)
+
+            try:
+                self._q.task_done()
+            except Exception:
+                pass
+
+---------------- END FILE: ./sidecar/result_poster.py ----------------
+
+---------------- FILE: ./sidecar/api.py ----------------
+
+# -*- coding: utf-8 -*-
+from fastapi import FastAPI
+from fastapi.responses import Response
+from pydantic import BaseModel
+from typing import Dict, Any
+import time
+
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
+from .local_queue import LocalQueue
+from .config import get_config
+from .metrics import inc_received
+
+_cfg = get_config()
+
+app = FastAPI(title="vLLM Sidecar", version="0.1.0")
+
+_local_q: LocalQueue | None = None
+
+
+def bind_local_queue(q: LocalQueue):
+    global _local_q
+    _local_q = q
+
+
+class PushItem(BaseModel):
+    req_id: str
+    prompt: str
+    meta: Dict[str, Any] = {}
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/health")
+async def health() -> dict:
+    if _local_q is None:
+        return {"status": "error", "queue_len": 0, "inflight": 0, "logical": 0}
+    pending, inflight = _local_q.state()
+    return {
+        "status": "ok",
+        "queue_len": pending,
+        "inflight": inflight,
+        "logical": pending + inflight,
+    }
+
+
+@app.post("/push")
+async def push(item: PushItem) -> dict:
+    """
+    Push-mode delivery from router → sidecar.
+
+    If TRACE_ENABLED=true, annotate:
+      - t_arrive_sidecar_push
+      - sidecar_queue_len_before / after
+      - sidecar_inflight_before
+      - sidecar_logical_before / after
+
+    Also stamps a receipt marker so this can be surfaced in experiment logs:
+      - rcpt_push_recv_wall
+    """
+    if _local_q is None:
+        return {"status": "error", "msg": "local queue not bound"}
+
+    # Prom: received (router -> sidecar)
+    inc_received(_cfg.CONTAINER_NAME)
+
+    meta = dict(item.meta or {})
+
+    # Snapshot queue state *before* enqueue
+    pending_before = 0
+    inflight_before = 0
+    if _local_q is not None:
+        pending_before, inflight_before = _local_q.state()
+    logical_before = pending_before + inflight_before
+
+    if getattr(_cfg, "TRACE_ENABLED", False):
+        now_push = time.time()
+        tr = dict(meta.get("__trace__") or {})
+
+        # Existing trace
+        tr["t_arrive_sidecar_push"] = now_push
+
+        # receipt marker (lets you audit "did sidecar receive it?" from experiment logs)
+        tr["rcpt_push_recv_wall"] = now_push
+
+        # Sidecar-local queue lengths
+        tr["sidecar_queue_len_before"] = pending_before
+        tr["sidecar_inflight_before"] = inflight_before
+        tr["sidecar_logical_before"] = logical_before
+
+        # After enqueue, pending increases by 1
+        tr["sidecar_queue_len_after"] = pending_before + 1
+        tr["sidecar_logical_after"] = logical_before + 1
+
+        meta["__trace__"] = tr
+
+    _local_q.put(item.req_id, item.prompt, meta)
+    return {"status": "ok"}
+
+---------------- END FILE: ./sidecar/api.py ----------------
+
+---------------- FILE: ./sidecar/vllm_client.py ----------------
+
+# sidecar/vllm_client.py
+# -*- coding: utf-8 -*-
+import time
+import threading
+from typing import Dict, Any, Optional
+
+import requests
+
+from .config import get_config
+from .local_queue import LocalQueue
+from .router_client import RouterPullWorker
+from .result_poster import ResultPoster
+from .metrics import inc_completed
+
+_cfg = get_config()
+
+
+class VLLMWorker:
+    """
+    Worker loop:
+      - Pop from local queue
+      - POST to vLLM /v1/chat/completions
+      - Enqueue result for async posting back to router /result (ResultPoster)
+
+    Trace fields added (if TRACE_ENABLED):
+      * t_dequeue_sidecar
+      * t_vllm_send
+      * t_vllm_recv
+      * t_post_result_sidecar
+
+    Plus sidecar queue snapshots:
+      * sidecar_queue_len_at_dequeue
+      * sidecar_inflight_at_dequeue
+      * sidecar_logical_at_dequeue
+      * sidecar_queue_len_at_result
+      * sidecar_inflight_at_result
+      * sidecar_logical_at_result
+    """
+
+    def __init__(
+        self,
+        local_q: LocalQueue,
+        pull_worker: Optional[RouterPullWorker] = None,
+        result_poster: Optional[ResultPoster] = None,  # NEW
+    ):
+        self.local_q = local_q
+        self._pull_worker = pull_worker
+        self._result_poster = result_poster  # NEW
+
+        self._stop_evt = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    # ------------------------------------------------------------
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._stop_evt.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        print("[sidecar] VLLMWorker started")
+
+    def stop(self):
+        self._stop_evt.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        print("[sidecar] VLLMWorker stopped")
+
+    # ------------------------------------------------------------
+
+    def _loop(self):
+        session = requests.Session()
+        vllm_url = f"{_cfg.VLLM_URL}/v1/chat/completions"
+
+        # Keep router_result_url only for fallback mode (if poster not provided)
+        router_result_url = f"{_cfg.ROUTER_URL}/result"
+
+        # Idle-poke configuration
+        idle_sleep_s = 0.01
+        spins_per_second = int(1.0 / idle_sleep_s)
+        spins_per_poke_worker = max(
+            1,
+            int(spins_per_second * _cfg.PULL_INTERVAL_S * _cfg.BATCH_SIZE),
+        )
+        idle_spins = 0
+
+        try:
+            while not self._stop_evt.is_set():
+
+                # --------------------------------------------------------
+                # Attempt to dequeue work
+                # --------------------------------------------------------
+                item = self.local_q.get_nowait()
+                if not item:
+                    idle_spins += 1
+
+                    # Occasional idle pull
+                    if (
+                        self._pull_worker is not None
+                        and idle_spins >= spins_per_poke_worker
+                    ):
+                        try:
+                            self._pull_worker.pull_if_capacity()
+                        except Exception as e:
+                            print(f"[sidecar] idle-poke pull_if_capacity error: {e}")
+                        idle_spins = 0
+
+                    time.sleep(idle_sleep_s)
+                    continue
+
+                # Reset idle counter
+                idle_spins = 0
+
+                req_id, prompt, meta = item
+
+                # --------------------------------------------------------
+                # Trace: dequeue timestamp + queue snapshot
+                # --------------------------------------------------------
+                if getattr(_cfg, "TRACE_ENABLED", False):
+                    pending_dq, inflight_dq = self.local_q.state()
+                    logical_dq = pending_dq + inflight_dq
+
+                    tr = dict(meta.get("__trace__") or {})
+                    tr["t_dequeue_sidecar"] = time.time()
+                    tr["sidecar_queue_len_at_dequeue"] = pending_dq
+                    tr["sidecar_inflight_at_dequeue"] = inflight_dq
+                    tr["sidecar_logical_at_dequeue"] = logical_dq
+                    meta["__trace__"] = tr
+
+                try:
+                    # ----------------------------------------------------
+                    # Build vLLM request
+                    # ----------------------------------------------------
+                    max_tokens = meta.get("max_tokens", 128)
+                    temperature = meta.get("temperature", 0.0)
+                    enable_thinking = bool(meta.get("enable_thinking", False))
+
+                    payload: Dict[str, Any] = {
+                        "model": _cfg.MODEL_NAME,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                        "chat_template_kwargs": {
+                            "enable_thinking": enable_thinking,
+                        },
+                    }
+
+                    # ----------------------------------------------------
+                    # Trace: vLLM send timestamp
+                    # ----------------------------------------------------
+                    if getattr(_cfg, "TRACE_ENABLED", False):
+                        tr = dict(meta.get("__trace__") or {})
+                        tr["t_vllm_send"] = time.time()
+                        meta["__trace__"] = tr
+
+                    # ----------------------------------------------------
+                    # Call vLLM
+                    # ----------------------------------------------------
+                    resp = session.post(
+                        vllm_url,
+                        json=payload,
+                        timeout=_cfg.VLLM_TIMEOUT_S,
+                    )
+
+                    # ----------------------------------------------------
+                    # Trace: vLLM recv timestamp
+                    # ----------------------------------------------------
+                    if getattr(_cfg, "TRACE_ENABLED", False):
+                        tr = dict(meta.get("__trace__") or {})
+                        tr["t_vllm_recv"] = time.time()
+                        meta["__trace__"] = tr
+
+                    # ----------------------------------------------------
+                    # Extract vLLM response, preserving EVERYTHING
+                    # ----------------------------------------------------
+                    output_text: str
+                    finish_reason: Optional[str] = None
+                    usage: Optional[Dict[str, Any]] = None
+                    raw_vllm: Optional[Dict[str, Any]] = None
+                    latency_s: Optional[float] = None
+
+                    # Try to get HTTP-level latency from requests
+                    try:
+                        latency_s = float(resp.elapsed.total_seconds())
+                    except Exception:
+                        latency_s = None
+
+                    if not resp.ok:
+                        print(f"[sidecar] vLLM error: {resp.status_code} {resp.text}")
+                        output_text = f"[vLLM error {resp.status_code}]"
+                    else:
+                        try:
+                            data = resp.json()
+                            raw_vllm = data
+
+                            choices = data.get("choices") or []
+                            if choices:
+                                first = choices[0]
+                                msg = first.get("message") or {}
+                                # Prefer message.content if present
+                                output_text = msg.get("content") or str(first)
+                                finish_reason = (
+                                    first.get("finish_reason")
+                                    or data.get("finish_reason")
+                                )
+                            else:
+                                # Fallback: just stringify the whole payload
+                                output_text = str(data)
+
+                            if isinstance(data.get("usage"), dict):
+                                usage = data["usage"]
+                        except Exception as e:
+                            print(f"[sidecar] parse error for req_id={req_id}: {e}")
+                            output_text = "[parse error in vLLM response]"
+                            raw_vllm = None
+                            finish_reason = None
+                            usage = None
+
+                    # ----------------------------------------------------
+                    # Trace: queue snapshot at result time
+                    # ----------------------------------------------------
+                    if getattr(_cfg, "TRACE_ENABLED", False):
+                        pending_res, inflight_res = self.local_q.state()
+                        logical_res = pending_res + inflight_res
+
+                        tr = dict(meta.get("__trace__") or {})
+                        tr["sidecar_queue_len_at_result"] = pending_res
+                        tr["sidecar_inflight_at_result"] = inflight_res
+                        tr["sidecar_logical_at_result"] = logical_res
+                        tr["t_post_result_sidecar"] = time.time()
+                        meta["__trace__"] = tr
+
+                    # ----------------------------------------------------
+                    # Build result object (FULL vLLM info preserved)
+                    # ----------------------------------------------------
+                    result_obj: Dict[str, Any] = {
+                        "output": output_text,
+                    }
+
+                    if finish_reason is not None:
+                        result_obj["finish_reason"] = finish_reason
+
+                    # HTTP-level latency as seen by sidecar → vLLM
+                    if latency_s is not None:
+                        result_obj["latency_s"] = latency_s
+
+                    # Full raw OpenAI-compatible JSON from vLLM
+                    if raw_vllm is not None:
+                        result_obj["raw"] = raw_vllm
+
+                    # Token usage from vLLM (prompt/completion/total)
+                    if usage is not None:
+                        result_obj["usage"] = usage
+
+                    # Attach trace dictionary into result, if enabled
+                    if getattr(_cfg, "TRACE_ENABLED", False):
+                        result_obj["trace"] = dict(meta.get("__trace__") or {})
+
+                    # ----------------------------------------------------
+                    # Send result back to router (ASYNC via ResultPoster)
+                    # ----------------------------------------------------
+                    result_payload = {
+                        "req_id": req_id,
+                        "result": result_obj,
+                    }
+
+                    # Prom: completed (sidecar produced a result payload)
+                    inc_completed(_cfg.CONTAINER_NAME)
+
+                    if self._result_poster is not None:
+                        # Non-blocking: avoids tying up vLLM workers on router backpressure / TCP resets
+                        self._result_poster.submit(result_payload)
+                    else:
+                        # Fallback: original synchronous behavior (kept for safety)
+                        try:
+                            r2 = session.post(
+                                router_result_url,
+                                json=result_payload,
+                                timeout=_cfg.ROUTER_RESULT_TIMEOUT_S,
+                            )
+                            if not r2.ok:
+                                print(
+                                    f"[sidecar] router /result error for req_id={req_id}: "
+                                    f"{r2.status_code} {r2.text}"
+                                )
+                        except Exception as e:
+                            print(f"[sidecar] router /result failed for req_id={req_id}: {e}")
+
+                except Exception as e:
+                    print(f"[sidecar] vLLM request failed for req_id={req_id}: {e}")
+
+                finally:
+                    # Mark job done
+                    self.local_q.task_done()
+
+                    # ----------------------------------------------------
+                    # Busy-path capacity top-up
+                    # ----------------------------------------------------
+                    if self._pull_worker is not None:
+                        try:
+                            self._pull_worker.pull_if_capacity()
+                        except Exception as e:
+                            print(f"[sidecar] post-completion pull_if_capacity error: {e}")
+
+        finally:
+            session.close()
+
+---------------- END FILE: ./sidecar/vllm_client.py ----------------
+
+---------------- FILE: ./sidecar/main.py ----------------
+
+# sidecar/main.py
+# -*- coding: utf-8 -*-
+import signal
+import threading
+import time
+
+import uvicorn
+
+from .config import get_config
+from .local_queue import LocalQueue
+from .router_client import RouterPullWorker
+from .vllm_client import VLLMWorker
+from .result_poster import ResultPoster       # NEW
+from .zmq_subscriber import KVSubscriber
+from .api import app, bind_local_queue
+
+_cfg = get_config()
+
+
+def _run_server():
+    uvicorn.run(
+        "sidecar.api:app",
+        host="0.0.0.0",
+        port=_cfg.SIDECAR_PORT,
+        log_level="info",
+    )
+
+
+def main():
+    # For KV-aware routing: endpoint identity = pod name
+    endpoint_id = _cfg.CONTAINER_NAME
+
+    local_q = LocalQueue(endpoint_id=endpoint_id)
+    bind_local_queue(local_q)
+
+    mode = (_cfg.SIDECAR_MODE or "pull").lower()
+
+    pull_worker = None
+    if mode == "pull":
+        pull_worker = RouterPullWorker(local_q, endpoint_id)
+        pull_worker.start()  # initializes session; this is not a polling thread
+
+    # ------------------------------------------------------------
+    # Result poster (async router /result delivery)
+    # ------------------------------------------------------------
+    result_poster = ResultPoster(maxsize=100000)
+    result_poster.start()
+
+    # ------------------------------------------------------------
+    # vLLM workers (unchanged concurrency / logic)
+    # ------------------------------------------------------------
+    vllm_workers = []
+    for _ in range(_cfg.BATCH_SIZE):
+        w = VLLMWorker(
+            local_q,
+            pull_worker=pull_worker,
+            result_poster=result_poster,   # NEW
+        )
+        w.start()
+        vllm_workers.append(w)
+
+    kv_sub = KVSubscriber()
+
+    stop_evt = threading.Event()
+
+    def handle_sig(*_args):
+        stop_evt.set()
+
+    signal.signal(signal.SIGINT, handle_sig)
+    signal.signal(signal.SIGTERM, handle_sig)
+
+    # Start KV subscriber
+    kv_sub.start()
+
+    # Start HTTP server in a background thread
+    server_thread = threading.Thread(target=_run_server, daemon=True)
+    server_thread.start()
+
+    print(
+        f"[sidecar] running in {mode.upper()} mode "
+        f"(BATCH_SIZE={_cfg.BATCH_SIZE}, port={_cfg.SIDECAR_PORT}, endpoint_id={endpoint_id})"
+    )
+
+    try:
+        while not stop_evt.is_set():
+            time.sleep(0.5)
+    finally:
+        print("[sidecar] shutting down")
+
+        if pull_worker:
+            pull_worker.stop()
+
+        for w in vllm_workers:
+            w.stop()
+
+        result_poster.stop()   # NEW
+
+        kv_sub.stop()
+
+
+if __name__ == "__main__":
+    main()
+
+---------------- END FILE: ./sidecar/main.py ----------------
+
+---------------- FILE: ./build.sh ----------------
+
+#!/bin/bash
+set -e
+
+PROXY_URL="http://peulerosweb:EulerOS_123@172.18.100.92:8080"
+
+docker build \
+  -f Dockerfile \
+  --build-arg HTTP_PROXY="$PROXY_URL" \
+  --build-arg HTTPS_PROXY="$PROXY_URL" \
+  -t kv-sidecar:latest .
+
+---------------- END FILE: ./build.sh ----------------
+
+---------------- FILE: ./Dockerfile ----------------
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# ---------- Proxy only for build ----------
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+
+ENV http_proxy=${HTTP_PROXY}
+ENV https_proxy=${HTTPS_PROXY}
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+# ------------------------------------------
+
+# Install deps
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ---------- Clear proxy for runtime ----------
+ENV http_proxy=""
+ENV https_proxy=""
+ENV HTTP_PROXY=""
+ENV HTTPS_PROXY=""
+# ---------------------------------------------
+
+# Copy app code
+COPY sidecar ./sidecar
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-m", "sidecar.main"]
+
+---------------- END FILE: ./Dockerfile ----------------
+
+---------------- FILE: ./requirements.txt ----------------
+
+fastapi
+uvicorn
+requests
+redis
+msgspec
+pyzmq
+prometheus_client
+
+---------------- END FILE: ./requirements.txt ----------------
