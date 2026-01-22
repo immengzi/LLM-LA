@@ -27,13 +27,13 @@ def _run_server():
 
 
 def main():
-    local_q = LocalQueue()
+    # For KV-aware routing: endpoint identity = pod name
+    endpoint_id = _cfg.CONTAINER_NAME
+
+    local_q = LocalQueue(endpoint_id=endpoint_id)
     bind_local_queue(local_q)
 
     mode = (_cfg.SIDECAR_MODE or "pull").lower()
-
-    # For KV-aware routing: endpoint identity = pod name
-    endpoint_id = _cfg.CONTAINER_NAME
 
     pull_worker = None
     if mode == "pull":

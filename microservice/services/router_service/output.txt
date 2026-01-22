@@ -1,0 +1,1959 @@
+===== FOLDER STRUCTURE =====
+.
+├── build.sh
+├── crawl.sh
+├── Dockerfile
+├── entrypoint.sh
+├── output.txt
+├── requirements.txt
+└── router
+    ├── api.py
+    ├── config.py
+    ├── __init__.py
+    ├── kv_aware.py
+    ├── kv_watcher.py
+    ├── len_select.py
+    ├── metrics.py
+    ├── models.py
+    ├── predictors.py
+    ├── push_router.py
+    └── router_state.py
+
+1 directory, 17 files
+
+===== FILE CONTENTS =====
+
+---------------- FILE: ./output.txt ----------------
+
+===== FOLDER STRUCTURE =====
+.
+├── build.sh
+├── crawl.sh
+├── Dockerfile
+├── entrypoint.sh
+├── output.txt
+├── requirements.txt
+└── router
+    ├── api.py
+    ├── config.py
+    ├── __init__.py
+    ├── kv_aware.py
+    ├── kv_watcher.py
+    ├── len_select.py
+    ├── metrics.py
+    ├── models.py
+    ├── predictors.py
+    ├── push_router.py
+    └── router_state.py
+
+1 directory, 17 files
+
+===== FILE CONTENTS =====
+
+---------------- FILE: ./output.txt ----------------
+
+
+---------------- END FILE: ./output.txt ----------------
+
+---------------- FILE: ./entrypoint.sh ----------------
+
+#!/usr/bin/env bash
+set -e
+
+HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-8080}"
+
+# ACCESS_LOG defaults to true if not set
+ACCESS_LOG="${ACCESS_LOG:-true}"
+
+if [ "$ACCESS_LOG" = "true" ]; then
+  echo "[entrypoint] Starting uvicorn WITH access log (ACCESS_LOG=true)"
+  exec uvicorn router.api:app --host "$HOST" --port "$PORT"
+else
+  echo "[entrypoint] Starting uvicorn with NO access log (ACCESS_LOG=false)"
+  exec uvicorn router.api:app --host "$HOST" --port "$PORT" --no-access-log
+fi
+
+---------------- END FILE: ./entrypoint.sh ----------------
+
+---------------- FILE: ./crawl.sh ----------------
+
+#!/usr/bin/env bash
+# Usage:
+#   ./crawl.sh /path/to/folder
+#   ./crawl.sh /path/to/folder -o out.txt
+#   ./crawl.sh /path/to/folder -x node_modules -x .venv -x README.md
+
+ROOT="${1:-.}"
+OUTFILE=""
+shift 1 || true  # shift root path
+
+EXCLUDES=()    # array to store folder or file names to exclude
+
+# parse optional flags
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output)
+      OUTFILE="$2"
+      shift 2
+      ;;
+    -x|--exclude)
+      EXCLUDES+=("$2")
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+run_crawl() {
+
+  echo "===== FOLDER STRUCTURE ====="
+  tree -a "$ROOT"
+
+  if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
+    echo ""
+    echo "===== EXCLUDED PATHS (still shown above) ====="
+    for ex in "${EXCLUDES[@]}"; do
+      echo "  - $ex"
+    done
+  fi
+
+  echo ""
+  echo "===== FILE CONTENTS ====="
+
+  # Build find exclusion arguments
+  FIND_EXCLUDES=()
+  for ex in "${EXCLUDES[@]}"; do
+    # Skip any file with this exact name
+    FIND_EXCLUDES+=( -not -name "$ex" )
+    # Skip everything under any directory with this name
+    FIND_EXCLUDES+=( -not -path "*/${ex}/*" )
+  done
+
+  # Execute the find with dynamic exclusions
+  find "$ROOT" -type f "${FIND_EXCLUDES[@]}" | while read -r file; do
+      echo ""
+      echo "---------------- FILE: $file ----------------"
+      echo ""
+      cat "$file"
+      echo ""
+      echo "---------------- END FILE: $file ----------------"
+  done
+}
+
+# output logic
+if [[ -n "$OUTFILE" ]]; then
+  run_crawl | tee "$OUTFILE"
+else
+  run_crawl
+fi
+
+---------------- END FILE: ./crawl.sh ----------------
+
+---------------- FILE: ./router/len_select.py ----------------
+
+# -*- coding: utf-8 -*-
+"""
+Length-aware selection over a *local pool* of candidates.
+
+Input is a list of (req_id, prompt, t_enq_client, meta)
+plus a predictor and policy.
+"""
+
+from typing import List, Tuple, Dict
+from .predictors import SimpleLengthPredictor
+from .config import get_config
+
+_cfg = get_config()
+
+
+def select_len_aware(
+    candidates: List[Tuple[int, str, float, Dict]],
+    predictor: SimpleLengthPredictor,
+    policy: str,
+) -> List[Tuple[int, str, float, Dict]]:
+    """
+    Return candidates sorted according to a length policy.
+
+    policy: "short_first" or "long_first"
+    """
+    scored = []
+    for req_id, prompt, t_enq, meta in candidates:
+        pred_out = predictor.predict_out_tokens(prompt, req_id=req_id)
+        score = pred_out or _cfg.DEFAULT_MAX_TOKENS
+        scored.append((req_id, prompt, t_enq, meta, score))
+
+    reverse = (policy == "long_first")
+    scored.sort(key=lambda x: x[4], reverse=reverse)
+    return [(r, p, t, m) for (r, p, t, m, _) in scored]
+
+---------------- END FILE: ./router/len_select.py ----------------
+
+---------------- FILE: ./router/config.py ----------------
+
+# -*- coding: utf-8 -*-
+from dataclasses import dataclass, asdict
+import os
+
+# Global singleton to avoid recomputing config multiple times
+_CONFIG = None
+
+
+@dataclass
+class RouterConfig:
+    # Basic
+    HOST: str = "0.0.0.0"
+    PORT: int = 8080
+
+    # Redis (for KV watcher)
+    REDIS_HOST: str = "redis"
+    REDIS_PORT: int = 6379
+    MODEL_NAME: str = "served-model"
+
+    # Hash service
+    HASH_SERVICE_URL: str = "http://prefix-hash-service:9095"
+
+    # vLLM discovery (for KV watcher to map pod -> endpoint)
+    NAMESPACE: str = "vllm"
+    LABEL_SELECTOR: str = "app=vllm-qwen"
+    VLLM_PORT: int = 8200
+
+    # KV watcher controls
+    KV_WATCH_INTERVAL_S: float = 1.0
+    KV_WATCH_MAX_KEYS: int = 200
+    KV_DISCOVERY_INTERVAL_S: float = 5.0
+    KV_LOG_KEYS: str = "summary"  # off | summary | full
+
+    # Routing knobs
+    KV_AWARE: bool = True
+    LEN_AWARE: bool = True
+    LEN_POLICY: str = "short_first"  # short_first | long_first
+
+    # how many items to scan vs want
+    POOL_FACTOR: int = 4
+
+    # batch size proxy: expected output tokens (for predictor)
+    DEFAULT_MAX_TOKENS: int = 1024
+
+    # --------------------------------------------------------------------
+    # Router mode + sidecar port
+    # --------------------------------------------------------------------
+    ROUTER_MODE: str = "pull"        # "pull", "push-rr", "push-random", "push-leastq"
+    SIDECAR_PORT: int = 9000         # sidecar FastAPI port
+
+    # --------------------------------------------------------------------
+    # Synchronous response flow (existing /enqueue)
+    # --------------------------------------------------------------------
+    RESULT_TIMEOUT_S: float = 60.0
+    RESULT_POLL_INTERVAL_S: float = 0.02  # (kept for compatibility; not used by ACK+poll)
+
+    # --------------------------------------------------------------------
+    # ACK+POLL transport support (router always exposes endpoints)
+    #
+    # These are NOT a "mode toggle". They are resource-management knobs
+    # for how long results remain queryable via GET /result/{req_id}.
+    # --------------------------------------------------------------------
+    POLL_RESULT_TTL_S: float = 300.0
+    POLL_CLEANUP_INTERVAL_S: float = 1.0
+
+    # --------------------------------------------------------------------
+    # HTTP timeouts
+    # --------------------------------------------------------------------
+    HASH_TIMEOUT_S: float = 2.0          # hash-service compute_hashes
+    PUSH_HTTP_TIMEOUT_S: float = 2.0     # push-mode health + push
+
+    # --------------------------------------------------------------------
+    # Push least-queue behavior
+    # --------------------------------------------------------------------
+    PUSH_LEASTQ_MODE: str = "health"     # health | local
+
+    # --------------------------------------------------------------------
+    # Per-request routing logs
+    # --------------------------------------------------------------------
+    REQ_LOG_MODE: str = "off"   # off | summary | full
+
+    # --------------------------------------------------------------------
+    # TRACE SYSTEM
+    # --------------------------------------------------------------------
+    TRACE_ENABLED: bool = False
+    TRACE_SAMPLING_RATE: float = 1.0
+
+
+def get_config() -> RouterConfig:
+    """
+    Return a singleton RouterConfig with env overrides applied.
+    Does NOT print anything (printing is done explicitly by callers).
+    """
+    global _CONFIG
+    if _CONFIG is not None:
+        return _CONFIG
+
+    cfg = RouterConfig()
+
+    # Basic overrides
+    cfg.REDIS_HOST = os.getenv("REDIS_HOST", cfg.REDIS_HOST)
+    cfg.REDIS_PORT = int(os.getenv("REDIS_PORT", cfg.REDIS_PORT))
+    cfg.MODEL_NAME = os.getenv("MODEL_NAME", cfg.MODEL_NAME)
+    cfg.NAMESPACE = os.getenv("NAMESPACE", cfg.NAMESPACE)
+    cfg.LABEL_SELECTOR = os.getenv("LABEL_SELECTOR", cfg.LABEL_SELECTOR)
+    cfg.VLLM_PORT = int(os.getenv("VLLM_PORT", cfg.VLLM_PORT))
+    cfg.KV_LOG_KEYS = os.getenv("KV_LOG_KEYS", cfg.KV_LOG_KEYS)
+
+    # Routing knobs
+    cfg.KV_AWARE = os.getenv("KV_AWARE", str(cfg.KV_AWARE)).lower() == "true"
+    cfg.LEN_AWARE = os.getenv("LEN_AWARE", str(cfg.LEN_AWARE)).lower() == "true"
+    cfg.LEN_POLICY = os.getenv("LEN_POLICY", cfg.LEN_POLICY)
+    cfg.POOL_FACTOR = int(os.getenv("POOL_FACTOR", cfg.POOL_FACTOR))
+    cfg.DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", cfg.DEFAULT_MAX_TOKENS))
+    cfg.HASH_SERVICE_URL = os.getenv("HASH_SERVICE_URL", cfg.HASH_SERVICE_URL)
+
+    # Router operation mode
+    cfg.ROUTER_MODE = os.getenv("ROUTER_MODE", cfg.ROUTER_MODE)
+    cfg.SIDECAR_PORT = int(os.getenv("SIDECAR_PORT", cfg.SIDECAR_PORT))
+
+    # Sync flow
+    cfg.RESULT_TIMEOUT_S = float(os.getenv("RESULT_TIMEOUT_S", cfg.RESULT_TIMEOUT_S))
+    cfg.RESULT_POLL_INTERVAL_S = float(
+        os.getenv("RESULT_POLL_INTERVAL_S", cfg.RESULT_POLL_INTERVAL_S)
+    )
+
+    # Poll retention knobs
+    cfg.POLL_RESULT_TTL_S = float(os.getenv("POLL_RESULT_TTL_S", cfg.POLL_RESULT_TTL_S))
+    cfg.POLL_CLEANUP_INTERVAL_S = float(os.getenv("POLL_CLEANUP_INTERVAL_S", cfg.POLL_CLEANUP_INTERVAL_S))
+
+    # Timeouts
+    cfg.HASH_TIMEOUT_S = float(os.getenv("HASH_TIMEOUT_S", cfg.HASH_TIMEOUT_S))
+    cfg.PUSH_HTTP_TIMEOUT_S = float(os.getenv("PUSH_HTTP_TIMEOUT_S", cfg.PUSH_HTTP_TIMEOUT_S))
+
+    # Push leastq
+    cfg.PUSH_LEASTQ_MODE = os.getenv("PUSH_LEASTQ_MODE", cfg.PUSH_LEASTQ_MODE)
+
+    # Logging verbosity
+    cfg.REQ_LOG_MODE = os.getenv("REQ_LOG_MODE", cfg.REQ_LOG_MODE)
+
+    # TRACE overrides
+    if "TRACE_ENABLED" in os.environ:
+        cfg.TRACE_ENABLED = os.getenv("TRACE_ENABLED", "false").lower() == "true"
+
+    if "TRACE_SAMPLING_RATE" in os.environ:
+        try:
+            r = float(os.getenv("TRACE_SAMPLING_RATE"))
+            if 0 < r <= 1.0:
+                cfg.TRACE_SAMPLING_RATE = r
+        except Exception:
+            pass
+
+    _CONFIG = cfg
+    return cfg
+
+
+def print_config(cfg: RouterConfig) -> None:
+    """
+    Generic config dumper: prints all fields of RouterConfig.
+    Any added/removed fields are automatically reflected.
+    """
+    import sys
+    data = asdict(cfg)
+
+    print("\n================== RouterConfig (effective) ==================")
+    for key in sorted(data.keys()):
+        value = data[key]
+        print(f" {key:22s} = {value}")
+
+    access_log = os.getenv("ACCESS_LOG", "true")
+    print(f" {'ACCESS_LOG':22s} = {access_log}")
+    print("=============================================================\n")
+
+    sys.stdout.flush()
+
+---------------- END FILE: ./router/config.py ----------------
+
+---------------- FILE: ./router/kv_aware.py ----------------
+
+# -*- coding: utf-8 -*-
+"""
+Minimal KV-aware state for router:
+
+- register_request_blocks(req_id, [block_hashes])
+- register_block_owners(block_hash, [endpoint_urls])
+- prefix_len(endpoint_url, req_id) -> int
+"""
+
+from typing import Dict, List, Iterable
+from threading import RLock
+
+# req_id -> [block_hashes...]
+_REQ_BLOCKS: Dict[str, List[int]] = {}
+# block_hash -> { endpoint_url: True }
+_BLOCK_OWNERS: Dict[int, Dict[str, bool]] = {}
+
+_LOCK = RLock()
+
+
+def register_request_blocks(req_id: str, block_hashes: Iterable[int]) -> None:
+    with _LOCK:
+        _REQ_BLOCKS[req_id] = list(block_hashes)
+
+
+def register_block_owners(block_hash: int, owners: Iterable[str]) -> None:
+    with _LOCK:
+        entry = _BLOCK_OWNERS.get(block_hash, {})
+        for ep in owners:
+            entry[ep] = True
+        _BLOCK_OWNERS[block_hash] = entry
+
+
+def prefix_len(endpoint: str, req_id: str) -> int:
+    """
+    How many prefix blocks of this request are owned by this endpoint?
+    """
+    with _LOCK:
+        blocks = _REQ_BLOCKS.get(req_id)
+        if not blocks:
+            return 0
+        owners = _BLOCK_OWNERS
+        count = 0
+        for h in blocks:
+            ep_map = owners.get(h)
+            if not ep_map or endpoint not in ep_map:
+                break
+            count += 1
+        return count
+
+---------------- END FILE: ./router/kv_aware.py ----------------
+
+---------------- FILE: ./router/kv_watcher.py ----------------
+
+# -*- coding: utf-8 -*-
+# kv_watcher.py
+"""
+Background KV watcher:
+- Periodically scans Redis kvblock keys.
+- Maps pod_name -> pod_ip -> router endpoint URL.
+- Calls register_block_owners(block_hash, owners).
+
+Verbosity controlled by config.KV_LOG_KEYS:
+  - "off"     : only start/stop + errors
+  - "summary" : discovery + scan summary
+  - "full"    : per-key logs + summary
+"""
+
+import os
+import time
+import threading
+from typing import Dict, Optional
+
+import asyncio
+import redis.asyncio as aioredis
+from kubernetes import client as k8s_client, config as k8s_config
+
+from .config import get_config
+from .kv_aware import register_block_owners
+
+_cfg = get_config()
+
+
+def _log(msg: str, *, level: str = "summary") -> None:
+    mode = str(_cfg.KV_LOG_KEYS).lower()
+
+    if level == "always":
+        print(f"[KVWatcher] {msg}")
+        return
+
+    if mode == "off":
+        return
+
+    if level == "summary":
+        print(f"[KVWatcher] {msg}")
+        return
+
+    if level == "full" and mode == "full":
+        print(f"[KVWatcher] {msg}")
+
+
+def _discover_pods() -> Dict[str, str]:
+    running_in_cluster = os.getenv("KUBERNETES_SERVICE_HOST") is not None
+
+    try:
+        if running_in_cluster:
+            k8s_config.load_incluster_config()
+        else:
+            k8s_config.load_kube_config()
+    except Exception as e:
+        _log(f"Failed to load K8s config: {e}", level="always")
+        return {}
+
+    v1 = k8s_client.CoreV1Api()
+
+    try:
+        pods = v1.list_namespaced_pod(
+            namespace=_cfg.NAMESPACE,
+            label_selector=_cfg.LABEL_SELECTOR,
+        ).items
+    except Exception as e:
+        _log(f"list_namespaced_pod failed: {e}", level="always")
+        return {}
+
+    out: Dict[str, str] = {}
+    for pod in pods:
+        if pod.status.phase == "Running" and pod.status.pod_ip:
+            out[pod.metadata.name] = pod.status.pod_ip
+    return out
+
+
+def _endpoint_for_pod(pod_name: str, pods: Dict[str, str]) -> Optional[str]:
+    # We only care about identity here; HTTP URL is only used in sidecar.
+    # So we just use pod_name as the endpoint key.
+    return pod_name if pod_name in pods else None
+
+
+class KVWatcher:
+    def __init__(self):
+        self.redis_url = f"redis://{_cfg.REDIS_HOST}:{_cfg.REDIS_PORT}"
+        self.model_name = _cfg.MODEL_NAME
+        self.interval_s = float(_cfg.KV_WATCH_INTERVAL_S)
+        self.max_keys = int(_cfg.KV_WATCH_MAX_KEYS)
+        self.discovery_interval_s = float(_cfg.KV_DISCOVERY_INTERVAL_S)
+
+        self._stop_evt = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._stop_evt.clear()
+        self._thread = threading.Thread(
+            target=self._thread_main,
+            daemon=True,
+        )
+        self._thread.start()
+        _log(
+            f"Started (redis={self.redis_url}, model={self.model_name}, "
+            f"interval_s={self.interval_s}, max_keys={self.max_keys}, "
+            f"log_mode={_cfg.KV_LOG_KEYS})",
+            level="always",
+        )
+
+    def stop(self):
+        self._stop_evt.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        _log("Stopped", level="always")
+
+    def _thread_main(self):
+        try:
+            asyncio.run(self._run_async())
+        except Exception as e:
+            _log(f"async loop crashed: {e}", level="always")
+
+    async def _run_async(self):
+        redis = aioredis.from_url(self.redis_url, decode_responses=True)
+        pods: Dict[str, str] = {}
+        last_discovery = 0.0
+
+        try:
+            while not self._stop_evt.is_set():
+                now = time.time()
+
+                if now - last_discovery >= self.discovery_interval_s:
+                    pods = _discover_pods()
+                    last_discovery = now
+                    _log(f"discovered {len(pods)} pods", level="summary")
+
+                if pods:
+                    await self._scan_once(redis, pods)
+
+                await asyncio.sleep(self.interval_s)
+
+        finally:
+            try:
+                await redis.close()
+            except Exception:
+                pass
+
+    async def _scan_once(self, redis, pods: Dict[str, str]):
+        pattern = f"{self.model_name}:kvblock:*"
+        seen = 0
+
+        try:
+            async for key in redis.scan_iter(match=pattern, count=100):
+                mapping = await redis.hgetall(key)
+                if not mapping:
+                    continue
+
+                try:
+                    block_hash = int(key.rsplit(":", 1)[1])
+                except Exception:
+                    continue
+
+                pod_owners = list(mapping.keys())
+                ep_owners = []
+                for pod_name in pod_owners:
+                    ep = _endpoint_for_pod(pod_name, pods)
+                    if ep:
+                        ep_owners.append(ep)
+
+                if ep_owners:
+                    register_block_owners(block_hash, ep_owners)
+
+                _log(f"key={key} pods={pod_owners} eps={ep_owners}", level="full")
+
+                seen += 1
+                if seen >= self.max_keys:
+                    break
+
+            if seen > 0:
+                _log(
+                    f"scan complete: scanned={seen} keys",
+                    level="summary",
+                )
+            else:
+                _log("scan complete: no kvblock keys found", level="summary")
+
+        except Exception as e:
+            _log(f"scan failed: {e}", level="always")
+
+---------------- END FILE: ./router/kv_watcher.py ----------------
+
+---------------- FILE: ./router/metrics.py ----------------
+
+# router/metrics.py
+# -*- coding: utf-8 -*-
+
+from prometheus_client import Counter, Gauge
+
+# ----------------------------
+# Router metrics (minimal set)
+# ----------------------------
+
+ROUTER_CENTRAL_QUEUE_LENGTH = Gauge(
+    "router_central_queue_length",
+    "Current length of the centralized router queue",
+)
+
+ROUTER_ADMISSION_REQUESTS_TOTAL = Counter(
+    "router_admission_requests_total",
+    "Total requests received at router admission",
+)
+
+ROUTER_DISPATCH_REQUESTS_TOTAL = Counter(
+    "router_dispatch_requests_total",
+    "Total requests dispatched from router to sidecars",
+    ["endpoint"],
+)
+
+
+def set_central_queue_length(n: int) -> None:
+    try:
+        ROUTER_CENTRAL_QUEUE_LENGTH.set(int(n))
+    except Exception:
+        pass
+
+
+def inc_admission() -> None:
+    try:
+        ROUTER_ADMISSION_REQUESTS_TOTAL.inc()
+    except Exception:
+        pass
+
+
+def inc_dispatch(endpoint: str) -> None:
+    try:
+        ROUTER_DISPATCH_REQUESTS_TOTAL.labels(endpoint=str(endpoint)).inc()
+    except Exception:
+        pass
+
+---------------- END FILE: ./router/metrics.py ----------------
+
+---------------- FILE: ./router/predictors.py ----------------
+
+# -*- coding: utf-8 -*-
+"""
+Very simple length predictor: use character length as proxy for tokens.
+You can later swap this for a proper model.
+"""
+
+from typing import Optional
+
+
+class SimpleLengthPredictor:
+    name = "char-len"
+
+    def predict_out_tokens(self, prompt: str, req_id: str) -> Optional[int]:
+        # "medium" guess: input length / 2
+        return max(1, len(prompt) // 2)
+
+
+_predictor = SimpleLengthPredictor()
+
+
+def get_length_predictor() -> SimpleLengthPredictor:
+    return _predictor
+
+---------------- END FILE: ./router/predictors.py ----------------
+
+---------------- FILE: ./router/__init__.py ----------------
+
+
+---------------- END FILE: ./router/__init__.py ----------------
+
+---------------- FILE: ./router/api.py ----------------
+
+# router/api.py
+# -*- coding: utf-8 -*-
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+
+import httpx
+import asyncio
+import time
+import sys
+
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
+from .config import get_config, print_config
+from .models import (
+    EnqueueRequest,
+    PullRequest,
+    PullResponse,
+)
+from .router_state import router_state
+from .kv_watcher import KVWatcher
+from .kv_aware import register_request_blocks
+from .push_router import PushRouter
+from .metrics import inc_admission
+
+_cfg = get_config()
+app = FastAPI(title="KV-aware Router Service")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_kv_watcher: KVWatcher | None = None
+_push_router: PushRouter | None = None
+_cleanup_task: asyncio.Task | None = None
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
+def _is_push_mode() -> bool:
+    return _cfg.ROUTER_MODE.startswith("push-")
+
+
+def _log_api_req(msg: str, *, level: str = "summary") -> None:
+    mode = str(_cfg.REQ_LOG_MODE).lower()
+    if mode == "off":
+        return
+
+    try:
+        qlen = router_state.size()
+        msg = f"{msg} (queue_len={qlen})"
+    except Exception:
+        pass
+
+    prefix = "[API]"
+    if mode == "summary":
+        if level == "summary":
+            print(f"{prefix} {msg}")
+            sys.stdout.flush()
+        return
+
+    print(f"{prefix} {msg}")
+    sys.stdout.flush()
+
+
+async def _maybe_register_kv_blocks(req_id: str, prompt: str) -> None:
+    if not _cfg.KV_AWARE:
+        return
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{_cfg.HASH_SERVICE_URL}/compute_hashes",
+                json={"prompt": prompt},
+                timeout=_cfg.HASH_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            block_hashes = data.get("block_hashes") or []
+            if block_hashes:
+                register_request_blocks(req_id, block_hashes)
+    except Exception as e:
+        print(f"[router] WARNING: KV hash compute failed for req_id={req_id}: {e}")
+        sys.stdout.flush()
+
+
+def _finalize_result_for_delivery(result: object) -> dict:
+    """
+    Make sync + poll deliver IDENTICAL result dicts to the client.
+    (The client load runner relies on stable schema.)
+    """
+    if not isinstance(result, dict):
+        result = {"output": result}
+
+    out: dict = dict(result)
+
+    # TRACE: add delivery-time stamps (same keys as previous sync path)
+    if _cfg.TRACE_ENABLED:
+        tr = out.get("trace") or out.get("__trace__") or {}
+        tr = dict(tr)
+
+        now_ts = time.time()
+        tr["t_enqueue_unblocked"] = now_ts
+        tr["t_enqueue_about_to_return"] = now_ts
+        tr["t_enqueue_response"] = now_ts
+
+        out["trace"] = tr
+        out.pop("__trace__", None)
+
+    # RESPONSE-ONLY rename: endpoint -> pod
+    if "endpoint" in out and "pod" not in out:
+        out["pod"] = out.pop("endpoint")
+
+    tr = out.get("trace")
+    if isinstance(tr, dict) and "endpoint" in tr and "pod" not in tr:
+        tr = dict(tr)
+        tr["pod"] = tr.pop("endpoint")
+        out["trace"] = tr
+
+    return out
+
+
+async def _cleanup_loop():
+    interval = max(0.1, float(getattr(_cfg, "POLL_CLEANUP_INTERVAL_S", 1.0)))
+    while True:
+        try:
+            router_state.cleanup_poll_state()
+        except Exception as e:
+            print(f"[router] WARN: poll cleanup failed: {e}")
+            sys.stdout.flush()
+        await asyncio.sleep(interval)
+
+
+# ============================================================
+# Startup / Shutdown
+# ============================================================
+
+@app.on_event("startup")
+async def _startup():
+    global _kv_watcher, _push_router, _cleanup_task
+
+    print_config(_cfg)
+    sys.stdout.flush()
+
+    _kv_watcher = KVWatcher()
+    _kv_watcher.start()
+    print("[router] KVWatcher started.")
+    sys.stdout.flush()
+
+    if _is_push_mode():
+        _push_router = PushRouter(mode=_cfg.ROUTER_MODE)
+        print(f"[router] PushRouter started in mode={_cfg.ROUTER_MODE}")
+    else:
+        print("[router] running in PULL mode.")
+    sys.stdout.flush()
+
+    _cleanup_task = asyncio.create_task(_cleanup_loop())
+    print("[router] poll cleanup task started.")
+    sys.stdout.flush()
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    global _kv_watcher, _push_router, _cleanup_task
+
+    if _kv_watcher:
+        _kv_watcher.stop()
+        print("[router] KVWatcher stopped.")
+
+    if _push_router is not None:
+        try:
+            await _push_router.aclose()
+        except Exception:
+            pass
+        _push_router = None
+        print("[router] PushRouter closed+cleared.")
+    else:
+        print("[router] PushRouter cleared.")
+    sys.stdout.flush()
+
+    if _cleanup_task is not None:
+        _cleanup_task.cancel()
+        _cleanup_task = None
+        print("[router] poll cleanup task cancelled.")
+        sys.stdout.flush()
+
+
+
+# ============================================================
+# Health / Metrics
+# ============================================================
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "queue_len": router_state.size()}
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# ============================================================
+# Sync (existing) endpoint: POST /enqueue (unchanged behavior)
+# ============================================================
+
+@app.post("/enqueue")
+async def enqueue(req: EnqueueRequest):
+    t_start = time.time()
+    inc_admission()
+
+    trace = None
+    if _cfg.TRACE_ENABLED:
+        qlen = router_state.size()
+        trace = {
+            "t_enq_client": float(req.t_enq_client or t_start),
+            "t_arrive_router": t_start,
+            "router_queue_len_at_arrive": qlen,
+        }
+
+    if _is_push_mode():
+        rid = router_state.next_req_id()
+        router_state.mark_pending(rid)
+        mode_str = "push"
+        meta = req.meta or {}
+    else:
+        t_enq = req.t_enq_client or t_start
+        meta = req.meta or {}
+        rid = router_state.enqueue(req.prompt, t_enq, meta)
+        mode_str = "pull"
+
+    if trace is not None:
+        meta = dict(meta)
+        meta.setdefault("__trace__", trace)
+        if not _is_push_mode():
+            router_state.update_meta(rid, meta)
+
+    _log_api_req(
+        f"enqueue rid={rid} mode={mode_str} len={len(req.prompt)} "
+        f"kv_aware={_cfg.KV_AWARE} len_aware={_cfg.LEN_AWARE}",
+        level="summary",
+    )
+
+    router_state.register_waiter(rid)
+
+    await _maybe_register_kv_blocks(rid, req.prompt)
+
+    if _is_push_mode():
+        if _push_router is None:
+            raise HTTPException(500, "PushRouter not initialized")
+        try:
+            await _push_router.route_and_push(rid, req.prompt, meta)
+        except Exception as e:
+            raise HTTPException(503, f"push failed: {e}")
+
+    result = await router_state.wait_for_result_async(rid, _cfg.RESULT_TIMEOUT_S)
+
+    if result is None:
+        raise HTTPException(504, "timeout waiting for vLLM result")
+
+    return {"req_id": rid, "result": _finalize_result_for_delivery(result)}
+
+
+# ============================================================
+# ACK-only enqueue: POST /enqueue_ack
+# ============================================================
+
+@app.post("/enqueue_ack")
+async def enqueue_ack(req: EnqueueRequest):
+    t_start = time.time()
+    inc_admission()
+
+    trace = None
+    if _cfg.TRACE_ENABLED:
+        qlen = router_state.size()
+        trace = {
+            "t_enq_client": float(req.t_enq_client or t_start),
+            "t_arrive_router": t_start,
+            "router_queue_len_at_arrive": qlen,
+        }
+
+    if _is_push_mode():
+        rid = router_state.next_req_id()
+        router_state.mark_pending(rid)
+        mode_str = "push"
+        meta = req.meta or {}
+    else:
+        t_enq = req.t_enq_client or t_start
+        meta = req.meta or {}
+        rid = router_state.enqueue(req.prompt, t_enq, meta)
+        mode_str = "pull"
+
+    if trace is not None:
+        meta = dict(meta)
+        meta.setdefault("__trace__", trace)
+        if not _is_push_mode():
+            router_state.update_meta(rid, meta)
+
+    router_state.register_waiter(rid)
+
+    _log_api_req(
+        f"enqueue_ack rid={rid} mode={mode_str} len={len(req.prompt)} "
+        f"kv_aware={_cfg.KV_AWARE} len_aware={_cfg.LEN_AWARE}",
+        level="summary",
+    )
+
+    await _maybe_register_kv_blocks(rid, req.prompt)
+
+    if _is_push_mode():
+        if _push_router is None:
+            raise HTTPException(500, "PushRouter not initialized")
+        try:
+            await _push_router.route_and_push(rid, req.prompt, meta)
+        except Exception as e:
+            raise HTTPException(503, f"push failed: {e}")
+
+    return {"req_id": rid}
+
+
+# ============================================================
+# Poll endpoint: GET /result/{req_id}
+# ============================================================
+
+@app.get("/result/{req_id}")
+async def get_result(req_id: str):
+    rid = str(req_id)
+    st = router_state.poll_status(rid)
+
+    if st == "pending":
+        return {"status": "pending"}
+    if st == "missing":
+        return {"status": "missing"}
+
+    res = router_state.get_poll_result(rid)
+    if res is None:
+        return {"status": "missing"}
+
+    return {"status": "ok", "req_id": rid, "result": _finalize_result_for_delivery(res)}
+
+
+# ============================================================
+# SIDE CAR → ROUTER RESULT CALLBACK: POST /result
+# ============================================================
+
+@app.post("/result")
+async def result_callback(payload: dict):
+    req_id_raw = payload.get("req_id")
+    if req_id_raw is None:
+        return {"status": "missing req_id"}
+
+    rid = str(req_id_raw)
+    result = payload.get("result")
+
+    # Backward compatibility — sidecar might send: {output, trace}
+    if result is None and "output" in payload:
+        result = {"output": payload["output"]}
+        if "trace" in payload and isinstance(payload["trace"], dict):
+            result["trace"] = payload["trace"]
+
+    if result is None:
+        return {"status": "missing result"}
+
+    endpoint = payload.get("endpoint")
+    _log_api_req(f"result callback rid={rid}", level="full")
+
+    if endpoint and _push_router is not None:
+        try:
+            _push_router.notify_result(endpoint)
+        except Exception as e:
+            print(f"[router] PushRouter notify_result failed for endpoint={endpoint}: {e}")
+            sys.stdout.flush()
+
+    # Preserve full trace + add router receipt timestamps
+    if _cfg.TRACE_ENABLED and isinstance(result, dict):
+        tr = result.get("trace") or result.get("__trace__") or {}
+        tr = dict(tr)
+        tr["t_router_result_recv"] = time.time()
+        tr["t_router_result_store"] = time.time()
+        result["trace"] = tr
+        result.pop("__trace__", None)
+
+    router_state.store_result(rid, result)
+    return {"status": "ok"}
+
+
+# ============================================================
+# SIDE CAR → ROUTER /pull
+# ============================================================
+
+@app.post("/pull", response_model=PullResponse)
+async def pull(req: PullRequest):
+    _log_api_req(f"/pull endpoint={req.endpoint} want={req.want}", level="full")
+
+    items = router_state.pull_for_endpoint(
+        endpoint=req.endpoint,
+        want=req.want,
+    )
+
+    if items:
+        ids = [it.req_id for it in items]
+        _log_api_req(
+            f"/pull ASSIGN endpoint={req.endpoint} want={req.want} -> {len(items)} items {ids}",
+            level="summary",
+        )
+    else:
+        _log_api_req(f"/pull IDLE endpoint={req.endpoint} want={req.want} -> 0 items", level="full")
+
+    return PullResponse(items=items)
+
+---------------- END FILE: ./router/api.py ----------------
+
+---------------- FILE: ./router/models.py ----------------
+
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+import time
+
+
+# -------------------------
+# Client → Router
+# -------------------------
+
+class EnqueueRequest(BaseModel):
+    prompt: str
+    req_id: Optional[str] = None
+    t_enq_client: Optional[float] = None
+    meta: Dict[str, Any] = {}
+
+
+class EnqueueResponse(BaseModel):
+    """
+    In the new synchronous design, the router blocks until vLLM has
+    produced an answer and sidecar pushed it back.
+
+    So this response includes the model output.
+    """
+    req_id: str
+    output: Optional[str] = None             # text from vLLM
+    finish_reason: Optional[str] = None      # e.g. "stop"
+    latency_s: Optional[float] = None        # model roundtrip
+    raw: Optional[Dict[str, Any]] = None     # full vLLM response if desired
+
+
+# -------------------------
+# Sidecar → Router (pull mode)
+# -------------------------
+
+class PullRequest(BaseModel):
+    # endpoint identity (e.g. pod name) – must match KVWatcher register_block_owners()
+    endpoint: str
+    want: int                 # sidecar-computed capacity
+
+
+class JobItem(BaseModel):
+    req_id: str
+    prompt: str
+    t_enq_client: float
+    meta: Dict[str, Any] = {}
+
+
+class PullResponse(BaseModel):
+    items: List[JobItem]
+
+
+# -------------------------
+# Sidecar → Router (result callback)
+# -------------------------
+
+class ResultRequest(BaseModel):
+    """
+    Internal API: sidecar posts vLLM output back to router.
+
+    Example payload:
+    {
+        "req_id": 17,
+        "result": {
+            "output": "hello ...",
+            "finish_reason": "stop",
+            "latency_s": 0.342,
+            "raw": {... full vLLM JSON ...}
+        }
+    }
+    """
+    req_id: str
+    result: Dict[str, Any]
+
+
+# -------------------------
+# Helpers
+# -------------------------
+
+def now_s() -> float:
+    return time.time()
+
+---------------- END FILE: ./router/models.py ----------------
+
+---------------- FILE: ./router/router_state.py ----------------
+
+# router/router_state.py
+# -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
+from collections import deque
+from threading import RLock
+from typing import Deque, Dict, Tuple, List, Any, Optional
+import sys
+import uuid
+import asyncio
+import time
+
+from .config import get_config
+from .kv_aware import prefix_len
+from .predictors import get_length_predictor
+from .len_select import select_len_aware
+from .models import JobItem, now_s
+from .metrics import set_central_queue_length, inc_dispatch
+
+_cfg = get_config()
+_pred = get_length_predictor()
+
+
+def _log_req(msg: str, *, level: str = "summary") -> None:
+    """
+    Centralized logging for pull-routing decisions.
+    Honors _cfg.REQ_LOG_MODE: off | summary | full
+    """
+    mode = str(_cfg.REQ_LOG_MODE).lower()
+
+    if mode == "off":
+        return
+
+    if level == "summary":
+        print(f"[PullRouter] {msg}")
+        sys.stdout.flush()
+    elif level == "full" and mode == "full":
+        print(f"[PullRouter] {msg}")
+        sys.stdout.flush()
+
+
+class RouterState:
+    """
+    Central queue of pending jobs + KV + length-aware selection.
+
+    - Sync /enqueue waits via asyncio Futures (existing behavior).
+    - Poll transport needs:
+        * a "pending" set for known req_ids
+        * a TTL'd results store for GET /result/{req_id}
+    """
+
+    def __init__(self):
+        self._lock = RLock()
+
+        # queue entries: (req_id, prompt, t_enq_client_or_router, meta)
+        self._queue: Deque[Tuple[str, str, float, dict]] = deque()
+
+        # Sync waiters
+        self._result_futs: Dict[str, asyncio.Future] = {}
+        self._result_values: Dict[str, Any] = {}
+
+        # Poll support
+        self._pending: Dict[str, float] = {}                 # req_id -> t_created
+        self._poll_results: Dict[str, Tuple[float, Any]] = {}  # req_id -> (t_done, result)
+
+        set_central_queue_length(0)
+
+    # -------------------------------------------------------
+    # ID allocation
+    # -------------------------------------------------------
+
+    def next_req_id(self) -> str:
+        with self._lock:
+            return uuid.uuid4().hex
+
+    def mark_pending(self, req_id: str) -> None:
+        with self._lock:
+            self._pending[req_id] = time.time()
+
+    # -------------------------------------------------------
+    # Enqueue (pull mode)
+    # -------------------------------------------------------
+
+    def enqueue(self, prompt: str, t_enq_client: float | None, meta: dict) -> str:
+        with self._lock:
+            rid = self.next_req_id()
+            ts = float(t_enq_client) if t_enq_client else now_s()
+            self._queue.append((rid, prompt, ts, meta or {}))
+            self._pending[rid] = time.time()
+            set_central_queue_length(len(self._queue))
+            return rid
+
+    def update_meta(self, req_id: str, meta: dict) -> None:
+        with self._lock:
+            if not self._queue:
+                return
+
+            new_q: Deque[Tuple[str, str, float, dict]] = deque()
+            updated = False
+            while self._queue:
+                rid, prompt, ts, old_meta = self._queue.popleft()
+                if not updated and rid == req_id:
+                    new_q.append((rid, prompt, ts, meta or {}))
+                    updated = True
+                else:
+                    new_q.append((rid, prompt, ts, old_meta))
+            self._queue = new_q
+            set_central_queue_length(len(self._queue))
+
+    # -------------------------------------------------------
+    # Pull (KV-aware + length-aware)
+    # -------------------------------------------------------
+
+    def pull_for_endpoint(self, endpoint: str, want: int) -> List[JobItem]:
+        if want <= 0:
+            return []
+
+        with self._lock:
+            if not self._queue:
+                set_central_queue_length(0)
+                return []
+
+            pool_factor = max(1, int(_cfg.POOL_FACTOR))
+            max_scan = min(len(self._queue), want * pool_factor)
+
+            # 1) Build pool
+            pool: List[Tuple[str, str, float, dict]] = []
+            for _ in range(max_scan):
+                rid, prompt, ts, meta = self._queue.popleft()
+                pool.append((rid, prompt, ts, meta))
+
+            set_central_queue_length(len(self._queue))
+
+            _log_req(
+                f"endpoint={endpoint} want={want} pool_size={len(pool)} "
+                f"queue_remaining={len(self._queue)}",
+                level="full",
+            )
+
+            kv_enabled = bool(_cfg.KV_AWARE)
+            len_enabled = bool(_cfg.LEN_AWARE)
+            len_policy = _cfg.LEN_POLICY
+
+            # 2) KV scoring
+            if kv_enabled:
+                scored = []
+                kv_pairs = []
+                for rid, prompt, ts, meta in pool:
+                    kv_hits = prefix_len(endpoint, rid)
+                    kv_pairs.append((rid, kv_hits))
+                    scored.append((rid, prompt, ts, meta, kv_hits))
+
+                _log_req(f"KV raw endpoint={endpoint}: {kv_pairs}", level="full")
+
+                scored.sort(key=lambda x: (-x[4], x[0]))
+                ordered: List[Tuple[str, str, float, dict]] = [
+                    (r, p, t, m) for (r, p, t, m, _kv) in scored
+                ]
+
+                _log_req(
+                    f"KV sorted endpoint={endpoint}: "
+                    f"{[(r, kv) for (r, _p, _t, _m, kv) in scored]}",
+                    level="full",
+                )
+            else:
+                ordered = list(pool)
+
+            # 3) Length-aware refinement
+            if len_enabled and len_policy:
+                refined = select_len_aware(ordered, _pred, len_policy)
+                ordered = refined
+                _log_req(
+                    f"Len policy='{len_policy}' ordering: "
+                    f"{[r for (r, _p, _t, _m) in refined]}",
+                    level="full",
+                )
+
+            # 4) Choose
+            chosen_raw = ordered[:want]
+            chosen_ids = [rid for (rid, _p, _t, _m) in chosen_raw]
+            chosen_kv_hits = [(rid, prefix_len(endpoint, rid)) for rid in chosen_ids]
+
+            _log_req(
+                f"chosen endpoint={endpoint}: {chosen_ids} kv_hits={chosen_kv_hits}",
+                level="summary",
+            )
+
+            # 4a) Attach trace info (if enabled)
+            dispatch_ts = now_s()
+            if getattr(_cfg, "TRACE_ENABLED", False):
+                qlen_at_dispatch = len(self._queue)
+                chosen: List[Tuple[str, str, float, dict]] = []
+                for rid, prompt, ts, meta in chosen_raw:
+                    m = dict(meta or {})
+                    tr = dict(m.get("__trace__") or {})
+                    tr.setdefault("t_enq_router_queue", ts)
+                    tr.setdefault("endpoint", endpoint)
+                    tr["t_dispatch_router"] = dispatch_ts
+                    tr["router_queue_len_at_dispatch"] = qlen_at_dispatch
+                    m["__trace__"] = tr
+                    chosen.append((rid, prompt, ts, m))
+            else:
+                chosen = chosen_raw
+
+            # Prom: outgoing dispatch (router -> sidecar)
+            for _rid, _prompt, _ts, _meta in chosen:
+                inc_dispatch(endpoint)
+
+            # 5) Requeue leftovers
+            leftovers = ordered[want:]
+            for rid, prompt, ts, meta in leftovers:
+                self._queue.appendleft((rid, prompt, ts, meta))
+
+            set_central_queue_length(len(self._queue))
+
+            if leftovers:
+                _log_req(
+                    f"leftovers requeued: {[r for (r, _p, _t, _m) in leftovers]}",
+                    level="full",
+                )
+
+            # 6) Output
+            return [
+                JobItem(req_id=rid, prompt=prompt, t_enq_client=ts, meta=meta)
+                for (rid, prompt, ts, meta) in chosen
+            ]
+
+    # -------------------------------------------------------
+    # Poll support
+    # -------------------------------------------------------
+
+    def poll_status(self, req_id: str) -> str:
+        """
+        Returns: "ok" | "pending" | "missing"
+        """
+        now = time.time()
+        ttl = float(getattr(_cfg, "POLL_RESULT_TTL_S", 300.0))
+
+        with self._lock:
+            if req_id in self._poll_results:
+                t_done, _ = self._poll_results[req_id]
+                if (now - t_done) <= ttl:
+                    return "ok"
+                # expired result
+                self._poll_results.pop(req_id, None)
+                self._pending.pop(req_id, None)
+                return "missing"
+
+            if req_id in self._pending:
+                t0 = self._pending[req_id]
+                if (now - t0) <= ttl:
+                    return "pending"
+                # expired pending
+                self._pending.pop(req_id, None)
+                return "missing"
+
+        return "missing"
+
+    def get_poll_result(self, req_id: str) -> Optional[Any]:
+        now = time.time()
+        ttl = float(getattr(_cfg, "POLL_RESULT_TTL_S", 300.0))
+        with self._lock:
+            entry = self._poll_results.get(req_id)
+            if not entry:
+                return None
+            t_done, result = entry
+            if (now - t_done) > ttl:
+                self._poll_results.pop(req_id, None)
+                self._pending.pop(req_id, None)
+                return None
+            return result
+
+    def cleanup_poll_state(self) -> int:
+        now = time.time()
+        ttl = float(getattr(_cfg, "POLL_RESULT_TTL_S", 300.0))
+
+        removed = 0
+        with self._lock:
+            for rid in list(self._poll_results.keys()):
+                t_done, _ = self._poll_results[rid]
+                if (now - t_done) > ttl:
+                    self._poll_results.pop(rid, None)
+                    removed += 1
+
+            for rid in list(self._pending.keys()):
+                t0 = self._pending[rid]
+                if (now - t0) > ttl and rid not in self._poll_results:
+                    self._pending.pop(rid, None)
+                    removed += 1
+
+        return removed
+
+    # -------------------------------------------------------
+    # Sync wait/notify (existing behavior)
+    # -------------------------------------------------------
+
+    def register_waiter(self, req_id: str) -> None:
+        with self._lock:
+            if req_id in self._result_futs:
+                return
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is None:
+                self._result_futs[req_id] = None  # type: ignore[assignment]
+                return
+
+            fut: asyncio.Future = loop.create_future()
+            self._result_futs[req_id] = fut
+
+            if req_id in self._result_values and not fut.done():
+                fut.set_result(self._result_values[req_id])
+
+    def store_result(self, req_id: str, result: Any) -> None:
+        """
+        Store result and resolve any sync waiter.
+        ALSO stores for poll retrieval (TTL'd).
+        """
+        fut: Optional[asyncio.Future] = None
+
+        with self._lock:
+            self._result_values[req_id] = result
+            fut = self._result_futs.get(req_id)
+
+            # Poll storage
+            self._poll_results[req_id] = (time.time(), result)
+            self._pending.pop(req_id, None)
+
+        if fut is None:
+            return
+        if not isinstance(fut, asyncio.Future):
+            return
+        if fut.done():
+            return
+
+        try:
+            loop = fut.get_loop()
+        except Exception:
+            loop = None
+
+        def _set():
+            if not fut.done():
+                fut.set_result(result)
+
+        if loop is not None:
+            try:
+                loop.call_soon_threadsafe(_set)
+                return
+            except Exception:
+                pass
+
+        try:
+            _set()
+        except Exception:
+            pass
+
+    async def wait_for_result_async(self, req_id: str, timeout_s: float) -> Optional[Any]:
+        """
+        Await the result for req_id up to timeout_s.
+        Cleans up sync-only waiter and sync-only stored value.
+        (Poll storage is TTL-cleaned separately.)
+        """
+        loop = asyncio.get_running_loop()
+
+        with self._lock:
+            fut = self._result_futs.get(req_id)
+            if not isinstance(fut, asyncio.Future) or fut.get_loop() is not loop:
+                fut = loop.create_future()
+                self._result_futs[req_id] = fut
+                if req_id in self._result_values and not fut.done():
+                    fut.set_result(self._result_values[req_id])
+
+        try:
+            result = await asyncio.wait_for(fut, timeout=float(timeout_s))
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            with self._lock:
+                self._result_futs.pop(req_id, None)
+                self._result_values.pop(req_id, None)
+
+        return result
+
+    # -------------------------------------------------------
+    # Metrics
+    # -------------------------------------------------------
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._queue)
+
+
+router_state = RouterState()
+
+---------------- END FILE: ./router/router_state.py ----------------
+
+---------------- FILE: ./router/push_router.py ----------------
+
+# -*- coding: utf-8 -*-
+import os
+import random
+import time
+import asyncio
+from collections import defaultdict
+from typing import Dict, List, Optional
+
+import httpx
+from kubernetes import client as k8s_client, config as k8s_config
+
+from .config import get_config
+from .metrics import inc_dispatch
+
+_cfg = get_config()
+
+
+def _log_req(msg: str, *, level: str = "summary") -> None:
+    """
+    Centralized logging for push-routing decisions.
+    Uses _cfg.REQ_LOG_MODE directly.
+    """
+    mode = str(_cfg.REQ_LOG_MODE).lower()
+    if mode == "off":
+        return
+
+    if level == "summary":
+        print(f"[PushRouter] {msg}")
+    elif level == "full" and mode == "full":
+        print(f"[PushRouter] {msg}")
+
+
+class PushRouter:
+    def __init__(self, mode: str):
+        self.mode = mode  # "push-rr", "push-random", "push-leastq"
+        self._eps: List[str] = []        # pod names
+        self._urls: Dict[str, str] = {}  # pod_name -> sidecar base URL
+        self._rr_idx: int = 0
+        self._last_discovery = 0.0
+        self._discovery_interval_s = float(getattr(_cfg, "KV_DISCOVERY_INTERVAL_S", 5.0))
+        self._leastq_mode: str = getattr(_cfg, "PUSH_LEASTQ_MODE", "health")
+        self._logical_inflight = defaultdict(int)
+
+        # ---------------------------------------------------------
+        # IMPORTANT: reuse ONE httpx client to avoid connection churn
+        # ---------------------------------------------------------
+        # No "concurrency cap" semantics are introduced here. This is purely
+        # TCP connection pooling / keepalive behavior.
+        #
+        # max_connections=None means "no explicit cap" in httpx.
+        # You can still tune keepalive connections.
+        limits = httpx.Limits(
+            max_connections=None,
+            max_keepalive_connections=int(getattr(_cfg, "PUSH_MAX_KEEPALIVE", 200)),
+            keepalive_expiry=float(getattr(_cfg, "PUSH_KEEPALIVE_EXPIRY_S", 30.0)),
+        )
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(float(_cfg.PUSH_HTTP_TIMEOUT_S)),
+            limits=limits,
+        )
+
+    async def aclose(self) -> None:
+        try:
+            await self._client.aclose()
+        except Exception:
+            pass
+
+    # ---------------------------------------------------------
+    # Pod discovery
+    # ---------------------------------------------------------
+
+    def _discover_pods(self) -> Dict[str, str]:
+        running_in_cluster = os.getenv("KUBERNETES_SERVICE_HOST") is not None
+        try:
+            if running_in_cluster:
+                k8s_config.load_incluster_config()
+            else:
+                k8s_config.load_kube_config()
+        except Exception as e:
+            print(f"[PushRouter] failed to load K8s config: {e}")
+            return {}
+
+        v1 = k8s_client.CoreV1Api()
+        try:
+            pods = v1.list_namespaced_pod(
+                namespace=_cfg.NAMESPACE,
+                label_selector=_cfg.LABEL_SELECTOR,
+            ).items
+        except Exception as e:
+            print(f"[PushRouter] list_namespaced_pod failed: {e}")
+            return {}
+
+        out: Dict[str, str] = {}
+        for pod in pods:
+            if pod.status.phase == "Running" and pod.status.pod_ip:
+                out[pod.metadata.name] = pod.status.pod_ip
+        return out
+
+    def _ensure_endpoints(self):
+        now = time.time()
+        if self._eps and (now - self._last_discovery) < self._discovery_interval_s:
+            return
+
+        pods = self._discover_pods()
+        self._eps = list(pods.keys())
+        self._urls = {
+            pod: f"http://{ip}:{_cfg.SIDECAR_PORT}"
+            for pod, ip in pods.items()
+        }
+        self._last_discovery = now
+
+        _log_req(f"discovered {len(self._eps)} pods: {self._eps}", level="summary")
+
+    # ---------------------------------------------------------
+    # Endpoint selection
+    # ---------------------------------------------------------
+
+    def _pick_endpoint_rr(self) -> Optional[str]:
+        if not self._eps:
+            return None
+        ep = self._eps[self._rr_idx % len(self._eps)]
+        self._rr_idx = (self._rr_idx + 1) % len(self._eps)
+        _log_req(f"RR pick → {ep}", level="full")
+        return ep
+
+    def _pick_endpoint_random(self) -> Optional[str]:
+        if not self._eps:
+            return None
+        ep = random.choice(self._eps)
+        _log_req(f"Random pick → {ep}", level="full")
+        return ep
+
+    async def _pick_endpoint_leastq_health(self) -> Optional[str]:
+        if not self._eps:
+            return None
+
+        async def fetch_score(ep: str):
+            url = self._urls.get(ep)
+            if not url:
+                return ep, None
+            try:
+                r = await self._client.get(f"{url}/health")
+                if r.status_code != 200:
+                    return ep, None
+                data = r.json()
+                score = int(data.get("logical", data.get("queue_len", 0)))
+                return ep, score
+            except Exception:
+                return ep, None
+
+        results = await asyncio.gather(
+            *(fetch_score(ep) for ep in self._eps),
+            return_exceptions=False,
+        )
+
+        best_ep = None
+        best_score = None
+        for ep, score in results:
+            if score is None:
+                continue
+            if best_score is None or score < best_score:
+                best_score = score
+                best_ep = ep
+
+        _log_req(f"LeastQ(health) pick → {best_ep} (score={best_score})", level="full")
+        return best_ep
+
+    def _pick_endpoint_leastq_local(self) -> Optional[str]:
+        if not self._eps:
+            return None
+
+        best_ep = None
+        best_score = None
+        for ep in self._eps:
+            score = int(self._logical_inflight.get(ep, 0))
+            if best_score is None or score < best_score:
+                best_score = score
+                best_ep = ep
+
+        _log_req(f"LeastQ(local) pick → {best_ep} (score={best_score})", level="full")
+        return best_ep
+
+    async def _pick_endpoint_leastq(self) -> Optional[str]:
+        if self._leastq_mode == "local":
+            return self._pick_endpoint_leastq_local()
+        return await self._pick_endpoint_leastq_health()
+
+    async def _pick_endpoint(self) -> Optional[str]:
+        if self.mode == "push-rr":
+            return self._pick_endpoint_rr()
+        if self.mode == "push-random":
+            return self._pick_endpoint_random()
+        if self.mode == "push-leastq":
+            return await self._pick_endpoint_leastq()
+        return self._pick_endpoint_rr()
+
+    # ---------------------------------------------------------
+    # Push operation
+    # ---------------------------------------------------------
+
+    async def route_and_push(self, req_id: str, prompt: str, meta: dict) -> None:
+        """
+        Dispatch a request to a sidecar in PUSH mode.
+        Injects trace info into meta["__trace__"] if TRACE_ENABLED.
+        """
+        self._ensure_endpoints()
+        if not self._eps:
+            raise RuntimeError("No endpoints available for push routing")
+
+        ep = await self._pick_endpoint()
+        if not ep:
+            raise RuntimeError("Failed to pick endpoint")
+
+        url = self._urls.get(ep)
+        if not url:
+            raise RuntimeError(f"No sidecar URL for endpoint {ep}")
+
+        # Prom: outgoing dispatch (router -> sidecar)
+        inc_dispatch(ep)
+
+        logical_before: Optional[int] = None
+        if self.mode == "push-leastq" and self._leastq_mode == "local":
+            logical_before = int(self._logical_inflight.get(ep, 0))
+            self._logical_inflight[ep] = logical_before + 1
+
+        dispatch_ts = time.time()
+
+        if getattr(_cfg, "TRACE_ENABLED", False):
+            meta = dict(meta or {})
+            tr = dict(meta.get("__trace__") or {})
+            tr.setdefault("endpoint", ep)
+            tr.setdefault("router_mode", self.mode)
+            tr["t_dispatch_router"] = dispatch_ts
+            if logical_before is not None:
+                tr["router_logical_inflight_before"] = logical_before
+                tr["router_logical_inflight_after"] = logical_before + 1
+            meta["__trace__"] = tr
+
+        payload = {
+            "req_id": req_id,
+            "prompt": str(prompt),
+            "meta": meta or {},
+        }
+
+        if self._leastq_mode == "local":
+            payload["endpoint"] = ep
+
+        _log_req(f"push req_id={req_id} → {ep} ({url})", level="summary")
+
+        try:
+            r = await self._client.post(f"{url}/push", json=payload)
+        except Exception as e:
+            _log_req(f"push failed for {ep}: {e}", level="full")
+            if self.mode == "push-leastq" and self._leastq_mode == "local":
+                if self._logical_inflight[ep] > 0:
+                    self._logical_inflight[ep] -= 1
+            raise
+
+        if r.status_code != 200:
+            _log_req(f"push to {ep} failed: {r.status_code} {r.text}", level="full")
+            if self.mode == "push-leastq" and self._leastq_mode == "local":
+                if self._logical_inflight[ep] > 0:
+                    self._logical_inflight[ep] -= 1
+            raise RuntimeError(f"push to {ep} failed: {r.status_code} {r.text}")
+
+    # ---------------------------------------------------------
+    # Result notification (for local leastq mode)
+    # ---------------------------------------------------------
+
+    def notify_result(self, endpoint: Optional[str]) -> None:
+        if not endpoint:
+            return
+        if endpoint not in self._eps:
+            return
+        current = self._logical_inflight.get(endpoint, 0)
+        if current > 0:
+            self._logical_inflight[endpoint] = current - 1
+
+---------------- END FILE: ./router/push_router.py ----------------
+
+---------------- FILE: ./build.sh ----------------
+
+#!/bin/bash
+set -e
+
+PROXY_URL="http://peulerosweb:EulerOS_123@172.18.100.92:8080"
+
+docker build \
+  -f Dockerfile \
+  --build-arg HTTP_PROXY="$PROXY_URL" \
+  --build-arg HTTPS_PROXY="$PROXY_URL" \
+  -t kv-router:latest .
+
+---------------- END FILE: ./build.sh ----------------
+
+---------------- FILE: ./Dockerfile ----------------
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# ---------- Proxy only for build ----------
+# Build args (provided at `docker build` time)
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+
+# Make them visible to pip/urllib3 during build
+ENV http_proxy=${HTTP_PROXY}
+ENV https_proxy=${HTTPS_PROXY}
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+# ------------------------------------------
+
+# Install deps
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ---------- Clear proxy for runtime ----------
+ENV http_proxy=""
+ENV https_proxy=""
+ENV HTTP_PROXY=""
+ENV HTTPS_PROXY=""
+# ---------------------------------------------
+
+# Copy app code
+COPY router ./router
+
+# Uvicorn config (can still be overridden in K8s)
+ENV HOST=0.0.0.0
+ENV PORT=8080
+
+# Add entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+CMD ["/entrypoint.sh"]
+
+---------------- END FILE: ./Dockerfile ----------------
+
+---------------- FILE: ./requirements.txt ----------------
+
+fastapi
+uvicorn[standard]
+httpx
+redis
+kubernetes
+prometheus_client
+
+---------------- END FILE: ./requirements.txt ----------------

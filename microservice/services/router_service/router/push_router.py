@@ -10,6 +10,7 @@ import httpx
 from kubernetes import client as k8s_client, config as k8s_config
 
 from .config import get_config
+from .metrics import inc_dispatch
 
 _cfg = get_config()
 
@@ -197,6 +198,9 @@ class PushRouter:
         if not url:
             raise RuntimeError(f"No sidecar URL for endpoint {ep}")
 
+        # Prom: outgoing dispatch (router -> sidecar)
+        inc_dispatch(ep)
+
         # ---------------------------------------------------------
         # Logical queue length (for leastq-local)
         # ---------------------------------------------------------
@@ -272,4 +276,3 @@ class PushRouter:
         current = self._logical_inflight.get(endpoint, 0)
         if current > 0:
             self._logical_inflight[endpoint] = current - 1
-

@@ -10,6 +10,28 @@
 # - Prometheus does NOT accept float durations in range selectors (e.g. [10.0s]).
 #   We always format window_s as an integer duration string like "10s".
 # - GPU/DCGM metrics are optional and off by default.
+#
+# Router + sidecar metrics:
+#   Router metrics (router service / likely :8080):
+#     - router_central_queue_length (gauge)               -> router_queue_length
+#     - router_admission_requests_total (counter -> rate) -> router_admission_rps
+#     - router_dispatch_requests_total (counter -> rate)  -> router_outgoing_rps
+#
+#   Sidecar metrics (kv-sidecar / likely :9000):
+#     - sidecar_queue_length (gauge)                      -> sidecar_queue_length
+#     - sidecar_received_requests_total (counter -> rate) -> sidecar_received_rps
+#     - sidecar_completed_requests_total (counter -> rate)-> sidecar_completed_rps
+#
+# Key behaviors:
+#   1) vLLM metrics: logged per vLLM instance (:8200) row
+#   2) sidecar metrics: exported_endpoint=<pod name> remapped into vLLM (:8200) rows via kube_pod_info
+#   3) router metrics:
+#       - logged per router instance (:8080) row
+#       - also broadcast as aggregated scalars into every vLLM (:8200) row
+#
+# Critical fixes:
+#   - If endpoint discovery hasn't populated yet, fallback-discover vLLM instances from Prometheus
+#   - If Prometheus returns instances not in `keys`, auto-add them so they appear in output
 
 from __future__ import annotations
 
@@ -105,6 +127,27 @@ def _safe_float(x: Any) -> Optional[float]:
         return None
 
 
+def _vec_values(vec: List[Dict[str, Any]]) -> List[float]:
+    vals: List[float] = []
+    for it in vec or []:
+        v = it.get("value")
+        if isinstance(v, list) and len(v) >= 2:
+            f = _safe_float(v[1])
+            if f is not None:
+                vals.append(float(f))
+    return vals
+
+
+def _scalar_max(vec: List[Dict[str, Any]]) -> Optional[float]:
+    vals = _vec_values(vec)
+    return max(vals) if vals else None
+
+
+def _scalar_sum(vec: List[Dict[str, Any]]) -> Optional[float]:
+    vals = _vec_values(vec)
+    return sum(vals) if vals else None
+
+
 def _vec_to_map_by_label(
     vec: List[Dict[str, Any]],
     label_key: str,
@@ -127,7 +170,11 @@ def _vec_to_map_by_label(
         if allowed is not None and k not in allowed:
             continue
 
-        if model_name and (labels.get("model_name") is not None) and labels.get("model_name") != model_name:
+        if (
+            model_name
+            and (labels.get("model_name") is not None)
+            and labels.get("model_name") != model_name
+        ):
             continue
 
         v = it.get("value")
@@ -163,10 +210,48 @@ def _format_prom_window_s(window_s: Any, *, default_s: int = 10) -> str:
     return f"{s}s"
 
 
+def _parse_extra_instances(cfg: Any) -> List[str]:
+    """
+    Optional: let the experiment config supply additional Prometheus instances
+    that should be present in the output even if not in router-discovered endpoints.
+
+    Supported config attrs (any of these):
+      - extra_instances: "10.244.0.17:8080,10.244.0.17:9000"
+      - router_instance: "10.244.0.17:8080"
+      - sidecar_instance: "10.244.0.17:9000"
+    """
+    out: List[str] = []
+
+    extra = getattr(cfg, "extra_instances", None)
+    if isinstance(extra, str) and extra.strip():
+        for part in extra.split(","):
+            s = part.strip()
+            if s:
+                out.append(s)
+
+    r = getattr(cfg, "router_instance", None)
+    if isinstance(r, str) and r.strip():
+        out.append(r.strip())
+
+    sc = getattr(cfg, "sidecar_instance", None)
+    if isinstance(sc, str) and sc.strip():
+        out.append(sc.strip())
+
+    # de-dup preserving order
+    seen = set()
+    deduped: List[str] = []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            deduped.append(x)
+    return deduped
+
+
 # ----------------------------
 # Metrics catalogs
 # ----------------------------
 
+# vLLM core metrics (existing)
 CPU_ONLY_METRICS_CATALOG: List[Dict[str, str]] = [
     # Core
     {"name": "vllm:num_requests_running", "kind": "gauge", "field": "requests_running"},
@@ -197,11 +282,25 @@ CPU_ONLY_METRICS_CATALOG: List[Dict[str, str]] = [
     {"name": "vllm:request_generation_tokens", "kind": "hist_avg", "field": "request_generation_tokens_avg"},
     {"name": "vllm:request_max_num_generation_tokens", "kind": "hist_avg", "field": "request_max_generation_tokens_avg"},
 
-    # Spec decode (optional)
+    # Spec decode (optional at vLLM level; okay if missing)
     {"name": "vllm:spec_decode_num_accepted_tokens_total", "kind": "counter_rate", "field": "spec_tokens_accepted_per_sec"},
     {"name": "vllm:spec_decode_num_draft_tokens_total", "kind": "counter_rate", "field": "spec_tokens_draft_per_sec"},
     {"name": "vllm:spec_decode_num_emitted_tokens_total", "kind": "counter_rate", "field": "spec_tokens_emitted_per_sec"},
 ]
+
+# Router + Sidecar (minimal set)
+ROUTER_SIDECAR_METRICS_CATALOG: List[Dict[str, str]] = [
+    # Router (labeled by instance=:8080)
+    {"name": "router_central_queue_length", "kind": "gauge", "field": "router_queue_length", "label": "instance"},
+    {"name": "router_admission_requests_total", "kind": "counter_rate", "field": "router_admission_rps", "label": "instance"},
+    {"name": "router_dispatch_requests_total", "kind": "counter_rate", "field": "router_outgoing_rps", "label": "instance"},
+
+    # Sidecar (labeled by exported_endpoint=<vllm pod name> in your Prometheus)
+    {"name": "sidecar_queue_length", "kind": "gauge", "field": "sidecar_queue_length", "label": "exported_endpoint"},
+    {"name": "sidecar_received_requests_total", "kind": "counter_rate", "field": "sidecar_received_rps", "label": "exported_endpoint"},
+    {"name": "sidecar_completed_requests_total", "kind": "counter_rate", "field": "sidecar_completed_rps", "label": "exported_endpoint"},
+]
+
 
 GPU_DCGM_METRICS_CATALOG: List[Dict[str, str]] = [
     # These only work if dcgm-exporter is deployed and scraped by Prometheus.
@@ -230,6 +329,8 @@ class _MetricsSampler(threading.Thread):
         metrics_catalog: List[Dict[str, str]],
         mode_name: str = "client",
         max_instances: Optional[int] = None,
+        only_filter_to_endpoints: bool = False,
+        extra_instances: Optional[List[str]] = None,
     ):
         super().__init__(daemon=True)
         self.run_dir = Path(run_dir)
@@ -239,6 +340,12 @@ class _MetricsSampler(threading.Thread):
         self.rate_window = str(rate_window or "10s")
         self.model_name = (model_name or "").strip() or None
         self.max_instances = int(max_instances) if max_instances is not None else None
+
+        # If true: router/sidecar metrics are filtered to discovered endpoints too.
+        # Default false to avoid dropping :8080/:9000 targets.
+        self.only_filter_to_endpoints = bool(only_filter_to_endpoints)
+
+        self._extra_instances = list(extra_instances or [])
 
         self._prom = PrometheusHTTP(prom_url, timeout_s=prom_timeout_s)
         self._stop_ev = threading.Event()
@@ -254,11 +361,21 @@ class _MetricsSampler(threading.Thread):
         self._samples = 0
         self._tick_errors = 0
 
+        # existing rollups
         self._sum_gpu_kv = 0.0
         self._sum_gen_tps = 0.0
         self._sum_prefill_tps = 0.0
         self._sum_reqs_running = 0.0
         self._sum_reqs_waiting = 0.0
+
+        # router + sidecar rollups
+        self._sum_router_q = 0.0
+        self._sum_router_adm_rps = 0.0
+        self._sum_router_out_rps = 0.0
+
+        self._sum_sidecar_q = 0.0
+        self._sum_sidecar_recv_rps = 0.0
+        self._sum_sidecar_comp_rps = 0.0
 
     def set_endpoints(self, endpoints: List[str]) -> None:
         with self._eps_lock:
@@ -356,18 +473,123 @@ class _MetricsSampler(threading.Thread):
                         inst2pod[inst_s] = str(pod)
         return inst2pod
 
+    def _allowed_for_metric(self, metric_name: str, vllm_allowed: Optional[set[str]]) -> Optional[set[str]]:
+        """
+        Default behavior:
+          - vLLM series are filtered to vllm_allowed (discovered endpoints)
+          - router/sidecar series are NOT filtered (otherwise they get dropped)
+        If only_filter_to_endpoints=True, everything uses vllm_allowed.
+        """
+        if self.only_filter_to_endpoints:
+            return vllm_allowed
+        if metric_name.startswith("vllm:"):
+            return vllm_allowed
+        return None
+
+    def _vllm_port_from_instances(self, vllm_instances: List[str]) -> str:
+        """
+        Best-effort extract port from vLLM instances (default 8200).
+        """
+        if not vllm_instances:
+            return "8200"
+        try:
+            _h, p = str(vllm_instances[0]).rsplit(":", 1)
+            if p.isdigit():
+                return p
+        except Exception:
+            pass
+        return "8200"
+
+    def _podname_to_instance_map(self, pod_names: List[str], port: str) -> Dict[str, str]:
+        """
+        Map pod name -> instance (pod_ip:port) using kube_pod_info.
+        Used to remap sidecar series labeled by exported_endpoint=<pod name>.
+        """
+        want = set(str(x) for x in (pod_names or []) if x)
+        if not want:
+            return {}
+
+        try:
+            vec = self._prom.instant("kube_pod_info")
+        except Exception:
+            vec = []
+
+        out: Dict[str, str] = {}
+        for it in vec or []:
+            labels = it.get("metric", {}) or {}
+            pod = labels.get("pod")
+            pod_ip = labels.get("pod_ip")
+            if not pod or not pod_ip:
+                continue
+            pod_s = str(pod)
+            if pod_s in want and pod_s not in out:
+                out[pod_s] = f"{pod_ip}:{port}"
+        return out
+
+    def _discover_router_instances(self) -> List[str]:
+        """
+        Auto-discover router :8080 instances by asking Prometheus for a router gauge.
+        """
+        try:
+            vec = self._prom.instant("router_central_queue_length")
+        except Exception:
+            vec = []
+        insts: List[str] = []
+        seen = set()
+        for it in vec or []:
+            labels = it.get("metric", {}) or {}
+            inst = labels.get("instance")
+            if not inst:
+                continue
+            s = str(inst)
+            if s not in seen:
+                seen.add(s)
+                insts.append(s)
+        return insts
+
+    def _fallback_discover_vllm_instances(self, *, vllm_port: str = "8200") -> List[str]:
+        """
+        If endpoint discovery isn't ready, discover vLLM instances directly from Prometheus.
+        """
+        try:
+            vec = self._prom.instant("vllm:num_requests_running")
+        except Exception:
+            vec = []
+        insts: List[str] = []
+        seen = set()
+        for it in vec or []:
+            labels = it.get("metric", {}) or {}
+            inst = labels.get("instance")
+            if not inst:
+                continue
+            s = str(inst)
+            if ":" in s:
+                try:
+                    _h, p = s.rsplit(":", 1)
+                    if p.isdigit() and p != str(vllm_port):
+                        continue
+                except Exception:
+                    pass
+            if s not in seen:
+                seen.add(s)
+                insts.append(s)
+        return insts
+
     def _collect_one_tick(self) -> Dict[str, Any]:
-        # endpoints are the router-discovered pod endpoints (whatever your discover_endpoints returns)
+        # endpoints are the router-discovered vLLM pod endpoints (typically :8200)
         with self._eps_lock:
             endpoints = list(self._endpoints)
 
-        # instances are the IP:port "instance" labels used by Prometheus (from endpoints if present)
-        instances = [_endpoint_to_instance(e) for e in endpoints]
+        vllm_instances = [_endpoint_to_instance(e) for e in endpoints]
+        if self.max_instances is not None and len(vllm_instances) > self.max_instances:
+            vllm_instances = vllm_instances[: self.max_instances]
 
-        if self.max_instances is not None and len(instances) > self.max_instances:
-            instances = instances[: self.max_instances]
+        # Fallback discover from Prometheus if discovery is empty at this tick
+        if not vllm_instances:
+            vllm_instances = self._fallback_discover_vllm_instances(vllm_port="8200")
 
-        allowed = set(instances) if instances else None
+        vllm_allowed = set(vllm_instances) if vllm_instances else None
+        vllm_port = self._vllm_port_from_instances(vllm_instances)
 
         raw: Dict[str, Any] = {}
         for spec in self._catalog:
@@ -382,41 +604,112 @@ class _MetricsSampler(threading.Thread):
                 raw[name + "_sum"] = s
                 raw[name + "_count"] = c
 
-        pod2inst = self._build_pod2instance(raw, instances)
+        # join helpers primarily from vLLM series
+        pod2inst = self._build_pod2instance(raw, vllm_instances)
         inst2pod = self._build_inst2pod(raw)
 
         per_inst: Dict[str, Dict[str, Any]] = {}
-        keys = instances[:] if instances else []
+
+        # ---- include router :8080 instances as first-class rows ----
+        router_instances = self._discover_router_instances()
+
+        # keys in output: vLLM + router + any user-specified extras
+        keys: List[str] = []
+        for inst in vllm_instances:
+            if inst not in keys:
+                keys.append(inst)
+        for inst in router_instances:
+            if inst not in keys:
+                keys.append(inst)
+        for inst in self._extra_instances:
+            if inst not in keys:
+                keys.append(inst)
 
         def _ensure(inst: str) -> Dict[str, Any]:
             rec = per_inst.get(inst)
             if rec is None:
                 rec = {"instance": inst}
                 per_inst[inst] = rec
-            # attach pod if known (helps join with router trace endpoint)
             if "pod" not in rec:
                 pod = inst2pod.get(inst)
                 if pod:
                     rec["pod"] = pod
             return rec
 
+        def _add_key(inst: str) -> None:
+            """
+            IMPORTANT: if Prometheus returns instances we didn't pre-list in `keys`,
+            add them so they show up in output.
+            """
+            if not inst:
+                return
+            if inst not in keys:
+                keys.append(inst)
+            _ensure(inst)
+
+        for inst in keys:
+            _ensure(inst)
+
+        # ----------------------------
+        # Router metrics: per-instance maps
+        # ----------------------------
+        try:
+            rq_vec = self._prom.instant("router_central_queue_length")
+            ra_vec = self._prom.instant(f"rate(router_admission_requests_total[{self.rate_window}])")
+            rd_vec = self._prom.instant(f"rate(router_dispatch_requests_total[{self.rate_window}])")
+
+            router_q_by_inst = _vec_to_map_by_label(rq_vec, "instance", allowed=None)
+            router_adm_by_inst = _vec_to_map_by_label(ra_vec, "instance", allowed=None)
+            router_out_by_inst = _vec_to_map_by_label(rd_vec, "instance", allowed=None)
+        except Exception:
+            router_q_by_inst = {}
+            router_adm_by_inst = {}
+            router_out_by_inst = {}
+
+        # write per-router rows
+        for inst in router_instances:
+            _add_key(inst)
+            rec = _ensure(inst)
+            rec["router_queue_length"] = router_q_by_inst.get(inst)
+            rec["router_admission_rps"] = router_adm_by_inst.get(inst)
+            rec["router_outgoing_rps"] = router_out_by_inst.get(inst)
+
+        # aggregated scalars for broadcast into vLLM rows
+        try:
+            router_q_scalar = max(router_q_by_inst.values()) if router_q_by_inst else None
+            router_adm_scalar = sum(router_adm_by_inst.values()) if router_adm_by_inst else None
+            router_out_scalar = sum(router_out_by_inst.values()) if router_out_by_inst else None
+        except Exception:
+            router_q_scalar = None
+            router_adm_scalar = None
+            router_out_scalar = None
+
+        # ----------------------------
+        # Catalog loop for all other metrics (vLLM + sidecar + dcgm)
+        # ----------------------------
         for spec in self._catalog:
             name = spec["name"]
             kind = spec["kind"]
             field = spec["field"]
             label_key = spec.get("label", "instance")
 
+            # router_* handled above
+            if isinstance(name, str) and name.startswith("router_"):
+                continue
+
+            allowed_for_this = self._allowed_for_metric(name, vllm_allowed)
+
             if kind == "hist_avg":
                 m_sum = _vec_to_map_by_label(
                     raw.get(name + "_sum", []),
                     label_key,
-                    allowed=None if label_key == "pod" else allowed,
+                    allowed=None if label_key == "pod" else allowed_for_this,
                     model_name=self.model_name,
                 )
                 m_cnt = _vec_to_map_by_label(
                     raw.get(name + "_count", []),
                     label_key,
-                    allowed=None if label_key == "pod" else allowed,
+                    allowed=None if label_key == "pod" else allowed_for_this,
                     model_name=self.model_name,
                 )
                 m_val = _divide_maps(m_sum, m_cnt)
@@ -424,44 +717,52 @@ class _MetricsSampler(threading.Thread):
                 m_val = _vec_to_map_by_label(
                     raw.get(name, []),
                     label_key,
-                    allowed=None if label_key == "pod" else allowed,
+                    allowed=None if label_key == "pod" else allowed_for_this,
                     model_name=self.model_name,
                 )
 
-            # If the metric is labeled by pod, remap pod->instance for joinability
+            # If metric is labeled by pod, remap pod->instance
             if label_key == "pod":
                 remapped: Dict[str, float] = {}
                 for pod, val in m_val.items():
                     inst = pod2inst.get(pod)
                     if inst is None:
                         continue
-                    if allowed is not None and inst not in allowed:
+                    if allowed_for_this is not None and inst not in allowed_for_this:
                         continue
                     remapped[inst] = val
                 m_val = remapped
 
-            if not keys:
-                keys = list(m_val.keys())
+            # Sidecar metrics keyed by exported_endpoint=<pod name> -> map to instance (pod_ip:port)
+            if label_key == "exported_endpoint":
+                pod_names = list(m_val.keys())
+                podname2inst = self._podname_to_instance_map(pod_names, vllm_port)
+                remapped = {}
+                for pod_name, val in m_val.items():
+                    inst = podname2inst.get(pod_name)
+                    if inst is None:
+                        continue
+                    remapped[inst] = val
+                m_val = remapped
 
-            for inst in keys:
-                rec = _ensure(inst)
-                rec[field] = m_val.get(inst, None)
+            # IMPORTANT: auto-add instances observed in Prometheus results so they show up in output
+            for inst, val in m_val.items():
+                _add_key(inst)
+                per_inst[inst][field] = val
 
-        # If endpoints were not supplied, let Prometheus define the instance set and
-        # also provide a deterministic endpoints list so the JSON is consistent/usable.
-        if not endpoints:
-            instances = [
-                rec.get("instance")
-                for rec in per_inst.values()
-                if isinstance(rec, dict) and rec.get("instance")
-            ]
-            instances = sorted(set(str(x) for x in instances))
+        # Broadcast aggregated router scalars into every vLLM row
+        for inst in vllm_instances:
+            _add_key(inst)
+            rec = _ensure(inst)
+            rec["router_queue_length"] = router_q_scalar
+            rec["router_admission_rps"] = router_adm_scalar
+            rec["router_outgoing_rps"] = router_out_scalar
 
         return {
             "ts": _now_iso_utc(),
             "mode": self.mode_name,
-            "instances": instances,   # instance labels (host:port). If endpoints empty, derived from samples[].instance
-            "samples": list(per_inst.values()),
+            "instances": keys,
+            "samples": [per_inst[k] for k in keys if k in per_inst],
         }
 
     def _update_rollups(self, tick: Dict[str, Any]) -> None:
@@ -493,6 +794,7 @@ class _MetricsSampler(threading.Thread):
                 return None
             return sum(vals)
 
+        # existing rollups
         a_kv = _avg("gpu_kv_cache_usage_frac")
         a_run = _avg("requests_running")
         a_wait = _avg("requests_waiting")
@@ -510,6 +812,29 @@ class _MetricsSampler(threading.Thread):
         if s_pre is not None:
             self._sum_prefill_tps += s_pre
 
+        # router + sidecar rollups
+        a_router_q = _avg("router_queue_length")
+        s_router_adm = _sum("router_admission_rps")
+        s_router_out = _sum("router_outgoing_rps")
+
+        a_sidecar_q = _avg("sidecar_queue_length")
+        s_sidecar_recv = _sum("sidecar_received_rps")
+        s_sidecar_comp = _sum("sidecar_completed_rps")
+
+        if a_router_q is not None:
+            self._sum_router_q += a_router_q
+        if s_router_adm is not None:
+            self._sum_router_adm_rps += s_router_adm
+        if s_router_out is not None:
+            self._sum_router_out_rps += s_router_out
+
+        if a_sidecar_q is not None:
+            self._sum_sidecar_q += a_sidecar_q
+        if s_sidecar_recv is not None:
+            self._sum_sidecar_recv_rps += s_sidecar_recv
+        if s_sidecar_comp is not None:
+            self._sum_sidecar_comp_rps += s_sidecar_comp
+
         self._samples += 1
 
     def _write_summary_file(self) -> Dict[str, Any]:
@@ -520,11 +845,21 @@ class _MetricsSampler(threading.Thread):
                 "samples": self._samples,
                 "tick_errors": self._tick_errors,
                 "overall": {
+                    # existing
                     "avg_gpu_kv_cache_usage_frac": (self._sum_gpu_kv / self._samples) if self._samples else None,
                     "avg_requests_running": self._sum_reqs_running / self._samples,
                     "avg_requests_waiting": self._sum_reqs_waiting / self._samples,
                     "sum_generation_tokens_per_sec": self._sum_gen_tps / self._samples,
                     "sum_prefill_tokens_per_sec": self._sum_prefill_tps / self._samples,
+
+                    # router + sidecar
+                    "avg_router_queue_length": self._sum_router_q / self._samples,
+                    "sum_router_admission_rps": self._sum_router_adm_rps / self._samples,
+                    "sum_router_outgoing_rps": self._sum_router_out_rps / self._samples,
+
+                    "avg_sidecar_queue_length": self._sum_sidecar_q / self._samples,
+                    "sum_sidecar_received_rps": self._sum_sidecar_recv_rps / self._samples,
+                    "sum_sidecar_completed_rps": self._sum_sidecar_comp_rps / self._samples,
                 },
             }
 
@@ -536,8 +871,6 @@ class _MetricsSampler(threading.Thread):
     def run(self) -> None:
         self._jsonl.open()
         try:
-            # NOTE: removed the "metrics_start" JSONL record (user request)
-
             while not self._stop_ev.is_set():
                 try:
                     tick = self._collect_one_tick()
@@ -590,14 +923,19 @@ def start_metrics_collection(*, run_dir: str | Path, cfg: Any) -> None:
         prom_url = str(cfg.prometheus_base_url)
         interval_s = float(cfg.scrape_interval_s)
 
-        # IMPORTANT: Prometheus requires integer duration like "10s", not "10.0s".
-        rate_window = _format_prom_window_s(getattr(cfg, "window_s", 10), default_s=10)
+        # IMPORTANT:
+        # rate() needs >=2 scrapes in the lookback window, otherwise Prom returns empty vectors.
+        # So ensure window >= ~2 scrapes and also >= 30s (common cluster scrape interval).
+        window_s = float(getattr(cfg, "window_s", 10))
+        safe_window_s = max(window_s, 2.2 * interval_s, 30.0)
+        rate_window = _format_prom_window_s(safe_window_s, default_s=30)
 
         model_name = getattr(cfg, "model_name", None)
 
         # Catalog selection:
-        catalog = list(CPU_ONLY_METRICS_CATALOG)
+        catalog = list(CPU_ONLY_METRICS_CATALOG) + list(ROUTER_SIDECAR_METRICS_CATALOG)
 
+        # keep existing debug option (still optional)
         if bool(getattr(cfg, "include_debug_metrics", False)):
             catalog += [
                 {"name": "vllm:request_total", "kind": "counter_rate", "field": "request_total_per_sec"},
@@ -606,6 +944,9 @@ def start_metrics_collection(*, run_dir: str | Path, cfg: Any) -> None:
 
         if bool(getattr(cfg, "include_gpu_metrics", False)):
             catalog += list(GPU_DCGM_METRICS_CATALOG)
+
+        only_filter_to_endpoints = bool(getattr(cfg, "only_filter_to_endpoints", False))
+        extra_instances = _parse_extra_instances(cfg)
 
         _sampler = _MetricsSampler(
             run_dir=Path(run_dir),
@@ -617,6 +958,8 @@ def start_metrics_collection(*, run_dir: str | Path, cfg: Any) -> None:
             metrics_catalog=catalog,
             mode_name="client",
             max_instances=getattr(cfg, "max_instances", None),
+            only_filter_to_endpoints=only_filter_to_endpoints,
+            extra_instances=extra_instances,
         )
         _sampler.start()
         print(f"[metrics] started -> {Path(run_dir) / 'metrics.jsonl'}")
@@ -625,6 +968,10 @@ def start_metrics_collection(*, run_dir: str | Path, cfg: Any) -> None:
 def update_metrics_endpoints(endpoints: List[str]) -> None:
     """
     Call this from your router loop whenever endpoint discovery changes.
+
+    NOTE: These endpoints are assumed to be vLLM endpoints (typically :8200).
+    Sidecar metrics are remapped into :8200 rows using kube_pod_info + exported_endpoint label.
+    Router metrics are logged as router rows and also broadcast into :8200 rows.
     """
     global _sampler
     with _lock:

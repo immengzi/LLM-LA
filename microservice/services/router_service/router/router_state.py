@@ -15,6 +15,7 @@ from .kv_aware import prefix_len
 from .predictors import get_length_predictor
 from .len_select import select_len_aware
 from .models import JobItem, now_s
+from .metrics import set_central_queue_length, inc_dispatch
 
 _cfg = get_config()
 _pred = get_length_predictor()
@@ -58,6 +59,9 @@ class RouterState:
         # req_id -> stored result (for early-arriving /result before waiter exists)
         self._result_values: Dict[str, Any] = {}
 
+        # initialize gauge
+        set_central_queue_length(0)
+
     # -------------------------------------------------------
     # ID allocation
     # -------------------------------------------------------
@@ -81,6 +85,7 @@ class RouterState:
             rid = self.next_req_id()
             ts = float(t_enq_client) if t_enq_client else now_s()
             self._queue.append((rid, prompt, ts, meta or {}))
+            set_central_queue_length(len(self._queue))
             return rid
 
     def update_meta(self, req_id: str, meta: dict) -> None:
@@ -105,6 +110,9 @@ class RouterState:
                     new_q.append((rid, prompt, ts, old_meta))
             self._queue = new_q
 
+            # length unchanged, but keep gauge consistent anyway
+            set_central_queue_length(len(self._queue))
+
     # -------------------------------------------------------
     # Pull (KV-aware + length-aware)
     # -------------------------------------------------------
@@ -115,6 +123,7 @@ class RouterState:
 
         with self._lock:
             if not self._queue:
+                set_central_queue_length(0)
                 return []
 
             pool_factor = max(1, int(_cfg.POOL_FACTOR))
@@ -125,6 +134,9 @@ class RouterState:
             for _ in range(max_scan):
                 rid, prompt, ts, meta = self._queue.popleft()
                 pool.append((rid, prompt, ts, meta))
+
+            # queue length changed after draining pool
+            set_central_queue_length(len(self._queue))
 
             _log_req(
                 f"endpoint={endpoint} want={want} pool_size={len(pool)} "
@@ -204,10 +216,17 @@ class RouterState:
             else:
                 chosen = chosen_raw
 
+            # Prom: outgoing dispatch (router -> sidecar) for each assigned item
+            for rid, _prompt, _ts, _meta in chosen:
+                inc_dispatch(endpoint)
+
             # 5) Requeue leftovers
             leftovers = ordered[want:]
             for rid, prompt, ts, meta in leftovers:
                 self._queue.appendleft((rid, prompt, ts, meta))
+
+            # queue length changed after requeue
+            set_central_queue_length(len(self._queue))
 
             if leftovers:
                 _log_req(

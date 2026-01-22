@@ -62,14 +62,47 @@ def _newest_experiment_dir(before: set[str]) -> Optional[Path]:
 # master plan parsing
 # ---------------------------
 
+def _resolve_master_path(master_config: str) -> Path:
+    """
+    Accept:
+      - "2-master_config"           -> configs/2-master_config.yaml
+      - "2-master_config.yaml"      -> configs/2-master_config.yaml
+      - "configs/2-master_config"   -> repo_root/configs/2-master_config.yaml
+      - "configs/2-master_config.yaml" -> repo_root/configs/2-master_config.yaml
+      - "/abs/path/whatever"        -> /abs/path/whatever.yaml
+      - "/abs/path/whatever.yaml"   -> absolute
+    """
+    p = Path(master_config).expanduser()
+
+    # NEW: make ".yaml" optional
+    if p.suffix == "":
+        p = p.with_suffix(".yaml")
+
+    if not p.is_absolute():
+        parts = p.parts
+        if parts and parts[0] == "configs":
+            p = REPO_ROOT / p
+        else:
+            p = CONFIGS_DIR / p
+
+    return p.resolve()
+
+
 def _resolve_client_config_path(key: str) -> Path:
     """
     master_config.yaml keys can be:
-      - "a.yaml"          -> configs/a.yaml
-      - "configs/a.yaml"  -> repo_root/configs/a.yaml
+      - "a"              -> configs/a.yaml
+      - "a.yaml"         -> configs/a.yaml
+      - "configs/a"      -> repo_root/configs/a.yaml
+      - "configs/a.yaml" -> repo_root/configs/a.yaml
+      - "/abs/path/a"    -> /abs/path/a.yaml
       - "/abs/path/a.yaml"
     """
     p = Path(key).expanduser()
+
+    # NEW: make ".yaml" optional for client config keys too
+    if p.suffix == "":
+        p = p.with_suffix(".yaml")
 
     if not p.is_absolute():
         parts = p.parts
@@ -225,16 +258,23 @@ def _run_client(config_path: Path) -> None:
 
 
 # ---------------------------
-# Click CLI (no knobs)
+# Click CLI (master config override; .yaml optional)
 # ---------------------------
 
 @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
-def cli() -> None:
+@click.option(
+    "--config",
+    "master_config",
+    default="1-master_config",
+    show_default=True,
+    help="Master sweep config file (suffix .yaml optional; relative to configs/ or absolute path).",
+)
+def cli(master_config: str) -> None:
     """
-    Reads configs/1-master_config.yaml (only: config -> methods),
+    Reads configs/<master_config>.yaml (mapping: config -> methods),
     patches vllm-k8s.yaml ROUTER_MODE accordingly, redeploys, then runs main.py.
     """
-    master_path = (CONFIGS_DIR / "1-master_config.yaml").resolve()
+    master_path = _resolve_master_path(master_config)
     manifest_path = (REPO_ROOT / "vllm-k8s.yaml").resolve()
 
     if not master_path.is_file():

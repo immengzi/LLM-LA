@@ -49,16 +49,31 @@ class RouterConfig:
     SIDECAR_PORT: int = 9000         # sidecar FastAPI port
 
     # --------------------------------------------------------------------
-    # Synchronous response flow
+    # Synchronous response flow (existing /enqueue)
     # --------------------------------------------------------------------
     RESULT_TIMEOUT_S: float = 60.0
-    RESULT_POLL_INTERVAL_S: float = 0.02
+    RESULT_POLL_INTERVAL_S: float = 0.02  # (kept for compatibility; not used by ACK+poll)
+
+    # --------------------------------------------------------------------
+    # ACK+POLL transport support (router always exposes endpoints)
+    # --------------------------------------------------------------------
+    POLL_RESULT_TTL_S: float = 300.0
+    POLL_CLEANUP_INTERVAL_S: float = 1.0
 
     # --------------------------------------------------------------------
     # HTTP timeouts
     # --------------------------------------------------------------------
     HASH_TIMEOUT_S: float = 2.0          # hash-service compute_hashes
     PUSH_HTTP_TIMEOUT_S: float = 2.0     # push-mode health + push
+
+    # --------------------------------------------------------------------
+    # HTTP connection pooling / keepalive knobs (NO semantic changes)
+    # --------------------------------------------------------------------
+    HASH_MAX_KEEPALIVE: int = 50
+    HASH_KEEPALIVE_EXPIRY_S: float = 30.0
+
+    PUSH_MAX_KEEPALIVE: int = 200
+    PUSH_KEEPALIVE_EXPIRY_S: float = 30.0
 
     # --------------------------------------------------------------------
     # Push least-queue behavior
@@ -71,12 +86,9 @@ class RouterConfig:
     REQ_LOG_MODE: str = "off"   # off | summary | full
 
     # --------------------------------------------------------------------
-    # TRACE SYSTEM (NEW)
+    # TRACE SYSTEM
     # --------------------------------------------------------------------
-    # When true, router/sidecar propagate full timing events.
     TRACE_ENABLED: bool = False
-
-    # Optional: sample 0 < rate ≤ 1.0 (e.g. 0.1 = trace 10% of requests)
     TRACE_SAMPLING_RATE: float = 1.0
 
 
@@ -118,9 +130,20 @@ def get_config() -> RouterConfig:
         os.getenv("RESULT_POLL_INTERVAL_S", cfg.RESULT_POLL_INTERVAL_S)
     )
 
+    # Poll retention knobs
+    cfg.POLL_RESULT_TTL_S = float(os.getenv("POLL_RESULT_TTL_S", cfg.POLL_RESULT_TTL_S))
+    cfg.POLL_CLEANUP_INTERVAL_S = float(os.getenv("POLL_CLEANUP_INTERVAL_S", cfg.POLL_CLEANUP_INTERVAL_S))
+
     # Timeouts
     cfg.HASH_TIMEOUT_S = float(os.getenv("HASH_TIMEOUT_S", cfg.HASH_TIMEOUT_S))
     cfg.PUSH_HTTP_TIMEOUT_S = float(os.getenv("PUSH_HTTP_TIMEOUT_S", cfg.PUSH_HTTP_TIMEOUT_S))
+
+    # Keepalive/pooling knobs
+    cfg.HASH_MAX_KEEPALIVE = int(os.getenv("HASH_MAX_KEEPALIVE", cfg.HASH_MAX_KEEPALIVE))
+    cfg.HASH_KEEPALIVE_EXPIRY_S = float(os.getenv("HASH_KEEPALIVE_EXPIRY_S", cfg.HASH_KEEPALIVE_EXPIRY_S))
+
+    cfg.PUSH_MAX_KEEPALIVE = int(os.getenv("PUSH_MAX_KEEPALIVE", cfg.PUSH_MAX_KEEPALIVE))
+    cfg.PUSH_KEEPALIVE_EXPIRY_S = float(os.getenv("PUSH_KEEPALIVE_EXPIRY_S", cfg.PUSH_KEEPALIVE_EXPIRY_S))
 
     # Push leastq
     cfg.PUSH_LEASTQ_MODE = os.getenv("PUSH_LEASTQ_MODE", cfg.PUSH_LEASTQ_MODE)
@@ -128,9 +151,7 @@ def get_config() -> RouterConfig:
     # Logging verbosity
     cfg.REQ_LOG_MODE = os.getenv("REQ_LOG_MODE", cfg.REQ_LOG_MODE)
 
-    # ------------------------------------------------------------
-    # TRACE OVERRIDES (NEW)
-    # ------------------------------------------------------------
+    # TRACE overrides
     if "TRACE_ENABLED" in os.environ:
         cfg.TRACE_ENABLED = os.getenv("TRACE_ENABLED", "false").lower() == "true"
 
@@ -140,7 +161,7 @@ def get_config() -> RouterConfig:
             if 0 < r <= 1.0:
                 cfg.TRACE_SAMPLING_RATE = r
         except Exception:
-            pass  # ignore invalid number
+            pass
 
     _CONFIG = cfg
     return cfg

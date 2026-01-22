@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 from fastapi import FastAPI
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Dict, Any
 import time
 
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
 from .local_queue import LocalQueue
 from .config import get_config
+from .metrics import inc_received
 
 _cfg = get_config()
 
@@ -23,6 +27,11 @@ class PushItem(BaseModel):
     req_id: str
     prompt: str
     meta: Dict[str, Any] = {}
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health")
@@ -54,6 +63,9 @@ async def push(item: PushItem) -> dict:
     """
     if _local_q is None:
         return {"status": "error", "msg": "local queue not bound"}
+
+    # Prom: received (router -> sidecar)
+    inc_received(_cfg.CONTAINER_NAME)
 
     meta = dict(item.meta or {})
 
