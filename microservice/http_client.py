@@ -1,5 +1,9 @@
 # http_client.py
-# Thin wrapper around POST /enqueue, returning both req_id and result.
+# Thin wrapper around POST /enqueue (sync) and POST /submit (async_pubsub).
+#
+# NOTE:
+# - Reconciliation via GET /result/{req_id} has been removed (no longer used).
+# - async_pubsub termination is handled solely by idle-timeout-after-last-recv in load_runner.py.
 
 from __future__ import annotations
 
@@ -15,7 +19,7 @@ def send_one(
     router_url: str,
     prompt: str,
     meta: Dict[str, Any] | None = None,
-) -> Tuple[int, Optional[Dict[str, Any]]]:
+) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
     Send one synchronous /enqueue request.
 
@@ -31,17 +35,7 @@ def send_one(
              "latency_s": 0.342,
 
              # ---  (if server-side trace is enabled) ---
-             "trace": {
-                 "pod": "vllm-pod-xyz",
-                 "t_enq_router": 1700000000.123456,
-                 "t_dispatch_router": 1700000000.234567,
-                 "t_arrive_sidecar_push": 1700000000.345678,
-                 "t_dequeue_sidecar": 1700000000.456789,
-                 "t_vllm_send": 1700000000.567891,
-                 "t_vllm_recv": 1700000001.012345,
-                 "t_post_result_sidecar": 1700000001.123456,
-                 "t_enqueue_response": 1700000001.234567
-             },
+             "trace": { ... },
 
              "raw": { ... full vLLM response ... }
           }
@@ -81,7 +75,7 @@ def send_one(
     if "req_id" not in data:
         raise RuntimeError(f"/enqueue response missing 'req_id': {data!r}")
 
-    rid = data["req_id"]
+    rid = str(data["req_id"])
     result = data.get("result")
 
     # Sanity: result should be a dict, but don't crash if it's not.
@@ -90,3 +84,68 @@ def send_one(
         result = None
 
     return rid, result
+
+
+def submit_one(
+    session: requests.Session,
+    router_url: str,
+    submit_path: str,
+    prompt: str,
+    meta: Dict[str, Any] | None = None,
+    # run_id is optional; when provided we stamp meta["__run_id"] for router pubsub isolation.
+    run_id: Optional[str] = None,
+) -> str:
+    """
+    Send one async submit request (submit+ack).
+
+    Expected router behavior:
+      - Accept request, allocate req_id, enqueue/dispatch
+      - Immediately return 202 Accepted with {"req_id": "<id>"}.
+
+    Returns:
+        req_id (string)
+    """
+    t_enq = time.time()
+
+    # IMPORTANT: copy meta so we never mutate caller dict (caller may reuse it).
+    m: Dict[str, Any] = dict(meta or {})
+
+    # Attach run_id so router can publish on results.<run_id>
+    # (router may look for meta["__run_id"]).
+    if run_id is not None and str(run_id).strip():
+        # If caller already provided __run_id, keep it (don't overwrite).
+        m.setdefault("__run_id", str(run_id).strip())
+
+    payload: Dict[str, Any] = {
+        "prompt": prompt,
+        "t_enq_client": t_enq,
+        "meta": m,
+    }
+
+    # Normalize submit_path
+    sp = submit_path or "/submit"
+    if not sp.startswith("/"):
+        sp = "/" + sp
+
+    url = f"{router_url}{sp}"
+    try:
+        # Keep timeout short: this is submit+ack only.
+        resp = session.post(url, json=payload, timeout=10.0)
+    except RequestException as e:
+        print(f"[client] ✗ HTTP error talking to router submit endpoint: {e}")
+        raise
+
+    # Accept either 202 (preferred) or 200 (tolerate)
+    if resp.status_code not in (200, 202):
+        print(f"[client] ✗ {sp} failed: {resp.status_code} {resp.text}")
+        raise RuntimeError(f"{sp} failed: {resp.status_code} {resp.text}")
+
+    try:
+        data = resp.json()
+    except Exception:
+        raise RuntimeError(f"{sp} returned non-JSON body: {resp.text!r}")
+
+    if "req_id" not in data:
+        raise RuntimeError(f"{sp} response missing 'req_id': {data!r}")
+
+    return str(data["req_id"])

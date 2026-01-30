@@ -1,0 +1,211 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen
+  namespace: vllm
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicas.vllm }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: vllm
+          image: quay.io/ascend/vllm-ascend:v0.11.0rc0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+          args:
+            - |
+              echo "--- ASCEND_TOOLKIT_HOME before sourcing: [$ASCEND_TOOLKIT_HOME]"
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
+              python -m vllm.entrypoints.openai.api_server \
+                --model /model \
+                --tokenizer /model \
+                --port 8200 \
+                --served-model-name served-model \
+                --tensor-parallel-size 1 \
+                --dtype float16 \
+                --kv-cache-dtype auto \
+                --max-num-seqs {{ .Values.batchSize }} \
+                --prefix-caching-hash-algo sha256_cbor \
+                --host 0.0.0.0 \
+                --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}'
+          env:
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: HF_HUB_DISABLE_TELEMETRY
+              value: "1"
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - containerPort: 8200
+              name: http
+              protocol: TCP
+            - containerPort: 5557
+              name: kvpub
+              protocol: TCP
+          volumeMounts:
+            - name: model
+              mountPath: /model
+              readOnly: true
+            - name: dcmi-volume
+              mountPath: /usr/local/dcmi
+            - name: npu-smi-volume
+              mountPath: /usr/local/bin/npu-smi
+            - name: ascend-driver-lib64-volume
+              mountPath: /usr/local/Ascend/driver/lib64/
+            - name: version-info-volume
+              mountPath: /usr/local/Ascend/driver/version.info
+            - name: ascend-install-info-volume
+              mountPath: /etc/ascend_install.info
+            - name: cache-volume
+              mountPath: /root/.cache
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            initialDelaySeconds: 120
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests:
+              huawei.com/Ascend: 1
+              ephemeral-storage: "2Gi"
+            limits:
+              huawei.com/Ascend: 1
+              ephemeral-storage: "4Gi"
+
+        - name: kv-sidecar
+          image: kv-sidecar:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ROUTER_URL
+              value: "http://router-service:8080"
+            - name: VLLM_URL
+              value: "http://127.0.0.1:8200"
+            - name: MODEL_NAME
+              value: "served-model"
+
+            - name: SIDECAR_PORT
+              value: "9000"
+
+            - name: BATCH_SIZE
+              value: "{{ .Values.batchSize }}"
+
+            - name: SIDECAR_MODE
+              value: {{ quote (include "vllmkv.sidecarMode" .) }}
+
+            - name: PULL_INTERVAL_S
+              value: "0.05"
+
+            - name: ROUTER_PULL_TIMEOUT_S
+              value: "1000.0"
+            - name: VLLM_TIMEOUT_S
+              value: "1000.0"
+            - name: ROUTER_RESULT_TIMEOUT_S
+              value: "1000.0"
+
+            - name: RESULT_TRANSPORT_MODE
+              value: "submit_ack"
+            - name: RESULT_SUBMIT_PATH
+              value: "/result_submit"
+
+            - name: VLLM_HOST
+              value: "127.0.0.1"
+            - name: VLLM_SUB_PORT
+              value: "5557"
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: CONTAINER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: MODEL_NAME_REDIS
+              value: "served-model"
+
+            - name: TRACE_ENABLED
+              value: "true"
+
+          ports:
+            - containerPort: 9000
+              name: sidecar-http
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+
+      volumes:
+        - name: model
+          persistentVolumeClaim:
+            claimName: qwen-local-pvc
+        - name: dcmi-volume
+          hostPath:
+            path: /usr/local/dcmi
+            type: Directory
+        - name: npu-smi-volume
+          hostPath:
+            path: /usr/local/bin/npu-smi
+            type: File
+        - name: ascend-driver-lib64-volume
+          hostPath:
+            path: /usr/local/Ascend/driver/lib64/
+            type: Directory
+        - name: version-info-volume
+          hostPath:
+            path: /usr/local/Ascend/driver/version.info
+            type: File
+        - name: ascend-install-info-volume
+          hostPath:
+            path: /etc/ascend_install.info
+            type: File
+        - name: cache-volume
+          hostPath:
+            path: /root/.cache
+            type: Directory
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-qwen
+  namespace: vllm
+spec:
+  type: NodePort
+  selector:
+    app: vllm-qwen
+  ports:
+    - name: http
+      port: 8200
+      targetPort: 8200
+      nodePort: 30034

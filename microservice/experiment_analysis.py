@@ -115,7 +115,7 @@ def load_experiment_latencies(
       - returns a pandas DataFrame with one row per record.
 
     Columns include:
-      - basic fields from the log record (idx, req_id, wait_wall_s, model_latency_s, ...),
+      - basic fields from the log record (idx, req_id, end_to_end_s, model_latency_s, ...),
       - 'send_failed' flag (bool, default False),
       - one column per derived metric from compute_trace_metrics:
           - end_to_end_s, client_to_router_s, router_queue_s, ...
@@ -151,7 +151,7 @@ def load_experiment_latencies(
             "idx": rec.get("idx"),
             "req_id": rec.get("req_id"),
             "send_failed": send_failed,
-            "wait_wall_s": rec.get("wait_wall_s"),
+            "end_to_end_s": rec.get("end_to_end_s"),
             "model_latency_s": rec.get("model_latency_s"),
             "finish_reason": rec.get("finish_reason"),
             "prompt_tokens": rec.get("prompt_tokens"),
@@ -177,7 +177,7 @@ def load_experiment_latencies(
                 "idx",
                 "req_id",
                 "send_failed",
-                "wait_wall_s",
+                "end_to_end_s",
                 "model_latency_s",
                 "finish_reason",
                 # metrics columns will appear as needed when data is present
@@ -196,7 +196,7 @@ def load_experiment_latencies(
 
 
 # ============================================================
-# NEW: Minimal Prometheus metrics loader (metrics.jsonl)
+# Minimal Prometheus metrics loader (metrics.jsonl)
 # ============================================================
 
 def load_experiment_prom_samples(

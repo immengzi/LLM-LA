@@ -33,9 +33,14 @@ def _make_pooled_session(pool_connections: int, pool_maxsize: int) -> requests.S
 
 class ResultPoster:
     """
-    Async poster for sidecar -> router /result.
+    Async poster for sidecar -> router result ingestion.
 
-    Key property: vLLM workers never block on router /result.
+    Backward compatible:
+      - RESULT_TRANSPORT_MODE="sync"       -> POST {ROUTER_URL}/result      (old behavior)
+      - RESULT_TRANSPORT_MODE="submit_ack" -> POST {ROUTER_URL}{RESULT_SUBMIT_PATH}
+                                            (new behavior: router ACKs immediately)
+
+    Key property: vLLM workers never block on router backpressure.
 
     Policy:
       - By default: NO RETRY (drop on failure) because you explicitly asked for that.
@@ -48,6 +53,29 @@ class ResultPoster:
         self._thread: Optional[threading.Thread] = None
         self._session: Optional[requests.Session] = None
 
+        # Resolve URL once (config is static per process)
+        self._result_url = self._resolve_result_url()
+
+    # ----------------------------
+    # URL selection (NEW)
+    # ----------------------------
+
+    def _resolve_result_url(self) -> str:
+        mode = str(getattr(_cfg, "RESULT_TRANSPORT_MODE", "sync") or "sync").lower().strip()
+
+        if mode == "submit_ack":
+            submit_path = str(getattr(_cfg, "RESULT_SUBMIT_PATH", "/result_submit") or "/result_submit")
+            if not submit_path.startswith("/"):
+                submit_path = "/" + submit_path
+            return f"{_cfg.ROUTER_URL}{submit_path}"
+
+        # Default: old behavior
+        return f"{_cfg.ROUTER_URL}/result"
+
+    # ----------------------------
+    # Lifecycle
+    # ----------------------------
+
     def start(self):
         if self._thread is not None:
             return
@@ -58,9 +86,12 @@ class ResultPoster:
         )
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+
+        mode = str(getattr(_cfg, "RESULT_TRANSPORT_MODE", "sync") or "sync").lower().strip()
         print(
             "[sidecar] ResultPoster started "
-            f"(retry={_cfg.RESULT_POST_RETRY}, pool_maxsize={_cfg.ROUTER_POOL_MAXSIZE})"
+            f"(mode={mode}, url={self._result_url}, retry={_cfg.RESULT_POST_RETRY}, "
+            f"pool_maxsize={_cfg.ROUTER_POOL_MAXSIZE})"
         )
 
     def stop(self):
@@ -76,6 +107,10 @@ class ResultPoster:
             self._session = None
         print("[sidecar] ResultPoster stopped")
 
+    # ----------------------------
+    # Public API
+    # ----------------------------
+
     def submit(self, payload: Dict[str, Any]) -> None:
         # No blocking: never stall vLLM workers.
         try:
@@ -83,6 +118,10 @@ class ResultPoster:
         except queue.Full:
             rid = payload.get("req_id", "?")
             print(f"[sidecar] ResultPoster queue FULL; dropping result for req_id={rid}")
+
+    # ----------------------------
+    # Internals
+    # ----------------------------
 
     def _try_post_once(self, session: requests.Session, url: str, payload: Dict[str, Any]) -> bool:
         try:
@@ -96,7 +135,7 @@ class ResultPoster:
             pool_connections=_cfg.ROUTER_POOL_CONNECTIONS,
             pool_maxsize=_cfg.ROUTER_POOL_MAXSIZE,
         )
-        url = f"{_cfg.ROUTER_URL}/result"
+        url = self._result_url
 
         while not self._stop.is_set():
             try:
@@ -109,7 +148,7 @@ class ResultPoster:
             if not _cfg.RESULT_POST_RETRY:
                 ok = self._try_post_once(session, url, payload)
                 if not ok:
-                    print(f"[sidecar] /result post FAILED (no-retry) req_id={rid}")
+                    print(f"[sidecar] result post FAILED (no-retry) req_id={rid} url={url}")
                 try:
                     self._q.task_done()
                 except Exception:
@@ -119,6 +158,8 @@ class ResultPoster:
             # Optional bounded retry mode
             attempt = 0
             max_tries = max(1, int(_cfg.RESULT_POST_MAX_RETRIES) + 1)  # include first attempt
+            ok = False
+
             while not self._stop.is_set() and attempt < max_tries:
                 attempt += 1
                 ok = self._try_post_once(session, url, payload)
@@ -133,7 +174,9 @@ class ResultPoster:
                 time.sleep(sleep_s)
 
             if attempt >= max_tries and not ok:
-                print(f"[sidecar] /result post FAILED after retries req_id={rid} tries={attempt}")
+                print(
+                    f"[sidecar] result post FAILED after retries req_id={rid} tries={attempt} url={url}"
+                )
 
             try:
                 self._q.task_done()

@@ -6,6 +6,10 @@ import os
 
 @dataclass
 class SidecarConfig:
+    # ------------------------------------------------
+    # Router + vLLM endpoints
+    # ------------------------------------------------
+
     # Where the router-service lives
     ROUTER_URL: str = "http://router-service:8080"
 
@@ -14,11 +18,17 @@ class SidecarConfig:
 
     MODEL_NAME: str = "served-model"
 
+    # ------------------------------------------------
     # Local queue / batching
+    # ------------------------------------------------
+
     BATCH_SIZE: int = 8
     PULL_INTERVAL_S: float = 0.05
 
-    # ZMQ → Redis kv sync (same as you had)
+    # ------------------------------------------------
+    # ZMQ → Redis KV sync (unchanged)
+    # ------------------------------------------------
+
     VLLM_HOST: str = "127.0.0.1"
     VLLM_SUB_PORT: int = 5557
 
@@ -27,20 +37,37 @@ class SidecarConfig:
     CONTAINER_NAME: str = os.getenv("CONTAINER_NAME", "vllm-pod")
     MODEL_NAME_REDIS: str = "served-model"
 
-    # sidecar HTTP + concurrency + mode
-    SIDECAR_PORT: int = 9000                # where this sidecar FastAPI listens
-    SIDECAR_MODE: str = "pull"              # "pull" or "push"
+    # ------------------------------------------------
+    # Sidecar HTTP + mode
+    # ------------------------------------------------
 
-    # HTTP timeouts (seconds)
-    ROUTER_PULL_TIMEOUT_S: float = 1.0      # /pull timeout
-    VLLM_TIMEOUT_S: float = 30.0            # vLLM generation timeout
-    ROUTER_RESULT_TIMEOUT_S: float = 5.0    # /result post timeout
+    SIDECAR_PORT: int = 9000          # where sidecar FastAPI listens
+    SIDECAR_MODE: str = "pull"        # pull | push
+
+    # ------------------------------------------------
+    # HTTP timeouts
+    # ------------------------------------------------
+
+    ROUTER_PULL_TIMEOUT_S: float = 1.0
+    VLLM_TIMEOUT_S: float = 30.0
+
+    # ------------------------------------------------
+    # Result transport (NEW — backward compatible)
+    # ------------------------------------------------
+    # sync        -> POST /result (old behavior)
+    # submit_ack -> POST /result_submit (immediate ACK)
+    RESULT_TRANSPORT_MODE: str = "sync"
+
+    # Path used when RESULT_TRANSPORT_MODE=submit_ack
+    RESULT_SUBMIT_PATH: str = "/result_submit"
+
+    # HTTP timeout for result submission (applies to both modes)
+    ROUTER_RESULT_TIMEOUT_S: float = 5.0
 
     # ------------------------------------------------
     # Connection pooling (requests / urllib3)
     # ------------------------------------------------
-    # Default urllib3 pool_maxsize is only 10; increase it to avoid churn
-    # when you have many threads or bursts.
+
     ROUTER_POOL_CONNECTIONS: int = 50
     ROUTER_POOL_MAXSIZE: int = 200
 
@@ -48,17 +75,18 @@ class SidecarConfig:
     VLLM_POOL_MAXSIZE: int = 50
 
     # ------------------------------------------------
-    # Result posting behavior
+    # Result posting retry behavior
     # ------------------------------------------------
-    # You said: "I don't want to retry". So default is OFF.
+
     RESULT_POST_RETRY: bool = False
-    RESULT_POST_MAX_RETRIES: int = 0  # if RESULT_POST_RETRY=True, cap retries
+    RESULT_POST_MAX_RETRIES: int = 0
     RESULT_POST_BACKOFF_BASE_S: float = 0.05
     RESULT_POST_BACKOFF_CAP_S: float = 2.0
 
     # ------------------------------------------------
-    # Tracing controls (must match router side)
+    # Tracing
     # ------------------------------------------------
+
     TRACE_ENABLED: bool = False
     TRACE_SAMPLE_RATE: float = 1.0
 
@@ -66,13 +94,22 @@ class SidecarConfig:
 def get_config() -> SidecarConfig:
     cfg = SidecarConfig()
 
+    # ------------------------------------------------
+    # Endpoints
+    # ------------------------------------------------
     cfg.ROUTER_URL = os.getenv("ROUTER_URL", cfg.ROUTER_URL)
     cfg.VLLM_URL = os.getenv("VLLM_URL", cfg.VLLM_URL)
     cfg.MODEL_NAME = os.getenv("MODEL_NAME", cfg.MODEL_NAME)
 
-    cfg.BATCH_SIZE = int(os.getenv("BATCH_SIZE", getattr(cfg, "BATCH_SIZE", 8)))
+    # ------------------------------------------------
+    # Queue / batching
+    # ------------------------------------------------
+    cfg.BATCH_SIZE = int(os.getenv("BATCH_SIZE", cfg.BATCH_SIZE))
     cfg.PULL_INTERVAL_S = float(os.getenv("PULL_INTERVAL_S", cfg.PULL_INTERVAL_S))
 
+    # ------------------------------------------------
+    # KV sync
+    # ------------------------------------------------
     cfg.VLLM_HOST = os.getenv("VLLM_HOST", cfg.VLLM_HOST)
     cfg.VLLM_SUB_PORT = int(os.getenv("VLLM_SUB_PORT", cfg.VLLM_SUB_PORT))
     cfg.REDIS_HOST = os.getenv("REDIS_HOST", cfg.REDIS_HOST)
@@ -80,27 +117,50 @@ def get_config() -> SidecarConfig:
     cfg.CONTAINER_NAME = os.getenv("CONTAINER_NAME", cfg.CONTAINER_NAME)
     cfg.MODEL_NAME_REDIS = os.getenv("MODEL_NAME_REDIS", cfg.MODEL_NAME_REDIS)
 
+    # ------------------------------------------------
+    # Sidecar mode
+    # ------------------------------------------------
     cfg.SIDECAR_PORT = int(os.getenv("SIDECAR_PORT", cfg.SIDECAR_PORT))
     cfg.SIDECAR_MODE = os.getenv("SIDECAR_MODE", cfg.SIDECAR_MODE)
 
+    # ------------------------------------------------
+    # Timeouts
+    # ------------------------------------------------
     cfg.ROUTER_PULL_TIMEOUT_S = float(os.getenv("ROUTER_PULL_TIMEOUT_S", cfg.ROUTER_PULL_TIMEOUT_S))
     cfg.VLLM_TIMEOUT_S = float(os.getenv("VLLM_TIMEOUT_S", cfg.VLLM_TIMEOUT_S))
     cfg.ROUTER_RESULT_TIMEOUT_S = float(os.getenv("ROUTER_RESULT_TIMEOUT_S", cfg.ROUTER_RESULT_TIMEOUT_S))
 
+    # ------------------------------------------------
+    # Result transport (NEW)
+    # ------------------------------------------------
+    cfg.RESULT_TRANSPORT_MODE = os.getenv(
+        "RESULT_TRANSPORT_MODE", cfg.RESULT_TRANSPORT_MODE
+    ).lower()
+
+    cfg.RESULT_SUBMIT_PATH = os.getenv(
+        "RESULT_SUBMIT_PATH", cfg.RESULT_SUBMIT_PATH
+    )
+
+    # ------------------------------------------------
     # Pool knobs
+    # ------------------------------------------------
     cfg.ROUTER_POOL_CONNECTIONS = int(os.getenv("ROUTER_POOL_CONNECTIONS", cfg.ROUTER_POOL_CONNECTIONS))
     cfg.ROUTER_POOL_MAXSIZE = int(os.getenv("ROUTER_POOL_MAXSIZE", cfg.ROUTER_POOL_MAXSIZE))
     cfg.VLLM_POOL_CONNECTIONS = int(os.getenv("VLLM_POOL_CONNECTIONS", cfg.VLLM_POOL_CONNECTIONS))
     cfg.VLLM_POOL_MAXSIZE = int(os.getenv("VLLM_POOL_MAXSIZE", cfg.VLLM_POOL_MAXSIZE))
 
-    # Result posting retry knobs
+    # ------------------------------------------------
+    # Result retry knobs
+    # ------------------------------------------------
     cfg.RESULT_POST_RETRY = os.getenv("RESULT_POST_RETRY", str(cfg.RESULT_POST_RETRY)).lower() == "true"
     cfg.RESULT_POST_MAX_RETRIES = int(os.getenv("RESULT_POST_MAX_RETRIES", cfg.RESULT_POST_MAX_RETRIES))
     cfg.RESULT_POST_BACKOFF_BASE_S = float(os.getenv("RESULT_POST_BACKOFF_BASE_S", cfg.RESULT_POST_BACKOFF_BASE_S))
     cfg.RESULT_POST_BACKOFF_CAP_S = float(os.getenv("RESULT_POST_BACKOFF_CAP_S", cfg.RESULT_POST_BACKOFF_CAP_S))
 
-    # Tracing env overrides
+    # ------------------------------------------------
+    # Tracing
+    # ------------------------------------------------
     cfg.TRACE_ENABLED = os.getenv("TRACE_ENABLED", "false").lower() == "true"
-    cfg.TRACE_SAMPLE_RATE = float(os.getenv("TRACE_SAMPLE_RATE", getattr(cfg, "TRACE_SAMPLE_RATE", 1.0)))
+    cfg.TRACE_SAMPLE_RATE = float(os.getenv("TRACE_SAMPLE_RATE", cfg.TRACE_SAMPLE_RATE))
 
     return cfg

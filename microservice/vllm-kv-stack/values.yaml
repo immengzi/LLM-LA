@@ -1,0 +1,23 @@
+replicas:
+  router: 1
+  vllm: 8
+
+router:
+  # pull | push-rr | push-random | push-leastq
+  mode: pull
+
+batchSize: 8
+
+autoscaling:
+  enabled: false
+
+  # Initial replicas when autoscaling is enabled.
+  # If null, it defaults to replicas.vllm (so you only set one number).
+  minReplicaCount: null
+
+  maxReplicaCount: 16
+
+  threshold: "16"
+
+  prometheusQuery: |
+    max(router_central_queue_length{namespace="vllm"})

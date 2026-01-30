@@ -163,7 +163,7 @@ def _run_one_method(
                 "prompt": req.prompt if sim_cfg.output_log_mode == "full" else req.prompt[:200],
                 "planned_ts_mono": req.t_arrival_router,
                 "actual_send_ts_mono": req.t_dispatch_router,
-                "wait_wall_s": None,
+                "end_to_end_s": None,
                 "model_latency_s": ts,
                 "finish_reason": "stop",
                 "prompt_tokens": req.in_tokens,

@@ -1,3 +1,4 @@
+# experiment_io.py
 # Helpers for experiment I/O:
 # - Choose next experiment directory under ./experiments
 # - Persist the effective client config as config.json
@@ -13,6 +14,7 @@ import json
 import shutil
 import threading
 import time
+import os
 
 from config import ClientConfig
 
@@ -31,22 +33,57 @@ class ExperimentLogger:
         self._lock = threading.Lock()
         self._fh = None  # type: Optional[object]
 
+        # (backward compatible): optionally reduce flush frequency to avoid
+        # pathological slowdowns/hangs on some filesystems.
+        #
+        # Default is 1 => flush every line (IDENTICAL to old behavior).
+        try:
+            self._flush_every_n = int(os.environ.get("EXP_LOG_FLUSH_EVERY_N", "1") or "1")
+        except Exception:
+            self._flush_every_n = 1
+        self._flush_every_n = max(1, self._flush_every_n)
+        self._n_since_flush = 0
+
     def open(self) -> None:
         # Append mode so multiple runs could be resumed if desired.
         self._fh = open(self._logs_path, "a", encoding="utf-8")
 
     def log_request(self, record: dict) -> None:
+        # Fast path: if closed/detached, do nothing.
         if self._fh is None:
             return
-        line = json.dumps(record, ensure_ascii=False)
+
+        try:
+            line = json.dumps(record, ensure_ascii=False)
+        except Exception:
+            # If record is non-serializable, skip rather than crashing the run.
+            return
+
         with self._lock:
-            self._fh.write(line + "\n")
-            self._fh.flush()
+            fh = self._fh
+            if fh is None:
+                return
+            try:
+                fh.write(line + "\n")
+                self._n_since_flush += 1
+                if self._flush_every_n <= 1 or (self._n_since_flush % self._flush_every_n) == 0:
+                    fh.flush()
+            except Exception:
+                # Best-effort: never let logging wedge the experiment.
+                pass
 
     def close(self) -> None:
-        if self._fh is not None:
-            self._fh.close()
+        # Detach file handle under lock so writers immediately stop,
+        # then close outside the lock to avoid blocking other threads.
+        fh = None
+        with self._lock:
+            fh = self._fh
             self._fh = None
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:
+                pass
 
 
 def _next_experiment_dir(root: Path) -> Path:
@@ -91,7 +128,7 @@ def init_experiment(
     Create a new experiment directory and persist:
       - config.json        : frozen view of the effective ClientConfig.
       - config_used.yaml   : exact YAML file used to run this experiment.
-      - vllm-k8s.yaml      : deployment manifest snapshot (if present).
+      - vllm-k8s.yaml      : deployment manifest snapshot (now: Helm-rendered manifest).
       - logs.json          : per-request JSON-lines (append-only via ExperimentLogger).
 
     Returns:
@@ -123,16 +160,24 @@ def init_experiment(
     src_cfg = src_cfg.resolve()
     _copy_file_if_exists(src_cfg, exp_dir / "config_used.yaml")
 
-    # 2) Copy deployment manifest snapshot, if present.
-    # Try repo root (same directory as this file) first, then CWD.
+    # 2) Copy deployment manifest snapshot (best-effort).
+    # The sweeper writes repo_root/vllm-k8s.yaml = Helm rendered manifest before running the client.
     here = Path(__file__).resolve().parent
     candidates = [
         (here / "vllm-k8s.yaml").resolve(),
         (Path.cwd() / "vllm-k8s.yaml").resolve(),
     ]
+    copied = False
     for c in candidates:
         if _copy_file_if_exists(c, exp_dir / "vllm-k8s.yaml"):
+            copied = True
             break
+
+    if not copied:
+        (exp_dir / "vllm-k8s.yaml").write_text(
+            "# WARN: vllm-k8s.yaml snapshot missing. Sweeper did not write repo_root/vllm-k8s.yaml.\n",
+            encoding="utf-8",
+        )
 
     # Prepare logger for per-request logs.
     logs_path = exp_dir / "logs.json"

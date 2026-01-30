@@ -1,5 +1,8 @@
 # main.py
 # Entry point: read YAML config, build prompts, build schedule, run open-loop load.
+#
+# NOTE: Helm knobs live in cfg.helm but are used by sweep_methods.py (cluster lifecycle),
+# not by main.py. main.py behavior remains identical.
 
 from __future__ import annotations
 
@@ -77,6 +80,21 @@ def main():
         print("[client] No prompts available; exiting.")
         return
 
+    # Transport summary (non-breaking)
+    tcfg = getattr(cfg, "transport", None)
+    transport_mode = getattr(tcfg, "mode", "sync") if tcfg is not None else "sync"
+    submit_path = getattr(tcfg, "submit_path", "/submit") if tcfg is not None else "/submit"
+    results_zmq = getattr(tcfg, "results_zmq", None) if tcfg is not None else None
+    topic = getattr(tcfg, "topic", "") if tcfg is not None else ""
+    run_id = getattr(tcfg, "run_id", None) if tcfg is not None else None
+    grace_s = getattr(tcfg, "grace_s", 30.0) if tcfg is not None else 30.0
+
+    # reconciliation knobs (safe defaults even if missing)
+    reconcile_enabled = bool(getattr(tcfg, "reconcile_enabled", True)) if tcfg is not None else True
+    reconcile_timeout_s = float(getattr(tcfg, "reconcile_timeout_s", 2.0)) if tcfg is not None else 2.0
+    reconcile_attempts = int(getattr(tcfg, "reconcile_attempts", 5)) if tcfg is not None else 5
+    reconcile_interval_s = float(getattr(tcfg, "reconcile_interval_s", 0.5)) if tcfg is not None else 0.5
+
     print(
         f"[client] router-url={cfg.router_url}, "
         f"n={total}, pattern={cfg.load_pattern.pattern}, "
@@ -84,8 +102,19 @@ def main():
         f"warmup_reqs={cfg.load_pattern.warmup_reqs}, "
         f"output_log_mode={cfg.output_log_mode}, "
         f"print_trace={cfg.print_trace}, "
-        f"metrics_enabled={bool(cfg.metrics.enabled)}"
+        f"metrics_enabled={bool(cfg.metrics.enabled)}, "
+        f"transport_mode={transport_mode}"
     )
+
+    if str(transport_mode).lower() == "async_pubsub":
+        print(
+            f"[client] async_pubsub: submit_path={submit_path} "
+            f"results_zmq={results_zmq} topic={topic!r} run_id={run_id!r} grace_s={grace_s}"
+        )
+        print(
+            f"[client] async_pubsub reconcile: enabled={reconcile_enabled} "
+            f"timeout_s={reconcile_timeout_s} attempts={reconcile_attempts} interval_s={reconcile_interval_s}"
+        )
 
     # Initialize experiment directory + logger
     exp_dir, exp_logger = init_experiment(
@@ -148,6 +177,7 @@ def main():
             logger=exp_logger,
             output_log_mode=cfg.output_log_mode,
             print_trace=cfg.print_trace,
+            transport=getattr(cfg, "transport", None),
         )
     finally:
         t_end_load = time.time()
@@ -170,6 +200,17 @@ def main():
         "total_requests": int(total),
         "load_runner_duration_s": round(float(dt_load), 3) if dt_load is not None else None,
         "wall_time_s": round(float(dt_wall), 3),
+        "transport_mode": str(transport_mode),
+        "submit_path": str(submit_path),
+        "results_zmq": results_zmq,
+        "topic": str(topic),
+        "run_id": run_id,
+        "grace_s": float(grace_s) if grace_s is not None else None,
+        # reconciliation settings (for experiment reproducibility)
+        "reconcile_enabled": bool(reconcile_enabled),
+        "reconcile_timeout_s": float(reconcile_timeout_s),
+        "reconcile_attempts": int(reconcile_attempts),
+        "reconcile_interval_s": float(reconcile_interval_s),
     }
     try:
         with (Path(exp_dir) / "run_summary.json").open("w", encoding="utf-8") as f:
