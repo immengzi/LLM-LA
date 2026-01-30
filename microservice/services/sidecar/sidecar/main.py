@@ -10,7 +10,7 @@ from .config import get_config
 from .local_queue import LocalQueue
 from .router_client import RouterPullWorker
 from .vllm_client import VLLMWorker
-from .result_poster import ResultPoster       # NEW
+from .result_poster import ResultPoster
 from .zmq_subscriber import KVSubscriber
 from .api import app, bind_local_queue
 
@@ -41,7 +41,9 @@ def main():
         pull_worker.start()  # initializes session; this is not a polling thread
 
     # ------------------------------------------------------------
-    # Result poster (async router /result delivery)
+    # Result poster (async router result delivery)
+    #   - sync: POST /result (legacy)
+    #   - submit_ack: POST RESULT_SUBMIT_PATH (default /result_submit), router ACKs 202 immediately
     # ------------------------------------------------------------
     result_poster = ResultPoster(maxsize=100000)
     result_poster.start()
@@ -54,7 +56,7 @@ def main():
         w = VLLMWorker(
             local_q,
             pull_worker=pull_worker,
-            result_poster=result_poster,   # NEW
+            result_poster=result_poster,
         )
         w.start()
         vllm_workers.append(w)
@@ -76,9 +78,17 @@ def main():
     server_thread = threading.Thread(target=_run_server, daemon=True)
     server_thread.start()
 
+    # Explicitly print which result transport we're using (helps debug env wiring)
+    result_transport = str(getattr(_cfg, "RESULT_TRANSPORT_MODE", "sync")).lower()
+    result_path = str(getattr(_cfg, "RESULT_SUBMIT_PATH", "/result_submit"))
+
     print(
         f"[sidecar] running in {mode.upper()} mode "
         f"(BATCH_SIZE={_cfg.BATCH_SIZE}, port={_cfg.SIDECAR_PORT}, endpoint_id={endpoint_id})"
+    )
+    print(
+        f"[sidecar] result transport={result_transport} "
+        f"(sync -> POST /result, submit_ack -> POST {result_path})"
     )
 
     try:
@@ -93,7 +103,7 @@ def main():
         for w in vllm_workers:
             w.stop()
 
-        result_poster.stop()   # NEW
+        result_poster.stop()
 
         kv_sub.stop()
 

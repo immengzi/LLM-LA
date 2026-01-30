@@ -1,25 +1,21 @@
 ===== FOLDER STRUCTURE =====
 .
-├── build.sh
+├── api.py
+├── config.py
 ├── crawl.sh
-├── Dockerfile
-├── entrypoint.sh
+├── __init__.py
+├── kv_aware.py
+├── kv_watcher.py
+├── len_select.py
+├── metrics.py
+├── models.py
 ├── output.txt
-├── requirements.txt
-└── router
-    ├── api.py
-    ├── config.py
-    ├── __init__.py
-    ├── kv_aware.py
-    ├── kv_watcher.py
-    ├── len_select.py
-    ├── metrics.py
-    ├── models.py
-    ├── predictors.py
-    ├── push_router.py
-    └── router_state.py
+├── predictors.py
+├── pubsub.py
+├── push_router.py
+└── router_state.py
 
-1 directory, 17 files
+0 directories, 14 files
 
 ===== FILE CONTENTS =====
 
@@ -27,26 +23,22 @@
 
 ===== FOLDER STRUCTURE =====
 .
-├── build.sh
+├── api.py
+├── config.py
 ├── crawl.sh
-├── Dockerfile
-├── entrypoint.sh
+├── __init__.py
+├── kv_aware.py
+├── kv_watcher.py
+├── len_select.py
+├── metrics.py
+├── models.py
 ├── output.txt
-├── requirements.txt
-└── router
-    ├── api.py
-    ├── config.py
-    ├── __init__.py
-    ├── kv_aware.py
-    ├── kv_watcher.py
-    ├── len_select.py
-    ├── metrics.py
-    ├── models.py
-    ├── predictors.py
-    ├── push_router.py
-    └── router_state.py
+├── predictors.py
+├── pubsub.py
+├── push_router.py
+└── router_state.py
 
-1 directory, 17 files
+0 directories, 14 files
 
 ===== FILE CONTENTS =====
 
@@ -55,105 +47,7 @@
 
 ---------------- END FILE: ./output.txt ----------------
 
----------------- FILE: ./entrypoint.sh ----------------
-
-#!/usr/bin/env bash
-set -e
-
-HOST="${HOST:-0.0.0.0}"
-PORT="${PORT:-8080}"
-
-# ACCESS_LOG defaults to true if not set
-ACCESS_LOG="${ACCESS_LOG:-true}"
-
-if [ "$ACCESS_LOG" = "true" ]; then
-  echo "[entrypoint] Starting uvicorn WITH access log (ACCESS_LOG=true)"
-  exec uvicorn router.api:app --host "$HOST" --port "$PORT"
-else
-  echo "[entrypoint] Starting uvicorn with NO access log (ACCESS_LOG=false)"
-  exec uvicorn router.api:app --host "$HOST" --port "$PORT" --no-access-log
-fi
-
----------------- END FILE: ./entrypoint.sh ----------------
-
----------------- FILE: ./crawl.sh ----------------
-
-#!/usr/bin/env bash
-# Usage:
-#   ./crawl.sh /path/to/folder
-#   ./crawl.sh /path/to/folder -o out.txt
-#   ./crawl.sh /path/to/folder -x node_modules -x .venv -x README.md
-
-ROOT="${1:-.}"
-OUTFILE=""
-shift 1 || true  # shift root path
-
-EXCLUDES=()    # array to store folder or file names to exclude
-
-# parse optional flags
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -o|--output)
-      OUTFILE="$2"
-      shift 2
-      ;;
-    -x|--exclude)
-      EXCLUDES+=("$2")
-      shift 2
-      ;;
-    *)
-      echo "Unknown option: $1"
-      exit 1
-      ;;
-  esac
-done
-
-run_crawl() {
-
-  echo "===== FOLDER STRUCTURE ====="
-  tree -a "$ROOT"
-
-  if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
-    echo ""
-    echo "===== EXCLUDED PATHS (still shown above) ====="
-    for ex in "${EXCLUDES[@]}"; do
-      echo "  - $ex"
-    done
-  fi
-
-  echo ""
-  echo "===== FILE CONTENTS ====="
-
-  # Build find exclusion arguments
-  FIND_EXCLUDES=()
-  for ex in "${EXCLUDES[@]}"; do
-    # Skip any file with this exact name
-    FIND_EXCLUDES+=( -not -name "$ex" )
-    # Skip everything under any directory with this name
-    FIND_EXCLUDES+=( -not -path "*/${ex}/*" )
-  done
-
-  # Execute the find with dynamic exclusions
-  find "$ROOT" -type f "${FIND_EXCLUDES[@]}" | while read -r file; do
-      echo ""
-      echo "---------------- FILE: $file ----------------"
-      echo ""
-      cat "$file"
-      echo ""
-      echo "---------------- END FILE: $file ----------------"
-  done
-}
-
-# output logic
-if [[ -n "$OUTFILE" ]]; then
-  run_crawl | tee "$OUTFILE"
-else
-  run_crawl
-fi
-
----------------- END FILE: ./crawl.sh ----------------
-
----------------- FILE: ./router/len_select.py ----------------
+---------------- FILE: ./len_select.py ----------------
 
 # -*- coding: utf-8 -*-
 """
@@ -190,10 +84,11 @@ def select_len_aware(
     scored.sort(key=lambda x: x[4], reverse=reverse)
     return [(r, p, t, m) for (r, p, t, m, _) in scored]
 
----------------- END FILE: ./router/len_select.py ----------------
+---------------- END FILE: ./len_select.py ----------------
 
----------------- FILE: ./router/config.py ----------------
+---------------- FILE: ./config.py ----------------
 
+# router/config.py
 # -*- coding: utf-8 -*-
 from dataclasses import dataclass, asdict
 import os
@@ -251,19 +146,45 @@ class RouterConfig:
     RESULT_POLL_INTERVAL_S: float = 0.02  # (kept for compatibility; not used by ACK+poll)
 
     # --------------------------------------------------------------------
-    # ACK+POLL transport support (router always exposes endpoints)
-    #
-    # These are NOT a "mode toggle". They are resource-management knobs
-    # for how long results remain queryable via GET /result/{req_id}.
+    # ACK+POLL / retention support (used by router_state cleanup too)
     # --------------------------------------------------------------------
+    # These are also used to prevent unbounded growth of stored results/waiters
+    # under submit_ack / async_pubsub where the client never waits.
     POLL_RESULT_TTL_S: float = 300.0
     POLL_CLEANUP_INTERVAL_S: float = 1.0
+
+    # --------------------------------------------------------------------
+    # Sidecar -> router result ingestion transport (NEW; backward compatible)
+    # --------------------------------------------------------------------
+    # "sync":       sidecar POSTs to /result (old behavior)
+    # "submit_ack": sidecar POSTs to RESULT_SUBMIT_PATH and router ACKs immediately
+    RESULT_TRANSPORT_MODE: str = "sync"         # sync | submit_ack
+    RESULT_SUBMIT_PATH: str = "/result_submit"  # only used when RESULT_TRANSPORT_MODE=submit_ack
+
+    # --------------------------------------------------------------------
+    # ASYNC PUBSUB transport (client submit + ZMQ publish results)
+    # --------------------------------------------------------------------
+    TRANSPORT_MODE: str = "sync"          # "sync" | "async_pubsub"
+    SUBMIT_PATH: str = "/submit"          # client submit endpoint (FastAPI path)
+    RESULTS_ZMQ_BIND: str = "tcp://0.0.0.0:5559"  # router PUB bind
+    RESULTS_ZMQ_TOPIC: str = "results"    # pubsub topic prefix
+    RESULTS_ZMQ_HWM: int = 100000         # high-water mark (best-effort safety)
+    RESULTS_GRACE_S: float = 30.0         # client-side wait-after-submit; router doesn't enforce
 
     # --------------------------------------------------------------------
     # HTTP timeouts
     # --------------------------------------------------------------------
     HASH_TIMEOUT_S: float = 2.0          # hash-service compute_hashes
     PUSH_HTTP_TIMEOUT_S: float = 2.0     # push-mode health + push
+
+    # --------------------------------------------------------------------
+    # HTTP connection pooling / keepalive knobs (NO semantic changes)
+    # --------------------------------------------------------------------
+    HASH_MAX_KEEPALIVE: int = 50
+    HASH_KEEPALIVE_EXPIRY_S: float = 30.0
+
+    PUSH_MAX_KEEPALIVE: int = 200
+    PUSH_KEEPALIVE_EXPIRY_S: float = 30.0
 
     # --------------------------------------------------------------------
     # Push least-queue behavior
@@ -282,6 +203,10 @@ class RouterConfig:
     TRACE_SAMPLING_RATE: float = 1.0
 
 
+def _norm_mode(s: str) -> str:
+    return str(s or "").strip().lower()
+
+
 def get_config() -> RouterConfig:
     """
     Return a singleton RouterConfig with env overrides applied.
@@ -294,6 +219,9 @@ def get_config() -> RouterConfig:
     cfg = RouterConfig()
 
     # Basic overrides
+    cfg.HOST = os.getenv("HOST", cfg.HOST)
+    cfg.PORT = int(os.getenv("PORT", cfg.PORT))
+
     cfg.REDIS_HOST = os.getenv("REDIS_HOST", cfg.REDIS_HOST)
     cfg.REDIS_PORT = int(os.getenv("REDIS_PORT", cfg.REDIS_PORT))
     cfg.MODEL_NAME = os.getenv("MODEL_NAME", cfg.MODEL_NAME)
@@ -320,13 +248,57 @@ def get_config() -> RouterConfig:
         os.getenv("RESULT_POLL_INTERVAL_S", cfg.RESULT_POLL_INTERVAL_S)
     )
 
-    # Poll retention knobs
+    # Poll retention knobs (also used by router_state cleanup loop)
     cfg.POLL_RESULT_TTL_S = float(os.getenv("POLL_RESULT_TTL_S", cfg.POLL_RESULT_TTL_S))
-    cfg.POLL_CLEANUP_INTERVAL_S = float(os.getenv("POLL_CLEANUP_INTERVAL_S", cfg.POLL_CLEANUP_INTERVAL_S))
+    cfg.POLL_CLEANUP_INTERVAL_S = float(
+        os.getenv("POLL_CLEANUP_INTERVAL_S", cfg.POLL_CLEANUP_INTERVAL_S)
+    )
+
+    # Harden against bad envs (avoid disabling cleanup accidentally)
+    if cfg.POLL_RESULT_TTL_S <= 0:
+        cfg.POLL_RESULT_TTL_S = 300.0
+    if cfg.POLL_CLEANUP_INTERVAL_S <= 0:
+        cfg.POLL_CLEANUP_INTERVAL_S = 1.0
+    # don't allow absurdly tight loops
+    cfg.POLL_CLEANUP_INTERVAL_S = max(0.1, float(cfg.POLL_CLEANUP_INTERVAL_S))
+    # don't allow TTL too tiny (would delete results before any observer sees them)
+    cfg.POLL_RESULT_TTL_S = max(1.0, float(cfg.POLL_RESULT_TTL_S))
+
+    # sidecar -> router result transport knobs
+    cfg.RESULT_TRANSPORT_MODE = os.getenv("RESULT_TRANSPORT_MODE", cfg.RESULT_TRANSPORT_MODE)
+    cfg.RESULT_SUBMIT_PATH = os.getenv("RESULT_SUBMIT_PATH", cfg.RESULT_SUBMIT_PATH)
+    if cfg.RESULT_SUBMIT_PATH and not str(cfg.RESULT_SUBMIT_PATH).startswith("/"):
+        cfg.RESULT_SUBMIT_PATH = "/" + str(cfg.RESULT_SUBMIT_PATH)
+
+    # Normalize/validate transport mode
+    rtm = _norm_mode(cfg.RESULT_TRANSPORT_MODE)
+    if rtm not in ("sync", "submit_ack"):
+        rtm = "sync"
+    cfg.RESULT_TRANSPORT_MODE = rtm
+
+    # Async pubsub transport knobs
+    cfg.TRANSPORT_MODE = os.getenv("TRANSPORT_MODE", cfg.TRANSPORT_MODE)
+    cfg.SUBMIT_PATH = os.getenv("SUBMIT_PATH", cfg.SUBMIT_PATH)
+    cfg.RESULTS_ZMQ_BIND = os.getenv("RESULTS_ZMQ_BIND", cfg.RESULTS_ZMQ_BIND)
+    cfg.RESULTS_ZMQ_TOPIC = os.getenv("RESULTS_ZMQ_TOPIC", cfg.RESULTS_ZMQ_TOPIC)
+    cfg.RESULTS_ZMQ_HWM = int(os.getenv("RESULTS_ZMQ_HWM", cfg.RESULTS_ZMQ_HWM))
+    cfg.RESULTS_GRACE_S = float(os.getenv("RESULTS_GRACE_S", cfg.RESULTS_GRACE_S))
+
+    tm = _norm_mode(cfg.TRANSPORT_MODE)
+    if tm not in ("sync", "async_pubsub"):
+        tm = "sync"
+    cfg.TRANSPORT_MODE = tm
 
     # Timeouts
     cfg.HASH_TIMEOUT_S = float(os.getenv("HASH_TIMEOUT_S", cfg.HASH_TIMEOUT_S))
     cfg.PUSH_HTTP_TIMEOUT_S = float(os.getenv("PUSH_HTTP_TIMEOUT_S", cfg.PUSH_HTTP_TIMEOUT_S))
+
+    # Keepalive/pooling knobs
+    cfg.HASH_MAX_KEEPALIVE = int(os.getenv("HASH_MAX_KEEPALIVE", cfg.HASH_MAX_KEEPALIVE))
+    cfg.HASH_KEEPALIVE_EXPIRY_S = float(os.getenv("HASH_KEEPALIVE_EXPIRY_S", cfg.HASH_KEEPALIVE_EXPIRY_S))
+
+    cfg.PUSH_MAX_KEEPALIVE = int(os.getenv("PUSH_MAX_KEEPALIVE", cfg.PUSH_MAX_KEEPALIVE))
+    cfg.PUSH_KEEPALIVE_EXPIRY_S = float(os.getenv("PUSH_KEEPALIVE_EXPIRY_S", cfg.PUSH_KEEPALIVE_EXPIRY_S))
 
     # Push leastq
     cfg.PUSH_LEASTQ_MODE = os.getenv("PUSH_LEASTQ_MODE", cfg.PUSH_LEASTQ_MODE)
@@ -369,9 +341,9 @@ def print_config(cfg: RouterConfig) -> None:
 
     sys.stdout.flush()
 
----------------- END FILE: ./router/config.py ----------------
+---------------- END FILE: ./config.py ----------------
 
----------------- FILE: ./router/kv_aware.py ----------------
+---------------- FILE: ./kv_aware.py ----------------
 
 # -*- coding: utf-8 -*-
 """
@@ -423,9 +395,9 @@ def prefix_len(endpoint: str, req_id: str) -> int:
             count += 1
         return count
 
----------------- END FILE: ./router/kv_aware.py ----------------
+---------------- END FILE: ./kv_aware.py ----------------
 
----------------- FILE: ./router/kv_watcher.py ----------------
+---------------- FILE: ./kv_watcher.py ----------------
 
 # -*- coding: utf-8 -*-
 # kv_watcher.py
@@ -617,9 +589,86 @@ class KVWatcher:
         except Exception as e:
             _log(f"scan failed: {e}", level="always")
 
----------------- END FILE: ./router/kv_watcher.py ----------------
+---------------- END FILE: ./kv_watcher.py ----------------
 
----------------- FILE: ./router/metrics.py ----------------
+---------------- FILE: ./crawl.sh ----------------
+
+#!/usr/bin/env bash
+# Usage:
+#   ./crawl.sh /path/to/folder
+#   ./crawl.sh /path/to/folder -o out.txt
+#   ./crawl.sh /path/to/folder -x node_modules -x .venv -x README.md
+
+ROOT="${1:-.}"
+OUTFILE=""
+shift 1 || true  # shift root path
+
+EXCLUDES=()    # array to store folder or file names to exclude
+
+# parse optional flags
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output)
+      OUTFILE="$2"
+      shift 2
+      ;;
+    -x|--exclude)
+      EXCLUDES+=("$2")
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+run_crawl() {
+
+  echo "===== FOLDER STRUCTURE ====="
+  tree -a "$ROOT"
+
+  if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
+    echo ""
+    echo "===== EXCLUDED PATHS (still shown above) ====="
+    for ex in "${EXCLUDES[@]}"; do
+      echo "  - $ex"
+    done
+  fi
+
+  echo ""
+  echo "===== FILE CONTENTS ====="
+
+  # Build find exclusion arguments
+  FIND_EXCLUDES=()
+  for ex in "${EXCLUDES[@]}"; do
+    # Skip any file with this exact name
+    FIND_EXCLUDES+=( -not -name "$ex" )
+    # Skip everything under any directory with this name
+    FIND_EXCLUDES+=( -not -path "*/${ex}/*" )
+  done
+
+  # Execute the find with dynamic exclusions
+  find "$ROOT" -type f "${FIND_EXCLUDES[@]}" | while read -r file; do
+      echo ""
+      echo "---------------- FILE: $file ----------------"
+      echo ""
+      cat "$file"
+      echo ""
+      echo "---------------- END FILE: $file ----------------"
+  done
+}
+
+# output logic
+if [[ -n "$OUTFILE" ]]; then
+  run_crawl | tee "$OUTFILE"
+else
+  run_crawl
+fi
+
+---------------- END FILE: ./crawl.sh ----------------
+
+---------------- FILE: ./metrics.py ----------------
 
 # router/metrics.py
 # -*- coding: utf-8 -*-
@@ -667,9 +716,9 @@ def inc_dispatch(endpoint: str) -> None:
     except Exception:
         pass
 
----------------- END FILE: ./router/metrics.py ----------------
+---------------- END FILE: ./metrics.py ----------------
 
----------------- FILE: ./router/predictors.py ----------------
+---------------- FILE: ./predictors.py ----------------
 
 # -*- coding: utf-8 -*-
 """
@@ -694,31 +743,34 @@ _predictor = SimpleLengthPredictor()
 def get_length_predictor() -> SimpleLengthPredictor:
     return _predictor
 
----------------- END FILE: ./router/predictors.py ----------------
+---------------- END FILE: ./predictors.py ----------------
 
----------------- FILE: ./router/__init__.py ----------------
+---------------- FILE: ./__init__.py ----------------
 
 
----------------- END FILE: ./router/__init__.py ----------------
+---------------- END FILE: ./__init__.py ----------------
 
----------------- FILE: ./router/api.py ----------------
+---------------- FILE: ./api.py ----------------
 
 # router/api.py
 # -*- coding: utf-8 -*-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from fastapi import status
+from fastapi import BackgroundTasks  # NEW
 
 import httpx
-import asyncio
 import time
 import sys
+from threading import RLock
+from typing import Optional, Dict, Any
 
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from .config import get_config, print_config
 from .models import (
-    EnqueueRequest,
+    EnqueueRequest,  # FIX: required (used by /enqueue and /submit handler type)
     PullRequest,
     PullResponse,
 )
@@ -727,6 +779,9 @@ from .kv_watcher import KVWatcher
 from .kv_aware import register_request_blocks
 from .push_router import PushRouter
 from .metrics import inc_admission
+
+# Async pubsub publisher (added later as router/pubsub.py)
+from .pubsub import ResultPublisher  # type: ignore
 
 _cfg = get_config()
 app = FastAPI(title="KV-aware Router Service")
@@ -740,7 +795,13 @@ app.add_middleware(
 
 _kv_watcher: KVWatcher | None = None
 _push_router: PushRouter | None = None
-_cleanup_task: asyncio.Task | None = None
+
+# PubSub publisher (optional; enabled when TRANSPORT_MODE=async_pubsub)
+_publisher: Optional[ResultPublisher] = None
+
+# Map req_id -> run_id (so /result can publish with run_id filtering)
+_rid_runid_lock = RLock()
+_rid_to_run_id: Dict[str, str] = {}
 
 
 # ============================================================
@@ -748,11 +809,44 @@ _cleanup_task: asyncio.Task | None = None
 # ============================================================
 
 def _is_push_mode() -> bool:
-    return _cfg.ROUTER_MODE.startswith("push-")
+    """Return True if router is running a push-* mode."""
+    return str(_cfg.ROUTER_MODE).startswith("push-")
+
+
+def _transport_async_pubsub_enabled() -> bool:
+    return str(getattr(_cfg, "TRANSPORT_MODE", "sync")).lower() == "async_pubsub"
+
+
+def _result_transport_submit_ack() -> bool:
+    return str(getattr(_cfg, "RESULT_TRANSPORT_MODE", "sync")).lower() == "submit_ack"
+
+
+def _remember_run_id(req_id: str, meta: Dict[str, Any]) -> None:
+    """
+    Best-effort: remember run_id so /result can publish it.
+    Convention: client sets meta["__run_id"] = "<string>".
+    """
+    try:
+        run_id = meta.get("__run_id")
+        if not isinstance(run_id, str) or not run_id:
+            return
+        with _rid_runid_lock:
+            _rid_to_run_id[req_id] = run_id
+    except Exception:
+        pass
+
+
+def _pop_run_id(req_id: str) -> Optional[str]:
+    with _rid_runid_lock:
+        return _rid_to_run_id.pop(req_id, None)
 
 
 def _log_api_req(msg: str, *, level: str = "summary") -> None:
+    """
+    Logging controlled by REQ_LOG_MODE (off | summary | full)
+    """
     mode = str(_cfg.REQ_LOG_MODE).lower()
+
     if mode == "off":
         return
 
@@ -763,6 +857,7 @@ def _log_api_req(msg: str, *, level: str = "summary") -> None:
         pass
 
     prefix = "[API]"
+
     if mode == "summary":
         if level == "summary":
             print(f"{prefix} {msg}")
@@ -774,6 +869,7 @@ def _log_api_req(msg: str, *, level: str = "summary") -> None:
 
 
 async def _maybe_register_kv_blocks(req_id: str, prompt: str) -> None:
+    """Best-effort KV-block computation."""
     if not _cfg.KV_AWARE:
         return
 
@@ -794,51 +890,131 @@ async def _maybe_register_kv_blocks(req_id: str, prompt: str) -> None:
         sys.stdout.flush()
 
 
-def _finalize_result_for_delivery(result: object) -> dict:
+def _install_submit_route() -> None:
     """
-    Make sync + poll deliver IDENTICAL result dicts to the client.
-    (The client load runner relies on stable schema.)
+    Install the /submit endpoint at the configured SUBMIT_PATH.
+
+    We keep a default /submit for convenience, but allow SUBMIT_PATH to be
+    changed without editing code (useful behind gateways).
     """
-    if not isinstance(result, dict):
-        result = {"output": result}
+    async def _submit_handler(req: EnqueueRequest):
+        return await submit(req)
 
-    out: dict = dict(result)
+    submit_path = getattr(_cfg, "SUBMIT_PATH", "/submit") or "/submit"
+    if not str(submit_path).startswith("/"):
+        submit_path = "/" + str(submit_path)
 
-    # TRACE: add delivery-time stamps (same keys as previous sync path)
-    if _cfg.TRACE_ENABLED:
-        tr = out.get("trace") or out.get("__trace__") or {}
-        tr = dict(tr)
-
-        now_ts = time.time()
-        tr["t_enqueue_unblocked"] = now_ts
-        tr["t_enqueue_about_to_return"] = now_ts
-        tr["t_enqueue_response"] = now_ts
-
-        out["trace"] = tr
-        out.pop("__trace__", None)
-
-    # RESPONSE-ONLY rename: endpoint -> pod
-    if "endpoint" in out and "pod" not in out:
-        out["pod"] = out.pop("endpoint")
-
-    tr = out.get("trace")
-    if isinstance(tr, dict) and "endpoint" in tr and "pod" not in tr:
-        tr = dict(tr)
-        tr["pod"] = tr.pop("endpoint")
-        out["trace"] = tr
-
-    return out
+    if submit_path != "/submit":
+        # Avoid duplicate registration if someone sets SUBMIT_PATH="/submit"
+        app.add_api_route(
+            submit_path,
+            _submit_handler,
+            methods=["POST"],
+            name="submit",
+        )
 
 
-async def _cleanup_loop():
-    interval = max(0.1, float(getattr(_cfg, "POLL_CLEANUP_INTERVAL_S", 1.0)))
-    while True:
+def _install_result_submit_route() -> None:
+    """
+    Install RESULT_SUBMIT_PATH (default /result_submit) if RESULT_TRANSPORT_MODE=submit_ack.
+
+    Note: we *also* keep /result always available for compatibility.
+    """
+    async def _result_submit_handler(payload: dict, background_tasks: BackgroundTasks):
+        return await result_submit_ack(payload, background_tasks)
+
+    if not _result_transport_submit_ack():
+        return
+
+    path = getattr(_cfg, "RESULT_SUBMIT_PATH", "/result_submit") or "/result_submit"
+    if not str(path).startswith("/"):
+        path = "/" + str(path)
+
+    if path == "/result":
+        # Safety: never alias to /result. Users can still configure it, but we refuse to.
+        print("[router] WARNING: RESULT_SUBMIT_PATH=/result is not allowed; ignoring.")
+        sys.stdout.flush()
+        return
+
+    app.add_api_route(
+        path,
+        _result_submit_handler,
+        methods=["POST"],
+        name="result_submit_ack",
+    )
+    print(f"[router] Result submit-ack route installed at {path}")
+    sys.stdout.flush()
+
+
+def _ingest_result_payload(payload: dict) -> None:
+    """
+    Shared ingestion logic for /result and submit-ack result endpoint.
+    This MUST NOT block on network; keep it best-effort.
+
+    Payload format expected:
+      {
+        "req_id": "...",
+        "result": {...},
+        optional "endpoint": "...",
+        optional "trace": {...}  (legacy)
+      }
+    """
+    req_id_raw = payload.get("req_id")
+    if req_id_raw is None:
+        return
+
+    rid = str(req_id_raw)
+    result = payload.get("result")
+
+    # Backward compatibility — sidecar might send: {output, trace}
+    if result is None and "output" in payload:
+        result = {"output": payload["output"]}
+        if "trace" in payload and isinstance(payload["trace"], dict):
+            result["trace"] = payload["trace"]
+
+    if result is None:
+        return
+
+    endpoint = payload.get("endpoint")
+
+    if endpoint and _push_router is not None:
         try:
-            router_state.cleanup_poll_state()
+            _push_router.notify_result(endpoint)
         except Exception as e:
-            print(f"[router] WARN: poll cleanup failed: {e}")
+            print(f"[router] PushRouter notify_result failed for endpoint={endpoint}: {e}")
             sys.stdout.flush()
-        await asyncio.sleep(interval)
+
+    # Preserve full trace
+    if _cfg.TRACE_ENABLED and isinstance(result, dict):
+        tr = result.get("trace") or result.get("__trace__") or {}
+        tr = dict(tr)
+        tr["t_router_result_recv"] = time.time()
+        tr["t_router_result_store"] = time.time()
+        result["trace"] = tr
+        result.pop("__trace__", None)
+
+    # Store for sync (/enqueue) and for potential debugging
+    router_state.store_result(rid, result)
+
+    # Publish for async_pubsub (best-effort)
+    if _publisher is not None:
+        try:
+            run_id = _pop_run_id(rid)
+            pub_payload: Dict[str, Any] = {
+                "req_id": rid,
+                "result": result,
+            }
+            if endpoint:
+                pub_payload["endpoint"] = endpoint
+            if run_id:
+                pub_payload["run_id"] = run_id
+            _publisher.publish(pub_payload)
+        except Exception as e:
+            print(f"[router] WARNING: pubsub publish failed for rid={rid}: {e}")
+            sys.stdout.flush()
+    else:
+        # Even if pubsub is off, drop run_id tracking to avoid leaks.
+        _pop_run_id(rid)
 
 
 # ============================================================
@@ -847,16 +1023,24 @@ async def _cleanup_loop():
 
 @app.on_event("startup")
 async def _startup():
-    global _kv_watcher, _push_router, _cleanup_task
+    global _kv_watcher, _push_router, _publisher
 
     print_config(_cfg)
     sys.stdout.flush()
 
+    # Dynamic submit path support
+    _install_submit_route()
+
+    # Dynamic /result_submit (submit-ack) support
+    _install_result_submit_route()
+
+    # KV watcher
     _kv_watcher = KVWatcher()
     _kv_watcher.start()
     print("[router] KVWatcher started.")
     sys.stdout.flush()
 
+    # Push router (optional)
     if _is_push_mode():
         _push_router = PushRouter(mode=_cfg.ROUTER_MODE)
         print(f"[router] PushRouter started in mode={_cfg.ROUTER_MODE}")
@@ -864,40 +1048,49 @@ async def _startup():
         print("[router] running in PULL mode.")
     sys.stdout.flush()
 
-    _cleanup_task = asyncio.create_task(_cleanup_loop())
-    print("[router] poll cleanup task started.")
-    sys.stdout.flush()
+    # PubSub publisher (optional)
+    if _transport_async_pubsub_enabled():
+        try:
+            _publisher = ResultPublisher(
+                bind=str(_cfg.RESULTS_ZMQ_BIND),
+                topic=str(_cfg.RESULTS_ZMQ_TOPIC),
+                hwm=int(getattr(_cfg, "RESULTS_ZMQ_HWM", 100000)),
+            )
+            _publisher.start()
+            print(
+                f"[router] PubSub enabled: bind={_cfg.RESULTS_ZMQ_BIND} "
+                f"topic={_cfg.RESULTS_ZMQ_TOPIC} hwm={getattr(_cfg,'RESULTS_ZMQ_HWM',None)}"
+            )
+        except Exception as e:
+            _publisher = None
+            print(f"[router] WARNING: failed to start pubsub publisher: {e}")
+        sys.stdout.flush()
 
 
 @app.on_event("shutdown")
 async def _shutdown():
-    global _kv_watcher, _push_router, _cleanup_task
+    global _kv_watcher, _push_router, _publisher
 
     if _kv_watcher:
         _kv_watcher.stop()
         print("[router] KVWatcher stopped.")
 
-    if _push_router is not None:
+    _push_router = None
+    print("[router] PushRouter cleared.")
+
+    if _publisher is not None:
         try:
-            await _push_router.aclose()
+            _publisher.stop()
         except Exception:
             pass
-        _push_router = None
-        print("[router] PushRouter closed+cleared.")
-    else:
-        print("[router] PushRouter cleared.")
+        _publisher = None
+        print("[router] PubSub publisher stopped.")
+
     sys.stdout.flush()
-
-    if _cleanup_task is not None:
-        _cleanup_task.cancel()
-        _cleanup_task = None
-        print("[router] poll cleanup task cancelled.")
-        sys.stdout.flush()
-
 
 
 # ============================================================
-# Health / Metrics
+# Health
 # ============================================================
 
 @app.get("/health")
@@ -905,20 +1098,34 @@ async def health():
     return {"status": "ok", "queue_len": router_state.size()}
 
 
+# ============================================================
+# Prometheus
+# ============================================================
+
 @app.get("/metrics")
 def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 # ============================================================
-# Sync (existing) endpoint: POST /enqueue (unchanged behavior)
+# ASYNC PUBSUB: submit + immediate ack (no waiting)
 # ============================================================
 
-@app.post("/enqueue")
-async def enqueue(req: EnqueueRequest):
+@app.post("/submit")
+async def submit(req: EnqueueRequest):
+    """
+    Async submit endpoint:
+      - returns immediately with {req_id}
+      - completion is delivered via ZMQ PUB (router -> clients), if enabled
+      - DOES NOT change the existing /enqueue semantics (full backward compatibility)
+
+    This endpoint is always available, but is only *useful* when:
+      TRANSPORT_MODE=async_pubsub
+    """
     t_start = time.time()
     inc_admission()
 
+    # Construct trace skeleton (same as /enqueue)
     trace = None
     if _cfg.TRACE_ENABLED:
         qlen = router_state.size()
@@ -928,9 +1135,9 @@ async def enqueue(req: EnqueueRequest):
             "router_queue_len_at_arrive": qlen,
         }
 
+    # Push vs Pull behavior
     if _is_push_mode():
         rid = router_state.next_req_id()
-        router_state.mark_pending(rid)
         mode_str = "push"
         meta = req.meta or {}
     else:
@@ -939,6 +1146,81 @@ async def enqueue(req: EnqueueRequest):
         rid = router_state.enqueue(req.prompt, t_enq, meta)
         mode_str = "pull"
 
+    # Remember run_id for pubsub filtering (best-effort)
+    _remember_run_id(rid, meta or {})
+
+    # Inject trace into meta if enabled (and store into queue meta in pull mode)
+    if trace is not None:
+        meta = dict(meta)
+        meta.setdefault("__trace__", trace)
+        if not _is_push_mode():
+            router_state.update_meta(rid, meta)
+
+    _log_api_req(
+        f"submit rid={rid} mode={mode_str} len={len(req.prompt)} "
+        f"kv_aware={_cfg.KV_AWARE} len_aware={_cfg.LEN_AWARE}",
+        level="summary",
+    )
+
+    # For consistency, allow /result to arrive before a sync waiter exists.
+    router_state.register_waiter(rid)
+
+    # KV hashing (best-effort)
+    await _maybe_register_kv_blocks(rid, req.prompt)
+
+    # Push-mode dispatch now (still async, but we don't wait for result)
+    if _is_push_mode():
+        if _push_router is None:
+            raise HTTPException(500, "PushRouter not initialized")
+        try:
+            await _push_router.route_and_push(rid, req.prompt, meta)
+        except Exception as e:
+            raise HTTPException(503, f"push failed: {e}")
+
+    # ACK immediately
+    return Response(
+        content=f'{{"req_id":"{rid}"}}',
+        media_type="application/json",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+
+
+# ============================================================
+# MAIN: enqueue + synchronous wait for result
+# ============================================================
+
+@app.post("/enqueue")
+async def enqueue(req: EnqueueRequest):
+    """
+    Synchronous enqueue with tracing support.
+    """
+    t_start = time.time()
+    inc_admission()
+
+    # Construct trace skeleton
+    trace = None
+    if _cfg.TRACE_ENABLED:
+        qlen = router_state.size()
+        trace = {
+            "t_enq_client": float(req.t_enq_client or t_start),
+            "t_arrive_router": t_start,
+            "router_queue_len_at_arrive": qlen,
+        }
+
+    # Push vs Pull behavior
+    if _is_push_mode():
+        rid = router_state.next_req_id()
+        mode_str = "push"
+        meta = req.meta or {}
+    else:
+        t_enq = req.t_enq_client or t_start
+        meta = req.meta or {}
+        rid = router_state.enqueue(req.prompt, t_enq, meta)
+        mode_str = "pull"
+
+    _remember_run_id(rid, meta or {})
+
+    # Inject trace into meta if enabled
     if trace is not None:
         meta = dict(meta)
         meta.setdefault("__trace__", trace)
@@ -953,8 +1235,10 @@ async def enqueue(req: EnqueueRequest):
 
     router_state.register_waiter(rid)
 
+    # KV hashing
     await _maybe_register_kv_blocks(rid, req.prompt)
 
+    # Push-mode dispatch
     if _is_push_mode():
         if _push_router is None:
             raise HTTPException(500, "PushRouter not initialized")
@@ -963,134 +1247,96 @@ async def enqueue(req: EnqueueRequest):
         except Exception as e:
             raise HTTPException(503, f"push failed: {e}")
 
-    result = await router_state.wait_for_result_async(rid, _cfg.RESULT_TIMEOUT_S)
+    # Wait for result (async)
+    result = await router_state.wait_for_result_async(
+        rid,
+        _cfg.RESULT_TIMEOUT_S,
+    )
+
+    # Trace: unblock
+    if _cfg.TRACE_ENABLED and isinstance(result, dict):
+        tr = result.get("trace") or result.get("__trace__") or {}
+        tr = dict(tr)
+        tr["t_enqueue_unblocked"] = time.time()
+        result["trace"] = tr
+
+    router_latency = time.time() - t_start
 
     if result is None:
+        _log_api_req(
+            f"timeout rid={rid} mode={mode_str} after {router_latency:.3f}s",
+            level="summary",
+        )
         raise HTTPException(504, "timeout waiting for vLLM result")
 
-    return {"req_id": rid, "result": _finalize_result_for_delivery(result)}
+    if not isinstance(result, dict):
+        result = {"output": result}
 
-
-# ============================================================
-# ACK-only enqueue: POST /enqueue_ack
-# ============================================================
-
-@app.post("/enqueue_ack")
-async def enqueue_ack(req: EnqueueRequest):
-    t_start = time.time()
-    inc_admission()
-
-    trace = None
+    # Merge router final timestamps into trace
     if _cfg.TRACE_ENABLED:
-        qlen = router_state.size()
-        trace = {
-            "t_enq_client": float(req.t_enq_client or t_start),
-            "t_arrive_router": t_start,
-            "router_queue_len_at_arrive": qlen,
-        }
+        tr = result.get("trace") or result.get("__trace__") or {}
+        tr = dict(tr)
+        tr["t_enqueue_about_to_return"] = time.time()
+        tr["t_enqueue_response"] = time.time()
+        result["trace"] = tr
+        result.pop("__trace__", None)
 
-    if _is_push_mode():
-        rid = router_state.next_req_id()
-        router_state.mark_pending(rid)
-        mode_str = "push"
-        meta = req.meta or {}
-    else:
-        t_enq = req.t_enq_client or t_start
-        meta = req.meta or {}
-        rid = router_state.enqueue(req.prompt, t_enq, meta)
-        mode_str = "pull"
+    # RESPONSE-ONLY rename endpoint -> pod
+    if "endpoint" in result and "pod" not in result:
+        result["pod"] = result.pop("endpoint")
 
-    if trace is not None:
-        meta = dict(meta)
-        meta.setdefault("__trace__", trace)
-        if not _is_push_mode():
-            router_state.update_meta(rid, meta)
-
-    router_state.register_waiter(rid)
+    tr = result.get("trace")
+    if isinstance(tr, dict) and "endpoint" in tr and "pod" not in tr:
+        tr["pod"] = tr.pop("endpoint")
+        result["trace"] = tr
 
     _log_api_req(
-        f"enqueue_ack rid={rid} mode={mode_str} len={len(req.prompt)} "
-        f"kv_aware={_cfg.KV_AWARE} len_aware={_cfg.LEN_AWARE}",
+        f"complete rid={rid} mode={mode_str} latency={router_latency:.3f}s",
         level="summary",
     )
 
-    await _maybe_register_kv_blocks(rid, req.prompt)
-
-    if _is_push_mode():
-        if _push_router is None:
-            raise HTTPException(500, "PushRouter not initialized")
-        try:
-            await _push_router.route_and_push(rid, req.prompt, meta)
-        except Exception as e:
-            raise HTTPException(503, f"push failed: {e}")
-
-    return {"req_id": rid}
+    return {"req_id": rid, "result": result}
 
 
 # ============================================================
-# Poll endpoint: GET /result/{req_id}
-# ============================================================
-
-@app.get("/result/{req_id}")
-async def get_result(req_id: str):
-    rid = str(req_id)
-    st = router_state.poll_status(rid)
-
-    if st == "pending":
-        return {"status": "pending"}
-    if st == "missing":
-        return {"status": "missing"}
-
-    res = router_state.get_poll_result(rid)
-    if res is None:
-        return {"status": "missing"}
-
-    return {"status": "ok", "req_id": rid, "result": _finalize_result_for_delivery(res)}
-
-
-# ============================================================
-# SIDE CAR → ROUTER RESULT CALLBACK: POST /result
+# SIDE CAR → ROUTER RESULT CALLBACK (SYNC/COMPAT)
 # ============================================================
 
 @app.post("/result")
 async def result_callback(payload: dict):
+    """
+    Backward-compatible result ingestion.
+    """
+    _log_api_req("result callback", level="full")
+    _ingest_result_payload(payload)
+    return {"status": "ok"}
+
+
+# ============================================================
+# SIDE CAR → ROUTER RESULT SUBMIT (ACK IMMEDIATELY)
+# ============================================================
+
+async def result_submit_ack(payload: dict, background_tasks: BackgroundTasks):
+    """
+    New: sidecar submits results, router ACKs immediately (202),
+    and ingestion runs in a background task.
+
+    Enabled when:
+      RESULT_TRANSPORT_MODE=submit_ack
+    Exposed at:
+      RESULT_SUBMIT_PATH (default /result_submit)
+    """
     req_id_raw = payload.get("req_id")
     if req_id_raw is None:
         return {"status": "missing req_id"}
 
-    rid = str(req_id_raw)
-    result = payload.get("result")
+    background_tasks.add_task(_ingest_result_payload, payload)
 
-    # Backward compatibility — sidecar might send: {output, trace}
-    if result is None and "output" in payload:
-        result = {"output": payload["output"]}
-        if "trace" in payload and isinstance(payload["trace"], dict):
-            result["trace"] = payload["trace"]
-
-    if result is None:
-        return {"status": "missing result"}
-
-    endpoint = payload.get("endpoint")
-    _log_api_req(f"result callback rid={rid}", level="full")
-
-    if endpoint and _push_router is not None:
-        try:
-            _push_router.notify_result(endpoint)
-        except Exception as e:
-            print(f"[router] PushRouter notify_result failed for endpoint={endpoint}: {e}")
-            sys.stdout.flush()
-
-    # Preserve full trace + add router receipt timestamps
-    if _cfg.TRACE_ENABLED and isinstance(result, dict):
-        tr = result.get("trace") or result.get("__trace__") or {}
-        tr = dict(tr)
-        tr["t_router_result_recv"] = time.time()
-        tr["t_router_result_store"] = time.time()
-        result["trace"] = tr
-        result.pop("__trace__", None)
-
-    router_state.store_result(rid, result)
-    return {"status": "ok"}
+    return Response(
+        content='{"status":"accepted"}',
+        media_type="application/json",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
 
 
 # ============================================================
@@ -1099,7 +1345,10 @@ async def result_callback(payload: dict):
 
 @app.post("/pull", response_model=PullResponse)
 async def pull(req: PullRequest):
-    _log_api_req(f"/pull endpoint={req.endpoint} want={req.want}", level="full")
+    _log_api_req(
+        f"/pull endpoint={req.endpoint} want={req.want}",
+        level="full",
+    )
 
     items = router_state.pull_for_endpoint(
         endpoint=req.endpoint,
@@ -1109,17 +1358,139 @@ async def pull(req: PullRequest):
     if items:
         ids = [it.req_id for it in items]
         _log_api_req(
-            f"/pull ASSIGN endpoint={req.endpoint} want={req.want} -> {len(items)} items {ids}",
+            f"/pull ASSIGN endpoint={req.endpoint} want={req.want} "
+            f"-> {len(items)} items {ids}",
             level="summary",
         )
     else:
-        _log_api_req(f"/pull IDLE endpoint={req.endpoint} want={req.want} -> 0 items", level="full")
+        _log_api_req(
+            f"/pull IDLE endpoint={req.endpoint} want={req.want} -> 0 items",
+            level="full",
+        )
 
     return PullResponse(items=items)
 
----------------- END FILE: ./router/api.py ----------------
+---------------- END FILE: ./api.py ----------------
 
----------------- FILE: ./router/models.py ----------------
+---------------- FILE: ./pubsub.py ----------------
+
+# router/pubsub.py
+# -*- coding: utf-8 -*-
+"""
+ZeroMQ PUB publisher for async_pubsub transport.
+
+Design goals:
+- Router should never block request handling on slow subscribers.
+- Best-effort delivery: PUB drops if no subscribers / HWM overflow.
+- Simple topic prefix so clients can SUB-filter cheaply.
+- Payload is JSON bytes: {"req_id": "...", "result": {...}, "run_id": "...", ...}
+
+Config is wired via router/config.py:
+- RESULTS_ZMQ_BIND   e.g. "tcp://0.0.0.0:5559"
+- RESULTS_ZMQ_TOPIC  e.g. "results"
+- RESULTS_ZMQ_HWM    e.g. 100000
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, Optional
+from threading import RLock
+
+import zmq
+
+
+class ResultPublisher:
+    def __init__(self, *, bind: str, topic: str = "results", hwm: int = 100000):
+        self._bind = str(bind)
+        self._topic = str(topic or "results")
+        self._hwm = int(hwm) if hwm is not None else 100000
+
+        self._ctx: Optional[zmq.Context] = None
+        self._sock: Optional[zmq.Socket] = None
+        self._lock = RLock()
+        self._started = False
+
+    @property
+    def bind(self) -> str:
+        return self._bind
+
+    @property
+    def topic(self) -> str:
+        return self._topic
+
+    def start(self) -> None:
+        with self._lock:
+            if self._started:
+                return
+
+            ctx = zmq.Context.instance()
+            sock = ctx.socket(zmq.PUB)
+
+            # High-water mark: controls in-memory queueing for slow subscribers.
+            # We want "best-effort": allow buffering but never block.
+            try:
+                sock.setsockopt(zmq.SNDHWM, int(self._hwm))
+            except Exception:
+                pass
+
+            # LINGER=0 ensures close() doesn't block at shutdown.
+            try:
+                sock.setsockopt(zmq.LINGER, 0)
+            except Exception:
+                pass
+
+            sock.bind(self._bind)
+
+            self._ctx = ctx
+            self._sock = sock
+            self._started = True
+
+    def stop(self) -> None:
+        with self._lock:
+            if not self._started:
+                return
+            try:
+                if self._sock is not None:
+                    self._sock.close(0)
+            finally:
+                self._sock = None
+                self._ctx = None
+                self._started = False
+
+    def publish(self, payload: Dict[str, Any]) -> None:
+        """
+        Best-effort publish. Never raises to callers (unless truly unexpected).
+        Message wire format:
+          [topic_bytes, json_bytes]
+        Where topic_bytes = f"{topic}.{run_id or 'default'}"
+        """
+        sock = None
+        with self._lock:
+            if not self._started or self._sock is None:
+                return
+            sock = self._sock
+
+        try:
+            run_id = payload.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                run_id = "default"
+
+            topic = f"{self._topic}.{run_id}".encode("utf-8", errors="strict")
+            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+            # DONTWAIT => never block router thread; drop if cannot enqueue.
+            sock.send_multipart([topic, body], flags=zmq.DONTWAIT)
+        except zmq.Again:
+            # HWM hit; drop.
+            return
+        except Exception:
+            # Best-effort: never crash request handling due to pubsub.
+            return
+
+---------------- END FILE: ./pubsub.py ----------------
+
+---------------- FILE: ./models.py ----------------
 
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -1202,9 +1573,9 @@ class ResultRequest(BaseModel):
 def now_s() -> float:
     return time.time()
 
----------------- END FILE: ./router/models.py ----------------
+---------------- END FILE: ./models.py ----------------
 
----------------- FILE: ./router/router_state.py ----------------
+---------------- FILE: ./router_state.py ----------------
 
 # router/router_state.py
 # -*- coding: utf-8 -*-
@@ -1217,7 +1588,6 @@ from typing import Deque, Dict, Tuple, List, Any, Optional
 import sys
 import uuid
 import asyncio
-import time
 
 from .config import get_config
 from .kv_aware import prefix_len
@@ -1252,26 +1622,23 @@ class RouterState:
     """
     Central queue of pending jobs + KV + length-aware selection.
 
-    - Sync /enqueue waits via asyncio Futures (existing behavior).
-    - Poll transport needs:
-        * a "pending" set for known req_ids
-        * a TTL'd results store for GET /result/{req_id}
+      - Result waiters are asyncio Futures
+      - This avoids the router enqueue handler blocking in asyncio.to_thread(...)
+        and eliminates massive router_wakeup_s artifacts under load.
     """
 
     def __init__(self):
         self._lock = RLock()
-
         # queue entries: (req_id, prompt, t_enq_client_or_router, meta)
         self._queue: Deque[Tuple[str, str, float, dict]] = deque()
 
-        # Sync waiters
+        # Result tracking (async-native)
+        # req_id -> asyncio.Future that will hold the result
         self._result_futs: Dict[str, asyncio.Future] = {}
+        # req_id -> stored result (for early-arriving /result before waiter exists)
         self._result_values: Dict[str, Any] = {}
 
-        # Poll support
-        self._pending: Dict[str, float] = {}                 # req_id -> t_created
-        self._poll_results: Dict[str, Tuple[float, Any]] = {}  # req_id -> (t_done, result)
-
+        # initialize gauge
         set_central_queue_length(0)
 
     # -------------------------------------------------------
@@ -1282,24 +1649,31 @@ class RouterState:
         with self._lock:
             return uuid.uuid4().hex
 
-    def mark_pending(self, req_id: str) -> None:
-        with self._lock:
-            self._pending[req_id] = time.time()
-
     # -------------------------------------------------------
-    # Enqueue (pull mode)
+    # Enqueue
     # -------------------------------------------------------
 
     def enqueue(self, prompt: str, t_enq_client: float | None, meta: dict) -> str:
+        """
+        Enqueue a new request in pull mode.
+
+        t_enq_client: client-side enqueue timestamp (if provided),
+        otherwise we stamp with router now().
+        """
         with self._lock:
             rid = self.next_req_id()
             ts = float(t_enq_client) if t_enq_client else now_s()
             self._queue.append((rid, prompt, ts, meta or {}))
-            self._pending[rid] = time.time()
             set_central_queue_length(len(self._queue))
             return rid
 
     def update_meta(self, req_id: str, meta: dict) -> None:
+        """
+        In-place update of meta for a queued request.
+
+        Used by the API layer to inject trace info after enqueue without
+        changing queue order or timestamps.
+        """
         with self._lock:
             if not self._queue:
                 return
@@ -1314,6 +1688,8 @@ class RouterState:
                 else:
                     new_q.append((rid, prompt, ts, old_meta))
             self._queue = new_q
+
+            # length unchanged, but keep gauge consistent anyway
             set_central_queue_length(len(self._queue))
 
     # -------------------------------------------------------
@@ -1338,6 +1714,7 @@ class RouterState:
                 rid, prompt, ts, meta = self._queue.popleft()
                 pool.append((rid, prompt, ts, meta))
 
+            # queue length changed after draining pool
             set_central_queue_length(len(self._queue))
 
             _log_req(
@@ -1352,18 +1729,21 @@ class RouterState:
 
             # 2) KV scoring
             if kv_enabled:
-                scored = []
                 kv_pairs = []
+                scored = []
                 for rid, prompt, ts, meta in pool:
                     kv_hits = prefix_len(endpoint, rid)
                     kv_pairs.append((rid, kv_hits))
                     scored.append((rid, prompt, ts, meta, kv_hits))
 
-                _log_req(f"KV raw endpoint={endpoint}: {kv_pairs}", level="full")
+                _log_req(
+                    f"KV raw endpoint={endpoint}: {kv_pairs}",
+                    level="full",
+                )
 
                 scored.sort(key=lambda x: (-x[4], x[0]))
                 ordered: List[Tuple[str, str, float, dict]] = [
-                    (r, p, t, m) for (r, p, t, m, _kv) in scored
+                    (r, p, t, m) for (r, p, t, m, _) in scored
                 ]
 
                 _log_req(
@@ -1395,24 +1775,28 @@ class RouterState:
             )
 
             # 4a) Attach trace info (if enabled)
+            chosen: List[Tuple[str, str, float, dict]] = []
             dispatch_ts = now_s()
             if getattr(_cfg, "TRACE_ENABLED", False):
                 qlen_at_dispatch = len(self._queue)
-                chosen: List[Tuple[str, str, float, dict]] = []
+
                 for rid, prompt, ts, meta in chosen_raw:
                     m = dict(meta or {})
                     tr = dict(m.get("__trace__") or {})
+
                     tr.setdefault("t_enq_router_queue", ts)
                     tr.setdefault("endpoint", endpoint)
+
                     tr["t_dispatch_router"] = dispatch_ts
                     tr["router_queue_len_at_dispatch"] = qlen_at_dispatch
+
                     m["__trace__"] = tr
                     chosen.append((rid, prompt, ts, m))
             else:
                 chosen = chosen_raw
 
-            # Prom: outgoing dispatch (router -> sidecar)
-            for _rid, _prompt, _ts, _meta in chosen:
+            # Prom: outgoing dispatch (router -> sidecar) for each assigned item
+            for rid, _prompt, _ts, _meta in chosen:
                 inc_dispatch(endpoint)
 
             # 5) Requeue leftovers
@@ -1420,165 +1804,123 @@ class RouterState:
             for rid, prompt, ts, meta in leftovers:
                 self._queue.appendleft((rid, prompt, ts, meta))
 
+            # queue length changed after requeue
             set_central_queue_length(len(self._queue))
 
             if leftovers:
                 _log_req(
-                    f"leftovers requeued: {[r for (r, _p, _t, _m) in leftovers]}",
+                    f"leftovers requeued: "
+                    f"{[r for (r, _p, _t, _m) in leftovers]}",
                     level="full",
                 )
 
-            # 6) Output
-            return [
+            # 6) Build output
+            items = [
                 JobItem(req_id=rid, prompt=prompt, t_enq_client=ts, meta=meta)
                 for (rid, prompt, ts, meta) in chosen
             ]
+            return items
 
     # -------------------------------------------------------
-    # Poll support
-    # -------------------------------------------------------
-
-    def poll_status(self, req_id: str) -> str:
-        """
-        Returns: "ok" | "pending" | "missing"
-        """
-        now = time.time()
-        ttl = float(getattr(_cfg, "POLL_RESULT_TTL_S", 300.0))
-
-        with self._lock:
-            if req_id in self._poll_results:
-                t_done, _ = self._poll_results[req_id]
-                if (now - t_done) <= ttl:
-                    return "ok"
-                # expired result
-                self._poll_results.pop(req_id, None)
-                self._pending.pop(req_id, None)
-                return "missing"
-
-            if req_id in self._pending:
-                t0 = self._pending[req_id]
-                if (now - t0) <= ttl:
-                    return "pending"
-                # expired pending
-                self._pending.pop(req_id, None)
-                return "missing"
-
-        return "missing"
-
-    def get_poll_result(self, req_id: str) -> Optional[Any]:
-        now = time.time()
-        ttl = float(getattr(_cfg, "POLL_RESULT_TTL_S", 300.0))
-        with self._lock:
-            entry = self._poll_results.get(req_id)
-            if not entry:
-                return None
-            t_done, result = entry
-            if (now - t_done) > ttl:
-                self._poll_results.pop(req_id, None)
-                self._pending.pop(req_id, None)
-                return None
-            return result
-
-    def cleanup_poll_state(self) -> int:
-        now = time.time()
-        ttl = float(getattr(_cfg, "POLL_RESULT_TTL_S", 300.0))
-
-        removed = 0
-        with self._lock:
-            for rid in list(self._poll_results.keys()):
-                t_done, _ = self._poll_results[rid]
-                if (now - t_done) > ttl:
-                    self._poll_results.pop(rid, None)
-                    removed += 1
-
-            for rid in list(self._pending.keys()):
-                t0 = self._pending[rid]
-                if (now - t0) > ttl and rid not in self._poll_results:
-                    self._pending.pop(rid, None)
-                    removed += 1
-
-        return removed
-
-    # -------------------------------------------------------
-    # Sync wait/notify (existing behavior)
+    # Result wait/notify (ASYNC)
     # -------------------------------------------------------
 
     def register_waiter(self, req_id: str) -> None:
+        """
+        Ensure an asyncio Future exists for this req_id.
+        If a result already arrived (early /result), resolve immediately.
+        """
         with self._lock:
             if req_id in self._result_futs:
                 return
 
+            loop = None
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 loop = None
 
+            # If called outside an event loop (shouldn't happen from API),
+            # we still create a Future-like placeholder by deferring creation.
+            # The async waiter will create it again if needed.
             if loop is None:
+                # Store a sentinel None; async path will fix it up.
                 self._result_futs[req_id] = None  # type: ignore[assignment]
                 return
 
             fut: asyncio.Future = loop.create_future()
             self._result_futs[req_id] = fut
 
+            # If result already stored, resolve right away
             if req_id in self._result_values and not fut.done():
                 fut.set_result(self._result_values[req_id])
 
     def store_result(self, req_id: str, result: Any) -> None:
         """
-        Store result and resolve any sync waiter.
-        ALSO stores for poll retrieval (TTL'd).
+        Store result and resolve any waiting Future.
+        Safe to call from either sync or async context (FastAPI endpoint is async).
         """
         fut: Optional[asyncio.Future] = None
-
+        loop = None
         with self._lock:
             self._result_values[req_id] = result
             fut = self._result_futs.get(req_id)
 
-            # Poll storage
-            self._poll_results[req_id] = (time.time(), result)
-            self._pending.pop(req_id, None)
-
+        # If there's no future yet (enqueue hasn't registered), that's fine.
         if fut is None:
             return
+
+        # If we stored a sentinel because register_waiter ran outside loop, ignore here.
         if not isinstance(fut, asyncio.Future):
             return
+
         if fut.done():
             return
 
+        # Resolve on the loop thread safely
         try:
             loop = fut.get_loop()
         except Exception:
             loop = None
 
+        if loop is None:
+            # Best-effort direct resolve
+            try:
+                fut.set_result(result)
+            except Exception:
+                pass
+            return
+
         def _set():
             if not fut.done():
                 fut.set_result(result)
 
-        if loop is not None:
+        try:
+            loop.call_soon_threadsafe(_set)
+        except Exception:
+            # Best-effort fallback
             try:
-                loop.call_soon_threadsafe(_set)
-                return
+                _set()
             except Exception:
                 pass
-
-        try:
-            _set()
-        except Exception:
-            pass
 
     async def wait_for_result_async(self, req_id: str, timeout_s: float) -> Optional[Any]:
         """
         Await the result for req_id up to timeout_s.
-        Cleans up sync-only waiter and sync-only stored value.
-        (Poll storage is TTL-cleaned separately.)
+        Cleans up waiter + stored result after completion (or timeout).
         """
+        # Ensure a real Future exists on THIS running loop
         loop = asyncio.get_running_loop()
 
         with self._lock:
             fut = self._result_futs.get(req_id)
+
             if not isinstance(fut, asyncio.Future) or fut.get_loop() is not loop:
+                # Create loop-local future and replace
                 fut = loop.create_future()
                 self._result_futs[req_id] = fut
+
+                # If result already stored, resolve immediately
                 if req_id in self._result_values and not fut.done():
                     fut.set_result(self._result_values[req_id])
 
@@ -1587,6 +1929,7 @@ class RouterState:
         except asyncio.TimeoutError:
             return None
         finally:
+            # Cleanup (avoid unbounded growth)
             with self._lock:
                 self._result_futs.pop(req_id, None)
                 self._result_values.pop(req_id, None)
@@ -1602,11 +1945,12 @@ class RouterState:
             return len(self._queue)
 
 
+# global instance
 router_state = RouterState()
 
----------------- END FILE: ./router/router_state.py ----------------
+---------------- END FILE: ./router_state.py ----------------
 
----------------- FILE: ./router/push_router.py ----------------
+---------------- FILE: ./push_router.py ----------------
 
 # -*- coding: utf-8 -*-
 import os
@@ -1631,6 +1975,7 @@ def _log_req(msg: str, *, level: str = "summary") -> None:
     Uses _cfg.REQ_LOG_MODE directly.
     """
     mode = str(_cfg.REQ_LOG_MODE).lower()
+
     if mode == "off":
         return
 
@@ -1649,31 +1994,8 @@ class PushRouter:
         self._last_discovery = 0.0
         self._discovery_interval_s = float(getattr(_cfg, "KV_DISCOVERY_INTERVAL_S", 5.0))
         self._leastq_mode: str = getattr(_cfg, "PUSH_LEASTQ_MODE", "health")
+        # local logical queue lengths: sent - completed
         self._logical_inflight = defaultdict(int)
-
-        # ---------------------------------------------------------
-        # IMPORTANT: reuse ONE httpx client to avoid connection churn
-        # ---------------------------------------------------------
-        # No "concurrency cap" semantics are introduced here. This is purely
-        # TCP connection pooling / keepalive behavior.
-        #
-        # max_connections=None means "no explicit cap" in httpx.
-        # You can still tune keepalive connections.
-        limits = httpx.Limits(
-            max_connections=None,
-            max_keepalive_connections=int(getattr(_cfg, "PUSH_MAX_KEEPALIVE", 200)),
-            keepalive_expiry=float(getattr(_cfg, "PUSH_KEEPALIVE_EXPIRY_S", 30.0)),
-        )
-        self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(float(_cfg.PUSH_HTTP_TIMEOUT_S)),
-            limits=limits,
-        )
-
-    async def aclose(self) -> None:
-        try:
-            await self._client.aclose()
-        except Exception:
-            pass
 
     # ---------------------------------------------------------
     # Pod discovery
@@ -1730,6 +2052,7 @@ class PushRouter:
             return None
         ep = self._eps[self._rr_idx % len(self._eps)]
         self._rr_idx = (self._rr_idx + 1) % len(self._eps)
+
         _log_req(f"RR pick → {ep}", level="full")
         return ep
 
@@ -1737,6 +2060,7 @@ class PushRouter:
         if not self._eps:
             return None
         ep = random.choice(self._eps)
+
         _log_req(f"Random pick → {ep}", level="full")
         return ep
 
@@ -1744,24 +2068,26 @@ class PushRouter:
         if not self._eps:
             return None
 
-        async def fetch_score(ep: str):
-            url = self._urls.get(ep)
-            if not url:
-                return ep, None
-            try:
-                r = await self._client.get(f"{url}/health")
-                if r.status_code != 200:
-                    return ep, None
-                data = r.json()
-                score = int(data.get("logical", data.get("queue_len", 0)))
-                return ep, score
-            except Exception:
-                return ep, None
+        async with httpx.AsyncClient(timeout=_cfg.PUSH_HTTP_TIMEOUT_S) as client:
 
-        results = await asyncio.gather(
-            *(fetch_score(ep) for ep in self._eps),
-            return_exceptions=False,
-        )
+            async def fetch_score(ep: str):
+                url = self._urls.get(ep)
+                if not url:
+                    return ep, None
+                try:
+                    r = await client.get(f"{url}/health")
+                    if r.status_code != 200:
+                        return ep, None
+                    data = r.json()
+                    score = int(data.get("logical", data.get("queue_len", 0)))
+                    return ep, score
+                except Exception:
+                    return ep, None
+
+            results = await asyncio.gather(
+                *(fetch_score(ep) for ep in self._eps),
+                return_exceptions=False,
+            )
 
         best_ep = None
         best_score = None
@@ -1781,6 +2107,7 @@ class PushRouter:
 
         best_ep = None
         best_score = None
+
         for ep in self._eps:
             score = int(self._logical_inflight.get(ep, 0))
             if best_score is None or score < best_score:
@@ -1805,7 +2132,7 @@ class PushRouter:
         return self._pick_endpoint_rr()
 
     # ---------------------------------------------------------
-    # Push operation
+    # Push operation (trace added)
     # ---------------------------------------------------------
 
     async def route_and_push(self, req_id: str, prompt: str, meta: dict) -> None:
@@ -1828,6 +2155,9 @@ class PushRouter:
         # Prom: outgoing dispatch (router -> sidecar)
         inc_dispatch(ep)
 
+        # ---------------------------------------------------------
+        # Logical queue length (for leastq-local)
+        # ---------------------------------------------------------
         logical_before: Optional[int] = None
         if self.mode == "push-leastq" and self._leastq_mode == "local":
             logical_before = int(self._logical_inflight.get(ep, 0))
@@ -1835,15 +2165,22 @@ class PushRouter:
 
         dispatch_ts = time.time()
 
+        # ---------------------------------------------------------
+        # Inject trace into meta["__trace__"]
+        # ---------------------------------------------------------
         if getattr(_cfg, "TRACE_ENABLED", False):
             meta = dict(meta or {})
             tr = dict(meta.get("__trace__") or {})
+
             tr.setdefault("endpoint", ep)
             tr.setdefault("router_mode", self.mode)
             tr["t_dispatch_router"] = dispatch_ts
+
+            # Record queue length at dispatch (only meaningful in leastq-local mode)
             if logical_before is not None:
                 tr["router_logical_inflight_before"] = logical_before
                 tr["router_logical_inflight_after"] = logical_before + 1
+
             meta["__trace__"] = tr
 
         payload = {
@@ -1852,26 +2189,34 @@ class PushRouter:
             "meta": meta or {},
         }
 
+        # Helps leastq-local debugging (optional field)
         if self._leastq_mode == "local":
             payload["endpoint"] = ep
 
-        _log_req(f"push req_id={req_id} → {ep} ({url})", level="summary")
+        _log_req(
+            f"push req_id={req_id} → {ep} ({url})",
+            level="summary",
+        )
 
-        try:
-            r = await self._client.post(f"{url}/push", json=payload)
-        except Exception as e:
-            _log_req(f"push failed for {ep}: {e}", level="full")
-            if self.mode == "push-leastq" and self._leastq_mode == "local":
-                if self._logical_inflight[ep] > 0:
-                    self._logical_inflight[ep] -= 1
-            raise
+        async with httpx.AsyncClient(timeout=_cfg.PUSH_HTTP_TIMEOUT_S) as client:
+            try:
+                r = await client.post(f"{url}/push", json=payload)
+            except Exception as e:
+                _log_req(f"push failed for {ep}: {e}", level="full")
+                if self.mode == "push-leastq" and self._leastq_mode == "local":
+                    if self._logical_inflight[ep] > 0:
+                        self._logical_inflight[ep] -= 1
+                raise
 
-        if r.status_code != 200:
-            _log_req(f"push to {ep} failed: {r.status_code} {r.text}", level="full")
-            if self.mode == "push-leastq" and self._leastq_mode == "local":
-                if self._logical_inflight[ep] > 0:
-                    self._logical_inflight[ep] -= 1
-            raise RuntimeError(f"push to {ep} failed: {r.status_code} {r.text}")
+            if r.status_code != 200:
+                _log_req(
+                    f"push to {ep} failed: {r.status_code} {r.text}",
+                    level="full",
+                )
+                if self.mode == "push-leastq" and self._leastq_mode == "local":
+                    if self._logical_inflight[ep] > 0:
+                        self._logical_inflight[ep] -= 1
+                raise RuntimeError(f"push to {ep} failed: {r.status_code} {r.text}")
 
     # ---------------------------------------------------------
     # Result notification (for local leastq mode)
@@ -1886,74 +2231,4 @@ class PushRouter:
         if current > 0:
             self._logical_inflight[endpoint] = current - 1
 
----------------- END FILE: ./router/push_router.py ----------------
-
----------------- FILE: ./build.sh ----------------
-
-#!/bin/bash
-set -e
-
-PROXY_URL="http://peulerosweb:EulerOS_123@172.18.100.92:8080"
-
-docker build \
-  -f Dockerfile \
-  --build-arg HTTP_PROXY="$PROXY_URL" \
-  --build-arg HTTPS_PROXY="$PROXY_URL" \
-  -t kv-router:latest .
-
----------------- END FILE: ./build.sh ----------------
-
----------------- FILE: ./Dockerfile ----------------
-
-FROM python:3.11-slim
-
-WORKDIR /app
-
-# ---------- Proxy only for build ----------
-# Build args (provided at `docker build` time)
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-
-# Make them visible to pip/urllib3 during build
-ENV http_proxy=${HTTP_PROXY}
-ENV https_proxy=${HTTPS_PROXY}
-ENV HTTP_PROXY=${HTTP_PROXY}
-ENV HTTPS_PROXY=${HTTPS_PROXY}
-# ------------------------------------------
-
-# Install deps
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# ---------- Clear proxy for runtime ----------
-ENV http_proxy=""
-ENV https_proxy=""
-ENV HTTP_PROXY=""
-ENV HTTPS_PROXY=""
-# ---------------------------------------------
-
-# Copy app code
-COPY router ./router
-
-# Uvicorn config (can still be overridden in K8s)
-ENV HOST=0.0.0.0
-ENV PORT=8080
-
-# Add entrypoint script
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-CMD ["/entrypoint.sh"]
-
----------------- END FILE: ./Dockerfile ----------------
-
----------------- FILE: ./requirements.txt ----------------
-
-fastapi
-uvicorn[standard]
-httpx
-redis
-kubernetes
-prometheus_client
-
----------------- END FILE: ./requirements.txt ----------------
+---------------- END FILE: ./push_router.py ----------------

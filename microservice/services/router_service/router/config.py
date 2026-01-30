@@ -1,3 +1,4 @@
+# router/config.py
 # -*- coding: utf-8 -*-
 from dataclasses import dataclass, asdict
 import os
@@ -55,10 +56,30 @@ class RouterConfig:
     RESULT_POLL_INTERVAL_S: float = 0.02  # (kept for compatibility; not used by ACK+poll)
 
     # --------------------------------------------------------------------
-    # ACK+POLL transport support (router always exposes endpoints)
+    # ACK+POLL / retention support (used by router_state cleanup too)
     # --------------------------------------------------------------------
+    # These are also used to prevent unbounded growth of stored results/waiters
+    # under submit_ack / async_pubsub where the client never waits.
     POLL_RESULT_TTL_S: float = 300.0
     POLL_CLEANUP_INTERVAL_S: float = 1.0
+
+    # --------------------------------------------------------------------
+    # Sidecar -> router result ingestion transport (NEW; backward compatible)
+    # --------------------------------------------------------------------
+    # "sync":       sidecar POSTs to /result (old behavior)
+    # "submit_ack": sidecar POSTs to RESULT_SUBMIT_PATH and router ACKs immediately
+    RESULT_TRANSPORT_MODE: str = "sync"         # sync | submit_ack
+    RESULT_SUBMIT_PATH: str = "/result_submit"  # only used when RESULT_TRANSPORT_MODE=submit_ack
+
+    # --------------------------------------------------------------------
+    # ASYNC PUBSUB transport (client submit + ZMQ publish results)
+    # --------------------------------------------------------------------
+    TRANSPORT_MODE: str = "sync"          # "sync" | "async_pubsub"
+    SUBMIT_PATH: str = "/submit"          # client submit endpoint (FastAPI path)
+    RESULTS_ZMQ_BIND: str = "tcp://0.0.0.0:5559"  # router PUB bind
+    RESULTS_ZMQ_TOPIC: str = "results"    # pubsub topic prefix
+    RESULTS_ZMQ_HWM: int = 100000         # high-water mark (best-effort safety)
+    RESULTS_GRACE_S: float = 30.0         # client-side wait-after-submit; router doesn't enforce
 
     # --------------------------------------------------------------------
     # HTTP timeouts
@@ -92,6 +113,10 @@ class RouterConfig:
     TRACE_SAMPLING_RATE: float = 1.0
 
 
+def _norm_mode(s: str) -> str:
+    return str(s or "").strip().lower()
+
+
 def get_config() -> RouterConfig:
     """
     Return a singleton RouterConfig with env overrides applied.
@@ -104,6 +129,9 @@ def get_config() -> RouterConfig:
     cfg = RouterConfig()
 
     # Basic overrides
+    cfg.HOST = os.getenv("HOST", cfg.HOST)
+    cfg.PORT = int(os.getenv("PORT", cfg.PORT))
+
     cfg.REDIS_HOST = os.getenv("REDIS_HOST", cfg.REDIS_HOST)
     cfg.REDIS_PORT = int(os.getenv("REDIS_PORT", cfg.REDIS_PORT))
     cfg.MODEL_NAME = os.getenv("MODEL_NAME", cfg.MODEL_NAME)
@@ -130,9 +158,46 @@ def get_config() -> RouterConfig:
         os.getenv("RESULT_POLL_INTERVAL_S", cfg.RESULT_POLL_INTERVAL_S)
     )
 
-    # Poll retention knobs
+    # Poll retention knobs (also used by router_state cleanup loop)
     cfg.POLL_RESULT_TTL_S = float(os.getenv("POLL_RESULT_TTL_S", cfg.POLL_RESULT_TTL_S))
-    cfg.POLL_CLEANUP_INTERVAL_S = float(os.getenv("POLL_CLEANUP_INTERVAL_S", cfg.POLL_CLEANUP_INTERVAL_S))
+    cfg.POLL_CLEANUP_INTERVAL_S = float(
+        os.getenv("POLL_CLEANUP_INTERVAL_S", cfg.POLL_CLEANUP_INTERVAL_S)
+    )
+
+    # Harden against bad envs (avoid disabling cleanup accidentally)
+    if cfg.POLL_RESULT_TTL_S <= 0:
+        cfg.POLL_RESULT_TTL_S = 300.0
+    if cfg.POLL_CLEANUP_INTERVAL_S <= 0:
+        cfg.POLL_CLEANUP_INTERVAL_S = 1.0
+    # don't allow absurdly tight loops
+    cfg.POLL_CLEANUP_INTERVAL_S = max(0.1, float(cfg.POLL_CLEANUP_INTERVAL_S))
+    # don't allow TTL too tiny (would delete results before any observer sees them)
+    cfg.POLL_RESULT_TTL_S = max(1.0, float(cfg.POLL_RESULT_TTL_S))
+
+    # sidecar -> router result transport knobs
+    cfg.RESULT_TRANSPORT_MODE = os.getenv("RESULT_TRANSPORT_MODE", cfg.RESULT_TRANSPORT_MODE)
+    cfg.RESULT_SUBMIT_PATH = os.getenv("RESULT_SUBMIT_PATH", cfg.RESULT_SUBMIT_PATH)
+    if cfg.RESULT_SUBMIT_PATH and not str(cfg.RESULT_SUBMIT_PATH).startswith("/"):
+        cfg.RESULT_SUBMIT_PATH = "/" + str(cfg.RESULT_SUBMIT_PATH)
+
+    # Normalize/validate transport mode
+    rtm = _norm_mode(cfg.RESULT_TRANSPORT_MODE)
+    if rtm not in ("sync", "submit_ack"):
+        rtm = "sync"
+    cfg.RESULT_TRANSPORT_MODE = rtm
+
+    # Async pubsub transport knobs
+    cfg.TRANSPORT_MODE = os.getenv("TRANSPORT_MODE", cfg.TRANSPORT_MODE)
+    cfg.SUBMIT_PATH = os.getenv("SUBMIT_PATH", cfg.SUBMIT_PATH)
+    cfg.RESULTS_ZMQ_BIND = os.getenv("RESULTS_ZMQ_BIND", cfg.RESULTS_ZMQ_BIND)
+    cfg.RESULTS_ZMQ_TOPIC = os.getenv("RESULTS_ZMQ_TOPIC", cfg.RESULTS_ZMQ_TOPIC)
+    cfg.RESULTS_ZMQ_HWM = int(os.getenv("RESULTS_ZMQ_HWM", cfg.RESULTS_ZMQ_HWM))
+    cfg.RESULTS_GRACE_S = float(os.getenv("RESULTS_GRACE_S", cfg.RESULTS_GRACE_S))
+
+    tm = _norm_mode(cfg.TRANSPORT_MODE)
+    if tm not in ("sync", "async_pubsub"):
+        tm = "sync"
+    cfg.TRANSPORT_MODE = tm
 
     # Timeouts
     cfg.HASH_TIMEOUT_S = float(os.getenv("HASH_TIMEOUT_S", cfg.HASH_TIMEOUT_S))

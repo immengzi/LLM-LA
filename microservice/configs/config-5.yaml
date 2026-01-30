@@ -1,8 +1,8 @@
 # test_config.yaml
 # Clean test config (explicit knobs, values close to example_config.yaml)
 
-router_url: "http://127.0.0.1:30080"
-total_requests: 10000
+router_url: "http://7.242.102.243:30080"
+total_requests: 1000
 prompt_source: "hf-lmsys"
 
 
@@ -31,13 +31,13 @@ hf_lmsys:
 load_pattern:
   pattern: "det"
 
-  rate_rps: 5
+  rate_rps: 6
   duration_s: 1000000000.0
   warmup_reqs: 0
 
   burst_on_s: 2.0
   burst_off_s: 2.0
-  burst_rps_on: 40.045
+  burst_rps_on: 40.0
   burst_rps_off: 0.0
 
   step_schedule: "0:5,30:15,60:3"
@@ -82,3 +82,16 @@ metrics:
   include_debug_metrics: false
   model_name: null
   max_instances: null
+
+# =========================
+# Transport mode
+# =========================
+
+transport:
+  mode: "async_pubsub"
+  submit_path: "/submit"
+  results_zmq: "tcp://7.242.102.243:30559"
+  topic: "results"
+  run_id: null
+  grace_s: 36000.0
+

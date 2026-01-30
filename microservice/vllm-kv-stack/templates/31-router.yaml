@@ -1,0 +1,154 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: router-service
+  namespace: vllm
+spec:
+  replicas: {{ .Values.replicas.router }}
+  selector:
+    matchLabels:
+      app: router-service
+  template:
+    metadata:
+      labels:
+        app: router-service
+    spec:
+      serviceAccountName: kv-router-sa
+      containers:
+        - name: router
+          image: kv-router:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8080"
+            - name: ACCESS_LOG
+              value: "false"
+
+            - name: KV_LOG_KEYS
+              value: "off"
+            - name: REQ_LOG_MODE
+              value: "summary"
+
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: MODEL_NAME
+              value: "served-model"
+
+            - name: NAMESPACE
+              value: "vllm"
+            - name: LABEL_SELECTOR
+              value: "app=vllm-qwen"
+            - name: VLLM_PORT
+              value: "8200"
+
+            - name: KV_WATCH_INTERVAL_S
+              value: "1.0"
+            - name: KV_WATCH_MAX_KEYS
+              value: "200"
+            - name: KV_DISCOVERY_INTERVAL_S
+              value: "5.0"
+
+            - name: HASH_SERVICE_URL
+              value: "http://vllm-cpu-hash:9095"
+            - name: HASH_TIMEOUT_S
+              value: "2.0"
+
+            - name: KV_AWARE
+              value: "true"
+            - name: LEN_AWARE
+              value: "true"
+            - name: LEN_POLICY
+              value: "short_first"
+
+            - name: POOL_FACTOR
+              value: "4"
+            - name: DEFAULT_MAX_TOKENS
+              value: "1024"
+
+            - name: ROUTER_MODE
+              value: {{ quote .Values.router.mode }}
+
+            - name: SIDECAR_PORT
+              value: "9000"
+
+            - name: PUSH_LEASTQ_MODE
+              value: "local"
+
+            - name: RESULT_TIMEOUT_S
+              value: "1000.0"
+            - name: RESULT_POLL_INTERVAL_S
+              value: "0.02"
+
+            - name: PUSH_HTTP_TIMEOUT_S
+              value: "2.0"
+
+            - name: TRACE_ENABLED
+              value: "true"
+
+            - name: TRANSPORT_MODE
+              value: "async_pubsub"
+            - name: SUBMIT_PATH
+              value: "/submit"
+            - name: RESULTS_ZMQ_BIND
+              value: "tcp://0.0.0.0:5559"
+            - name: RESULTS_ZMQ_TOPIC
+              value: "results"
+            - name: RESULTS_ZMQ_HWM
+              value: "500000"
+            - name: RESULTS_GRACE_S
+              value: "5.0"
+
+            - name: RESULT_TRANSPORT_MODE
+              value: "submit_ack"
+            - name: RESULT_SUBMIT_PATH
+              value: "/result_submit"
+
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 5559
+              name: results-zmq
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: router-service
+  namespace: vllm
+spec:
+  type: NodePort
+  selector:
+    app: router-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080
+    - name: results-zmq
+      port: 5559
+      targetPort: 5559
+      nodePort: 30559

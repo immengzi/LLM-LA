@@ -7,3 +7,4 @@ uvicorn
 datasets
 transformers
 torch==2.8.0
+pyzmq>=25.0.0

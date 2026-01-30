@@ -1,0 +1,47 @@
+{{- if .Values.autoscaling.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vllm-qwen-scale-by-router-queue
+  namespace: vllm
+spec:
+  scaleTargetRef:
+    kind: Deployment
+    name: vllm-qwen
+
+  minReplicaCount: {{ include "vllmkv.kedaMinReplicas" . }}
+  maxReplicaCount: {{ .Values.autoscaling.maxReplicaCount }}
+
+  pollingInterval: 10
+  cooldownPeriod: 300
+
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 60
+            - type: Pods
+              value: 4
+              periodSeconds: 60
+          selectPolicy: Max
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Percent
+              value: 20
+              periodSeconds: 60
+          selectPolicy: Max
+
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-kube-prometheus-prometheus.observability:9090
+        metricName: router_queue_pressure
+        query: |
+{{ .Values.autoscaling.prometheusQuery | indent 10 }}
+        threshold: {{ quote .Values.autoscaling.threshold }}
+{{- end }}

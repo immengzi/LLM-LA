@@ -261,25 +261,19 @@ class RouterState:
             except RuntimeError:
                 loop = None
 
-            # If called outside an event loop (shouldn't happen from API),
-            # we still create a Future-like placeholder by deferring creation.
-            # The async waiter will create it again if needed.
             if loop is None:
-                # Store a sentinel None; async path will fix it up.
                 self._result_futs[req_id] = None  # type: ignore[assignment]
                 return
 
             fut: asyncio.Future = loop.create_future()
             self._result_futs[req_id] = fut
 
-            # If result already stored, resolve right away
             if req_id in self._result_values and not fut.done():
                 fut.set_result(self._result_values[req_id])
 
     def store_result(self, req_id: str, result: Any) -> None:
         """
         Store result and resolve any waiting Future.
-        Safe to call from either sync or async context (FastAPI endpoint is async).
         """
         fut: Optional[asyncio.Future] = None
         loop = None
@@ -287,25 +281,19 @@ class RouterState:
             self._result_values[req_id] = result
             fut = self._result_futs.get(req_id)
 
-        # If there's no future yet (enqueue hasn't registered), that's fine.
         if fut is None:
             return
-
-        # If we stored a sentinel because register_waiter ran outside loop, ignore here.
         if not isinstance(fut, asyncio.Future):
             return
-
         if fut.done():
             return
 
-        # Resolve on the loop thread safely
         try:
             loop = fut.get_loop()
         except Exception:
             loop = None
 
         if loop is None:
-            # Best-effort direct resolve
             try:
                 fut.set_result(result)
             except Exception:
@@ -319,7 +307,6 @@ class RouterState:
         try:
             loop.call_soon_threadsafe(_set)
         except Exception:
-            # Best-effort fallback
             try:
                 _set()
             except Exception:
@@ -328,20 +315,14 @@ class RouterState:
     async def wait_for_result_async(self, req_id: str, timeout_s: float) -> Optional[Any]:
         """
         Await the result for req_id up to timeout_s.
-        Cleans up waiter + stored result after completion (or timeout).
         """
-        # Ensure a real Future exists on THIS running loop
         loop = asyncio.get_running_loop()
 
         with self._lock:
             fut = self._result_futs.get(req_id)
-
             if not isinstance(fut, asyncio.Future) or fut.get_loop() is not loop:
-                # Create loop-local future and replace
                 fut = loop.create_future()
                 self._result_futs[req_id] = fut
-
-                # If result already stored, resolve immediately
                 if req_id in self._result_values and not fut.done():
                     fut.set_result(self._result_values[req_id])
 
@@ -350,7 +331,6 @@ class RouterState:
         except asyncio.TimeoutError:
             return None
         finally:
-            # Cleanup (avoid unbounded growth)
             with self._lock:
                 self._result_futs.pop(req_id, None)
                 self._result_values.pop(req_id, None)

@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
+# sweep_methods.py
+#
+# Helm-based sweep runner with same external interface/behavior as the old YAML-patching sweeper:
+# - Reads configs/<master_config>.yaml mapping: { client_config: [methods...] }
+# - BEFORE EACH EXPERIMENT: clean cluster (helm uninstall, ignore errors)
+# - Deploy via Helm with per-experiment knobs read from the client config YAML:
+#     cfg.helm.replicas, cfg.helm.batch_size, cfg.helm.autoscaling_* and cfg.helm.autoscaling_prometheus_query
+# - Also sets router mode per job (method)
+# - Waits for readiness
+# - Writes repo_root/vllm-k8s.yaml = helm template output so experiment snapshot stays identical
+# - Runs main.py unchanged and snapshots sweep_meta.json
+
 from __future__ import annotations
 
 import json
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import click
 import yaml
+
+from config import load_config  # <-- NEW: to read cfg.helm from each client config
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -36,6 +49,10 @@ def _run(cmd: List[str], *, check: bool = True, capture: bool = False) -> subpro
 
 def _kubectl(args: List[str], *, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
     return _run(["kubectl", *args], check=check, capture=capture)
+
+
+def _helm(args: List[str], *, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
+    return _run(["helm", *args], check=check, capture=capture)
 
 
 # ---------------------------
@@ -63,18 +80,7 @@ def _newest_experiment_dir(before: set[str]) -> Optional[Path]:
 # ---------------------------
 
 def _resolve_master_path(master_config: str) -> Path:
-    """
-    Accept:
-      - "2-master_config"           -> configs/2-master_config.yaml
-      - "2-master_config.yaml"      -> configs/2-master_config.yaml
-      - "configs/2-master_config"   -> repo_root/configs/2-master_config.yaml
-      - "configs/2-master_config.yaml" -> repo_root/configs/2-master_config.yaml
-      - "/abs/path/whatever"        -> /abs/path/whatever.yaml
-      - "/abs/path/whatever.yaml"   -> absolute
-    """
     p = Path(master_config).expanduser()
-
-    # NEW: make ".yaml" optional
     if p.suffix == "":
         p = p.with_suffix(".yaml")
 
@@ -89,18 +95,7 @@ def _resolve_master_path(master_config: str) -> Path:
 
 
 def _resolve_client_config_path(key: str) -> Path:
-    """
-    master_config.yaml keys can be:
-      - "a"              -> configs/a.yaml
-      - "a.yaml"         -> configs/a.yaml
-      - "configs/a"      -> repo_root/configs/a.yaml
-      - "configs/a.yaml" -> repo_root/configs/a.yaml
-      - "/abs/path/a"    -> /abs/path/a.yaml
-      - "/abs/path/a.yaml"
-    """
     p = Path(key).expanduser()
-
-    # NEW: make ".yaml" optional for client config keys too
     if p.suffix == "":
         p = p.with_suffix(".yaml")
 
@@ -134,98 +129,79 @@ def _load_master_plan(master_path: Path) -> Dict[Path, List[str]]:
 
 
 # ---------------------------
-# k8s manifest helpers
+# Helm helpers
 # ---------------------------
 
-def _load_multi_doc_yaml(path: Path) -> List[dict]:
-    docs = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
-    out: List[dict] = []
-    for d in docs:
-        if d is None:
+def _coerce_set_value(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if v is None:
+        return None
+    return str(v)
+
+
+def _helm_template(
+    *,
+    release: str,
+    chart_dir: Path,
+    namespace: str,
+    values_file: Optional[Path],
+    set_values: Dict[str, object],
+) -> str:
+    cmd: List[str] = [
+        "template",
+        release,
+        str(chart_dir),
+        "--namespace",
+        namespace,
+    ]
+    if values_file is not None and values_file.is_file():
+        cmd.extend(["-f", str(values_file)])
+
+    for k in sorted(set_values.keys()):
+        vs = _coerce_set_value(set_values[k])
+        if vs is None:
             continue
-        if not isinstance(d, dict):
-            raise RuntimeError(f"Non-mapping YAML document in {path}")
-        out.append(d)
-    return out
+        cmd.extend(["--set", f"{k}={vs}"])
+
+    proc = _helm(cmd, check=True, capture=True)
+    return proc.stdout or ""
 
 
-def _infer_namespace_from_manifest(docs: List[dict]) -> str:
-    """
-    Use the namespace declared in the manifest itself:
-      kind: Namespace
-      metadata:
-        name: <ns>
-    """
-    for obj in docs:
-        if obj.get("kind") == "Namespace":
-            meta = obj.get("metadata") or {}
-            name = meta.get("name")
-            if isinstance(name, str) and name.strip():
-                return name.strip()
-    raise RuntimeError(
-        "Could not infer namespace: no 'kind: Namespace' doc with metadata.name found in vllm-k8s.yaml"
-    )
+def _helm_uninstall(*, release: str, namespace: str) -> None:
+    _helm(["uninstall", release, "-n", namespace], check=False, capture=True)
 
 
-def _set_env_var(container: dict, key: str, value: str) -> bool:
-    env = container.get("env")
-    if not isinstance(env, list):
-        return False
-    for item in env:
-        if isinstance(item, dict) and item.get("name") == key:
-            item["value"] = value
-            return True
-    return False
+def _helm_install_or_upgrade(
+    *,
+    release: str,
+    chart_dir: Path,
+    namespace: str,
+    values_file: Optional[Path],
+    set_values: Dict[str, object],
+) -> None:
+    cmd: List[str] = [
+        "upgrade",
+        "--install",
+        release,
+        str(chart_dir),
+        "-n",
+        namespace,
+        "--create-namespace",
+    ]
+    if values_file is not None and values_file.is_file():
+        cmd.extend(["-f", str(values_file)])
 
-
-def _patch_router_mode(docs: List[dict], *, router_mode: str) -> None:
-    """
-    Patch ONLY what your k8s config already defines:
-      Deployment/router-service -> container name=router -> env ROUTER_MODE
-    """
-    changed = False
-    for obj in docs:
-        if obj.get("kind") != "Deployment":
+    for k in sorted(set_values.keys()):
+        vs = _coerce_set_value(set_values[k])
+        if vs is None:
             continue
-        meta = obj.get("metadata") or {}
-        if meta.get("name") != "router-service":
-            continue
+        cmd.extend(["--set", f"{k}={vs}"])
 
-        spec = obj.get("spec") or {}
-        tpl_spec = ((spec.get("template") or {}).get("spec") or {})
-        containers = tpl_spec.get("containers") or []
-        for c in containers:
-            if isinstance(c, dict) and c.get("name") == "router":
-                if _set_env_var(c, "ROUTER_MODE", router_mode):
-                    changed = True
-
-    if not changed:
-        raise RuntimeError(
-            "Failed to patch ROUTER_MODE. Expected in vllm-k8s.yaml:\n"
-            "Deployment metadata.name: router-service\n"
-            "container name: router\n"
-            "env: - name: ROUTER_MODE\n"
-        )
-
-
-def _write_multi_doc_yaml(docs: List[dict], out_path: Path) -> None:
-    with out_path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump_all(docs, f, sort_keys=False)
-
-
-# ---------------------------
-# k8s lifecycle
-# ---------------------------
-
-def _delete_and_apply(rendered_manifest: Path) -> None:
-    _kubectl(["delete", "-f", str(rendered_manifest), "--ignore-not-found=true"], check=False)
-    _kubectl(["apply", "-f", str(rendered_manifest)], check=True)
+    _helm(cmd, check=True, capture=False)
 
 
 def _wait_ready(namespace: str, timeout_s: float = 900.0) -> None:
-    """
-    Safety timeout only (not a config knob).
-    """
     deadline = time.time() + float(timeout_s)
 
     for kind in ("deploy", "sts", "ds"):
@@ -258,7 +234,7 @@ def _run_client(config_path: Path) -> None:
 
 
 # ---------------------------
-# Click CLI (master config override; .yaml optional)
+# Click CLI (same interface)
 # ---------------------------
 
 @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
@@ -272,24 +248,24 @@ def _run_client(config_path: Path) -> None:
 def cli(master_config: str) -> None:
     """
     Reads configs/<master_config>.yaml (mapping: config -> methods),
-    patches vllm-k8s.yaml ROUTER_MODE accordingly, redeploys, then runs main.py.
+    cleans cluster before each experiment, deploys via Helm, then runs main.py.
     """
     master_path = _resolve_master_path(master_config)
-    manifest_path = (REPO_ROOT / "vllm-k8s.yaml").resolve()
-
     if not master_path.is_file():
         raise click.ClickException(f"Missing {master_path}")
-    if not manifest_path.is_file():
-        raise click.ClickException(f"Missing {manifest_path}")
 
     plan = _load_master_plan(master_path)
-
     for cfg in plan.keys():
         if not cfg.is_file():
             raise click.ClickException(f"Client config not found: {cfg}")
 
-    base_docs = _load_multi_doc_yaml(manifest_path)
-    namespace = _infer_namespace_from_manifest(base_docs)
+    # HELM defaults (hardcoded)
+    release = "vllm"
+    namespace = "vllm"
+    chart_dir = (REPO_ROOT / "vllm-kv-stack").resolve()
+    values_file = chart_dir / "values.yaml"
+    if not chart_dir.is_dir():
+        raise click.ClickException(f"Chart dir not found: {chart_dir}")
 
     jobs: List[Tuple[Path, str]] = []
     for cfg, methods in plan.items():
@@ -297,8 +273,8 @@ def cli(master_config: str) -> None:
             jobs.append((cfg, m))
 
     click.echo(f"[sweep] master_config={master_path}")
-    click.echo(f"[sweep] manifest={manifest_path}")
-    click.echo(f"[sweep] namespace(inferred)={namespace}")
+    click.echo(f"[sweep] chart_dir={chart_dir}")
+    click.echo(f"[sweep] release={release} namespace={namespace}")
     click.echo(f"[sweep] jobs={len(jobs)}")
 
     for i, (cfg_path, method) in enumerate(jobs, start=1):
@@ -306,36 +282,96 @@ def cli(master_config: str) -> None:
         click.echo(f"[sweep] job {i}/{len(jobs)}  config={cfg_path.name}  method={method}")
         click.echo("=" * 90)
 
-        docs_list = _load_multi_doc_yaml(manifest_path)
-        _patch_router_mode(docs_list, router_mode=method)
+        # Load client config to read Helm knobs (NEW)
+        cfg = load_config(str(cfg_path))
+        h = getattr(cfg, "helm", None)
+        if h is None:
+            raise click.ClickException(f"Config has no 'helm' section: {cfg_path}")
 
-        with tempfile.TemporaryDirectory(prefix="k8s_sweep_") as td:
-            rendered = Path(td) / "rendered.yaml"
-            _write_multi_doc_yaml(docs_list, rendered)
+        # ---- EXACT OLD BEHAVIOR: clean cluster before each experiment ----
+        _helm_uninstall(release=release, namespace=namespace)
 
-            _delete_and_apply(rendered)
-            _wait_ready(namespace)
+        # ---- Deploy via Helm using cfg.helm knobs ----
+        #
+        # IMPORTANT: these keys must match your chart values.yaml!
+        set_values: Dict[str, object] = {
+            # routing method for router
+            "router.mode": method,
 
-            before = _snapshot_existing_experiments()
-            _run_client(cfg_path)
-            exp_dir = _newest_experiment_dir(before)
+            # init replicas (needed even if autoscaling is enabled)
+            "vllm.replicas": int(h.replicas),
 
-            if exp_dir is None:
-                click.echo("[warn] could not detect new experiment dir; skipping artifact snapshot")
-                continue
+            # sidecar batching
+            "sidecar.batchSize": int(h.batch_size),
+        }
 
-            shutil.copy2(rendered, exp_dir / "vllm-k8s.yaml")
-            meta = {
-                "client_config": str(cfg_path),
-                "router_method": method,
-                "master_config": str(master_path),
-                "ts_unix": time.time(),
-            }
-            (exp_dir / "sweep_meta.json").write_text(
-                json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8"
-            )
+        # Autoscaling toggle + parameters
+        set_values["autoscaling.enabled"] = bool(h.autoscaling_enabled)
 
-            click.echo(f"[sweep] experiment_dir={exp_dir}")
+        if bool(h.autoscaling_enabled):
+            set_values["autoscaling.minReplicaCount"] = int(h.autoscaling_min)
+            set_values["autoscaling.maxReplicaCount"] = int(h.autoscaling_max)
+            set_values["autoscaling.threshold"] = str(h.autoscaling_threshold)
+
+            # Query can be multiline; helm --set needs a single line.
+            # We normalize whitespace while preserving semantics.
+            q = str(h.autoscaling_prometheus_query or "").strip()
+            q = " ".join(q.split())
+            set_values["autoscaling.prometheusQuery"] = q
+
+        _helm_install_or_upgrade(
+            release=release,
+            chart_dir=chart_dir,
+            namespace=namespace,
+            values_file=values_file if values_file.is_file() else None,
+            set_values=set_values,
+        )
+
+        _wait_ready(namespace)
+
+        # Render and snapshot manifest (same artifact name)
+        rendered_text = _helm_template(
+            release=release,
+            chart_dir=chart_dir,
+            namespace=namespace,
+            values_file=values_file if values_file.is_file() else None,
+            set_values=set_values,
+        )
+        (REPO_ROOT / "vllm-k8s.yaml").write_text(rendered_text, encoding="utf-8")
+
+        before = _snapshot_existing_experiments()
+        _run_client(cfg_path)
+        exp_dir = _newest_experiment_dir(before)
+
+        if exp_dir is None:
+            click.echo("[warn] could not detect new experiment dir; skipping artifact snapshot")
+            continue
+
+        shutil.copy2(REPO_ROOT / "vllm-k8s.yaml", exp_dir / "vllm-k8s.yaml")
+        meta = {
+            "client_config": str(cfg_path),
+            "router_method": method,
+            "master_config": str(master_path),
+            "ts_unix": time.time(),
+            "helm_release": release,
+            "helm_namespace": namespace,
+            "helm_chart_dir": str(chart_dir),
+            "helm_set_values": set_values,
+            "helm_knobs_from_config": {
+                "replicas": int(h.replicas),
+                "batch_size": int(h.batch_size),
+                "autoscaling_enabled": bool(h.autoscaling_enabled),
+                "autoscaling_min": int(h.autoscaling_min),
+                "autoscaling_max": int(h.autoscaling_max),
+                "autoscaling_threshold": str(h.autoscaling_threshold),
+                "autoscaling_prometheus_query": str(h.autoscaling_prometheus_query),
+            },
+        }
+        (exp_dir / "sweep_meta.json").write_text(
+            json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8"
+        )
+
+        click.echo(f"[sweep] experiment_dir={exp_dir}")
 
     click.echo("\n[sweep] done.")
 

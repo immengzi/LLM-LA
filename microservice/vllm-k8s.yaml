@@ -1,41 +1,146 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: vllm
-
 ---
+# Source: vllm-kv-stack/templates/30-router-rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kv-router-sa
+  namespace: vllm
+---
+# Source: vllm-kv-stack/templates/01-model-pv.yaml
 apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: qwen-local-pv
+  annotations:
+    "helm.sh/resource-policy": keep
 spec:
   capacity:
     storage: 20Gi
-  accessModes: ["ReadOnlyMany"]
+  accessModes:
+    - ReadOnlyMany
   persistentVolumeReclaimPolicy: Retain
   storageClassName: ""
   hostPath:
     path: /mnt/nvme1/saeid/models/qwen3-8b
     type: Directory
-
 ---
+# Source: vllm-kv-stack/templates/02-model-pvc.yaml
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: qwen-local-pvc
   namespace: vllm
+  annotations:
+    "helm.sh/resource-policy": keep
 spec:
-  accessModes: ["ReadOnlyMany"]
+  accessModes:
+    - ReadOnlyMany
   resources:
     requests:
       storage: 20Gi
   storageClassName: ""
   volumeName: qwen-local-pv
-
-# =====================================================================
-# Redis deployment and service (NodePort)
-# =====================================================================
 ---
+# Source: vllm-kv-stack/templates/30-router-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kv-router-role
+  namespace: vllm
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+---
+# Source: vllm-kv-stack/templates/30-router-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kv-router-rolebinding
+  namespace: vllm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kv-router-role
+subjects:
+  - kind: ServiceAccount
+    name: kv-router-sa
+    namespace: vllm
+---
+# Source: vllm-kv-stack/templates/10-redis.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: vllm
+spec:
+  type: NodePort
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      nodePort: 30079
+---
+# Source: vllm-kv-stack/templates/20-cpu-hash.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-cpu-hash
+  namespace: vllm
+spec:
+  type: NodePort
+  selector:
+    app: vllm-cpu-hash
+  ports:
+    - name: http
+      port: 9095
+      targetPort: 9095
+      nodePort: 30095
+---
+# Source: vllm-kv-stack/templates/31-router.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: router-service
+  namespace: vllm
+spec:
+  type: NodePort
+  selector:
+    app: router-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080
+    - name: results-zmq
+      port: 5559
+      targetPort: 5559
+      nodePort: 30559
+---
+# Source: vllm-kv-stack/templates/40-vllm.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-qwen
+  namespace: vllm
+spec:
+  type: NodePort
+  selector:
+    app: vllm-qwen
+  ports:
+    - name: http
+      port: 8200
+      targetPort: 8200
+      nodePort: 30034
+---
+# Source: vllm-kv-stack/templates/10-redis.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -54,7 +159,13 @@ spec:
       containers:
         - name: redis
           image: redis:7-alpine
-          args: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+          args:
+            - redis-server
+            - --save
+            - "60"
+            - "1"
+            - --loglevel
+            - warning
           ports:
             - containerPort: 6379
               name: redis
@@ -75,27 +186,8 @@ spec:
               port: 6379
             initialDelaySeconds: 10
             periodSeconds: 20
-
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: redis
-  namespace: vllm
-spec:
-  selector:
-    app: redis
-  ports:
-    - name: redis
-      port: 6379        # cluster-internal port
-      targetPort: 6379  # container port
-      nodePort: 30079   # external NodePort
-  type: NodePort
-
-# =====================================================================
-# CPU hash service (prefix / block hashing)
-# =====================================================================
----
+# Source: vllm-kv-stack/templates/20-cpu-hash.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -116,7 +208,9 @@ spec:
           image: vllm-cpu-hash:latest
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
-          command: ["/bin/bash", "-c"]
+          command:
+            - /bin/bash
+            - -c
           args:
             - |
               source /opt/venv/bin/activate 2>/dev/null || true && \
@@ -150,61 +244,8 @@ spec:
         - name: model
           persistentVolumeClaim:
             claimName: qwen-local-pvc
-
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: vllm-cpu-hash
-  namespace: vllm
-spec:
-  selector:
-    app: vllm-cpu-hash
-  ports:
-    - name: http
-      port: 9095         # cluster-internal
-      targetPort: 9095   # container port
-      nodePort: 30095    # external NodePort
-  type: NodePort
-
-# =====================================================================
-# Router service (API + KV-aware scheduling)
-# =====================================================================
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: kv-router-sa
-  namespace: vllm
-
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: kv-router-role
-  namespace: vllm
-rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
-
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: kv-router-rolebinding
-  namespace: vllm
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: kv-router-role
-subjects:
-  - kind: ServiceAccount
-    name: kv-router-sa
-    namespace: vllm
-
----
----
+# Source: vllm-kv-stack/templates/31-router.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -226,23 +267,18 @@ spec:
           image: kv-router:latest
           imagePullPolicy: IfNotPresent
           env:
-            # Uvicorn / API host + port
             - name: HOST
               value: "0.0.0.0"
             - name: PORT
               value: "8080"
-
-            # Entry-point / uvicorn access log
             - name: ACCESS_LOG
               value: "false"
 
-            # Router logging
             - name: KV_LOG_KEYS
-              value: "off"        # off | summary | full
+              value: "off"
             - name: REQ_LOG_MODE
-              value: "summary"    # off | summary | full
+              value: "summary"
 
-            # Redis + model identity
             - name: REDIS_HOST
               value: "redis"
             - name: REDIS_PORT
@@ -250,7 +286,6 @@ spec:
             - name: MODEL_NAME
               value: "served-model"
 
-            # K8s discovery for vLLM pods
             - name: NAMESPACE
               value: "vllm"
             - name: LABEL_SELECTOR
@@ -258,7 +293,6 @@ spec:
             - name: VLLM_PORT
               value: "8200"
 
-            # KV watcher tuning
             - name: KV_WATCH_INTERVAL_S
               value: "1.0"
             - name: KV_WATCH_MAX_KEYS
@@ -266,55 +300,67 @@ spec:
             - name: KV_DISCOVERY_INTERVAL_S
               value: "5.0"
 
-            # Hash service
             - name: HASH_SERVICE_URL
               value: "http://vllm-cpu-hash:9095"
             - name: HASH_TIMEOUT_S
               value: "2.0"
 
-            # Routing features
             - name: KV_AWARE
               value: "true"
             - name: LEN_AWARE
               value: "true"
             - name: LEN_POLICY
-              value: "short_first"   # short_first | long_first
+              value: "short_first"
 
-            # Length selection pool size
             - name: POOL_FACTOR
               value: "4"
-
-            # Predictor default max tokens (batch proxy)
             - name: DEFAULT_MAX_TOKENS
               value: "1024"
 
-            # Router mode + sidecar port
             - name: ROUTER_MODE
-              value: "push-least-queue"     # instead of pull / push-rr / push-random / push-least-queue
+              value: "push-random"
+
             - name: SIDECAR_PORT
               value: "9000"
 
-            # choose how least-queue gets its queue lengths
             - name: PUSH_LEASTQ_MODE
-              value: "local"           # "health" (default) | "local"
+              value: "local"
 
-            # Synchronous wait behavior
             - name: RESULT_TIMEOUT_S
               value: "1000.0"
             - name: RESULT_POLL_INTERVAL_S
               value: "0.02"
 
-            # Push-mode HTTP timeouts
             - name: PUSH_HTTP_TIMEOUT_S
               value: "2.0"
 
-            # Tracing (router-side timestamps, endpoint, etc.)
             - name: TRACE_ENABLED
               value: "true"
+
+            - name: TRANSPORT_MODE
+              value: "async_pubsub"
+            - name: SUBMIT_PATH
+              value: "/submit"
+            - name: RESULTS_ZMQ_BIND
+              value: "tcp://0.0.0.0:5559"
+            - name: RESULTS_ZMQ_TOPIC
+              value: "results"
+            - name: RESULTS_ZMQ_HWM
+              value: "500000"
+            - name: RESULTS_GRACE_S
+              value: "5.0"
+
+            - name: RESULT_TRANSPORT_MODE
+              value: "submit_ack"
+            - name: RESULT_SUBMIT_PATH
+              value: "/result_submit"
 
           ports:
             - containerPort: 8080
               name: http
+            - containerPort: 5559
+              name: results-zmq
+
           readinessProbe:
             httpGet:
               path: /health
@@ -334,28 +380,8 @@ spec:
             limits:
               cpu: "1000m"
               memory: "1Gi"
-
-
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: router-service
-  namespace: vllm
-spec:
-  type: NodePort
-  selector:
-    app: router-service
-  ports:
-    - name: http
-      port: 8080
-      targetPort: 8080
-      nodePort: 30080
-
-# =====================================================================
-# vLLM Ascend deployment with KV events and sidecar
-# =====================================================================
----
+# Source: vllm-kv-stack/templates/40-vllm.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -376,7 +402,9 @@ spec:
         - name: vllm
           image: quay.io/ascend/vllm-ascend:v0.11.0rc0
           imagePullPolicy: IfNotPresent
-          command: ["/bin/bash", "-c"]
+          command:
+            - /bin/bash
+            - -c
           args:
             - |
               echo "--- ASCEND_TOOLKIT_HOME before sourcing: [$ASCEND_TOOLKIT_HOME]"
@@ -458,7 +486,6 @@ spec:
           image: kv-sidecar:latest
           imagePullPolicy: IfNotPresent
           env:
-            # Router and vLLM endpoints
             - name: ROUTER_URL
               value: "http://router-service:8080"
             - name: VLLM_URL
@@ -466,17 +493,18 @@ spec:
             - name: MODEL_NAME
               value: "served-model"
 
-            # Sidecar HTTP and concurrency
             - name: SIDECAR_PORT
               value: "9000"
+
             - name: BATCH_SIZE
               value: "8"
+
             - name: SIDECAR_MODE
-              value: "pull"
+              value: "push"
+
             - name: PULL_INTERVAL_S
               value: "0.05"
 
-            # Sidecar HTTP timeouts
             - name: ROUTER_PULL_TIMEOUT_S
               value: "1000.0"
             - name: VLLM_TIMEOUT_S
@@ -484,7 +512,11 @@ spec:
             - name: ROUTER_RESULT_TIMEOUT_S
               value: "1000.0"
 
-            # ZMQ → Redis KV sync
+            - name: RESULT_TRANSPORT_MODE
+              value: "submit_ack"
+            - name: RESULT_SUBMIT_PATH
+              value: "/result_submit"
+
             - name: VLLM_HOST
               value: "127.0.0.1"
             - name: VLLM_SUB_PORT
@@ -500,7 +532,6 @@ spec:
             - name: MODEL_NAME_REDIS
               value: "served-model"
 
-            # Tracing (sidecar + vLLM timestamps)
             - name: TRACE_ENABLED
               value: "true"
 
@@ -544,25 +575,8 @@ spec:
           hostPath:
             path: /root/.cache
             type: Directory
-
-
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: vllm-qwen
-  namespace: vllm
-spec:
-  type: NodePort
-  selector:
-    app: vllm-qwen
-  ports:
-    - name: http
-      port: 8200
-      targetPort: 8200
-      nodePort: 30034
-
----
+# Source: vllm-kv-stack/templates/50-podmonitors.yaml
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
@@ -576,11 +590,8 @@ spec:
     - path: /metrics
       port: http
       interval: 1s
-
-# =====================================================================
-# PodMonitor for router-service (scrape router /metrics on port 8080)
-# =====================================================================
 ---
+# Source: vllm-kv-stack/templates/50-podmonitors.yaml
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
@@ -594,11 +605,8 @@ spec:
     - path: /metrics
       port: http
       interval: 1s
-
-# =====================================================================
-# PodMonitor for kv-sidecar (scrape sidecar /metrics on port 9000)
-# =====================================================================
 ---
+# Source: vllm-kv-stack/templates/50-podmonitors.yaml
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:

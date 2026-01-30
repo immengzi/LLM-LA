@@ -37,7 +37,7 @@ def compute_trace_metrics(trace: Dict[str, Any]) -> Dict[str, float]:
     t_post_result_sidecar = _get_ts(trace, "t_post_result_sidecar")
     t_router_result_recv = _get_ts(trace, "t_router_result_recv")
 
-    # NEW router post-result split points (added in router/api.py)
+    # router post-result split points (added in router/api.py)
     t_router_result_store = _get_ts(trace, "t_router_result_store")
     t_enqueue_unblocked = _get_ts(trace, "t_enqueue_unblocked")
     t_enqueue_about_to_return = _get_ts(trace, "t_enqueue_about_to_return")

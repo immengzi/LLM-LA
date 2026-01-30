@@ -1,134 +1,23 @@
 ===== FOLDER STRUCTURE =====
 .
-├── build.sh
+├── api.py
+├── config.py
 ├── crawl.sh
-├── Dockerfile
+├── __init__.py
+├── local_queue.py
+├── main.py
+├── metrics.py
 ├── output.txt
-├── requirements.txt
-└── sidecar
-    ├── api.py
-    ├── config.py
-    ├── __init__.py
-    ├── local_queue.py
-    ├── main.py
-    ├── metrics.py
-    ├── result_poster.py
-    ├── router_client.py
-    ├── vllm_client.py
-    └── zmq_subscriber.py
+├── result_poster.py
+├── router_client.py
+├── vllm_client.py
+└── zmq_subscriber.py
 
-1 directory, 15 files
+0 directories, 12 files
 
 ===== FILE CONTENTS =====
 
----------------- FILE: ./output.txt ----------------
-
-===== FOLDER STRUCTURE =====
-.
-├── build.sh
-├── crawl.sh
-├── Dockerfile
-├── output.txt
-├── requirements.txt
-└── sidecar
-    ├── api.py
-    ├── config.py
-    ├── __init__.py
-    ├── local_queue.py
-    ├── main.py
-    ├── metrics.py
-    ├── result_poster.py
-    ├── router_client.py
-    ├── vllm_client.py
-    └── zmq_subscriber.py
-
-1 directory, 15 files
-
-===== FILE CONTENTS =====
-
----------------- FILE: ./output.txt ----------------
-
-
----------------- END FILE: ./output.txt ----------------
-
----------------- FILE: ./crawl.sh ----------------
-
-#!/usr/bin/env bash
-# Usage:
-#   ./crawl.sh /path/to/folder
-#   ./crawl.sh /path/to/folder -o out.txt
-#   ./crawl.sh /path/to/folder -x node_modules -x .venv -x README.md
-
-ROOT="${1:-.}"
-OUTFILE=""
-shift 1 || true  # shift root path
-
-EXCLUDES=()    # array to store folder or file names to exclude
-
-# parse optional flags
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -o|--output)
-      OUTFILE="$2"
-      shift 2
-      ;;
-    -x|--exclude)
-      EXCLUDES+=("$2")
-      shift 2
-      ;;
-    *)
-      echo "Unknown option: $1"
-      exit 1
-      ;;
-  esac
-done
-
-run_crawl() {
-
-  echo "===== FOLDER STRUCTURE ====="
-  tree -a "$ROOT"
-
-  if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
-    echo ""
-    echo "===== EXCLUDED PATHS (still shown above) ====="
-    for ex in "${EXCLUDES[@]}"; do
-      echo "  - $ex"
-    done
-  fi
-
-  echo ""
-  echo "===== FILE CONTENTS ====="
-
-  # Build find exclusion arguments
-  FIND_EXCLUDES=()
-  for ex in "${EXCLUDES[@]}"; do
-    # Skip any file with this exact name
-    FIND_EXCLUDES+=( -not -name "$ex" )
-    # Skip everything under any directory with this name
-    FIND_EXCLUDES+=( -not -path "*/${ex}/*" )
-  done
-
-  # Execute the find with dynamic exclusions
-  find "$ROOT" -type f "${FIND_EXCLUDES[@]}" | while read -r file; do
-      echo ""
-      echo "---------------- FILE: $file ----------------"
-      echo ""
-      cat "$file"
-      echo ""
-      echo "---------------- END FILE: $file ----------------"
-  done
-}
-
-# output logic
-if [[ -n "$OUTFILE" ]]; then
-  run_crawl | tee "$OUTFILE"
-else
-  run_crawl
-fi
-
----------------- END FILE: ./crawl.sh ----------------
-
----------------- FILE: ./sidecar/zmq_subscriber.py ----------------
+---------------- FILE: ./zmq_subscriber.py ----------------
 
 #!/usr/bin/env python3
 # zmq_subscriber.py
@@ -339,9 +228,248 @@ class KVSubscriber:
         except Exception as e:
             print(f"[KV-SUB] redis error: {e}")
 
----------------- END FILE: ./sidecar/zmq_subscriber.py ----------------
+---------------- END FILE: ./zmq_subscriber.py ----------------
 
----------------- FILE: ./sidecar/config.py ----------------
+---------------- FILE: ./output.txt ----------------
+
+===== FOLDER STRUCTURE =====
+.
+├── api.py
+├── config.py
+├── crawl.sh
+├── __init__.py
+├── local_queue.py
+├── main.py
+├── metrics.py
+├── output.txt
+├── result_poster.py
+├── router_client.py
+├── vllm_client.py
+└── zmq_subscriber.py
+
+0 directories, 12 files
+
+===== FILE CONTENTS =====
+
+---------------- FILE: ./zmq_subscriber.py ----------------
+
+#!/usr/bin/env python3
+# zmq_subscriber.py
+"""
+KV Cache Event Listener Sidecar for vLLM (per-pod)
+
+- Subscribes to vLLM KV events over ZMQ
+- Decodes msgpack KVEventBatch (same wire format as former centralized listener)
+- Stores KV block presence information in Redis
+
+Redis schema (per MODEL_NAME_REDIS):
+  - {MODEL}:kvblock:{block_hash}        (HASH)  block -> { pod_name: timestamp }
+  - {MODEL}:podblocks:{pod_name}        (SET)   pod   -> { block_hashes }
+  - {MODEL}:kvblocks                    (HASH)  index of all block_hashes
+"""
+
+import os
+import time
+import threading
+from typing import Any, Optional, Union, NewType
+
+import zmq
+import msgspec
+import redis
+
+from .config import get_config
+
+_cfg = get_config()
+
+# ------------------------------
+# Type definitions (match old listener)
+# ------------------------------
+
+BlockHash = NewType("BlockHash", int)
+
+
+class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True, gc=False):
+    ts: float
+    events: list[Any]
+
+
+class KVCacheEvent(msgspec.Struct, array_like=True, omit_defaults=True, gc=False, tag=True):
+    """Base class for KV cache events."""
+    pass
+
+
+class BlockStored(KVCacheEvent):
+    block_hashes: list[BlockHash]
+    parent_block_hash: Optional[BlockHash]
+    token_ids: list[int]
+    block_size: int
+    lora_id: Optional[int]
+
+
+class BlockRemoved(KVCacheEvent):
+    block_hashes: list[BlockHash]
+
+
+class AllBlocksCleared(KVCacheEvent):
+    pass
+
+
+class KVEventBatch(EventBatch):
+    events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
+
+
+# ------------------------------
+# Subscriber
+# ------------------------------
+
+class KVSubscriber:
+    def __init__(self):
+        self.vllm_host = _cfg.VLLM_HOST
+        self.vllm_port = _cfg.VLLM_SUB_PORT
+        self.redis = redis.Redis(
+            host=_cfg.REDIS_HOST,
+            port=_cfg.REDIS_PORT,
+            decode_responses=True,
+        )
+        self.model = _cfg.MODEL_NAME_REDIS
+        self.pod_name = _cfg.CONTAINER_NAME
+
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+        # IMPORTANT: msgpack + KVEventBatch, not JSON
+        self._decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
+
+    # ------------- lifecycle -------------
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        print(
+            f"[KV-SUB] started (host={self.vllm_host}, port={self.vllm_port}, "
+            f"pod={self.pod_name}, model={self.model})"
+        )
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        print("[KV-SUB] stopped")
+
+    # ------------- core loop -------------
+
+    def _loop(self):
+        ctx = zmq.Context()
+        sub = ctx.socket(zmq.SUB)
+        sub.connect(f"tcp://{self.vllm_host}:{self.vllm_port}")
+
+        # Match old listener: subscribe only to KV topic prefix
+        sub.setsockopt_string(zmq.SUBSCRIBE, "kv@")
+
+        print("[KV-SUB] connected to vLLM publisher (topic prefix 'kv@')")
+
+        try:
+            while not self._stop.is_set():
+                try:
+                    # Publisher: [topic, seq_bytes, payload]
+                    frames = sub.recv_multipart(flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    time.sleep(0.01)
+                    continue
+                except Exception as e:
+                    print(f"[KV-SUB] ZMQ recv error: {e}")
+                    time.sleep(1.0)
+                    continue
+
+                if len(frames) != 3:
+                    print(f"[KV-SUB] unexpected frame count: {len(frames)} (expected 3)")
+                    continue
+
+                topic, seq_bytes, payload = frames
+                # seq = int.from_bytes(seq_bytes, "big")  # unused but available
+
+                try:
+                    batch = self._decoder.decode(payload)
+                except Exception as e:
+                    print(f"[KV-SUB] decode error (msgpack KVEventBatch): {e}")
+                    continue
+
+                try:
+                    self._handle_batch(batch)
+                except Exception as e:
+                    print(f"[KV-SUB] error handling KV batch: {e}")
+
+        finally:
+            try:
+                sub.close(0)
+            except Exception:
+                pass
+            ctx.term()
+
+    # ------------- Redis update -------------
+
+    def _handle_batch(self, event_batch: KVEventBatch) -> None:
+        """
+        Update Redis for KV cache events.
+
+        Redis schema:
+          - {model}:kvblocks               -> HSET(block_hash -> "kvblock:{block_hash}")
+          - {model}:kvblock:{block_hash}   -> HSET(pod_name -> timestamp)
+          - {model}:podblocks:{pod_name}   -> SET(block_hashes held by pod)
+        """
+        key_prefix = f"{self.model}:" if self.model else ""
+        kvblocks_key = f"{key_prefix}kvblocks"
+        podblocks_key = f"{key_prefix}podblocks:{self.pod_name}"
+
+        pipe = self.redis.pipeline(transaction=False)
+        ts = int(time.time())
+
+        for ev in event_batch.events:
+            # BlockStored
+            if isinstance(ev, BlockStored):
+                for block_hash in ev.block_hashes:
+                    bh_str = str(block_hash)
+                    kvblock_key = f"{key_prefix}kvblock:{bh_str}"
+
+                    # block -> pod
+                    pipe.hset(kvblock_key, self.pod_name, ts)
+                    # pod -> block
+                    pipe.sadd(podblocks_key, bh_str)
+                    # index of all blocks
+                    pipe.hset(kvblocks_key, bh_str, kvblock_key)
+
+            # BlockRemoved
+            elif isinstance(ev, BlockRemoved):
+                for block_hash in ev.block_hashes:
+                    bh_str = str(block_hash)
+                    kvblock_key = f"{key_prefix}kvblock:{bh_str}"
+                    pipe.hdel(kvblock_key, self.pod_name)
+                    pipe.srem(podblocks_key, bh_str)
+
+            # AllBlocksCleared
+            elif isinstance(ev, AllBlocksCleared):
+                for bh_str in self.redis.sscan_iter(podblocks_key):
+                    kvblock_key = f"{key_prefix}kvblock:{bh_str}"
+                    pipe.hdel(kvblock_key, self.pod_name)
+                pipe.delete(podblocks_key)
+
+        try:
+            pipe.execute()
+        except Exception as e:
+            print(f"[KV-SUB] redis error: {e}")
+
+---------------- END FILE: ./zmq_subscriber.py ----------------
+
+---------------- FILE: ./output.txt ----------------
+
+
+---------------- END FILE: ./output.txt ----------------
+
+---------------- FILE: ./config.py ----------------
 
 # sidecar/config.py
 # -*- coding: utf-8 -*-
@@ -351,6 +479,10 @@ import os
 
 @dataclass
 class SidecarConfig:
+    # ------------------------------------------------
+    # Router + vLLM endpoints
+    # ------------------------------------------------
+
     # Where the router-service lives
     ROUTER_URL: str = "http://router-service:8080"
 
@@ -359,11 +491,17 @@ class SidecarConfig:
 
     MODEL_NAME: str = "served-model"
 
+    # ------------------------------------------------
     # Local queue / batching
+    # ------------------------------------------------
+
     BATCH_SIZE: int = 8
     PULL_INTERVAL_S: float = 0.05
 
-    # ZMQ → Redis kv sync (same as you had)
+    # ------------------------------------------------
+    # ZMQ → Redis KV sync (unchanged)
+    # ------------------------------------------------
+
     VLLM_HOST: str = "127.0.0.1"
     VLLM_SUB_PORT: int = 5557
 
@@ -372,20 +510,37 @@ class SidecarConfig:
     CONTAINER_NAME: str = os.getenv("CONTAINER_NAME", "vllm-pod")
     MODEL_NAME_REDIS: str = "served-model"
 
-    # sidecar HTTP + concurrency + mode
-    SIDECAR_PORT: int = 9000                # where this sidecar FastAPI listens
-    SIDECAR_MODE: str = "pull"              # "pull" or "push"
+    # ------------------------------------------------
+    # Sidecar HTTP + mode
+    # ------------------------------------------------
 
-    # HTTP timeouts (seconds)
-    ROUTER_PULL_TIMEOUT_S: float = 1.0      # /pull timeout
-    VLLM_TIMEOUT_S: float = 30.0            # vLLM generation timeout
-    ROUTER_RESULT_TIMEOUT_S: float = 5.0    # /result post timeout
+    SIDECAR_PORT: int = 9000          # where sidecar FastAPI listens
+    SIDECAR_MODE: str = "pull"        # pull | push
+
+    # ------------------------------------------------
+    # HTTP timeouts
+    # ------------------------------------------------
+
+    ROUTER_PULL_TIMEOUT_S: float = 1.0
+    VLLM_TIMEOUT_S: float = 30.0
+
+    # ------------------------------------------------
+    # Result transport (NEW — backward compatible)
+    # ------------------------------------------------
+    # sync        -> POST /result (old behavior)
+    # submit_ack -> POST /result_submit (immediate ACK)
+    RESULT_TRANSPORT_MODE: str = "sync"
+
+    # Path used when RESULT_TRANSPORT_MODE=submit_ack
+    RESULT_SUBMIT_PATH: str = "/result_submit"
+
+    # HTTP timeout for result submission (applies to both modes)
+    ROUTER_RESULT_TIMEOUT_S: float = 5.0
 
     # ------------------------------------------------
     # Connection pooling (requests / urllib3)
     # ------------------------------------------------
-    # Default urllib3 pool_maxsize is only 10; increase it to avoid churn
-    # when you have many threads or bursts.
+
     ROUTER_POOL_CONNECTIONS: int = 50
     ROUTER_POOL_MAXSIZE: int = 200
 
@@ -393,17 +548,18 @@ class SidecarConfig:
     VLLM_POOL_MAXSIZE: int = 50
 
     # ------------------------------------------------
-    # Result posting behavior
+    # Result posting retry behavior
     # ------------------------------------------------
-    # You said: "I don't want to retry". So default is OFF.
+
     RESULT_POST_RETRY: bool = False
-    RESULT_POST_MAX_RETRIES: int = 0  # if RESULT_POST_RETRY=True, cap retries
+    RESULT_POST_MAX_RETRIES: int = 0
     RESULT_POST_BACKOFF_BASE_S: float = 0.05
     RESULT_POST_BACKOFF_CAP_S: float = 2.0
 
     # ------------------------------------------------
-    # Tracing controls (must match router side)
+    # Tracing
     # ------------------------------------------------
+
     TRACE_ENABLED: bool = False
     TRACE_SAMPLE_RATE: float = 1.0
 
@@ -411,13 +567,22 @@ class SidecarConfig:
 def get_config() -> SidecarConfig:
     cfg = SidecarConfig()
 
+    # ------------------------------------------------
+    # Endpoints
+    # ------------------------------------------------
     cfg.ROUTER_URL = os.getenv("ROUTER_URL", cfg.ROUTER_URL)
     cfg.VLLM_URL = os.getenv("VLLM_URL", cfg.VLLM_URL)
     cfg.MODEL_NAME = os.getenv("MODEL_NAME", cfg.MODEL_NAME)
 
-    cfg.BATCH_SIZE = int(os.getenv("BATCH_SIZE", getattr(cfg, "BATCH_SIZE", 8)))
+    # ------------------------------------------------
+    # Queue / batching
+    # ------------------------------------------------
+    cfg.BATCH_SIZE = int(os.getenv("BATCH_SIZE", cfg.BATCH_SIZE))
     cfg.PULL_INTERVAL_S = float(os.getenv("PULL_INTERVAL_S", cfg.PULL_INTERVAL_S))
 
+    # ------------------------------------------------
+    # KV sync
+    # ------------------------------------------------
     cfg.VLLM_HOST = os.getenv("VLLM_HOST", cfg.VLLM_HOST)
     cfg.VLLM_SUB_PORT = int(os.getenv("VLLM_SUB_PORT", cfg.VLLM_SUB_PORT))
     cfg.REDIS_HOST = os.getenv("REDIS_HOST", cfg.REDIS_HOST)
@@ -425,34 +590,57 @@ def get_config() -> SidecarConfig:
     cfg.CONTAINER_NAME = os.getenv("CONTAINER_NAME", cfg.CONTAINER_NAME)
     cfg.MODEL_NAME_REDIS = os.getenv("MODEL_NAME_REDIS", cfg.MODEL_NAME_REDIS)
 
+    # ------------------------------------------------
+    # Sidecar mode
+    # ------------------------------------------------
     cfg.SIDECAR_PORT = int(os.getenv("SIDECAR_PORT", cfg.SIDECAR_PORT))
     cfg.SIDECAR_MODE = os.getenv("SIDECAR_MODE", cfg.SIDECAR_MODE)
 
+    # ------------------------------------------------
+    # Timeouts
+    # ------------------------------------------------
     cfg.ROUTER_PULL_TIMEOUT_S = float(os.getenv("ROUTER_PULL_TIMEOUT_S", cfg.ROUTER_PULL_TIMEOUT_S))
     cfg.VLLM_TIMEOUT_S = float(os.getenv("VLLM_TIMEOUT_S", cfg.VLLM_TIMEOUT_S))
     cfg.ROUTER_RESULT_TIMEOUT_S = float(os.getenv("ROUTER_RESULT_TIMEOUT_S", cfg.ROUTER_RESULT_TIMEOUT_S))
 
+    # ------------------------------------------------
+    # Result transport (NEW)
+    # ------------------------------------------------
+    cfg.RESULT_TRANSPORT_MODE = os.getenv(
+        "RESULT_TRANSPORT_MODE", cfg.RESULT_TRANSPORT_MODE
+    ).lower()
+
+    cfg.RESULT_SUBMIT_PATH = os.getenv(
+        "RESULT_SUBMIT_PATH", cfg.RESULT_SUBMIT_PATH
+    )
+
+    # ------------------------------------------------
     # Pool knobs
+    # ------------------------------------------------
     cfg.ROUTER_POOL_CONNECTIONS = int(os.getenv("ROUTER_POOL_CONNECTIONS", cfg.ROUTER_POOL_CONNECTIONS))
     cfg.ROUTER_POOL_MAXSIZE = int(os.getenv("ROUTER_POOL_MAXSIZE", cfg.ROUTER_POOL_MAXSIZE))
     cfg.VLLM_POOL_CONNECTIONS = int(os.getenv("VLLM_POOL_CONNECTIONS", cfg.VLLM_POOL_CONNECTIONS))
     cfg.VLLM_POOL_MAXSIZE = int(os.getenv("VLLM_POOL_MAXSIZE", cfg.VLLM_POOL_MAXSIZE))
 
-    # Result posting retry knobs
+    # ------------------------------------------------
+    # Result retry knobs
+    # ------------------------------------------------
     cfg.RESULT_POST_RETRY = os.getenv("RESULT_POST_RETRY", str(cfg.RESULT_POST_RETRY)).lower() == "true"
     cfg.RESULT_POST_MAX_RETRIES = int(os.getenv("RESULT_POST_MAX_RETRIES", cfg.RESULT_POST_MAX_RETRIES))
     cfg.RESULT_POST_BACKOFF_BASE_S = float(os.getenv("RESULT_POST_BACKOFF_BASE_S", cfg.RESULT_POST_BACKOFF_BASE_S))
     cfg.RESULT_POST_BACKOFF_CAP_S = float(os.getenv("RESULT_POST_BACKOFF_CAP_S", cfg.RESULT_POST_BACKOFF_CAP_S))
 
-    # Tracing env overrides
+    # ------------------------------------------------
+    # Tracing
+    # ------------------------------------------------
     cfg.TRACE_ENABLED = os.getenv("TRACE_ENABLED", "false").lower() == "true"
-    cfg.TRACE_SAMPLE_RATE = float(os.getenv("TRACE_SAMPLE_RATE", getattr(cfg, "TRACE_SAMPLE_RATE", 1.0)))
+    cfg.TRACE_SAMPLE_RATE = float(os.getenv("TRACE_SAMPLE_RATE", cfg.TRACE_SAMPLE_RATE))
 
     return cfg
 
----------------- END FILE: ./sidecar/config.py ----------------
+---------------- END FILE: ./config.py ----------------
 
----------------- FILE: ./sidecar/router_client.py ----------------
+---------------- FILE: ./router_client.py ----------------
 
 # sidecar/router_client.py
 # -*- coding: utf-8 -*-
@@ -461,12 +649,30 @@ import time
 from typing import Dict, Any
 
 import requests
+from requests.adapters import HTTPAdapter  # NEW
 
 from .config import get_config
 from .local_queue import LocalQueue
 from .metrics import inc_received
 
 _cfg = get_config()
+
+
+def _make_pooled_session(pool_connections: int, pool_maxsize: int) -> requests.Session:
+    """
+    Create a requests.Session with a larger urllib3 connection pool.
+    This reduces TCP churn and makes connection reuse much more reliable.
+    """
+    s = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=int(pool_connections),
+        pool_maxsize=int(pool_maxsize),
+        max_retries=0,
+        pool_block=False,
+    )
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
+    return s
 
 
 class RouterPullWorker:
@@ -503,7 +709,13 @@ class RouterPullWorker:
         if self._session is not None:
             return
         self._stop_evt.clear()
-        self._session = requests.Session()
+
+        # pooled session (no semantic change)
+        self._session = _make_pooled_session(
+            pool_connections=_cfg.ROUTER_POOL_CONNECTIONS,
+            pool_maxsize=_cfg.ROUTER_POOL_MAXSIZE,
+        )
+
         print(f"[sidecar] RouterPullWorker ready (endpoint_id={self.endpoint_id})")
 
     def stop(self):
@@ -550,7 +762,10 @@ class RouterPullWorker:
             session = self._session
             tmp_session = False
             if session is None:
-                session = requests.Session()
+                session = _make_pooled_session(
+                    pool_connections=_cfg.ROUTER_POOL_CONNECTIONS,
+                    pool_maxsize=_cfg.ROUTER_POOL_MAXSIZE,
+                )
                 tmp_session = True
 
             try:
@@ -640,9 +855,86 @@ class RouterPullWorker:
                     except Exception:
                         pass
 
----------------- END FILE: ./sidecar/router_client.py ----------------
+---------------- END FILE: ./router_client.py ----------------
 
----------------- FILE: ./sidecar/local_queue.py ----------------
+---------------- FILE: ./crawl.sh ----------------
+
+#!/usr/bin/env bash
+# Usage:
+#   ./crawl.sh /path/to/folder
+#   ./crawl.sh /path/to/folder -o out.txt
+#   ./crawl.sh /path/to/folder -x node_modules -x .venv -x README.md
+
+ROOT="${1:-.}"
+OUTFILE=""
+shift 1 || true  # shift root path
+
+EXCLUDES=()    # array to store folder or file names to exclude
+
+# parse optional flags
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output)
+      OUTFILE="$2"
+      shift 2
+      ;;
+    -x|--exclude)
+      EXCLUDES+=("$2")
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+run_crawl() {
+
+  echo "===== FOLDER STRUCTURE ====="
+  tree -a "$ROOT"
+
+  if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
+    echo ""
+    echo "===== EXCLUDED PATHS (still shown above) ====="
+    for ex in "${EXCLUDES[@]}"; do
+      echo "  - $ex"
+    done
+  fi
+
+  echo ""
+  echo "===== FILE CONTENTS ====="
+
+  # Build find exclusion arguments
+  FIND_EXCLUDES=()
+  for ex in "${EXCLUDES[@]}"; do
+    # Skip any file with this exact name
+    FIND_EXCLUDES+=( -not -name "$ex" )
+    # Skip everything under any directory with this name
+    FIND_EXCLUDES+=( -not -path "*/${ex}/*" )
+  done
+
+  # Execute the find with dynamic exclusions
+  find "$ROOT" -type f "${FIND_EXCLUDES[@]}" | while read -r file; do
+      echo ""
+      echo "---------------- FILE: $file ----------------"
+      echo ""
+      cat "$file"
+      echo ""
+      echo "---------------- END FILE: $file ----------------"
+  done
+}
+
+# output logic
+if [[ -n "$OUTFILE" ]]; then
+  run_crawl | tee "$OUTFILE"
+else
+  run_crawl
+fi
+
+---------------- END FILE: ./crawl.sh ----------------
+
+---------------- FILE: ./local_queue.py ----------------
 
 # -*- coding: utf-8 -*-
 from queue import Queue, Empty
@@ -713,9 +1005,9 @@ class LocalQueue:
             self._inflight = max(0, self._inflight - 1)
             self._update_gauge_locked()
 
----------------- END FILE: ./sidecar/local_queue.py ----------------
+---------------- END FILE: ./local_queue.py ----------------
 
----------------- FILE: ./sidecar/metrics.py ----------------
+---------------- FILE: ./metrics.py ----------------
 
 # sidecar/metrics.py
 # -*- coding: utf-8 -*-
@@ -766,14 +1058,14 @@ def inc_completed(endpoint: str) -> None:
     except Exception:
         pass
 
----------------- END FILE: ./sidecar/metrics.py ----------------
+---------------- END FILE: ./metrics.py ----------------
 
----------------- FILE: ./sidecar/__init__.py ----------------
+---------------- FILE: ./__init__.py ----------------
 
 
----------------- END FILE: ./sidecar/__init__.py ----------------
+---------------- END FILE: ./__init__.py ----------------
 
----------------- FILE: ./sidecar/result_poster.py ----------------
+---------------- FILE: ./result_poster.py ----------------
 
 # sidecar/result_poster.py
 # -*- coding: utf-8 -*-
@@ -810,9 +1102,14 @@ def _make_pooled_session(pool_connections: int, pool_maxsize: int) -> requests.S
 
 class ResultPoster:
     """
-    Async poster for sidecar -> router /result.
+    Async poster for sidecar -> router result ingestion.
 
-    Key property: vLLM workers never block on router /result.
+    Backward compatible:
+      - RESULT_TRANSPORT_MODE="sync"       -> POST {ROUTER_URL}/result      (old behavior)
+      - RESULT_TRANSPORT_MODE="submit_ack" -> POST {ROUTER_URL}{RESULT_SUBMIT_PATH}
+                                            (new behavior: router ACKs immediately)
+
+    Key property: vLLM workers never block on router backpressure.
 
     Policy:
       - By default: NO RETRY (drop on failure) because you explicitly asked for that.
@@ -825,6 +1122,29 @@ class ResultPoster:
         self._thread: Optional[threading.Thread] = None
         self._session: Optional[requests.Session] = None
 
+        # Resolve URL once (config is static per process)
+        self._result_url = self._resolve_result_url()
+
+    # ----------------------------
+    # URL selection (NEW)
+    # ----------------------------
+
+    def _resolve_result_url(self) -> str:
+        mode = str(getattr(_cfg, "RESULT_TRANSPORT_MODE", "sync") or "sync").lower().strip()
+
+        if mode == "submit_ack":
+            submit_path = str(getattr(_cfg, "RESULT_SUBMIT_PATH", "/result_submit") or "/result_submit")
+            if not submit_path.startswith("/"):
+                submit_path = "/" + submit_path
+            return f"{_cfg.ROUTER_URL}{submit_path}"
+
+        # Default: old behavior
+        return f"{_cfg.ROUTER_URL}/result"
+
+    # ----------------------------
+    # Lifecycle
+    # ----------------------------
+
     def start(self):
         if self._thread is not None:
             return
@@ -835,9 +1155,12 @@ class ResultPoster:
         )
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+
+        mode = str(getattr(_cfg, "RESULT_TRANSPORT_MODE", "sync") or "sync").lower().strip()
         print(
             "[sidecar] ResultPoster started "
-            f"(retry={_cfg.RESULT_POST_RETRY}, pool_maxsize={_cfg.ROUTER_POOL_MAXSIZE})"
+            f"(mode={mode}, url={self._result_url}, retry={_cfg.RESULT_POST_RETRY}, "
+            f"pool_maxsize={_cfg.ROUTER_POOL_MAXSIZE})"
         )
 
     def stop(self):
@@ -853,6 +1176,10 @@ class ResultPoster:
             self._session = None
         print("[sidecar] ResultPoster stopped")
 
+    # ----------------------------
+    # Public API
+    # ----------------------------
+
     def submit(self, payload: Dict[str, Any]) -> None:
         # No blocking: never stall vLLM workers.
         try:
@@ -860,6 +1187,10 @@ class ResultPoster:
         except queue.Full:
             rid = payload.get("req_id", "?")
             print(f"[sidecar] ResultPoster queue FULL; dropping result for req_id={rid}")
+
+    # ----------------------------
+    # Internals
+    # ----------------------------
 
     def _try_post_once(self, session: requests.Session, url: str, payload: Dict[str, Any]) -> bool:
         try:
@@ -873,7 +1204,7 @@ class ResultPoster:
             pool_connections=_cfg.ROUTER_POOL_CONNECTIONS,
             pool_maxsize=_cfg.ROUTER_POOL_MAXSIZE,
         )
-        url = f"{_cfg.ROUTER_URL}/result"
+        url = self._result_url
 
         while not self._stop.is_set():
             try:
@@ -886,7 +1217,7 @@ class ResultPoster:
             if not _cfg.RESULT_POST_RETRY:
                 ok = self._try_post_once(session, url, payload)
                 if not ok:
-                    print(f"[sidecar] /result post FAILED (no-retry) req_id={rid}")
+                    print(f"[sidecar] result post FAILED (no-retry) req_id={rid} url={url}")
                 try:
                     self._q.task_done()
                 except Exception:
@@ -896,6 +1227,8 @@ class ResultPoster:
             # Optional bounded retry mode
             attempt = 0
             max_tries = max(1, int(_cfg.RESULT_POST_MAX_RETRIES) + 1)  # include first attempt
+            ok = False
+
             while not self._stop.is_set() and attempt < max_tries:
                 attempt += 1
                 ok = self._try_post_once(session, url, payload)
@@ -910,16 +1243,18 @@ class ResultPoster:
                 time.sleep(sleep_s)
 
             if attempt >= max_tries and not ok:
-                print(f"[sidecar] /result post FAILED after retries req_id={rid} tries={attempt}")
+                print(
+                    f"[sidecar] result post FAILED after retries req_id={rid} tries={attempt} url={url}"
+                )
 
             try:
                 self._q.task_done()
             except Exception:
                 pass
 
----------------- END FILE: ./sidecar/result_poster.py ----------------
+---------------- END FILE: ./result_poster.py ----------------
 
----------------- FILE: ./sidecar/api.py ----------------
+---------------- FILE: ./api.py ----------------
 
 # -*- coding: utf-8 -*-
 from fastapi import FastAPI
@@ -1023,9 +1358,9 @@ async def push(item: PushItem) -> dict:
     _local_q.put(item.req_id, item.prompt, meta)
     return {"status": "ok"}
 
----------------- END FILE: ./sidecar/api.py ----------------
+---------------- END FILE: ./api.py ----------------
 
----------------- FILE: ./sidecar/vllm_client.py ----------------
+---------------- FILE: ./vllm_client.py ----------------
 
 # sidecar/vllm_client.py
 # -*- coding: utf-8 -*-
@@ -1335,9 +1670,9 @@ class VLLMWorker:
         finally:
             session.close()
 
----------------- END FILE: ./sidecar/vllm_client.py ----------------
+---------------- END FILE: ./vllm_client.py ----------------
 
----------------- FILE: ./sidecar/main.py ----------------
+---------------- FILE: ./main.py ----------------
 
 # sidecar/main.py
 # -*- coding: utf-8 -*-
@@ -1351,7 +1686,7 @@ from .config import get_config
 from .local_queue import LocalQueue
 from .router_client import RouterPullWorker
 from .vllm_client import VLLMWorker
-from .result_poster import ResultPoster       # NEW
+from .result_poster import ResultPoster
 from .zmq_subscriber import KVSubscriber
 from .api import app, bind_local_queue
 
@@ -1382,7 +1717,9 @@ def main():
         pull_worker.start()  # initializes session; this is not a polling thread
 
     # ------------------------------------------------------------
-    # Result poster (async router /result delivery)
+    # Result poster (async router result delivery)
+    #   - sync: POST /result (legacy)
+    #   - submit_ack: POST RESULT_SUBMIT_PATH (default /result_submit), router ACKs 202 immediately
     # ------------------------------------------------------------
     result_poster = ResultPoster(maxsize=100000)
     result_poster.start()
@@ -1395,7 +1732,7 @@ def main():
         w = VLLMWorker(
             local_q,
             pull_worker=pull_worker,
-            result_poster=result_poster,   # NEW
+            result_poster=result_poster,
         )
         w.start()
         vllm_workers.append(w)
@@ -1417,9 +1754,17 @@ def main():
     server_thread = threading.Thread(target=_run_server, daemon=True)
     server_thread.start()
 
+    # Explicitly print which result transport we're using (helps debug env wiring)
+    result_transport = str(getattr(_cfg, "RESULT_TRANSPORT_MODE", "sync")).lower()
+    result_path = str(getattr(_cfg, "RESULT_SUBMIT_PATH", "/result_submit"))
+
     print(
         f"[sidecar] running in {mode.upper()} mode "
         f"(BATCH_SIZE={_cfg.BATCH_SIZE}, port={_cfg.SIDECAR_PORT}, endpoint_id={endpoint_id})"
+    )
+    print(
+        f"[sidecar] result transport={result_transport} "
+        f"(sync -> POST /result, submit_ack -> POST {result_path})"
     )
 
     try:
@@ -1434,7 +1779,7 @@ def main():
         for w in vllm_workers:
             w.stop()
 
-        result_poster.stop()   # NEW
+        result_poster.stop()
 
         kv_sub.stop()
 
@@ -1442,67 +1787,4 @@ def main():
 if __name__ == "__main__":
     main()
 
----------------- END FILE: ./sidecar/main.py ----------------
-
----------------- FILE: ./build.sh ----------------
-
-#!/bin/bash
-set -e
-
-PROXY_URL="http://peulerosweb:EulerOS_123@172.18.100.92:8080"
-
-docker build \
-  -f Dockerfile \
-  --build-arg HTTP_PROXY="$PROXY_URL" \
-  --build-arg HTTPS_PROXY="$PROXY_URL" \
-  -t kv-sidecar:latest .
-
----------------- END FILE: ./build.sh ----------------
-
----------------- FILE: ./Dockerfile ----------------
-
-FROM python:3.11-slim
-
-WORKDIR /app
-
-# ---------- Proxy only for build ----------
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-
-ENV http_proxy=${HTTP_PROXY}
-ENV https_proxy=${HTTPS_PROXY}
-ENV HTTP_PROXY=${HTTP_PROXY}
-ENV HTTPS_PROXY=${HTTPS_PROXY}
-# ------------------------------------------
-
-# Install deps
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# ---------- Clear proxy for runtime ----------
-ENV http_proxy=""
-ENV https_proxy=""
-ENV HTTP_PROXY=""
-ENV HTTPS_PROXY=""
-# ---------------------------------------------
-
-# Copy app code
-COPY sidecar ./sidecar
-
-ENV PYTHONUNBUFFERED=1
-
-CMD ["python", "-m", "sidecar.main"]
-
----------------- END FILE: ./Dockerfile ----------------
-
----------------- FILE: ./requirements.txt ----------------
-
-fastapi
-uvicorn
-requests
-redis
-msgspec
-pyzmq
-prometheus_client
-
----------------- END FILE: ./requirements.txt ----------------
+---------------- END FILE: ./main.py ----------------
