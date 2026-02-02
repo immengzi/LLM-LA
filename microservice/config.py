@@ -1,4 +1,4 @@
-# config.py  (FULL MODIFIED: old config + minimal Helm section)
+# config.py  (FULL MODIFIED: old config + minimal Helm section + idle-zero-running knob)
 
 from __future__ import annotations
 
@@ -93,7 +93,10 @@ class TransportConfig:
 
     - "sync": existing behavior (POST /enqueue, block until completion).
     - "async_pubsub": submit+ack (POST /submit) + receive completions via one ZMQ SUB socket.
-      End-of-run termination: idle timeout AFTER LAST received completion.
+      End-of-run termination:
+        (A) If Prometheus shows vllm:num_requests_running == 0 for ALL vLLM instances
+            continuously for idle_zero_running_s -> declare remaining pending LOST.
+        (B) Backstop: if no completion is received for idle_timeout_s -> declare pending LOST.
     """
     mode: str = "sync"  # sync | async_pubsub
 
@@ -119,9 +122,17 @@ class TransportConfig:
     # ZMQ SUB receive high-water-mark (client-side queue). (Router has its own HWM too.)
     results_hwm: int = 10000
 
-    # after the last RECEIVED completion (last RECV), wait at most this many seconds.
+    # Backstop: after the last RECEIVED completion (last RECV), wait at most this many seconds.
     # If no new completion arrives in that idle window, mark remaining pending as LOST and terminate.
     idle_timeout_s: float = 60.0
+
+    # NEW: Prometheus fleet-idle detector (preferred).
+    # If vllm:num_requests_running is ZERO across ALL vLLM instances continuously
+    # for this many seconds while the experiment still has pending requests, we treat
+    # those pending requests as LOST and terminate.
+    #
+    # Set <=0 to disable and rely only on idle_timeout_s.
+    idle_zero_running_s: float = 10.0
 
     # Buffer completions that arrive BEFORE the submit thread records pending[rid].
     # TTL bounds memory; size cap bounds worst-case.
@@ -270,6 +281,15 @@ def load_config(path: str) -> ClientConfig:
         except Exception:
             transport.idle_timeout_s = 60.0
         transport.idle_timeout_s = max(1.0, transport.idle_timeout_s)
+
+        # NEW: fleet idle detector window
+        try:
+            transport.idle_zero_running_s = float(getattr(transport, "idle_zero_running_s", 10.0))
+        except Exception:
+            transport.idle_zero_running_s = 10.0
+        # allow <=0 to disable
+        if transport.idle_zero_running_s < 0.0:
+            transport.idle_zero_running_s = 0.0
 
         try:
             transport.orphan_ttl_s = float(transport.orphan_ttl_s)

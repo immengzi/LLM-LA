@@ -3,7 +3,9 @@
 #
 # NOTE:
 # - Reconciliation via GET /result/{req_id} has been removed (no longer used).
-# - async_pubsub termination is handled solely by idle-timeout-after-last-recv in load_runner.py.
+# - async_pubsub termination is handled in load_runner.py via:
+#     - Preferred: Prometheus fleet-idle detection (requests_running==0 for idle_zero_running_s)
+#     - Backstop: idle-timeout-after-last-recv (idle_timeout_s)
 
 from __future__ import annotations
 
@@ -148,4 +150,8 @@ def submit_one(
     if "req_id" not in data:
         raise RuntimeError(f"{sp} response missing 'req_id': {data!r}")
 
-    return str(data["req_id"])
+    rid = str(data["req_id"]).strip()
+    if not rid:
+        raise RuntimeError(f"{sp} returned empty 'req_id': {data!r}")
+
+    return rid

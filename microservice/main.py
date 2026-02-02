@@ -89,12 +89,6 @@ def main():
     run_id = getattr(tcfg, "run_id", None) if tcfg is not None else None
     grace_s = getattr(tcfg, "grace_s", 30.0) if tcfg is not None else 30.0
 
-    # reconciliation knobs (safe defaults even if missing)
-    reconcile_enabled = bool(getattr(tcfg, "reconcile_enabled", True)) if tcfg is not None else True
-    reconcile_timeout_s = float(getattr(tcfg, "reconcile_timeout_s", 2.0)) if tcfg is not None else 2.0
-    reconcile_attempts = int(getattr(tcfg, "reconcile_attempts", 5)) if tcfg is not None else 5
-    reconcile_interval_s = float(getattr(tcfg, "reconcile_interval_s", 0.5)) if tcfg is not None else 0.5
-
     print(
         f"[client] router-url={cfg.router_url}, "
         f"n={total}, pattern={cfg.load_pattern.pattern}, "
@@ -110,10 +104,6 @@ def main():
         print(
             f"[client] async_pubsub: submit_path={submit_path} "
             f"results_zmq={results_zmq} topic={topic!r} run_id={run_id!r} grace_s={grace_s}"
-        )
-        print(
-            f"[client] async_pubsub reconcile: enabled={reconcile_enabled} "
-            f"timeout_s={reconcile_timeout_s} attempts={reconcile_attempts} interval_s={reconcile_interval_s}"
         )
 
     # Initialize experiment directory + logger
@@ -206,11 +196,6 @@ def main():
         "topic": str(topic),
         "run_id": run_id,
         "grace_s": float(grace_s) if grace_s is not None else None,
-        # reconciliation settings (for experiment reproducibility)
-        "reconcile_enabled": bool(reconcile_enabled),
-        "reconcile_timeout_s": float(reconcile_timeout_s),
-        "reconcile_attempts": int(reconcile_attempts),
-        "reconcile_interval_s": float(reconcile_interval_s),
     }
     try:
         with (Path(exp_dir) / "run_summary.json").open("w", encoding="utf-8") as f:
