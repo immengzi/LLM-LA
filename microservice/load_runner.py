@@ -9,11 +9,13 @@
 #                   A single ZMQ SUB listener receives completion events and emits the
 #                   SAME per-request log schema as sync mode (so analysis stays unchanged).
 #
-# (idle-timeout termination policy for async_pubsub):
-#   - After the last RECEIVED completion (last RECV), wait at most idle_timeout_s seconds.
-#   - If no new completion arrives in that idle window, mark ALL remaining pending requests
-#     as LOST and terminate the experiment.
-#   - No reconciliation polling / retry logic.
+# Termination policy for async_pubsub (preferred + backstop):
+#   1) Preferred: Prometheus fleet-idle detection:
+#        - If vLLM reports requests_running==0 (and requests_waiting==0 when available)
+#          continuously for idle_zero_running_s seconds => stop early (mark remaining as LOST).
+#   2) Backstop: idle_timeout_s since last EMITTED completion event => stop (mark remaining LOST).
+#
+# No reconciliation polling / retry logic.
 
 from __future__ import annotations
 
@@ -35,6 +37,12 @@ try:
     from config import TransportConfig
 except Exception:  # pragma: no cover
     TransportConfig = None  # type: ignore
+
+# Metrics tick accessor (optional at runtime if metrics disabled)
+try:
+    from metrics_prom import get_last_metrics_tick
+except Exception:  # pragma: no cover
+    get_last_metrics_tick = None  # type: ignore
 
 
 @dataclass
@@ -640,6 +648,65 @@ def _pubsub_listener_thread(
             pass
 
 
+def _fleet_idle_from_metrics_tick(tick: Optional[Dict[str, Any]]) -> Tuple[Optional[bool], Dict[str, Any]]:
+    """
+    Determine fleet-idle from the last metrics tick:
+      - Consider vLLM-ish rows: those that have requests_running or requests_waiting fields.
+      - Fleet idle => max(requests_running) == 0 AND (if waiting values exist) max(requests_waiting) == 0.
+    Returns:
+      (idle_bool_or_none, debug_dict)
+    """
+    if not isinstance(tick, dict):
+        return None, {"reason": "no_tick"}
+
+    samples = tick.get("samples")
+    if not isinstance(samples, list) or not samples:
+        return None, {"reason": "no_samples"}
+
+    running_vals: List[float] = []
+    waiting_vals: List[float] = []
+
+    for rec in samples:
+        if not isinstance(rec, dict):
+            continue
+        # Only treat as vLLM row if any of these keys are present.
+        if ("requests_running" not in rec) and ("requests_waiting" not in rec):
+            continue
+
+        rv = rec.get("requests_running")
+        wv = rec.get("requests_waiting")
+
+        try:
+            if rv is not None:
+                running_vals.append(float(rv))
+        except Exception:
+            pass
+        try:
+            if wv is not None:
+                waiting_vals.append(float(wv))
+        except Exception:
+            pass
+
+    if not running_vals and not waiting_vals:
+        return None, {"reason": "no_vllm_rows"}
+
+    max_running = max(running_vals) if running_vals else None
+    max_waiting = max(waiting_vals) if waiting_vals else None
+
+    # Decide idle
+    if max_running is None:
+        return None, {"reason": "no_running_metric", "max_waiting": max_waiting}
+
+    if max_running != 0.0:
+        return False, {"max_running": max_running, "max_waiting": max_waiting}
+
+    # running is zero; if waiting exists, also require waiting==0
+    if max_waiting is not None and max_waiting != 0.0:
+        return False, {"max_running": max_running, "max_waiting": max_waiting}
+
+    return True, {"max_running": max_running, "max_waiting": max_waiting}
+
+
 def run_open_loop_load(
     *,
     router_url: str,
@@ -659,7 +726,9 @@ def run_open_loop_load(
     transport:
       - None or TransportConfig(mode="sync") => existing /enqueue behavior.
       - TransportConfig(mode="async_pubsub") => /submit + ZMQ completion events
-        with an end-of-run policy of idle_timeout_s AFTER LAST RECEIVED completion.
+        with end-of-run policy:
+          - Preferred: fleet idle (requests_running==0) for idle_zero_running_s
+          - Backstop: idle_timeout_s since last emitted completion
     """
     if len(prompts) != len(plan_times):
         raise ValueError("prompts and plan_times length mismatch")
@@ -676,8 +745,9 @@ def run_open_loop_load(
     topic = ""
     run_id = None
 
-    # async_pubsub end condition
+    # async_pubsub end conditions
     idle_timeout_s = 60.0
+    idle_zero_running_s = 10.0  # <=0 disables fleet-idle shortcut
 
     # Orphan buffering knobs (hardcoded safe defaults)
     orphan_ttl_s = 300.0
@@ -693,6 +763,9 @@ def run_open_loop_load(
 
             if hasattr(transport, "idle_timeout_s"):
                 idle_timeout_s = float(getattr(transport, "idle_timeout_s") or idle_timeout_s)
+
+            if hasattr(transport, "idle_zero_running_s"):
+                idle_zero_running_s = float(getattr(transport, "idle_zero_running_s"))
 
             if hasattr(transport, "orphan_ttl_s"):
                 orphan_ttl_s = float(getattr(transport, "orphan_ttl_s") or orphan_ttl_s)
@@ -712,6 +785,12 @@ def run_open_loop_load(
     if idle_timeout_s > 3600.0:
         print(f"[load_runner] WARNING: idle_timeout_s={idle_timeout_s} very large; clamping to 3600s")
         idle_timeout_s = 3600.0
+
+    # Safety clamp for idle_zero_running_s (<=0 disables)
+    try:
+        idle_zero_running_s = float(idle_zero_running_s)
+    except Exception:
+        idle_zero_running_s = 10.0
 
     # Warmup (kept synchronous even in async_pubsub mode)
     warmup_reqs = int(warmup_reqs or 0)
@@ -781,6 +860,14 @@ def run_open_loop_load(
         raise RuntimeError("transport.mode=async_pubsub requires transport.results_zmq to be set")
 
     print(f"[load_runner] async_pubsub: idle_timeout_s(after last recv)={idle_timeout_s}")
+    if idle_zero_running_s > 0:
+        print(f"[load_runner] async_pubsub: idle_zero_running_s(fleet idle shortcut)={idle_zero_running_s}")
+    else:
+        print("[load_runner] async_pubsub: fleet-idle shortcut disabled (idle_zero_running_s<=0)")
+
+    if get_last_metrics_tick is None and idle_zero_running_s > 0:
+        print("[load_runner] WARNING: metrics_prom.get_last_metrics_tick not available; fleet-idle shortcut disabled")
+        idle_zero_running_s = 0.0
 
     pending: Dict[str, Dict[str, Any]] = {}
     pending_lock = threading.Lock()
@@ -856,11 +943,20 @@ def run_open_loop_load(
         t.join()
 
     # After all submits: wait while completions keep arriving.
-    # Stop condition: pending drains OR idle_timeout_s since last emitted completion.
+    # Stop condition (whichever happens first):
+    #   - pending drains
+    #   - fleet idle for idle_zero_running_s (if enabled)
+    #   - idle_timeout_s since last emitted completion (backstop)
     wait_start = time.time()
     next_progress_print = wait_start + 5.0
 
     timed_out = False
+    timeout_reason: Optional[str] = None
+
+    # For fleet-idle shortcut
+    zero_run_start_wall: Optional[float] = None
+    last_fleet_debug: Dict[str, Any] = {}
+
     while True:
         with pending_lock:
             remaining = len(pending)
@@ -873,16 +969,48 @@ def run_open_loop_load(
             last_recv_wall = float(progress.get("last_recv_wall", now))
         idle_s = now - last_recv_wall
 
+        # Preferred: fleet-idle shortcut
+        fleet_idle_ok: Optional[bool] = None
+        if idle_zero_running_s > 0 and get_last_metrics_tick is not None:
+            tick = get_last_metrics_tick()
+            fleet_idle_ok, last_fleet_debug = _fleet_idle_from_metrics_tick(tick)
+
+            if fleet_idle_ok is True:
+                if zero_run_start_wall is None:
+                    zero_run_start_wall = now
+                elif (now - zero_run_start_wall) >= float(idle_zero_running_s):
+                    timed_out = True
+                    timeout_reason = f"fleet_idle (requests_running==0 for {idle_zero_running_s}s)"
+                    break
+            else:
+                zero_run_start_wall = None
+
+        # Backstop: idle since last recv
         if idle_s > float(idle_timeout_s):
             timed_out = True
+            timeout_reason = f"idle_timeout_after_last_recv ({idle_timeout_s}s)"
             break
 
         if now >= next_progress_print:
             waited = now - wait_start
             left = max(0.0, float(idle_timeout_s) - idle_s)
+
+            extra = ""
+            if idle_zero_running_s > 0:
+                if fleet_idle_ok is True and zero_run_start_wall is not None:
+                    zero_idle_s = now - zero_run_start_wall
+                    zero_left = max(0.0, float(idle_zero_running_s) - zero_idle_s)
+                    extra = f" fleet_idle=True zero_idle={zero_idle_s:.1f}s zero_left≈{zero_left:.1f}s"
+                elif fleet_idle_ok is False:
+                    mr = last_fleet_debug.get("max_running")
+                    mw = last_fleet_debug.get("max_waiting")
+                    extra = f" fleet_idle=False max_running={mr} max_waiting={mw}"
+                else:
+                    extra = f" fleet_idle=unknown reason={last_fleet_debug.get('reason')}"
+
             print(
                 f"[load_runner] drain-wait: remaining={remaining} "
-                f"waited={waited:.1f}s idle={idle_s:.1f}s idle_left≈{left:.1f}s"
+                f"waited={waited:.1f}s idle={idle_s:.1f}s idle_left≈{left:.1f}s{extra}"
             )
             next_progress_print = now + 5.0
 
@@ -902,19 +1030,20 @@ def run_open_loop_load(
             leftovers = list(pending.values())
             pending.clear()
 
+        reason_str = timeout_reason or f"idle_timeout_after_last_recv ({idle_timeout_s}s)"
         for info in leftovers:
             idx = int(info["idx"])
             rid = str(info["req_id"])
             print(
                 f"[client][RECV][T{idx}] ✗ LOST idx={idx} req_id={rid} "
-                f"(idle_timeout after last recv: {idle_timeout_s}s)"
+                f"({reason_str})"
             )
             lost += 1
             if logger is not None:
                 err_record: Dict[str, Any] = {
                     "idx": idx,
                     "req_id": rid,
-                    "error": f"lost (idle_timeout after last recv: {idle_timeout_s}s)",
+                    "error": f"lost ({reason_str})",
                     "prompt": info.get("prompt"),
                     "planned_ts_mono": info.get("planned_ts_mono"),
                     "actual_send_ts_mono": info.get("actual_send_ts_mono"),

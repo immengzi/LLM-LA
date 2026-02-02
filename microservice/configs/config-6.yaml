@@ -2,7 +2,7 @@
 # Clean test config (explicit knobs, values close to example_config.yaml)
 
 router_url: "http://7.242.102.243:30080"
-total_requests: 100
+total_requests: 10000
 prompt_source: "hf-lmsys"
 
 
@@ -93,6 +93,6 @@ transport:
   results_zmq: "tcp://7.242.102.243:30559"
   topic: "results"
   run_id: null
-  idle_timeout_s: 200.0
+  idle_timeout_s: 600.0
 
 

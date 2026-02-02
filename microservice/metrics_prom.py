@@ -32,6 +32,11 @@
 # Critical fixes:
 #   - If endpoint discovery hasn't populated yet, fallback-discover vLLM instances from Prometheus
 #   - If Prometheus returns instances not in `keys`, auto-add them so they appear in output
+#
+# NEW:
+#   - sampler stores last successful tick and exposes get_last_metrics_tick()
+#     so load_runner can reuse the existing Prometheus scraping to detect
+#     vllm:num_requests_running == 0 fleet-idle condition.
 
 from __future__ import annotations
 
@@ -357,6 +362,10 @@ class _MetricsSampler(threading.Thread):
         self._jsonl = JsonlLogger(self.run_dir / "metrics.jsonl")
         self._summary_path = self.run_dir / "metrics_summary.json"
 
+        # NEW: last successful tick snapshot for reuse by load_runner
+        self._last_lock = threading.Lock()
+        self._last_tick: Optional[Dict[str, Any]] = None
+
         # rollups
         self._samples = 0
         self._tick_errors = 0
@@ -383,6 +392,14 @@ class _MetricsSampler(threading.Thread):
 
     def stop(self) -> None:
         self._stop_ev.set()
+
+    # NEW: allow readers to retrieve last successful tick
+    def get_last_tick(self) -> Optional[Dict[str, Any]]:
+        with self._last_lock:
+            if self._last_tick is None:
+                return None
+            # return a shallow copy so callers can't mutate internal state
+            return dict(self._last_tick)
 
     def _q_gauge(self, name: str) -> List[Dict[str, Any]]:
         return self._prom.instant(name)
@@ -874,6 +891,11 @@ class _MetricsSampler(threading.Thread):
             while not self._stop_ev.is_set():
                 try:
                     tick = self._collect_one_tick()
+
+                    # NEW: publish last successful tick for other threads
+                    with self._last_lock:
+                        self._last_tick = tick
+
                     self._jsonl.write(tick)
                     self._update_rollups(tick)
                 except Exception as e:
@@ -982,6 +1004,26 @@ def update_metrics_endpoints(endpoints: List[str]) -> None:
         s.set_endpoints(endpoints or [])
     except Exception:
         pass
+
+
+def get_last_metrics_tick() -> Optional[Dict[str, Any]]:
+    """
+    Return the last successful metrics tick collected by the background sampler.
+    Used by async_pubsub drain logic to detect fleet-idle (requests_running==0).
+
+    Returns:
+      - dict tick (shallow copy), or
+      - None if metrics are disabled / not started / no tick yet.
+    """
+    global _sampler
+    with _lock:
+        s = _sampler
+    if s is None:
+        return None
+    try:
+        return s.get_last_tick()
+    except Exception:
+        return None
 
 
 def stop_metrics_collection() -> Dict[str, Any]:

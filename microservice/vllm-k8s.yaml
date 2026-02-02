@@ -318,7 +318,7 @@ spec:
               value: "1024"
 
             - name: ROUTER_MODE
-              value: "push-random"
+              value: "push-least-queue"
 
             - name: SIDECAR_PORT
               value: "9000"
