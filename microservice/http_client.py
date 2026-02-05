@@ -1,11 +1,5 @@
 # http_client.py
 # Thin wrapper around POST /enqueue (sync) and POST /submit (async_pubsub).
-#
-# NOTE:
-# - Reconciliation via GET /result/{req_id} has been removed (no longer used).
-# - async_pubsub termination is handled in load_runner.py via:
-#     - Preferred: Prometheus fleet-idle detection (requests_running==0 for idle_zero_running_s)
-#     - Backstop: idle-timeout-after-last-recv (idle_timeout_s)
 
 from __future__ import annotations
 

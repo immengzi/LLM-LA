@@ -146,56 +146,86 @@ class RouterState:
 
             kv_enabled = bool(_cfg.KV_AWARE)
             len_enabled = bool(_cfg.LEN_AWARE)
-            len_policy = _cfg.LEN_POLICY
+            len_policy = str(_cfg.LEN_POLICY or "")
 
-            # 2) KV scoring
+            # ---------------------------------------------------
+            # KV-first ordering, then length refinement ONLY
+            # within equal KV-hit tiers (no KV overwrite).
+            # ---------------------------------------------------
+
+            # 2) Compute KV hits for the pool (or 0s if KV disabled)
+            kv_pairs: List[Tuple[str, int]] = []
+            pool_with_kv: List[Tuple[str, str, float, dict, int]] = []
+
             if kv_enabled:
-                kv_pairs = []
-                scored = []
                 for rid, prompt, ts, meta in pool:
                     kv_hits = prefix_len(endpoint, rid)
                     kv_pairs.append((rid, kv_hits))
-                    scored.append((rid, prompt, ts, meta, kv_hits))
+                    pool_with_kv.append((rid, prompt, ts, meta, kv_hits))
 
                 _log_req(
                     f"KV raw endpoint={endpoint}: {kv_pairs}",
                     level="full",
                 )
-
-                scored.sort(key=lambda x: (-x[4], x[0]))
-                ordered: List[Tuple[str, str, float, dict]] = [
-                    (r, p, t, m) for (r, p, t, m, _) in scored
-                ]
-
-                _log_req(
-                    f"KV sorted endpoint={endpoint}: "
-                    f"{[(r, kv) for (r, _p, _t, _m, kv) in scored]}",
-                    level="full",
-                )
             else:
-                ordered = list(pool)
+                for rid, prompt, ts, meta in pool:
+                    pool_with_kv.append((rid, prompt, ts, meta, 0))
 
-            # 3) Length-aware refinement
-            if len_enabled and len_policy:
-                refined = select_len_aware(ordered, _pred, len_policy)
-                ordered = refined
+            # 3) Group by kv_hits, descending (KV is always primary)
+            kv_to_items: Dict[int, List[Tuple[str, str, float, dict]]] = {}
+            for rid, prompt, ts, meta, kv_hits in pool_with_kv:
+                kv_to_items.setdefault(int(kv_hits), []).append((rid, prompt, ts, meta))
+
+            kv_levels = sorted(kv_to_items.keys(), reverse=True)
+
+            # Log KV tiering deterministically
+            if kv_enabled:
                 _log_req(
-                    f"Len policy='{len_policy}' ordering: "
-                    f"{[r for (r, _p, _t, _m) in refined]}",
+                    f"KV tiers endpoint={endpoint}: "
+                    f"{[(k, [r for (r, _p, _t, _m) in kv_to_items[k]]) for k in kv_levels]}",
                     level="full",
                 )
 
-            # 4) Choose
+            # 4) Build final ordered list: concatenate KV tiers, and (optionally)
+            #    apply length-aware ordering ONLY within each tier.
+            ordered: List[Tuple[str, str, float, dict]] = []
+            for kv_hits in kv_levels:
+                tier = kv_to_items[kv_hits]
+
+                # Stable deterministic baseline inside tier: req_id
+                tier.sort(key=lambda x: x[0])
+
+                if len_enabled and len_policy:
+                    tier_refined = select_len_aware(tier, _pred, len_policy)
+                    tier = tier_refined
+
+                    _log_req(
+                        f"Len refine within KV={kv_hits} policy='{len_policy}': "
+                        f"{[r for (r, _p, _t, _m) in tier]}",
+                        level="full",
+                    )
+
+                ordered.extend(tier)
+
+            if kv_enabled:
+                # For debugging: show final (rid, kv_hits) order
+                _log_req(
+                    f"KV-first final order endpoint={endpoint}: "
+                    f"{[(r, prefix_len(endpoint, r)) for (r, _p, _t, _m) in ordered]}",
+                    level="full",
+                )
+
+            # 5) Choose
             chosen_raw = ordered[:want]
             chosen_ids = [rid for (rid, _p, _t, _m) in chosen_raw]
-            chosen_kv_hits = [(rid, prefix_len(endpoint, rid)) for rid in chosen_ids]
+            chosen_kv_hits = [(rid, prefix_len(endpoint, rid)) for rid in chosen_ids] if kv_enabled else []
 
             _log_req(
                 f"chosen endpoint={endpoint}: {chosen_ids} kv_hits={chosen_kv_hits}",
                 level="summary",
             )
 
-            # 4a) Attach trace info (if enabled)
+            # 5a) Attach trace info (if enabled)
             chosen: List[Tuple[str, str, float, dict]] = []
             dispatch_ts = now_s()
             if getattr(_cfg, "TRACE_ENABLED", False):
@@ -220,7 +250,7 @@ class RouterState:
             for rid, _prompt, _ts, _meta in chosen:
                 inc_dispatch(endpoint)
 
-            # 5) Requeue leftovers
+            # 6) Requeue leftovers
             leftovers = ordered[want:]
             for rid, prompt, ts, meta in leftovers:
                 self._queue.appendleft((rid, prompt, ts, meta))
@@ -235,7 +265,7 @@ class RouterState:
                     level="full",
                 )
 
-            # 6) Build output
+            # 7) Build output
             items = [
                 JobItem(req_id=rid, prompt=prompt, t_enq_client=ts, meta=meta)
                 for (rid, prompt, ts, meta) in chosen

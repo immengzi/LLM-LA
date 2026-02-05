@@ -156,7 +156,7 @@ class HelmConfig:
       - sidecar batch size
     """
     # initial replicas for vLLM deployment (even when autoscaling is enabled)
-    replicas: int = 8
+    replicas: int = 4
 
     # sidecar batch size
     batch_size: int = 8
