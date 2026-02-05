@@ -1,0 +1,13 @@
+COMPUTED VALUES:
+autoscaling:
+  enabled: false
+  maxReplicaCount: 16
+  prometheusQuery: |
+    max(router_central_queue_length{namespace="vllm"})
+  threshold: "16"
+batchSize: 8
+replicas:
+  router: 1
+  vllm: 2
+router:
+  mode: push-random

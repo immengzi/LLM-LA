@@ -22,9 +22,19 @@
 #     - sidecar_received_requests_total (counter -> rate) -> sidecar_received_rps
 #     - sidecar_completed_requests_total (counter -> rate)-> sidecar_completed_rps
 #
+# NEW (thread/worker metrics):
+#   Sidecar (kv-sidecar / :9000):
+#     - sidecar_python_threads (gauge)                    -> sidecar_python_threads
+#     - sidecar_workers_total (gauge)                     -> sidecar_workers_total
+#     - sidecar_workers_busy (gauge)                      -> sidecar_workers_busy
+#
+#   vLLM wrapper exporter (vllm container / :9101):
+#     - vllm_threads (gauge)                              -> vllm_threads
+#
 # Key behaviors:
 #   1) vLLM metrics: logged per vLLM instance (:8200) row
 #   2) sidecar metrics: exported_endpoint=<pod name> remapped into vLLM (:8200) rows via kube_pod_info
+#      - AND pod-labeled sidecar gauges are also remapped into :8200 rows via pod->instance mapping.
 #   3) router metrics:
 #       - logged per router instance (:8080) row
 #       - also broadcast as aggregated scalars into every vLLM (:8200) row
@@ -293,7 +303,7 @@ CPU_ONLY_METRICS_CATALOG: List[Dict[str, str]] = [
     {"name": "vllm:spec_decode_num_emitted_tokens_total", "kind": "counter_rate", "field": "spec_tokens_emitted_per_sec"},
 ]
 
-# Router + Sidecar (minimal set)
+# Router + Sidecar + vLLM thread metrics
 ROUTER_SIDECAR_METRICS_CATALOG: List[Dict[str, str]] = [
     # Router (labeled by instance=:8080)
     {"name": "router_central_queue_length", "kind": "gauge", "field": "router_queue_length", "label": "instance"},
@@ -304,6 +314,17 @@ ROUTER_SIDECAR_METRICS_CATALOG: List[Dict[str, str]] = [
     {"name": "sidecar_queue_length", "kind": "gauge", "field": "sidecar_queue_length", "label": "exported_endpoint"},
     {"name": "sidecar_received_requests_total", "kind": "counter_rate", "field": "sidecar_received_rps", "label": "exported_endpoint"},
     {"name": "sidecar_completed_requests_total", "kind": "counter_rate", "field": "sidecar_completed_rps", "label": "exported_endpoint"},
+
+    # NEW: sidecar worker metrics (exported_endpoint=<pod name>)
+    {"name": "sidecar_workers_total", "kind": "gauge", "field": "sidecar_workers_total", "label": "exported_endpoint"},
+    {"name": "sidecar_workers_busy", "kind": "gauge", "field": "sidecar_workers_busy", "label": "exported_endpoint"},
+
+    # NEW: sidecar python thread count (usually has 'pod' label via Prometheus Operator relabeling)
+    # We remap pod -> vLLM (:8200) instance.
+    {"name": "sidecar_python_threads", "kind": "gauge", "field": "sidecar_python_threads", "label": "pod"},
+
+    # NEW: vLLM wrapper exporter thread count (metric itself includes pod="..."; remap pod -> :8200 instance)
+    {"name": "vllm_threads", "kind": "gauge", "field": "vllm_threads", "label": "pod"},
 ]
 
 
@@ -385,6 +406,12 @@ class _MetricsSampler(threading.Thread):
         self._sum_sidecar_q = 0.0
         self._sum_sidecar_recv_rps = 0.0
         self._sum_sidecar_comp_rps = 0.0
+
+        # NEW rollups: threads / workers
+        self._sum_vllm_threads = 0.0
+        self._sum_sidecar_py_threads = 0.0
+        self._sum_sidecar_workers_total = 0.0
+        self._sum_sidecar_workers_busy = 0.0
 
     def set_endpoints(self, endpoints: List[str]) -> None:
         with self._eps_lock:
@@ -702,7 +729,7 @@ class _MetricsSampler(threading.Thread):
             router_out_scalar = None
 
         # ----------------------------
-        # Catalog loop for all other metrics (vLLM + sidecar + dcgm)
+        # Catalog loop for all other metrics (vLLM + sidecar + dcgm + threads)
         # ----------------------------
         for spec in self._catalog:
             name = spec["name"]
@@ -720,13 +747,13 @@ class _MetricsSampler(threading.Thread):
                 m_sum = _vec_to_map_by_label(
                     raw.get(name + "_sum", []),
                     label_key,
-                    allowed=None if label_key == "pod" else allowed_for_this,
+                    allowed=None if label_key in ("pod", "exported_endpoint") else allowed_for_this,
                     model_name=self.model_name,
                 )
                 m_cnt = _vec_to_map_by_label(
                     raw.get(name + "_count", []),
                     label_key,
-                    allowed=None if label_key == "pod" else allowed_for_this,
+                    allowed=None if label_key in ("pod", "exported_endpoint") else allowed_for_this,
                     model_name=self.model_name,
                 )
                 m_val = _divide_maps(m_sum, m_cnt)
@@ -734,7 +761,7 @@ class _MetricsSampler(threading.Thread):
                 m_val = _vec_to_map_by_label(
                     raw.get(name, []),
                     label_key,
-                    allowed=None if label_key == "pod" else allowed_for_this,
+                    allowed=None if label_key in ("pod", "exported_endpoint") else allowed_for_this,
                     model_name=self.model_name,
                 )
 
@@ -852,6 +879,21 @@ class _MetricsSampler(threading.Thread):
         if s_sidecar_comp is not None:
             self._sum_sidecar_comp_rps += s_sidecar_comp
 
+        # NEW rollups: threads / workers
+        a_vllm_thr = _avg("vllm_threads")
+        a_sc_py_thr = _avg("sidecar_python_threads")
+        a_sc_w_total = _avg("sidecar_workers_total")
+        a_sc_w_busy = _avg("sidecar_workers_busy")
+
+        if a_vllm_thr is not None:
+            self._sum_vllm_threads += a_vllm_thr
+        if a_sc_py_thr is not None:
+            self._sum_sidecar_py_threads += a_sc_py_thr
+        if a_sc_w_total is not None:
+            self._sum_sidecar_workers_total += a_sc_w_total
+        if a_sc_w_busy is not None:
+            self._sum_sidecar_workers_busy += a_sc_w_busy
+
         self._samples += 1
 
     def _write_summary_file(self) -> Dict[str, Any]:
@@ -877,6 +919,12 @@ class _MetricsSampler(threading.Thread):
                     "avg_sidecar_queue_length": self._sum_sidecar_q / self._samples,
                     "sum_sidecar_received_rps": self._sum_sidecar_recv_rps / self._samples,
                     "sum_sidecar_completed_rps": self._sum_sidecar_comp_rps / self._samples,
+
+                    # NEW: threads / workers
+                    "avg_vllm_threads": self._sum_vllm_threads / self._samples,
+                    "avg_sidecar_python_threads": self._sum_sidecar_py_threads / self._samples,
+                    "avg_sidecar_workers_total": self._sum_sidecar_workers_total / self._samples,
+                    "avg_sidecar_workers_busy": self._sum_sidecar_workers_busy / self._samples,
                 },
             }
 

@@ -10,9 +10,29 @@ from .config import get_config
 from .local_queue import LocalQueue
 from .router_client import RouterPullWorker
 from .result_poster import ResultPoster
-from .metrics import inc_completed
+from .metrics import inc_completed, set_sidecar_workers_busy
 
 _cfg = get_config()
+
+# ------------------------------------------------------------
+# process-wide busy counter for sidecar workers
+# ------------------------------------------------------------
+_BUSY_LOCK = threading.Lock()
+_BUSY_N = 0
+
+
+def _busy_inc() -> int:
+    global _BUSY_N
+    with _BUSY_LOCK:
+        _BUSY_N += 1
+        return _BUSY_N
+
+
+def _busy_dec() -> int:
+    global _BUSY_N
+    with _BUSY_LOCK:
+        _BUSY_N = max(0, _BUSY_N - 1)
+        return _BUSY_N
 
 
 class VLLMWorker:
@@ -41,11 +61,11 @@ class VLLMWorker:
         self,
         local_q: LocalQueue,
         pull_worker: Optional[RouterPullWorker] = None,
-        result_poster: Optional[ResultPoster] = None,  # NEW
+        result_poster: Optional[ResultPoster] = None,
     ):
         self.local_q = local_q
         self._pull_worker = pull_worker
-        self._result_poster = result_poster  # NEW
+        self._result_poster = result_poster
 
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
@@ -113,6 +133,15 @@ class VLLMWorker:
                 idle_spins = 0
 
                 req_id, prompt, meta = item
+
+                # --------------------------------------------------------
+                # Mark this worker as busy (process-wide counter)
+                # --------------------------------------------------------
+                try:
+                    busy_now = _busy_inc()
+                    set_sidecar_workers_busy(_cfg.CONTAINER_NAME, busy_now)
+                except Exception:
+                    pass
 
                 # --------------------------------------------------------
                 # Trace: dequeue timestamp + queue snapshot
@@ -294,9 +323,14 @@ class VLLMWorker:
                     # Mark job done
                     self.local_q.task_done()
 
-                    # ----------------------------------------------------
+                    # Decrement busy counter and update metric
+                    try:
+                        busy_now = _busy_dec()
+                        set_sidecar_workers_busy(_cfg.CONTAINER_NAME, busy_now)
+                    except Exception:
+                        pass
+
                     # Busy-path capacity top-up
-                    # ----------------------------------------------------
                     if self._pull_worker is not None:
                         try:
                             self._pull_worker.pull_if_capacity()

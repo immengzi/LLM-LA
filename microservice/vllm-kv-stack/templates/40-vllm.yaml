@@ -16,6 +16,7 @@ spec:
         app: vllm-qwen
     spec:
       restartPolicy: Always
+      shareProcessNamespace: true
       containers:
         - name: vllm
           image: quay.io/ascend/vllm-ascend:v0.11.0rc0
@@ -25,9 +26,13 @@ spec:
             - -c
           args:
             - |
+              set -euo pipefail
+
               echo "--- ASCEND_TOOLKIT_HOME before sourcing: [$ASCEND_TOOLKIT_HOME]"
               source /usr/local/Ascend/ascend-toolkit/set_env.sh
               export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
+
+              # --- start vLLM in background so we can launch a tiny exporter too
               python -m vllm.entrypoints.openai.api_server \
                 --model /model \
                 --tokenizer /model \
@@ -39,7 +44,62 @@ spec:
                 --max-num-seqs {{ .Values.batchSize }} \
                 --prefix-caching-hash-algo sha256_cbor \
                 --host 0.0.0.0 \
-                --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}'
+                --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
+                &
+              VLLM_PID=$!
+              echo "[vllm-wrapper] vLLM PID=$VLLM_PID"
+
+              # --- tiny Prometheus exporter on :9101 (serves ONLY /metrics)
+              #     Exposes ONE metric: vllm_threads{pod="<podname>"} <N>
+              VLLM_PID="$VLLM_PID" POD_NAME="$POD_NAME" python - <<'PY' &
+              import os
+              import time
+              from http.server import BaseHTTPRequestHandler, HTTPServer
+
+              PID = int(os.environ["VLLM_PID"])
+              POD = os.environ.get("POD_NAME", "unknown")
+              PORT = 9101
+
+              def threads(pid: int):
+                  try:
+                      return len(os.listdir(f"/proc/{pid}/task"))
+                  except Exception:
+                      return None
+
+              # Wait until /proc/PID exists (avoid startup race)
+              for _ in range(120):
+                  if os.path.exists(f"/proc/{PID}"):
+                      break
+                  time.sleep(0.25)
+
+              class H(BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      if self.path != "/metrics":
+                          self.send_response(404)
+                          self.end_headers()
+                          return
+
+                      n = threads(PID)
+                      if n is None:
+                          body = "# vLLM pid not visible\n"
+                      else:
+                          # IMPORTANT: do NOT produce '{{' '}}' anywhere (Helm will try to template it)
+                          body = 'vllm_threads{pod="%s"} %d\n' % (POD, n)
+
+                      self.send_response(200)
+                      self.send_header("Content-Type", "text/plain; version=0.0.4")
+                      self.end_headers()
+                      self.wfile.write(body.encode("utf-8"))
+
+                  def log_message(self, *args):
+                      pass
+
+              print(f"[vllm-thread-exporter] listening on :{PORT} (GET /metrics), pid={PID}, pod={POD}", flush=True)
+              HTTPServer(("0.0.0.0", PORT), H).serve_forever()
+              PY
+
+              # keep container alive as long as vLLM lives
+              wait "$VLLM_PID"
           env:
             - name: HF_HUB_OFFLINE
               value: "1"
@@ -61,6 +121,9 @@ spec:
               protocol: TCP
             - containerPort: 5557
               name: kvpub
+              protocol: TCP
+            - containerPort: 9101
+              name: vllmthr
               protocol: TCP
           volumeMounts:
             - name: model

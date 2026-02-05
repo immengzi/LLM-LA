@@ -52,10 +52,10 @@ class SidecarConfig:
     VLLM_TIMEOUT_S: float = 30.0
 
     # ------------------------------------------------
-    # Result transport (NEW — backward compatible)
+    # Result transport (kept — backward compatible)
     # ------------------------------------------------
     # sync        -> POST /result (old behavior)
-    # submit_ack -> POST /result_submit (immediate ACK)
+    # submit_ack  -> POST /result_submit (immediate ACK)
     RESULT_TRANSPORT_MODE: str = "sync"
 
     # Path used when RESULT_TRANSPORT_MODE=submit_ack
@@ -131,7 +131,7 @@ def get_config() -> SidecarConfig:
     cfg.ROUTER_RESULT_TIMEOUT_S = float(os.getenv("ROUTER_RESULT_TIMEOUT_S", cfg.ROUTER_RESULT_TIMEOUT_S))
 
     # ------------------------------------------------
-    # Result transport (NEW)
+    # Result transport (kept)
     # ------------------------------------------------
     cfg.RESULT_TRANSPORT_MODE = os.getenv(
         "RESULT_TRANSPORT_MODE", cfg.RESULT_TRANSPORT_MODE
