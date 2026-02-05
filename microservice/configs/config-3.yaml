@@ -98,7 +98,7 @@ transport:
 
 helm:
   # vLLM replica count (maps to .Values.replicas.vllm)
-  replicas: 8
+  replicas: 2
 
   # global batch size (maps to .Values.batchSize)
   batch_size: 8
