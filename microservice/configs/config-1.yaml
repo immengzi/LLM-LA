@@ -2,7 +2,7 @@
 # Clean test config (explicit knobs, values close to example_config.yaml)
 
 router_url: "http://7.242.102.243:30080"
-total_requests: 10000
+total_requests: 200
 prompt_source: "hf-lmsys"
 
 
@@ -31,7 +31,7 @@ hf_lmsys:
 load_pattern:
   pattern: "det"
 
-  rate_rps: 1
+  rate_rps: 3
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -94,3 +94,21 @@ transport:
   topic: "results"
   run_id: null
   idle_timeout_s: 600.0
+
+
+helm:
+  # vLLM replica count (maps to .Values.replicas.vllm)
+  replicas: 8
+
+  # global batch size (maps to .Values.batchSize)
+  batch_size: 8
+
+  # autoscaling controls (map to .Values.autoscaling.*)
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 16
+  autoscaling_threshold: "16"
+
+  # Prometheus query used by KEDA trigger (maps to .Values.autoscaling.prometheusQuery)
+  autoscaling_prometheus_query: |
+    max(router_central_queue_length{namespace="vllm"})

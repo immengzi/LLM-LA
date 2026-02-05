@@ -3,7 +3,7 @@ apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
   name: vllm-qwen-scale-by-router-queue
-  namespace: vllm
+  namespace: {{ .Release.Namespace }}
 spec:
   scaleTargetRef:
     kind: Deployment

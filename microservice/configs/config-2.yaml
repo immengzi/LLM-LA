@@ -96,3 +96,19 @@ transport:
   idle_timeout_s: 600.0
 
 
+helm:
+  # vLLM replica count (maps to .Values.replicas.vllm)
+  replicas: 8
+
+  # global batch size (maps to .Values.batchSize)
+  batch_size: 8
+
+  # autoscaling controls (map to .Values.autoscaling.*)
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 16
+  autoscaling_threshold: "16"
+
+  # Prometheus query used by KEDA trigger (maps to .Values.autoscaling.prometheusQuery)
+  autoscaling_prometheus_query: |
+    max(router_central_queue_length{namespace="vllm"})

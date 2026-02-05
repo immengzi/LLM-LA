@@ -87,7 +87,6 @@ def main():
     results_zmq = getattr(tcfg, "results_zmq", None) if tcfg is not None else None
     topic = getattr(tcfg, "topic", "") if tcfg is not None else ""
     run_id = getattr(tcfg, "run_id", None) if tcfg is not None else None
-    grace_s = getattr(tcfg, "grace_s", 30.0) if tcfg is not None else 30.0
 
     print(
         f"[client] router-url={cfg.router_url}, "
@@ -103,7 +102,7 @@ def main():
     if str(transport_mode).lower() == "async_pubsub":
         print(
             f"[client] async_pubsub: submit_path={submit_path} "
-            f"results_zmq={results_zmq} topic={topic!r} run_id={run_id!r} grace_s={grace_s}"
+            f"results_zmq={results_zmq} topic={topic!r} run_id={run_id!r}"
         )
 
     # Initialize experiment directory + logger
@@ -195,7 +194,6 @@ def main():
         "results_zmq": results_zmq,
         "topic": str(topic),
         "run_id": run_id,
-        "grace_s": float(grace_s) if grace_s is not None else None,
     }
     try:
         with (Path(exp_dir) / "run_summary.json").open("w", encoding="utf-8") as f:

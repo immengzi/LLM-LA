@@ -5,9 +5,9 @@
 #
 # TRANSPORT MODES:
 #   - sync (default): each thread calls POST /enqueue and blocks for the response.
-#   - async_pubsub: each thread calls POST /submit (submit+ack) and returns immediately.
-#                   A single ZMQ SUB listener receives completion events and emits the
-#                   SAME per-request log schema as sync mode (so analysis stays unchanged).
+#   - async_pubsub: submits requests on schedule from a SINGLE scheduler loop
+#                   (no thread-per-request), while a single ZMQ SUB listener receives
+#                   completion events and emits the SAME per-request log schema as sync mode.
 #
 # Termination policy for async_pubsub (preferred + backstop):
 #   1) Preferred: Prometheus fleet-idle detection:
@@ -175,7 +175,7 @@ def _emit_completion_from_result(
     Emit stdout + optional logger record, using the EXACT SAME schema as sync mode.
     This is shared by:
       - pubsub listener (normal)
-      - async submit thread (race-fix path: orphan result arrived before pending)
+      - async submitter loop (race-fix path: orphan result arrived before pending)
     """
     t0 = float(info["t0_wall"])
     t1 = time.time()
@@ -397,119 +397,6 @@ def _request_thread_sync(
         session.close()
 
 
-def _request_thread_async_submit(
-    task: RequestTask,
-    router_url: str,
-    submit_path: str,
-    gen_cfg: GenerationConfig,
-    t0_mono: float,
-    pending: Dict[str, Dict[str, Any]],
-    pending_lock: threading.Lock,
-    # orphan buffer for race where SUB result arrives before pending[rid] is set
-    orphans: Dict[str, Dict[str, Any]],
-    orphans_lock: threading.Lock,
-    orphan_ttl_s: float,
-    done_counter: Dict[str, int],
-    output_log_mode: str,
-    print_trace: bool,
-    # run_id forwarding so router can publish to results.<run_id>
-    run_id: Optional[str],
-    # idle-timeout progress tracking
-    progress: Dict[str, float],
-    progress_lock: threading.Lock,
-    logger: Optional[ExperimentLogger] = None,
-):
-    """
-    Async_pubsub worker:
-      - Sleep until scheduled timestamp
-      - Submit to /submit (ack immediately)
-      - Store local bookkeeping by req_id so the SUB listener can emit the SAME logs later.
-      - Race fix: if result arrived early (in orphans), emit immediately.
-    """
-    session = requests.Session()
-    try:
-        now = time.monotonic()
-        delay = task.ts_mono - now
-        if delay > 0:
-            time.sleep(delay)
-
-        # Per-second logging at actual send time
-        now_send = time.monotonic()
-        rel = now_send - t0_mono
-        sec = int(rel)
-        with _sec_lock:
-            _sec_counts[sec] = _sec_counts.get(sec, 0) + 1
-            count_in_sec = _sec_counts[sec]
-        print(f"[load_runner][SEC] t=[{sec},{sec+1}) sent_so_far_in_sec={count_in_sec}")
-
-        meta = {
-            "max_tokens": int(gen_cfg.max_tokens),
-            "temperature": float(gen_cfg.temperature),
-            "length_mode": gen_cfg.length_mode,
-            "enable_thinking": bool(gen_cfg.think),
-        }
-        if gen_cfg.target_output_tokens is not None:
-            meta["target_output_tokens"] = int(gen_cfg.target_output_tokens)
-        if gen_cfg.target_total_tokens is not None:
-            meta["target_total_tokens"] = int(gen_cfg.target_total_tokens)
-
-        print(f"[client][SEND][T{task.idx}] idx={task.idx} planned_ts={task.ts_mono:.6f}")
-
-        t0 = time.time()
-        rid = submit_one(session, router_url, submit_path, task.prompt, meta, run_id=run_id)
-
-        info = {
-            "idx": task.idx,
-            "req_id": rid,
-            "prompt": task.prompt,
-            "planned_ts_mono": task.ts_mono,
-            "actual_send_ts_mono": now_send,
-            "t0_wall": t0,
-            "logger": logger,  # stored for convenience (could be None)
-        }
-
-        # Store pending first
-        with pending_lock:
-            pending[rid] = info
-
-        # Race fix: if we already received this rid, consume it and emit now.
-        orphan_entry = None
-        with orphans_lock:
-            orphan_entry = orphans.pop(rid, None)
-
-        if orphan_entry is not None:
-            # orphan_entry shape: {"t_recv_wall": float, "result": Any}
-            t_recv = float(orphan_entry.get("t_recv_wall", 0.0))
-            if (time.time() - t_recv) <= float(orphan_ttl_s):
-                with pending_lock:
-                    pending.pop(rid, None)
-
-                _emit_completion_from_result(
-                    rid=rid,
-                    result=orphan_entry.get("result"),
-                    info=info,
-                    done_counter=done_counter,
-                    output_log_mode=output_log_mode,
-                    print_trace=print_trace,
-                )
-                # IMPORTANT: update idle-timeout progress only when we actually EMIT a completion
-                _note_last_recv(progress, progress_lock)
-
-    except Exception as e:
-        print(f"[client][RECV][T{task.idx}] ✗ ERROR idx={task.idx}: {e}")
-        if logger is not None:
-            err_record: Dict[str, Any] = {
-                "idx": task.idx,
-                "error": str(e),
-                "prompt": task.prompt,
-                "planned_ts_mono": task.ts_mono,
-                "send_failed": True,
-            }
-            logger.log_request(err_record)
-    finally:
-        session.close()
-
-
 def _pubsub_listener_thread(
     *,
     results_zmq: str,
@@ -534,9 +421,8 @@ def _pubsub_listener_thread(
     Single SUB connection that receives completion events.
 
     Race to fix:
-      Result may arrive on SUB before the submit thread has inserted pending[rid].
-      Previously you dropped it (info is None), permanently losing that completion.
-      Now we stash it in `orphans` and let submit threads pick it up.
+      Result may arrive on SUB before the submitter loop has inserted pending[rid].
+      We stash it in `orphans` and let the submitter consume it immediately.
 
     Expected wire format:
       - multipart: [topic, json_bytes] OR single-frame json_bytes
@@ -721,7 +607,7 @@ def run_open_loop_load(
     transport: Any = None,
 ):
     """
-    Execute a precomputed schedule using one thread per request.
+    Execute a precomputed schedule.
 
     transport:
       - None or TransportConfig(mode="sync") => existing /enqueue behavior.
@@ -822,7 +708,7 @@ def run_open_loop_load(
         t_w1 = time.time()
         print(f"[load_runner] warmup done in {t_w1 - t_w0:.3f}s")
 
-    print(f"[load_runner] Starting thread-per-request mode for {total} requests (transport_mode={mode})")
+    print(f"[load_runner] Starting load for {total} requests (transport_mode={mode})")
 
     if not plan_times:
         print("[load_runner] Empty schedule, nothing to send.")
@@ -833,7 +719,7 @@ def run_open_loop_load(
     t0_plan = plan_times[0]
     adj_plan_times = [t0_mono + (ts - t0_plan) for ts in plan_times]
 
-    # SYNC path: unchanged behavior
+    # SYNC path: unchanged behavior (thread-per-request)
     if mode != "async_pubsub":
         threads: List[threading.Thread] = []
         t0_wall = time.time()
@@ -907,40 +793,94 @@ def run_open_loop_load(
     )
     sub_t.start()
 
-    # Submit threads (short-lived connections)
-    threads = []
+    # ------------------------------------------------------------------
+    # SUBMISSION: single scheduler loop (NO thread-per-request)
+    # ------------------------------------------------------------------
     t0_wall = time.time()
+    session = requests.Session()
+    try:
+        for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
+            # sleep until scheduled time
+            now = time.monotonic()
+            delay = ts_mono - now
+            if delay > 0:
+                time.sleep(delay)
 
-    for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
-        task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
-        t = threading.Thread(
-            target=_request_thread_async_submit,
-            args=(
-                task,
-                router_url,
-                submit_path,
-                gen_cfg,
-                t0_mono,
-                pending,
-                pending_lock,
-                orphans,
-                orphans_lock,
-                float(orphan_ttl_s),
-                done_counter,
-                output_log_mode,
-                print_trace,
-                run_id,
-                progress,
-                progress_lock,
-                logger,
-            ),
-            daemon=True,
-        )
-        t.start()
-        threads.append(t)
+            # Per-second logging at actual send time
+            now_send = time.monotonic()
+            rel = now_send - t0_mono
+            sec = int(rel)
+            with _sec_lock:
+                _sec_counts[sec] = _sec_counts.get(sec, 0) + 1
+                count_in_sec = _sec_counts[sec]
+            print(f"[load_runner][SEC] t=[{sec},{sec+1}) sent_so_far_in_sec={count_in_sec}")
 
-    for t in threads:
-        t.join()
+            meta = {
+                "max_tokens": int(gen_cfg.max_tokens),
+                "temperature": float(gen_cfg.temperature),
+                "length_mode": gen_cfg.length_mode,
+                "enable_thinking": bool(gen_cfg.think),
+            }
+            if gen_cfg.target_output_tokens is not None:
+                meta["target_output_tokens"] = int(gen_cfg.target_output_tokens)
+            if gen_cfg.target_total_tokens is not None:
+                meta["target_total_tokens"] = int(gen_cfg.target_total_tokens)
+
+            print(f"[client][SEND][T{idx}] idx={idx} planned_ts={ts_mono:.6f}")
+
+            t0 = time.time()
+            try:
+                rid = submit_one(session, router_url, submit_path, prompt, meta, run_id=run_id)
+            except Exception as e:
+                print(f"[client][RECV][T{idx}] ✗ ERROR idx={idx}: {e}")
+                if logger is not None:
+                    err_record: Dict[str, Any] = {
+                        "idx": idx,
+                        "error": str(e),
+                        "prompt": prompt,
+                        "planned_ts_mono": ts_mono,
+                        "send_failed": True,
+                    }
+                    logger.log_request(err_record)
+                continue
+
+            info = {
+                "idx": idx,
+                "req_id": rid,
+                "prompt": prompt,
+                "planned_ts_mono": ts_mono,
+                "actual_send_ts_mono": now_send,
+                "t0_wall": t0,
+                "logger": logger,  # stored for convenience (could be None)
+            }
+
+            # Store pending
+            with pending_lock:
+                pending[rid] = info
+
+            # Race fix: if we already received this rid, consume it and emit now.
+            orphan_entry = None
+            with orphans_lock:
+                orphan_entry = orphans.pop(rid, None)
+
+            if orphan_entry is not None:
+                t_recv = float(orphan_entry.get("t_recv_wall", 0.0))
+                if (time.time() - t_recv) <= float(orphan_ttl_s):
+                    with pending_lock:
+                        pending.pop(rid, None)
+
+                    _emit_completion_from_result(
+                        rid=rid,
+                        result=orphan_entry.get("result"),
+                        info=info,
+                        done_counter=done_counter,
+                        output_log_mode=output_log_mode,
+                        print_trace=print_trace,
+                    )
+                    _note_last_recv(progress, progress_lock)
+
+    finally:
+        session.close()
 
     # After all submits: wait while completions keep arriving.
     # Stop condition (whichever happens first):

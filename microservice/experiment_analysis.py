@@ -255,3 +255,12 @@ def load_experiment_prom_samples(
         df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
 
     return df
+
+def experiments_from_series(series_ids, series_size=4, start_exp_id=1):
+    experiments = []
+    for s in sorted(series_ids):
+        if s < 0:
+            raise ValueError("series_ids must be non-negative")
+        start = start_exp_id + s * series_size
+        experiments.extend(range(start, start + series_size))
+    return experiments

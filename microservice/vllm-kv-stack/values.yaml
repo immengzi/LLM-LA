@@ -1,6 +1,6 @@
 replicas:
   router: 1
-  vllm: 8
+  vllm: 1
 
 router:
   # pull | push-rr | push-random | push-leastq

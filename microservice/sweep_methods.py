@@ -282,42 +282,50 @@ def cli(master_config: str) -> None:
         click.echo(f"[sweep] job {i}/{len(jobs)}  config={cfg_path.name}  method={method}")
         click.echo("=" * 90)
 
-        # Load client config to read Helm knobs (NEW)
+        # Load client config to read Helm knobs
         cfg = load_config(str(cfg_path))
         h = getattr(cfg, "helm", None)
         if h is None:
             raise click.ClickException(f"Config has no 'helm' section: {cfg_path}")
 
-        # ---- EXACT OLD BEHAVIOR: clean cluster before each experiment ----
+        # ---- clean cluster before each experiment ----
         _helm_uninstall(release=release, namespace=namespace)
 
         # ---- Deploy via Helm using cfg.helm knobs ----
         #
-        # IMPORTANT: these keys must match your chart values.yaml!
+        # IMPORTANT: these keys MUST match vllm-kv-stack/values.yaml
         set_values: Dict[str, object] = {
             # routing method for router
             "router.mode": method,
 
-            # init replicas (needed even if autoscaling is enabled)
-            "vllm.replicas": int(h.replicas),
+            # vLLM replicas (base when autoscaling disabled)
+            "replicas.vllm": int(h.replicas),
 
-            # sidecar batching
-            "sidecar.batchSize": int(h.batch_size),
+            # global batch size knob in the chart
+            "batchSize": int(h.batch_size),
         }
 
         # Autoscaling toggle + parameters
         set_values["autoscaling.enabled"] = bool(h.autoscaling_enabled)
 
         if bool(h.autoscaling_enabled):
+            # If user provided a min, use it; otherwise keep null and let chart default to replicas.vllm
+            # (Your HelmConfig currently has autoscaling_min as an int; if you want "null" from client,
+            #  you can extend HelmConfig to allow Optional[int]. For now we always set an int.)
             set_values["autoscaling.minReplicaCount"] = int(h.autoscaling_min)
+
             set_values["autoscaling.maxReplicaCount"] = int(h.autoscaling_max)
             set_values["autoscaling.threshold"] = str(h.autoscaling_threshold)
 
             # Query can be multiline; helm --set needs a single line.
-            # We normalize whitespace while preserving semantics.
             q = str(h.autoscaling_prometheus_query or "").strip()
             q = " ".join(q.split())
             set_values["autoscaling.prometheusQuery"] = q
+
+        # Debug: show exactly what we're setting
+        click.echo("[sweep] helm --set values:")
+        for k in sorted(set_values):
+            click.echo(f"  - {k}={_coerce_set_value(set_values[k])}")
 
         _helm_install_or_upgrade(
             release=release,
@@ -326,6 +334,14 @@ def cli(master_config: str) -> None:
             values_file=values_file if values_file.is_file() else None,
             set_values=set_values,
         )
+
+        # Debug: snapshot what Helm stored as effective values
+        try:
+            out = _helm(["get", "values", release, "-n", namespace, "--all"], capture=True).stdout or ""
+            (REPO_ROOT / "helm-effective-values.yaml").write_text(out, encoding="utf-8")
+            click.echo("[sweep] wrote helm-effective-values.yaml")
+        except Exception as e:
+            click.echo(f"[sweep] WARN: failed to helm get values: {e}")
 
         _wait_ready(namespace)
 
@@ -348,6 +364,11 @@ def cli(master_config: str) -> None:
             continue
 
         shutil.copy2(REPO_ROOT / "vllm-k8s.yaml", exp_dir / "vllm-k8s.yaml")
+        # also snapshot effective values alongside the manifest
+        hv_path = REPO_ROOT / "helm-effective-values.yaml"
+        if hv_path.is_file():
+            shutil.copy2(hv_path, exp_dir / "helm-effective-values.yaml")
+
         meta = {
             "client_config": str(cfg_path),
             "router_method": method,
