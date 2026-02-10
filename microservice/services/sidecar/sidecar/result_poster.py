@@ -57,7 +57,7 @@ class ResultPoster:
         self._result_url = self._resolve_result_url()
 
     # ----------------------------
-    # URL selection (NEW)
+    # URL selection
     # ----------------------------
 
     def _resolve_result_url(self) -> str:

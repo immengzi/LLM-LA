@@ -158,6 +158,7 @@ spec:
     spec:
       containers:
         - name: redis
+          # image: redis:7-alpine
           image: redis:7-alpine
           args:
             - redis-server
@@ -205,6 +206,7 @@ spec:
     spec:
       containers:
         - name: vllm-cpu-hash
+          # image: vllm-cpu-hash:latest
           image: vllm-cpu-hash:latest
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
@@ -264,6 +266,7 @@ spec:
       serviceAccountName: kv-router-sa
       containers:
         - name: router
+          # image: kv-router:latest
           image: kv-router:latest
           imagePullPolicy: IfNotPresent
           env:
@@ -305,12 +308,16 @@ spec:
             - name: HASH_TIMEOUT_S
               value: "2.0"
 
+            # ---- Helm-controlled routing knobs ----
             - name: KV_AWARE
               value: "true"
+
             - name: LEN_AWARE
               value: "true"
+
             - name: LEN_POLICY
               value: "short_first"
+            # --------------------------------------
 
             - name: POOL_FACTOR
               value: "4"
@@ -318,7 +325,7 @@ spec:
               value: "1024"
 
             - name: ROUTER_MODE
-              value: "push-random"
+              value: "pull"
 
             - name: SIDECAR_PORT
               value: "9000"
@@ -367,12 +374,14 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 20
+
           resources:
             requests:
               cpu: "250m"
@@ -388,7 +397,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 2
+  replicas: 8
   selector:
     matchLabels:
       app: vllm-qwen
@@ -401,6 +410,7 @@ spec:
       shareProcessNamespace: true
       containers:
         - name: vllm
+          # image: quay.io/ascend/vllm-ascend:v0.11.0rc0
           image: quay.io/ascend/vllm-ascend:v0.11.0rc0
           imagePullPolicy: IfNotPresent
           command:
@@ -546,6 +556,7 @@ spec:
               ephemeral-storage: "4Gi"
 
         - name: kv-sidecar
+          # image: kv-sidecar:latest
           image: kv-sidecar:latest
           imagePullPolicy: IfNotPresent
           env:
@@ -563,7 +574,7 @@ spec:
               value: "8"
 
             - name: SIDECAR_MODE
-              value: "push"
+              value: "pull"
 
             - name: PULL_INTERVAL_S
               value: "0.05"

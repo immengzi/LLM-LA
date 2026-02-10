@@ -15,7 +15,8 @@ spec:
     spec:
       containers:
         - name: vllm-cpu-hash
-          image: vllm-cpu-hash:latest
+          # image: vllm-cpu-hash:latest
+          image: {{ include "vllmkv.image" (list . .Values.images.cpuHash) }}
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
           command:

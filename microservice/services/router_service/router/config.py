@@ -30,7 +30,7 @@ class RouterConfig:
     KV_WATCH_INTERVAL_S: float = 1.0
     KV_WATCH_MAX_KEYS: int = 200
     KV_DISCOVERY_INTERVAL_S: float = 5.0
-    KV_LOG_KEYS: str = "summary"  # off | summary | full
+    KV_LOG_KEYS: str = "off"  # off | summary | full
 
     # Routing knobs
     KV_AWARE: bool = True
@@ -64,7 +64,7 @@ class RouterConfig:
     POLL_CLEANUP_INTERVAL_S: float = 1.0
 
     # --------------------------------------------------------------------
-    # Sidecar -> router result ingestion transport (NEW; backward compatible)
+    # Sidecar -> router result ingestion transport
     # --------------------------------------------------------------------
     # "sync":       sidecar POSTs to /result (old behavior)
     # "submit_ack": sidecar POSTs to RESULT_SUBMIT_PATH and router ACKs immediately
@@ -115,6 +115,13 @@ class RouterConfig:
 
 def _norm_mode(s: str) -> str:
     return str(s or "").strip().lower()
+
+
+def _norm_log_mode(s: str) -> str:
+    s = str(s or "").strip().lower()
+    if s not in ("off", "summary", "full"):
+        return "off"
+    return s
 
 
 def get_config() -> RouterConfig:
@@ -213,8 +220,8 @@ def get_config() -> RouterConfig:
     # Push leastq
     cfg.PUSH_LEASTQ_MODE = os.getenv("PUSH_LEASTQ_MODE", cfg.PUSH_LEASTQ_MODE)
 
-    # Logging verbosity
-    cfg.REQ_LOG_MODE = os.getenv("REQ_LOG_MODE", cfg.REQ_LOG_MODE)
+    # Logging verbosity (normalize to avoid surprising behavior)
+    cfg.REQ_LOG_MODE = _norm_log_mode(os.getenv("REQ_LOG_MODE", cfg.REQ_LOG_MODE))
 
     # TRACE overrides
     if "TRACE_ENABLED" in os.environ:

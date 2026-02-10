@@ -1,3 +1,4 @@
+# router/push_router.py
 # -*- coding: utf-8 -*-
 import os
 import random
@@ -11,6 +12,7 @@ from kubernetes import client as k8s_client, config as k8s_config
 
 from .config import get_config
 from .metrics import inc_dispatch
+from .kv_aware import get_request_blocks
 
 _cfg = get_config()
 
@@ -221,6 +223,9 @@ class PushRouter:
             tr.setdefault("endpoint", ep)
             tr.setdefault("router_mode", self.mode)
             tr["t_dispatch_router"] = dispatch_ts
+
+            if _cfg.KV_AWARE:
+                tr["kv_block_hashes"] = get_request_blocks(req_id)
 
             # Record queue length at dispatch (only meaningful in leastq-local mode)
             if logical_before is not None:

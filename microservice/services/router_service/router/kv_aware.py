@@ -5,6 +5,9 @@ Minimal KV-aware state for router:
 - register_request_blocks(req_id, [block_hashes])
 - register_block_owners(block_hash, [endpoint_urls])
 - prefix_len(endpoint_url, req_id) -> int
+
+Debug helpers:
+- get_request_blocks(req_id) -> List[int]
 """
 
 from typing import Dict, List, Iterable
@@ -21,6 +24,15 @@ _LOCK = RLock()
 def register_request_blocks(req_id: str, block_hashes: Iterable[int]) -> None:
     with _LOCK:
         _REQ_BLOCKS[req_id] = list(block_hashes)
+
+
+def get_request_blocks(req_id: str) -> List[int]:
+    """
+    Debug helper: return a copy of the request's block_hash list.
+    """
+    with _LOCK:
+        blocks = _REQ_BLOCKS.get(req_id) or []
+        return list(blocks)
 
 
 def register_block_owners(block_hash: int, owners: Iterable[str]) -> None:
