@@ -15,7 +15,8 @@ spec:
     spec:
       containers:
         - name: redis
-          image: redis:7-alpine
+          # image: redis:7-alpine
+          image: {{ include "vllmkv.image" (list . .Values.images.redis) }}
           args:
             - redis-server
             - --save

@@ -2,22 +2,43 @@ replicas:
   router: 1
   vllm: 1
 
+# Global override: if set, ALL images are rewritten to use this registry
+global:
+  imageRegistry: "7.242.102.243:32000"  # set "" to disable rewriting
+  # imageRegistry: ""  # set "" to disable rewriting
+
+images:
+  router: kv-router:latest
+  sidecar: kv-sidecar:latest
+  vllm: quay.io/ascend/vllm-ascend:v0.11.0rc0
+  cpuHash: vllm-cpu-hash:latest
+  redis: redis:7-alpine
+
 router:
   # pull | push-rr | push-random | push-leastq
   mode: pull
+
+  # Enable/disable KV-aware routing
+  kvAware: true
+
+  # Enable/disable length-aware batching/scheduling
+  lenAware: true
+
+  # Used only when lenAware=true
+  # short_first | long_first | even_short_long
+  lenPolicy: short_first
 
 batchSize: 8
 
 autoscaling:
   enabled: false
 
-  # Initial replicas when autoscaling is enabled.
-  # If null, it defaults to replicas.vllm (so you only set one number).
   minReplicaCount: null
-
   maxReplicaCount: 16
-
   threshold: "16"
 
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
+
+modelVolume:
+  create: false

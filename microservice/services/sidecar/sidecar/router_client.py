@@ -5,7 +5,7 @@ import time
 from typing import Dict, Any
 
 import requests
-from requests.adapters import HTTPAdapter  # NEW
+from requests.adapters import HTTPAdapter
 
 from .config import get_config
 from .local_queue import LocalQueue

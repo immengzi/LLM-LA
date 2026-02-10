@@ -1,4 +1,4 @@
-# config.py  (FULL MODIFIED: old config + minimal Helm section + idle-zero-running knob)
+# config.py
 
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ class TransportConfig:
     # If no new completion arrives in that idle window, mark remaining pending as LOST and terminate.
     idle_timeout_s: float = 60.0
 
-    # NEW: Prometheus fleet-idle detector (preferred).
+    # Prometheus fleet-idle detector (preferred).
     # If vllm:num_requests_running is ZERO across ALL vLLM instances continuously
     # for this many seconds while the experiment still has pending requests, we treat
     # those pending requests as LOST and terminate.
@@ -141,7 +141,7 @@ class TransportConfig:
 
 
 # =========================
-# Helm knobs for sweeps (MINIMAL, only what you asked)
+# Helm knobs for sweeps (MINIMAL, only what you asked + router kv/len toggles)
 # =========================
 
 @dataclass
@@ -154,6 +154,7 @@ class HelmConfig:
       - initial vLLM replicas
       - autoscaling enabled + key autoscaling fields
       - sidecar batch size
+      - router KV-aware and LEN-aware toggles + policy
     """
     # initial replicas for vLLM deployment (even when autoscaling is enabled)
     replicas: int = 4
@@ -169,6 +170,12 @@ class HelmConfig:
 
     # Prometheus query used by the autoscaler (string; can be multi-line in YAML)
     autoscaling_prometheus_query: str = 'max(router_central_queue_length{namespace="vllm"})'
+
+    # ---- router feature toggles (maps to Helm chart values.router.*) ----
+    router_kv_aware: bool = True
+    router_len_aware: bool = True
+    router_len_policy: str = "short_first"  # short_first | long_first | even_short_long
+    # ------------------------------------------------------------------------
 
 
 # =========================
@@ -282,7 +289,7 @@ def load_config(path: str) -> ClientConfig:
             transport.idle_timeout_s = 60.0
         transport.idle_timeout_s = max(1.0, transport.idle_timeout_s)
 
-        # NEW: fleet idle detector window
+        # fleet idle detector window
         try:
             transport.idle_zero_running_s = float(getattr(transport, "idle_zero_running_s", 10.0))
         except Exception:

@@ -10,7 +10,7 @@ import httpx
 import time
 import sys
 from threading import RLock
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
@@ -114,11 +114,79 @@ def _log_api_req(msg: str, *, level: str = "summary") -> None:
     sys.stdout.flush()
 
 
-async def _maybe_register_kv_blocks(req_id: str, prompt: str) -> None:
-    """Best-effort KV-block computation."""
-    if not _cfg.KV_AWARE:
+def _log_kv_hash(msg: str, *, level: str = "full") -> None:
+    """
+    KV-hash debug logging (uses existing REQ_LOG_MODE gating).
+    This is intentionally separate so you can grep for KVHASH lines.
+    """
+    mode = str(_cfg.REQ_LOG_MODE).lower()
+    if mode == "off":
         return
+    if level == "summary":
+        print(f"[KVHASH] {msg}")
+        sys.stdout.flush()
+        return
+    if level == "full" and mode == "full":
+        print(f"[KVHASH] {msg}")
+        sys.stdout.flush()
 
+
+def _safe_int_list(xs: Any) -> List[int]:
+    out: List[int] = []
+    if not isinstance(xs, list):
+        return out
+    for x in xs:
+        try:
+            out.append(int(x))
+        except Exception:
+            continue
+    return out
+
+
+async def _maybe_register_kv_blocks(
+    req_id: str,
+    prompt: str,
+    *,
+    meta: Optional[Dict[str, Any]] = None,
+    is_pull_mode: bool,
+) -> Dict[str, Any]:
+    """
+    Best-effort KV-block computation.
+
+    Side effects:
+    - register_request_blocks(req_id, block_hashes)
+    - If TRACE_ENABLED, attach router-computed block hashes into meta["__trace__"]:
+        trace["router_block_hashes"] = [...]
+      and persist meta back to the queue for pull mode via router_state.update_meta().
+
+    IMPORTANT DEBUGGING GUARANTEE (new):
+      - If TRACE_ENABLED and KV_AWARE, we will ALWAYS set:
+            trace["router_block_hashes"] = [...]
+        even when [] (empty). This lets you distinguish:
+          - "hash computed but empty" vs
+          - "hash not computed / failed".
+        On failure we also set:
+            trace["router_kv_hash_error"] = "..."
+    """
+    m: Dict[str, Any] = dict(meta or {})
+
+    if not _cfg.KV_AWARE:
+        return m
+
+    # If tracing is on, pre-seed trace keys so "missing" is meaningful.
+    if getattr(_cfg, "TRACE_ENABLED", False):
+        tr0 = dict(m.get("__trace__") or {})
+        tr0.setdefault("router_block_hashes", None)  # None => not computed yet
+        m["__trace__"] = tr0
+
+        # Persist this "not computed yet" marker for pull mode so it survives /pull.
+        if is_pull_mode:
+            try:
+                router_state.update_meta(req_id, m)
+            except Exception:
+                pass
+
+    t0 = time.time()
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -128,12 +196,57 @@ async def _maybe_register_kv_blocks(req_id: str, prompt: str) -> None:
             )
             resp.raise_for_status()
             data = resp.json()
-            block_hashes = data.get("block_hashes") or []
-            if block_hashes:
-                register_request_blocks(req_id, block_hashes)
+
+            block_hashes = _safe_int_list(data.get("block_hashes") or [])
+
+            # Debug (only when REQ_LOG_MODE=full)
+            _log_kv_hash(
+                f"req_id={req_id} status={resp.status_code} "
+                f"took_s={(time.time() - t0):.3f} "
+                f"n_hashes={len(block_hashes)}",
+                level="full",
+            )
+
+            # Always register if we got a list (even empty list is "computed")
+            # register_request_blocks stores list(block_hashes); empty list is fine.
+            register_request_blocks(req_id, block_hashes)
+
+            if getattr(_cfg, "TRACE_ENABLED", False):
+                tr = dict(m.get("__trace__") or {})
+                tr["router_block_hashes"] = block_hashes  # ALWAYS set (possibly [])
+                tr.pop("router_kv_hash_error", None)
+                m["__trace__"] = tr
+
+                if is_pull_mode:
+                    try:
+                        router_state.update_meta(req_id, m)
+                    except Exception:
+                        pass
+
     except Exception as e:
+        # Keep the old warning, but also annotate trace so downstream logs show the failure.
         print(f"[router] WARNING: KV hash compute failed for req_id={req_id}: {e}")
         sys.stdout.flush()
+
+        _log_kv_hash(
+            f"req_id={req_id} ERROR took_s={(time.time() - t0):.3f} err={type(e).__name__}: {e}",
+            level="summary",
+        )
+
+        if getattr(_cfg, "TRACE_ENABLED", False):
+            tr = dict(m.get("__trace__") or {})
+            # If it was still None, keep it None to indicate "not computed"
+            tr.setdefault("router_block_hashes", None)
+            tr["router_kv_hash_error"] = f"{type(e).__name__}: {e}"
+            m["__trace__"] = tr
+
+            if is_pull_mode:
+                try:
+                    router_state.update_meta(req_id, m)
+                except Exception:
+                    pass
+
+    return m
 
 
 def _install_submit_route() -> None:
@@ -386,11 +499,13 @@ async def submit(req: EnqueueRequest):
         rid = router_state.next_req_id()
         mode_str = "push"
         meta = req.meta or {}
+        is_pull_mode = False
     else:
         t_enq = req.t_enq_client or t_start
         meta = req.meta or {}
         rid = router_state.enqueue(req.prompt, t_enq, meta)
         mode_str = "pull"
+        is_pull_mode = True
 
     # Remember run_id for pubsub filtering (best-effort)
     _remember_run_id(rid, meta or {})
@@ -399,7 +514,7 @@ async def submit(req: EnqueueRequest):
     if trace is not None:
         meta = dict(meta)
         meta.setdefault("__trace__", trace)
-        if not _is_push_mode():
+        if is_pull_mode:
             router_state.update_meta(rid, meta)
 
     _log_api_req(
@@ -411,8 +526,13 @@ async def submit(req: EnqueueRequest):
     # For consistency, allow /result to arrive before a sync waiter exists.
     router_state.register_waiter(rid)
 
-    # KV hashing (best-effort)
-    await _maybe_register_kv_blocks(rid, req.prompt)
+    # KV hashing (best-effort) + attach router_block_hashes into trace/meta
+    meta = await _maybe_register_kv_blocks(
+        rid,
+        req.prompt,
+        meta=meta,
+        is_pull_mode=is_pull_mode,
+    )
 
     # Push-mode dispatch now (still async, but we don't wait for result)
     if _is_push_mode():
@@ -458,11 +578,13 @@ async def enqueue(req: EnqueueRequest):
         rid = router_state.next_req_id()
         mode_str = "push"
         meta = req.meta or {}
+        is_pull_mode = False
     else:
         t_enq = req.t_enq_client or t_start
         meta = req.meta or {}
         rid = router_state.enqueue(req.prompt, t_enq, meta)
         mode_str = "pull"
+        is_pull_mode = True
 
     _remember_run_id(rid, meta or {})
 
@@ -470,7 +592,7 @@ async def enqueue(req: EnqueueRequest):
     if trace is not None:
         meta = dict(meta)
         meta.setdefault("__trace__", trace)
-        if not _is_push_mode():
+        if is_pull_mode:
             router_state.update_meta(rid, meta)
 
     _log_api_req(
@@ -481,8 +603,13 @@ async def enqueue(req: EnqueueRequest):
 
     router_state.register_waiter(rid)
 
-    # KV hashing
-    await _maybe_register_kv_blocks(rid, req.prompt)
+    # KV hashing (best-effort) + attach router_block_hashes into trace/meta
+    meta = await _maybe_register_kv_blocks(
+        rid,
+        req.prompt,
+        meta=meta,
+        is_pull_mode=is_pull_mode,
+    )
 
     # Push-mode dispatch
     if _is_push_mode():

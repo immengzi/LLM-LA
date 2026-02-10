@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 import click
 import yaml
 
-from config import load_config  # <-- NEW: to read cfg.helm from each client config
+from config import load_config
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -282,47 +282,33 @@ def cli(master_config: str) -> None:
         click.echo(f"[sweep] job {i}/{len(jobs)}  config={cfg_path.name}  method={method}")
         click.echo("=" * 90)
 
-        # Load client config to read Helm knobs
         cfg = load_config(str(cfg_path))
         h = getattr(cfg, "helm", None)
         if h is None:
             raise click.ClickException(f"Config has no 'helm' section: {cfg_path}")
 
-        # ---- clean cluster before each experiment ----
         _helm_uninstall(release=release, namespace=namespace)
 
-        # ---- Deploy via Helm using cfg.helm knobs ----
-        #
-        # IMPORTANT: these keys MUST match vllm-kv-stack/values.yaml
         set_values: Dict[str, object] = {
-            # routing method for router
             "router.mode": method,
-
-            # vLLM replicas (base when autoscaling disabled)
             "replicas.vllm": int(h.replicas),
-
-            # global batch size knob in the chart
             "batchSize": int(h.batch_size),
+            "router.kvAware": bool(getattr(h, "router_kv_aware", True)),
+            "router.lenAware": bool(getattr(h, "router_len_aware", True)),
+            "router.lenPolicy": str(getattr(h, "router_len_policy", "short_first")),
         }
 
-        # Autoscaling toggle + parameters
         set_values["autoscaling.enabled"] = bool(h.autoscaling_enabled)
 
         if bool(h.autoscaling_enabled):
-            # If user provided a min, use it; otherwise keep null and let chart default to replicas.vllm
-            # (Your HelmConfig currently has autoscaling_min as an int; if you want "null" from client,
-            #  you can extend HelmConfig to allow Optional[int]. For now we always set an int.)
             set_values["autoscaling.minReplicaCount"] = int(h.autoscaling_min)
-
             set_values["autoscaling.maxReplicaCount"] = int(h.autoscaling_max)
             set_values["autoscaling.threshold"] = str(h.autoscaling_threshold)
 
-            # Query can be multiline; helm --set needs a single line.
             q = str(h.autoscaling_prometheus_query or "").strip()
             q = " ".join(q.split())
             set_values["autoscaling.prometheusQuery"] = q
 
-        # Debug: show exactly what we're setting
         click.echo("[sweep] helm --set values:")
         for k in sorted(set_values):
             click.echo(f"  - {k}={_coerce_set_value(set_values[k])}")
@@ -335,7 +321,6 @@ def cli(master_config: str) -> None:
             set_values=set_values,
         )
 
-        # Debug: snapshot what Helm stored as effective values
         try:
             out = _helm(["get", "values", release, "-n", namespace, "--all"], capture=True).stdout or ""
             (REPO_ROOT / "helm-effective-values.yaml").write_text(out, encoding="utf-8")
@@ -345,7 +330,6 @@ def cli(master_config: str) -> None:
 
         _wait_ready(namespace)
 
-        # Render and snapshot manifest (same artifact name)
         rendered_text = _helm_template(
             release=release,
             chart_dir=chart_dir,
@@ -364,7 +348,6 @@ def cli(master_config: str) -> None:
             continue
 
         shutil.copy2(REPO_ROOT / "vllm-k8s.yaml", exp_dir / "vllm-k8s.yaml")
-        # also snapshot effective values alongside the manifest
         hv_path = REPO_ROOT / "helm-effective-values.yaml"
         if hv_path.is_file():
             shutil.copy2(hv_path, exp_dir / "helm-effective-values.yaml")
@@ -386,6 +369,9 @@ def cli(master_config: str) -> None:
                 "autoscaling_max": int(h.autoscaling_max),
                 "autoscaling_threshold": str(h.autoscaling_threshold),
                 "autoscaling_prometheus_query": str(h.autoscaling_prometheus_query),
+                "router_kv_aware": bool(getattr(h, "router_kv_aware", True)),
+                "router_len_aware": bool(getattr(h, "router_len_aware", True)),
+                "router_len_policy": str(getattr(h, "router_len_policy", "short_first")),
             },
         }
         (exp_dir / "sweep_meta.json").write_text(

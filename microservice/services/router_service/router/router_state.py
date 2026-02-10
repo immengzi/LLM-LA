@@ -171,6 +171,11 @@ class RouterState:
                 for rid, prompt, ts, meta in pool:
                     pool_with_kv.append((rid, prompt, ts, meta, 0))
 
+            kv_hits_map: Dict[str, int] = {}
+            if kv_enabled:
+                for rid, _prompt, _ts, _meta, kv_hits in pool_with_kv:
+                    kv_hits_map[rid] = int(kv_hits)
+
             # 3) Group by kv_hits, descending (KV is always primary)
             kv_to_items: Dict[int, List[Tuple[str, str, float, dict]]] = {}
             for rid, prompt, ts, meta, kv_hits in pool_with_kv:
@@ -240,6 +245,9 @@ class RouterState:
 
                     tr["t_dispatch_router"] = dispatch_ts
                     tr["router_queue_len_at_dispatch"] = qlen_at_dispatch
+
+                    if kv_enabled:
+                        tr["kv_hits_len"] = int(kv_hits_map.get(rid, 0))
 
                     m["__trace__"] = tr
                     chosen.append((rid, prompt, ts, m))

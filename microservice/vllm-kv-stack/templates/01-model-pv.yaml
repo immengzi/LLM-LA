@@ -1,9 +1,8 @@
+{{- if .Values.modelVolume.create }}
 apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: qwen-local-pv
-  annotations:
-    "helm.sh/resource-policy": keep
 spec:
   capacity:
     storage: 20Gi
@@ -11,6 +10,10 @@ spec:
     - ReadOnlyMany
   persistentVolumeReclaimPolicy: Retain
   storageClassName: ""
-  hostPath:
-    path: /mnt/nvme1/saeid/models/qwen3-8b
-    type: Directory
+  mountOptions:
+    - ro
+    - nfsvers=4.1
+  nfs:
+    server: 7.242.102.243
+    path: /
+{{- end }}

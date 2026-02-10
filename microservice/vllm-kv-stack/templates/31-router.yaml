@@ -16,7 +16,8 @@ spec:
       serviceAccountName: kv-router-sa
       containers:
         - name: router
-          image: kv-router:latest
+          # image: kv-router:latest
+          image: {{ include "vllmkv.image" (list . .Values.images.router) }}
           imagePullPolicy: IfNotPresent
           env:
             - name: HOST
@@ -57,12 +58,16 @@ spec:
             - name: HASH_TIMEOUT_S
               value: "2.0"
 
+            # ---- Helm-controlled routing knobs ----
             - name: KV_AWARE
-              value: "true"
+              value: {{ ternary "true" "false" .Values.router.kvAware | quote }}
+
             - name: LEN_AWARE
-              value: "true"
+              value: {{ ternary "true" "false" .Values.router.lenAware | quote }}
+
             - name: LEN_POLICY
-              value: "short_first"
+              value: {{ quote .Values.router.lenPolicy }}
+            # --------------------------------------
 
             - name: POOL_FACTOR
               value: "4"
@@ -119,12 +124,14 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 20
+
           resources:
             requests:
               cpu: "250m"

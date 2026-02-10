@@ -22,7 +22,7 @@
 #     - sidecar_received_requests_total (counter -> rate) -> sidecar_received_rps
 #     - sidecar_completed_requests_total (counter -> rate)-> sidecar_completed_rps
 #
-# NEW (thread/worker metrics):
+# (thread/worker metrics):
 #   Sidecar (kv-sidecar / :9000):
 #     - sidecar_python_threads (gauge)                    -> sidecar_python_threads
 #     - sidecar_workers_total (gauge)                     -> sidecar_workers_total
@@ -42,8 +42,6 @@
 # Critical fixes:
 #   - If endpoint discovery hasn't populated yet, fallback-discover vLLM instances from Prometheus
 #   - If Prometheus returns instances not in `keys`, auto-add them so they appear in output
-#
-# NEW:
 #   - sampler stores last successful tick and exposes get_last_metrics_tick()
 #     so load_runner can reuse the existing Prometheus scraping to detect
 #     vllm:num_requests_running == 0 fleet-idle condition.
@@ -315,15 +313,15 @@ ROUTER_SIDECAR_METRICS_CATALOG: List[Dict[str, str]] = [
     {"name": "sidecar_received_requests_total", "kind": "counter_rate", "field": "sidecar_received_rps", "label": "exported_endpoint"},
     {"name": "sidecar_completed_requests_total", "kind": "counter_rate", "field": "sidecar_completed_rps", "label": "exported_endpoint"},
 
-    # NEW: sidecar worker metrics (exported_endpoint=<pod name>)
+    # sidecar worker metrics (exported_endpoint=<pod name>)
     {"name": "sidecar_workers_total", "kind": "gauge", "field": "sidecar_workers_total", "label": "exported_endpoint"},
     {"name": "sidecar_workers_busy", "kind": "gauge", "field": "sidecar_workers_busy", "label": "exported_endpoint"},
 
-    # NEW: sidecar python thread count (usually has 'pod' label via Prometheus Operator relabeling)
+    # sidecar python thread count (usually has 'pod' label via Prometheus Operator relabeling)
     # We remap pod -> vLLM (:8200) instance.
     {"name": "sidecar_python_threads", "kind": "gauge", "field": "sidecar_python_threads", "label": "pod"},
 
-    # NEW: vLLM wrapper exporter thread count (metric itself includes pod="..."; remap pod -> :8200 instance)
+    # vLLM wrapper exporter thread count (metric itself includes pod="..."; remap pod -> :8200 instance)
     {"name": "vllm_threads", "kind": "gauge", "field": "vllm_threads", "label": "pod"},
 ]
 
@@ -383,7 +381,7 @@ class _MetricsSampler(threading.Thread):
         self._jsonl = JsonlLogger(self.run_dir / "metrics.jsonl")
         self._summary_path = self.run_dir / "metrics_summary.json"
 
-        # NEW: last successful tick snapshot for reuse by load_runner
+        # last successful tick snapshot for reuse by load_runner
         self._last_lock = threading.Lock()
         self._last_tick: Optional[Dict[str, Any]] = None
 
@@ -407,7 +405,7 @@ class _MetricsSampler(threading.Thread):
         self._sum_sidecar_recv_rps = 0.0
         self._sum_sidecar_comp_rps = 0.0
 
-        # NEW rollups: threads / workers
+        # rollups: threads / workers
         self._sum_vllm_threads = 0.0
         self._sum_sidecar_py_threads = 0.0
         self._sum_sidecar_workers_total = 0.0
@@ -420,7 +418,7 @@ class _MetricsSampler(threading.Thread):
     def stop(self) -> None:
         self._stop_ev.set()
 
-    # NEW: allow readers to retrieve last successful tick
+    # allow readers to retrieve last successful tick
     def get_last_tick(self) -> Optional[Dict[str, Any]]:
         with self._last_lock:
             if self._last_tick is None:
@@ -879,7 +877,7 @@ class _MetricsSampler(threading.Thread):
         if s_sidecar_comp is not None:
             self._sum_sidecar_comp_rps += s_sidecar_comp
 
-        # NEW rollups: threads / workers
+        # rollups: threads / workers
         a_vllm_thr = _avg("vllm_threads")
         a_sc_py_thr = _avg("sidecar_python_threads")
         a_sc_w_total = _avg("sidecar_workers_total")
@@ -920,7 +918,7 @@ class _MetricsSampler(threading.Thread):
                     "sum_sidecar_received_rps": self._sum_sidecar_recv_rps / self._samples,
                     "sum_sidecar_completed_rps": self._sum_sidecar_comp_rps / self._samples,
 
-                    # NEW: threads / workers
+                    # threads / workers
                     "avg_vllm_threads": self._sum_vllm_threads / self._samples,
                     "avg_sidecar_python_threads": self._sum_sidecar_py_threads / self._samples,
                     "avg_sidecar_workers_total": self._sum_sidecar_workers_total / self._samples,
@@ -940,7 +938,7 @@ class _MetricsSampler(threading.Thread):
                 try:
                     tick = self._collect_one_tick()
 
-                    # NEW: publish last successful tick for other threads
+                    # publish last successful tick for other threads
                     with self._last_lock:
                         self._last_tick = tick
 

@@ -2,13 +2,8 @@
 # Clean test config (explicit knobs, values close to example_config.yaml)
 
 router_url: "http://7.242.102.243:30080"
-total_requests: 10000
+total_requests: 40000
 prompt_source: "hf-lmsys"
-
-
-# =========================
-# Prompt sources
-# =========================
 
 file_prompts:
   path: "prompts.json"
@@ -23,15 +18,9 @@ hf_lmsys:
   max_input_tokens: 10000000
   repeat_each: 1
 
-
-# =========================
-# Load generation
-# =========================
-
 load_pattern:
   pattern: "det"
-
-  rate_rps: 6
+  rate_rps: 4
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -45,13 +34,7 @@ load_pattern:
   rand_rps_min: 5.0
   rand_rps_max: 20.0
   rand_epoch_s: 5.0
-
   loadgen_seed: 12345
-
-
-# =========================
-# Generation parameters
-# =========================
 
 generation:
   max_tokens: 8192
@@ -61,18 +44,8 @@ generation:
   target_total_tokens: null
   think: false
 
-
-# =========================
-# Output / tracing
-# =========================
-
 output_log_mode: "summary"
 print_trace: false
-
-
-# =========================
-# Metrics / observability
-# =========================
 
 metrics:
   enabled: true
@@ -83,10 +56,6 @@ metrics:
   model_name: null
   max_instances: null
 
-# =========================
-# Transport mode
-# =========================
-
 transport:
   mode: "async_pubsub"
   submit_path: "/submit"
@@ -95,20 +64,15 @@ transport:
   run_id: null
   idle_timeout_s: 600.0
 
-
 helm:
-  # vLLM replica count (maps to .Values.replicas.vllm)
   replicas: 8
-
-  # global batch size (maps to .Values.batchSize)
   batch_size: 8
-
-  # autoscaling controls (map to .Values.autoscaling.*)
   autoscaling_enabled: false
   autoscaling_min: 1
   autoscaling_max: 16
   autoscaling_threshold: "16"
-
-  # Prometheus query used by KEDA trigger (maps to .Values.autoscaling.prometheusQuery)
   autoscaling_prometheus_query: |
     max(router_central_queue_length{namespace="vllm"})
+  router_kv_aware: true
+  router_len_aware: true
+  router_len_policy: "short_first"
