@@ -334,7 +334,7 @@ spec:
               value: "1024"
 
             - name: ROUTER_MODE
-              value: "pull"
+              value: "push-random"
 
             - name: SIDECAR_PORT
               value: "9000"
@@ -597,7 +597,7 @@ spec:
               value: "8"
 
             - name: SIDECAR_MODE
-              value: "pull"
+              value: "push"
 
             - name: PULL_INTERVAL_S
               value: "0.05"
