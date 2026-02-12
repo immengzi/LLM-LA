@@ -28,7 +28,8 @@ replicas:
 
 # Global override: if set, ALL images are rewritten to use this registry
 global:
-  imageRegistry: "7.242.102.243:32000"  # set "" to disable rewriting
+  imageRegistry: "reg.local:32000"
+  # imageRegistry: "7.242.102.243:32000"  # set "" to disable rewriting
   # imageRegistry: ""  # set "" to disable rewriting
 
 images:
@@ -63,6 +64,14 @@ autoscaling:
 
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
+
+# modelVolume:
+#   create: false
+modelVolume:
+  create: true
+  nfsServer: "nfs.local"
+  nfsPath: "/"
+  # nfsPath: "/mnt/nvme1/saeid/models/qwen3-8b"
 
 ---------------- END FILE: ./values.yaml ----------------
 
@@ -98,7 +107,8 @@ replicas:
 
 # Global override: if set, ALL images are rewritten to use this registry
 global:
-  imageRegistry: "7.242.102.243:32000"  # set "" to disable rewriting
+  imageRegistry: "reg.local:32000"
+  # imageRegistry: "7.242.102.243:32000"  # set "" to disable rewriting
   # imageRegistry: ""  # set "" to disable rewriting
 
 images:
@@ -133,6 +143,14 @@ autoscaling:
 
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
+
+# modelVolume:
+#   create: false
+modelVolume:
+  create: true
+  nfsServer: "nfs.local"
+  nfsPath: "/"
+  # nfsPath: "/mnt/nvme1/saeid/models/qwen3-8b"
 
 ---------------- END FILE: ./values.yaml ----------------
 
@@ -397,11 +415,14 @@ spec:
 
 ---------------- FILE: ./templates/02-model-pvc.yaml ----------------
 
+{{- if .Values.modelVolume.create }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: qwen-local-pvc
   namespace: vllm
+  annotations:
+    "helm.sh/resource-policy": keep
 spec:
   accessModes:
     - ReadOnlyMany
@@ -410,6 +431,7 @@ spec:
       storage: 20Gi
   storageClassName: ""
   volumeName: qwen-local-pv
+{{- end }}
 
 ---------------- END FILE: ./templates/02-model-pvc.yaml ----------------
 
@@ -467,10 +489,13 @@ spec:
 
 ---------------- FILE: ./templates/01-model-pv.yaml ----------------
 
+{{- if .Values.modelVolume.create }}
 apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: qwen-local-pv
+  annotations:
+    "helm.sh/resource-policy": keep
 spec:
   capacity:
     storage: 20Gi
@@ -481,9 +506,17 @@ spec:
   mountOptions:
     - ro
     - nfsvers=4.1
+  # nfs:
+  #   server: 7.242.102.243
+  #   path: /
+  # nfs:
+  #   server: nfs.local
+  #   path: /
   nfs:
-    server: 7.242.102.243
-    path: /
+    server: {{ .Values.modelVolume.nfsServer | quote }}
+    path: {{ .Values.modelVolume.nfsPath | quote }}
+
+{{- end }}
 
 ---------------- END FILE: ./templates/01-model-pv.yaml ----------------
 
@@ -814,13 +847,13 @@ spec:
             initialDelaySeconds: 120
             periodSeconds: 20
             failureThreshold: 6
-          # resources:
-          #   requests:
-          #     huawei.com/Ascend: 1
-          #     ephemeral-storage: "2Gi"
-          #   limits:
-          #     huawei.com/Ascend: 1
-          #     ephemeral-storage: "4Gi"
+          resources:
+            requests:
+              huawei.com/Ascend: 1
+              ephemeral-storage: "2Gi"
+            limits:
+              huawei.com/Ascend: 1
+              ephemeral-storage: "4Gi"
 
         - name: kv-sidecar
           # image: kv-sidecar:latest
@@ -915,7 +948,7 @@ spec:
         - name: cache-volume
           hostPath:
             path: /root/.cache
-            type: Directory
+            type: DirectoryOrCreate
 
 ---
 apiVersion: v1

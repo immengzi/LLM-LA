@@ -31,3 +31,5 @@ uv.tar.gz
 experiments
 .ipynb_checkpoints
 figures
+thread_dump.txt
+llm-lb.code-workspace

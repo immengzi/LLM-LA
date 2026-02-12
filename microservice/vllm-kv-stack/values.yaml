@@ -4,7 +4,8 @@ replicas:
 
 # Global override: if set, ALL images are rewritten to use this registry
 global:
-  imageRegistry: "7.242.102.243:32000"  # set "" to disable rewriting
+  imageRegistry: "reg.local:32000"
+  # imageRegistry: "7.242.102.243:32000"  # set "" to disable rewriting
   # imageRegistry: ""  # set "" to disable rewriting
 
 images:
@@ -40,5 +41,10 @@ autoscaling:
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
 
+# modelVolume:
+#   create: false
 modelVolume:
-  create: false
+  create: true
+  nfsServer: "nfs.local"
+  nfsPath: "/"
+  # nfsPath: "/mnt/nvme1/saeid/models/qwen3-8b"

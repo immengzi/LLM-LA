@@ -7,7 +7,7 @@ autoscaling:
   threshold: "16"
 batchSize: 8
 global:
-  imageRegistry: 7.242.102.243:32000
+  imageRegistry: reg.local:32000
 images:
   cpuHash: vllm-cpu-hash:latest
   redis: redis:7-alpine
@@ -15,7 +15,9 @@ images:
   sidecar: kv-sidecar:latest
   vllm: quay.io/ascend/vllm-ascend:v0.11.0rc0
 modelVolume:
-  create: false
+  create: true
+  nfsPath: /
+  nfsServer: nfs.local
 replicas:
   router: 1
   vllm: 12

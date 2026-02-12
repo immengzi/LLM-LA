@@ -2,7 +2,7 @@
 # Clean test config (explicit knobs, values close to example_config.yaml)
 
 router_url: "http://7.242.102.243:30080"
-total_requests: 40000
+total_requests: 500
 prompt_source: "hf-lmsys"
 
 file_prompts:

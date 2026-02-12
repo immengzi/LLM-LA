@@ -20,9 +20,18 @@ spec:
     - ReadOnlyMany
   persistentVolumeReclaimPolicy: Retain
   storageClassName: ""
-  hostPath:
-    path: /mnt/nvme1/saeid/models/qwen3-8b
-    type: Directory
+  mountOptions:
+    - ro
+    - nfsvers=4.1
+  # nfs:
+  #   server: 7.242.102.243
+  #   path: /
+  # nfs:
+  #   server: nfs.local
+  #   path: /
+  nfs:
+    server: "nfs.local"
+    path: "/"
 ---
 # Source: vllm-kv-stack/templates/02-model-pvc.yaml
 apiVersion: v1
@@ -159,7 +168,7 @@ spec:
       containers:
         - name: redis
           # image: redis:7-alpine
-          image: redis:7-alpine
+          image: reg.local:32000/redis:7-alpine
           args:
             - redis-server
             - --save
@@ -207,7 +216,7 @@ spec:
       containers:
         - name: vllm-cpu-hash
           # image: vllm-cpu-hash:latest
-          image: vllm-cpu-hash:latest
+          image: reg.local:32000/vllm-cpu-hash:latest
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
           command:
@@ -267,7 +276,7 @@ spec:
       containers:
         - name: router
           # image: kv-router:latest
-          image: kv-router:latest
+          image: reg.local:32000/kv-router:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: HOST
@@ -397,7 +406,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 8
+  replicas: 12
   selector:
     matchLabels:
       app: vllm-qwen
@@ -411,7 +420,7 @@ spec:
       containers:
         - name: vllm
           # image: quay.io/ascend/vllm-ascend:v0.11.0rc0
-          image: quay.io/ascend/vllm-ascend:v0.11.0rc0
+          image: reg.local:32000/ascend/vllm-ascend:v0.11.0rc0
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -533,20 +542,34 @@ spec:
               mountPath: /etc/ascend_install.info
             - name: cache-volume
               mountPath: /root/.cache
+
+          # ---- Startup probe (protect long model load) ----
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            periodSeconds: 10
+            failureThreshold: 180   # 30 minutes max startup
+            timeoutSeconds: 2
+
+          # ---- Readiness probe ----
           readinessProbe:
             httpGet:
               path: /health
               port: 8200
-            initialDelaySeconds: 60
             periodSeconds: 10
             failureThreshold: 12
+            timeoutSeconds: 2
+
+          # ---- Liveness probe (only active AFTER startupProbe succeeds) ----
           livenessProbe:
             httpGet:
               path: /health
               port: 8200
-            initialDelaySeconds: 120
             periodSeconds: 20
             failureThreshold: 6
+            timeoutSeconds: 2
+
           resources:
             requests:
               huawei.com/Ascend: 1
@@ -557,7 +580,7 @@ spec:
 
         - name: kv-sidecar
           # image: kv-sidecar:latest
-          image: kv-sidecar:latest
+          image: reg.local:32000/kv-sidecar:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: ROUTER_URL
@@ -648,7 +671,7 @@ spec:
         - name: cache-volume
           hostPath:
             path: /root/.cache
-            type: Directory
+            type: DirectoryOrCreate
 ---
 # Source: vllm-kv-stack/templates/50-podmonitors.yaml
 apiVersion: monitoring.coreos.com/v1
