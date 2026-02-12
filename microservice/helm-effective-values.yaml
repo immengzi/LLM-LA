@@ -25,4 +25,4 @@ router:
   kvAware: true
   lenAware: true
   lenPolicy: short_first
-  mode: pull
+  mode: push-least-queue
