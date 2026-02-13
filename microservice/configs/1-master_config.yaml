@@ -28,13 +28,25 @@
   # - push-random
   # - push-least-queue
 
-config-6.yaml:
-  - pull
+# config-6.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+# config-7.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+config-8.yaml:
+  # - pull
   - push-rr
   - push-random
   - push-least-queue
 
-# config-7.yaml:
+# config-9.yaml:
 #   - pull
 #   - push-rr
 #   - push-random

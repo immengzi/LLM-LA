@@ -33,7 +33,7 @@
 #
 # Key behaviors:
 #   1) vLLM metrics: logged per vLLM instance (:8200) row
-#   2) sidecar metrics: exported_endpoint=<pod name> remapped into vLLM (:8200) rows via kube_pod_info
+#   2) sidecar metrics: endpoint=<pod name> remapped into vLLM (:8200) rows via kube_pod_info
 #      - AND pod-labeled sidecar gauges are also remapped into :8200 rows via pod->instance mapping.
 #   3) router metrics:
 #       - logged per router instance (:8080) row
@@ -308,14 +308,14 @@ ROUTER_SIDECAR_METRICS_CATALOG: List[Dict[str, str]] = [
     {"name": "router_admission_requests_total", "kind": "counter_rate", "field": "router_admission_rps", "label": "instance"},
     {"name": "router_dispatch_requests_total", "kind": "counter_rate", "field": "router_outgoing_rps", "label": "instance"},
 
-    # Sidecar (labeled by exported_endpoint=<vllm pod name> in your Prometheus)
-    {"name": "sidecar_queue_length", "kind": "gauge", "field": "sidecar_queue_length", "label": "exported_endpoint"},
-    {"name": "sidecar_received_requests_total", "kind": "counter_rate", "field": "sidecar_received_rps", "label": "exported_endpoint"},
-    {"name": "sidecar_completed_requests_total", "kind": "counter_rate", "field": "sidecar_completed_rps", "label": "exported_endpoint"},
+    # Sidecar (labeled by endpoint=<pod name>)
+    {"name": "sidecar_queue_length", "kind": "gauge", "field": "sidecar_queue_length", "label": "endpoint"},
+    {"name": "sidecar_received_requests_total", "kind": "counter_rate", "field": "sidecar_received_rps", "label": "endpoint"},
+    {"name": "sidecar_completed_requests_total", "kind": "counter_rate", "field": "sidecar_completed_rps", "label": "endpoint"},
 
-    # sidecar worker metrics (exported_endpoint=<pod name>)
-    {"name": "sidecar_workers_total", "kind": "gauge", "field": "sidecar_workers_total", "label": "exported_endpoint"},
-    {"name": "sidecar_workers_busy", "kind": "gauge", "field": "sidecar_workers_busy", "label": "exported_endpoint"},
+    # sidecar worker metrics (endpoint=<pod name>)
+    {"name": "sidecar_workers_total", "kind": "gauge", "field": "sidecar_workers_total", "label": "endpoint"},
+    {"name": "sidecar_workers_busy", "kind": "gauge", "field": "sidecar_workers_busy", "label": "endpoint"},
 
     # sidecar python thread count (usually has 'pod' label via Prometheus Operator relabeling)
     # We remap pod -> vLLM (:8200) instance.
@@ -545,7 +545,7 @@ class _MetricsSampler(threading.Thread):
     def _podname_to_instance_map(self, pod_names: List[str], port: str) -> Dict[str, str]:
         """
         Map pod name -> instance (pod_ip:port) using kube_pod_info.
-        Used to remap sidecar series labeled by exported_endpoint=<pod name>.
+        Used to remap sidecar series labeled by endpoint=<pod name>.
         """
         want = set(str(x) for x in (pod_names or []) if x)
         if not want:
@@ -745,13 +745,13 @@ class _MetricsSampler(threading.Thread):
                 m_sum = _vec_to_map_by_label(
                     raw.get(name + "_sum", []),
                     label_key,
-                    allowed=None if label_key in ("pod", "exported_endpoint") else allowed_for_this,
+                    allowed=None if label_key in ("pod", "exported_endpoint", "endpoint") else allowed_for_this,
                     model_name=self.model_name,
                 )
                 m_cnt = _vec_to_map_by_label(
                     raw.get(name + "_count", []),
                     label_key,
-                    allowed=None if label_key in ("pod", "exported_endpoint") else allowed_for_this,
+                    allowed=None if label_key in ("pod", "exported_endpoint", "endpoint") else allowed_for_this,
                     model_name=self.model_name,
                 )
                 m_val = _divide_maps(m_sum, m_cnt)
@@ -759,7 +759,7 @@ class _MetricsSampler(threading.Thread):
                 m_val = _vec_to_map_by_label(
                     raw.get(name, []),
                     label_key,
-                    allowed=None if label_key in ("pod", "exported_endpoint") else allowed_for_this,
+                    allowed=None if label_key in ("pod", "exported_endpoint", "endpoint") else allowed_for_this,
                     model_name=self.model_name,
                 )
 
@@ -775,8 +775,8 @@ class _MetricsSampler(threading.Thread):
                     remapped[inst] = val
                 m_val = remapped
 
-            # Sidecar metrics keyed by exported_endpoint=<pod name> -> map to instance (pod_ip:port)
-            if label_key == "exported_endpoint":
+            # Sidecar metrics keyed by endpoint/exported_endpoint=<pod name> -> map to instance (pod_ip:port)
+            if label_key in ("exported_endpoint", "endpoint"):
                 pod_names = list(m_val.keys())
                 podname2inst = self._podname_to_instance_map(pod_names, vllm_port)
                 remapped = {}
@@ -1038,7 +1038,7 @@ def update_metrics_endpoints(endpoints: List[str]) -> None:
     Call this from your router loop whenever endpoint discovery changes.
 
     NOTE: These endpoints are assumed to be vLLM endpoints (typically :8200).
-    Sidecar metrics are remapped into :8200 rows using kube_pod_info + exported_endpoint label.
+    Sidecar metrics are remapped into :8200 rows using kube_pod_info + endpoint label.
     Router metrics are logged as router rows and also broadcast into :8200 rows.
     """
     global _sampler
