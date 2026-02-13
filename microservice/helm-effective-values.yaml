@@ -20,9 +20,9 @@ modelVolume:
   nfsServer: nfs.local
 replicas:
   router: 1
-  vllm: 12
+  vllm: 8
 router:
   kvAware: true
   lenAware: true
   lenPolicy: short_first
-  mode: push-least-queue
+  mode: push-rr

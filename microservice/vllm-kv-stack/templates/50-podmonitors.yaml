@@ -3,6 +3,8 @@ kind: PodMonitor
 metadata:
   name: vllm-qwen
   namespace: vllm
+  labels:
+    release: prometheus-kube-prometheus
 spec:
   selector:
     matchLabels:
@@ -28,6 +30,8 @@ kind: PodMonitor
 metadata:
   name: kv-router
   namespace: vllm
+  labels:
+    release: prometheus-kube-prometheus
 spec:
   selector:
     matchLabels:
@@ -45,6 +49,8 @@ kind: PodMonitor
 metadata:
   name: kv-sidecar
   namespace: vllm
+  labels:
+    release: prometheus-kube-prometheus
 spec:
   selector:
     matchLabels:

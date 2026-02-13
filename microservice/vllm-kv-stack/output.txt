@@ -833,20 +833,34 @@ spec:
               mountPath: /etc/ascend_install.info
             - name: cache-volume
               mountPath: /root/.cache
+
+          # ---- Startup probe (protect long model load) ----
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            periodSeconds: 10
+            failureThreshold: 180   # 30 minutes max startup
+            timeoutSeconds: 2
+
+          # ---- Readiness probe ----
           readinessProbe:
             httpGet:
               path: /health
               port: 8200
-            initialDelaySeconds: 60
             periodSeconds: 10
             failureThreshold: 12
+            timeoutSeconds: 2
+
+          # ---- Liveness probe (only active AFTER startupProbe succeeds) ----
           livenessProbe:
             httpGet:
               path: /health
               port: 8200
-            initialDelaySeconds: 120
             periodSeconds: 20
             failureThreshold: 6
+            timeoutSeconds: 2
+
           resources:
             requests:
               huawei.com/Ascend: 1
