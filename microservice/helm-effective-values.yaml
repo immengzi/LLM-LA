@@ -18,11 +18,21 @@ modelVolume:
   create: true
   nfsPath: /
   nfsServer: nfs.local
+pin:
+  enabled: true
+  nodeName: master
+  tolerations:
+  - effect: NoSchedule
+    key: node-role.kubernetes.io/control-plane
+    operator: Exists
+  - effect: NoSchedule
+    key: node-role.kubernetes.io/master
+    operator: Exists
 replicas:
   router: 1
   vllm: 8
 router:
-  kvAware: true
+  kvAware: false
   lenAware: true
   lenPolicy: short_first
   mode: push-rr

@@ -17,6 +17,7 @@ import time
 import os
 
 from config import ClientConfig
+from k8s_time_offsets import measure_k8s_node_time_offsets
 
 
 class ExperimentLogger:
@@ -126,7 +127,7 @@ def init_experiment(
 ) -> Tuple[Path, ExperimentLogger]:
     """
     Create a new experiment directory and persist:
-      - config.json        : frozen view of the effective ClientConfig.
+      - config.json        : frozen view of the effective ClientConfig + node time offsets snapshot.
       - config_used.yaml   : exact YAML file used to run this experiment.
       - vllm-k8s.yaml      : deployment manifest snapshot (now: Helm-rendered manifest).
       - logs.json          : per-request JSON-lines (append-only via ExperimentLogger).
@@ -141,12 +142,41 @@ def init_experiment(
 
     exp_dir = _next_experiment_dir(exps_root)
 
+    # --- Measure node clock offsets at run start (best-effort) ---
+    # We assume the client runs on the master node and treat the local clock as reference.
+    # Offsets are measured from the time-probe DaemonSet logs using a midpoint estimator.
+    #
+    # Only ONE scalar per node is stored:
+    #   offset_ns = remote_epoch_ns - local_midpoint_ns
+    #
+    # To convert a remote timestamp into master time:
+    #   master_ns_est = remote_ns - offset_ns
+    #
+    # Controlled by env vars:
+    #   TIME_PROBE_NAMESPACE (default: kube-system)
+    #   TIME_PROBE_LABEL     (default: app=time-probe)
+    #   TIME_PROBE_SAMPLES   (default: 15)
+    #   TIME_PROBE_TIMEOUT_S (default: 5)
+    #   TIME_PROBE_KUBECTL   (default: kubectl)
+    try:
+        time_offsets_ns = measure_k8s_node_time_offsets(
+            namespace=os.environ.get("TIME_PROBE_NAMESPACE", "kube-system"),
+            label_selector=os.environ.get("TIME_PROBE_LABEL", "app=time-probe"),
+            samples=int(os.environ.get("TIME_PROBE_SAMPLES", "15") or "15"),
+            kubectl=os.environ.get("TIME_PROBE_KUBECTL", "kubectl"),
+            timeout_s=float(os.environ.get("TIME_PROBE_TIMEOUT_S", "5") or "5"),
+        )
+    except Exception:
+        time_offsets_ns = {}
+
     # Persist the effective config for this run (resolved + defaults applied).
     config_out = {
         "created_at_unix": time.time(),
         "config_path": str(Path(config_path).resolve()),
         "config_name": config_name,
         "client_config": asdict(cfg),
+        # New entry (simple):
+        "time_offsets_ns": time_offsets_ns,
     }
     config_json_path = exp_dir / "config.json"
     with config_json_path.open("w", encoding="utf-8") as f:

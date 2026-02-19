@@ -165,6 +165,23 @@ spec:
       labels:
         app: redis
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - "master"
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/control-plane
+          operator: Exists
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/master
+          operator: Exists
+
       containers:
         - name: redis
           # image: redis:7-alpine
@@ -213,6 +230,23 @@ spec:
       labels:
         app: vllm-cpu-hash
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - "master"
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/control-plane
+          operator: Exists
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/master
+          operator: Exists
+
       containers:
         - name: vllm-cpu-hash
           # image: vllm-cpu-hash:latest
@@ -273,6 +307,23 @@ spec:
         app: router-service
     spec:
       serviceAccountName: kv-router-sa
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - "master"
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/control-plane
+          operator: Exists
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/master
+          operator: Exists
+
       containers:
         - name: router
           # image: kv-router:latest
@@ -319,7 +370,7 @@ spec:
 
             # ---- Helm-controlled routing knobs ----
             - name: KV_AWARE
-              value: "true"
+              value: "false"
 
             - name: LEN_AWARE
               value: "true"
@@ -417,6 +468,17 @@ spec:
     spec:
       restartPolicy: Always
       shareProcessNamespace: true
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: avoid
+                    operator: NotIn
+                    values:
+                      - vllm-qwen
+
       containers:
         - name: vllm
           # image: quay.io/ascend/vllm-ascend:v0.11.0rc0

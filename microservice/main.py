@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import os
 from pathlib import Path
 
 from config import load_config
@@ -16,6 +17,9 @@ from prompts import load_prompts_from_file, build_prompts_from_lmsys
 from scheduler import build_schedule
 from load_runner import run_open_loop_load
 from experiment_io import init_experiment
+
+# NEW: event-driven pod->node mapping snapshots (autoscaler / churn)
+from k8s_event_podmap import EventDrivenPodMapLogger
 
 # Optional metrics
 try:
@@ -106,12 +110,33 @@ def main():
         )
 
     # Initialize experiment directory + logger
+    # (Now also captures node clock offsets at run start into config.json)
     exp_dir, exp_logger = init_experiment(
         cfg,
         config_path=str(config_path),
         config_name=None,
     )
     print(f"[client] experiment_dir={exp_dir}")
+
+    # NEW: start event-driven pod->node mapping watcher (writes JSONL beside other logs)
+    podmap_logger = None
+    try:
+        podmap_logger = EventDrivenPodMapLogger(
+            out_path=Path(exp_dir) / "pod_node_mapping_events.jsonl",
+            namespace=os.environ.get("PODMAP_NAMESPACE", "vllm"),
+            deployment_name=os.environ.get("PODMAP_DEPLOYMENT", "vllm-qwen"),
+            kubectl=os.environ.get("PODMAP_KUBECTL", "kubectl"),
+            quiet_window_s=float(os.environ.get("PODMAP_QUIET_S", "10") or "10"),
+            snapshot_timeout_s=float(os.environ.get("PODMAP_TIMEOUT_S", "5") or "5"),
+        )
+        podmap_logger.start()
+        print(
+            f"[client] event podmap logger started -> "
+            f"{Path(exp_dir) / 'pod_node_mapping_events.jsonl'}"
+        )
+    except Exception as e:
+        print(f"[client] WARN: event podmap logger failed to start: {e}")
+        podmap_logger = None
 
     # Build schedule
     lp = cfg.load_pattern
@@ -178,6 +203,14 @@ def main():
                 print("[metrics] collection stopped")
             except Exception as e:
                 print(f"[metrics] failed to stop metrics collection: {e}")
+
+        # NEW: stop event-driven podmap logger
+        if podmap_logger is not None:
+            try:
+                podmap_logger.stop()
+                print("[client] event podmap logger stopped")
+            except Exception:
+                pass
 
         exp_logger.close()
 

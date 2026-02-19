@@ -38,6 +38,28 @@ kubectl taint nodes worker1 maintenance=true:NoExecute
 
 
 # ------------------------------------------------------------
+# 2.1) TAINT AN ENTIRE NODE (BLOCK EVERYTHING)
+# ------------------------------------------------------------
+# This is what you asked for: taint a node so NOTHING schedules on it.
+
+# Most common: hard block scheduling
+kubectl taint nodes <node-name> blocked=true:NoSchedule
+
+# If you also want to evict all currently running pods:
+kubectl taint nodes <node-name> blocked=true:NoExecute
+
+# If you want to temporarily cordon + taint (common maintenance flow):
+kubectl cordon <node-name>
+kubectl taint nodes <node-name> blocked=true:NoSchedule
+
+# To taint ALL nodes in the cluster:
+kubectl taint nodes --all blocked=true:NoSchedule
+
+# To taint ALL nodes with eviction:
+kubectl taint nodes --all blocked=true:NoExecute
+
+
+# ------------------------------------------------------------
 # 3) REMOVE A TAINT
 # ------------------------------------------------------------
 # IMPORTANT: Add a trailing "-" to remove
@@ -49,6 +71,13 @@ kubectl taint nodes worker1 dedicated=redis:NoSchedule-
 
 # Example: Remove maintenance taint
 kubectl taint nodes worker1 maintenance=true:NoExecute-
+
+# Remove the "block everything" taint
+kubectl taint nodes <node-name> blocked=true:NoSchedule-
+kubectl taint nodes <node-name> blocked=true:NoExecute-
+
+# Remove that taint from ALL nodes
+kubectl taint nodes --all blocked=true:NoSchedule-
 
 
 # ------------------------------------------------------------
@@ -77,6 +106,25 @@ kubectl get nodes -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints
 
 # Check pod scheduling events
 kubectl describe pod <pod-name> -n <namespace> | sed -n '/Events:/,$p'
+
+# ------------------------------------------------------------
+# 7) TAINT ONLY VLLM PODS
+# ------------------------------------------------------------
+
+kubectl label node <node-name> avoid=vllm-qwen
+
+
+# ------------------------------------------------------------
+# 8) REMOVE TAINT ONLY VLLM PODS
+# ------------------------------------------------------------
+
+kubectl label node <node-name> avoid-
+
+# ------------------------------------------------------------
+# 8) LIST THE TAINTS
+# ------------------------------------------------------------
+
+kubectl get nodes -l avoid=vllm-qwen
 
 # Look for:
 # - taints

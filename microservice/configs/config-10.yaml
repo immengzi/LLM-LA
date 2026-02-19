@@ -2,7 +2,7 @@
 # Clean test config (explicit knobs, values close to example_config.yaml)
 
 router_url: "http://7.242.102.243:30080"
-total_requests: 5000
+total_requests: 40000
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -20,7 +20,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 100
+  rate_rps: 10
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -62,10 +62,10 @@ transport:
   results_zmq: "tcp://7.242.102.243:30559"
   topic: "results"
   run_id: null
-  idle_timeout_s: 1000.0
+  idle_timeout_s: 600.0
 
 helm:
-  replicas: 8
+  replicas: 24
   batch_size: 8
   autoscaling_enabled: false
   autoscaling_min: 1
@@ -73,6 +73,6 @@ helm:
   autoscaling_threshold: "16"
   autoscaling_prometheus_query: |
     max(router_central_queue_length{namespace="vllm"})
-  router_kv_aware: false
+  router_kv_aware: true
   router_len_aware: true
   router_len_policy: "short_first"

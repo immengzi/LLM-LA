@@ -2,33 +2,19 @@
 # Utilities for loading experiment logs and computing per-request latency metrics.
 # + minimal helpers for loading Prometheus samples recorded in metrics.jsonl.
 #
-# Usage from a notebook, for example:
+# This version optionally corrects cross-node timestamps using:
+#   - experiments/<id>/config.json            -> time_offsets_ns (node -> offset_ns)
+#   - experiments/<id>/pod_node_mapping_events.jsonl -> pod->node snapshots over time
 #
-#   from experiment_analysis import load_experiment_latencies
-#   df = load_experiment_latencies(exp_id=3)
-#   df.head()
-#
-#   from experiment_analysis import load_experiment_prom_samples
-#   prom = load_experiment_prom_samples(exp_id=3)
-#   prom.head()
-#
-# This expects the directory layout produced by experiment_io.init_experiment():
-#
-#   ./experiments/
-#       1/
-#         config.json
-#         logs.json         <-- NDJSON (one JSON object per line)
-#         metrics.jsonl     <-- NDJSON (Prometheus samples; optional)
-#       2/
-#         ...
-#
-# Each line in logs.json is the per-request record emitted by load_runner.py.
+# Enable with:
+#   load_experiment_latencies(..., apply_time_offset_correction=True)
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Dict, Any, Optional, Union, List
+from typing import Iterable, Dict, Any, Optional, Union, List, Tuple
 import json
+import copy
 
 import pandas as pd
 
@@ -38,6 +24,10 @@ from trace_utils import compute_trace_metrics
 JsonDict = Dict[str, Any]
 PathLike = Union[str, Path]
 
+
+# =========================
+# IO helpers
+# =========================
 
 def _read_ndjson(path: Path) -> Iterable[JsonDict]:
     """
@@ -68,18 +58,6 @@ def _resolve_experiment_dir(
     You can either:
       - pass a numeric/string experiment ID (e.g. 3 -> ./experiments/3), or
       - pass an explicit exp_dir path.
-
-    Args:
-        exp_id: Experiment ID (directory name under experiments_root).
-        exp_dir: Explicit path to the experiment directory.
-        experiments_root: Root folder containing experiment subdirectories.
-
-    Returns:
-        Path to the experiment directory.
-
-    Raises:
-        ValueError if both exp_id and exp_dir are None.
-        FileNotFoundError if the resolved directory does not exist.
     """
     if exp_dir is not None and exp_id is not None:
         raise ValueError("Pass either exp_id or exp_dir, not both.")
@@ -97,56 +75,189 @@ def _resolve_experiment_dir(
     return p
 
 
+# =========================
+# Time-offset correction helpers
+# =========================
+
+def _load_time_offsets_ns(config_json_path: Path) -> Dict[str, int]:
+    """
+    Load node time offsets from config.json:
+      time_offsets_ns: { node_name: offset_ns }
+
+    offset_ns semantics (as used in your measurement script):
+      offset_ns = remote_epoch_ns - local_midpoint_ns
+
+    So to convert a remote timestamp into the master's timebase:
+      master_est_s = remote_s - (offset_ns / 1e9)
+    """
+    try:
+        obj = json.loads(config_json_path.read_text(encoding="utf-8"))
+        m = obj.get("time_offsets_ns", {}) or {}
+        out: Dict[str, int] = {}
+        for k, v in m.items():
+            try:
+                out[str(k)] = int(v)
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return {}
+
+
+def _load_podmap_event_snapshots(podmap_jsonl_path: Path) -> List[Tuple[float, Dict[str, str]]]:
+    """
+    Read pod_node_mapping_events.jsonl and extract a time-ordered list of snapshots:
+
+      [(ts_unix, {pod_name: node_name, ...}), ...]
+
+    We key by 'ts_unix' from the event logger entry (not the pod's start_time).
+    """
+    snaps: List[Tuple[float, Dict[str, str]]] = []
+    if not podmap_jsonl_path.is_file():
+        return snaps
+
+    for rec in _read_ndjson(podmap_jsonl_path):
+        try:
+            ts = float(rec.get("ts_unix", 0.0) or 0.0)
+            snap = rec.get("snapshot", {}) or {}
+            pods = snap.get("pods", []) or []
+            mapping: Dict[str, str] = {}
+            for p in pods:
+                pod = p.get("pod")
+                node = p.get("node")
+                if pod and node:
+                    mapping[str(pod)] = str(node)
+            if mapping:
+                snaps.append((ts, mapping))
+        except Exception:
+            continue
+
+    snaps.sort(key=lambda x: x[0])
+    return snaps
+
+
+def _pod_to_node_at_time(
+    snapshots: List[Tuple[float, Dict[str, str]]],
+    t_unix: float,
+) -> Dict[str, str]:
+    """
+    Pick the latest snapshot at or before t_unix.
+    If none exist before time, fall back to the earliest snapshot (best-effort).
+    """
+    if not snapshots:
+        return {}
+
+    # binary-ish scan (snapshots are small; linear is fine)
+    best: Optional[Dict[str, str]] = None
+    for ts, mapping in snapshots:
+        if ts <= t_unix:
+            best = mapping
+        else:
+            break
+
+    if best is None:
+        best = snapshots[0][1]
+    return best
+
+
+def _apply_time_offset_correction_to_trace(
+    trace: Dict[str, Any],
+    *,
+    serving_node: Optional[str],
+    time_offsets_ns: Dict[str, int],
+) -> Tuple[Dict[str, Any], Optional[float]]:
+    """
+    Return (corrected_trace, applied_offset_s).
+
+    Only adjusts timestamps that are *expected* to come from the sidecar/vLLM node clock.
+
+    Assumption:
+      - client/router timestamps are already on the master timebase
+      - sidecar/vLLM timestamps are on the serving node's clock (the node hosting the vLLM pod)
+    """
+    if not serving_node or serving_node not in time_offsets_ns:
+        return trace, None
+
+    offset_s = time_offsets_ns[serving_node] / 1e9
+
+    # Work on a copy (never mutate raw logs in-place).
+    out = copy.deepcopy(trace)
+
+    # Keys that are produced on the serving node side (sidecar + vLLM)
+    # If you add new timestamps later, extend this list/prefix logic.
+    def is_remote_key(k: str) -> bool:
+        k = str(k)
+        if not k.startswith("t_"):
+            return False
+        # Sidecar-side timestamps
+        if "sidecar" in k:
+            return True
+        # vLLM timestamps
+        if k.startswith("t_vllm_") or "vllm" in k:
+            return True
+        return False
+
+    for k, v in list(out.items()):
+        if not is_remote_key(k):
+            continue
+        if isinstance(v, (int, float)):
+            out[k] = float(v) - float(offset_s)
+
+    return out, float(offset_s)
+
+
+# =========================
+# Main latency loader
+# =========================
+
 def load_experiment_latencies(
     *,
     exp_id: Optional[Union[int, str]] = None,
     exp_dir: Optional[PathLike] = None,
     experiments_root: PathLike = "experiments",
     include_failed: bool = False,
+    apply_time_offset_correction: bool = False,
 ) -> pd.DataFrame:
     """
     Load logs.json for a given experiment and compute per-request latency metrics.
 
-    This function:
-      - locates the experiment directory (via exp_id or exp_dir),
-      - reads logs.json (NDJSON) line-by-line,
-      - for each record with a 'trace' object:
-          - recomputes derived metrics using compute_trace_metrics(trace),
-      - returns a pandas DataFrame with one row per record.
+    If apply_time_offset_correction=True:
+      - loads time_offsets_ns from config.json
+      - loads pod->node snapshots from pod_node_mapping_events.jsonl
+      - finds serving pod from trace['endpoint']
+      - finds serving node via snapshot closest to request time
+      - corrects sidecar/vLLM timestamps into the master's timebase before computing metrics
 
-    Columns include:
-      - basic fields from the log record (idx, req_id, end_to_end_s, model_latency_s, ...),
-      - 'send_failed' flag (bool, default False),
-      - one column per derived metric from compute_trace_metrics:
-          - end_to_end_s, client_to_router_s, router_queue_s, ...
-        (only present if the underlying timestamps exist in the trace).
-
-    Args:
-        exp_id: Experiment ID (e.g. 3 -> experiments/3/logs.json).
-        exp_dir: Explicit path to an experiment directory (overrides exp_id).
-        experiments_root: Root directory used when resolving exp_id.
-        include_failed: If False, drop rows where send_failed is True.
-
-    Returns:
-        pandas.DataFrame with one row per logged record.
+    Returns a DataFrame with:
+      - base fields
+      - derived trace metrics columns (client_to_router_s, router_queue_s, ...)
+      - extra helpful columns (serving_pod, serving_node, applied_time_offset_s)
     """
     exp_path = _resolve_experiment_dir(exp_id=exp_id, exp_dir=exp_dir, experiments_root=experiments_root)
     logs_path = exp_path / "logs.json"
+    config_path = exp_path / "config.json"
+    podmap_path = exp_path / "pod_node_mapping_events.jsonl"
 
     if not logs_path.is_file():
         raise FileNotFoundError(f"logs.json not found in experiment directory: {logs_path}")
 
+    time_offsets_ns: Dict[str, int] = {}
+    podmap_snaps: List[Tuple[float, Dict[str, str]]] = []
+
+    if apply_time_offset_correction:
+        time_offsets_ns = _load_time_offsets_ns(config_path) if config_path.is_file() else {}
+        podmap_snaps = _load_podmap_event_snapshots(podmap_path) if podmap_path.is_file() else []
+
     rows: List[JsonDict] = []
 
     for rec in _read_ndjson(logs_path):
-        # Normalise basic flags
         send_failed = bool(rec.get("send_failed", False))
-
-        # Optionally skip failed sends (no /enqueue, no trace).
         if send_failed and not include_failed:
             continue
 
-        # Start the row with a shallow copy of the record so we keep the basic fields.
+        trace = rec.get("trace") if isinstance(rec.get("trace"), dict) else None
+
+        # Base row
         row: JsonDict = {
             "idx": rec.get("idx"),
             "req_id": rec.get("req_id"),
@@ -159,19 +270,51 @@ def load_experiment_latencies(
             "total_tokens": rec.get("total_tokens"),
         }
 
-        trace = rec.get("trace")
-        if isinstance(trace, dict):
-            # Recompute derived metrics from raw timestamps to keep a single source of truth.
-            metrics = compute_trace_metrics(trace)
+        serving_pod = None
+        serving_node = None
+        applied_offset_s = None
 
-            # Merge into the row; keys are like 'end_to_end_s', 'router_queue_s', ...
+        if trace is not None:
+            serving_pod = trace.get("endpoint")
+
+            # Choose "request time" on master clock to pick the closest podmap snapshot
+            # Prefer t0_wall (client wall) if present; else fall back to t_arrive_router.
+            t_ref = rec.get("t0_wall", None)
+            if not isinstance(t_ref, (int, float)):
+                t_ref = trace.get("t_arrive_router", None)
+            if not isinstance(t_ref, (int, float)):
+                # last resort: now-ish, but better to just not map
+                t_ref = None
+
+            if apply_time_offset_correction and t_ref is not None and podmap_snaps and isinstance(serving_pod, str):
+                pod_to_node = _pod_to_node_at_time(podmap_snaps, float(t_ref))
+                serving_node = pod_to_node.get(serving_pod)
+
+                # Correct trace timestamps into master timebase
+                if time_offsets_ns:
+                    trace_corr, applied_offset_s = _apply_time_offset_correction_to_trace(
+                        trace,
+                        serving_node=serving_node,
+                        time_offsets_ns=time_offsets_ns,
+                    )
+                else:
+                    trace_corr = trace
+            else:
+                trace_corr = trace
+
+            # Save mapping columns (helpful for downstream analysis)
+            row["serving_pod"] = serving_pod
+            row["serving_node"] = serving_node
+            row["applied_time_offset_s"] = applied_offset_s
+
+            # Compute derived metrics from (possibly corrected) raw timestamps
+            metrics = compute_trace_metrics(trace_corr)
             for k, v in metrics.items():
                 row[k] = v
 
         rows.append(row)
 
     if not rows:
-        # Return an empty DataFrame with no rows but some expected columns.
         return pd.DataFrame(
             columns=[
                 "idx",
@@ -180,17 +323,21 @@ def load_experiment_latencies(
                 "end_to_end_s",
                 "model_latency_s",
                 "finish_reason",
-                # metrics columns will appear as needed when data is present
+                "serving_pod",
+                "serving_node",
+                "applied_time_offset_s",
             ]
         )
 
     df = pd.DataFrame(rows)
 
-    # Make sure some obvious fields are typed sensibly
+    # sensible typing
     if "idx" in df.columns:
         df["idx"] = pd.to_numeric(df["idx"], errors="coerce").astype("Int64")
     if "send_failed" in df.columns:
         df["send_failed"] = df["send_failed"].astype(bool)
+    if "applied_time_offset_s" in df.columns:
+        df["applied_time_offset_s"] = pd.to_numeric(df["applied_time_offset_s"], errors="coerce")
 
     return df
 
@@ -212,13 +359,6 @@ def load_experiment_prom_samples(
       {"ts": "...", "mode": "...", "instances": [...], "samples": [ {instance/pod + fields...}, ... ]}
 
     This function returns one row per (tick, sample), i.e. per instance per tick.
-
-    Output columns (depending on what's present in your metrics_prom catalog):
-      - ts (datetime64[ns, UTC])
-      - instance (host:port)
-      - pod (optional)
-      - requests_running, requests_waiting, gen_tokens_per_sec, ... (optional)
-      - any other fields in the "samples" objects
     """
     exp_path = _resolve_experiment_dir(exp_id=exp_id, exp_dir=exp_dir, experiments_root=experiments_root)
     metrics_path = exp_path / "metrics.jsonl"
@@ -242,7 +382,6 @@ def load_experiment_prom_samples(
             if not isinstance(s, dict):
                 continue
             row: JsonDict = {"ts": ts}
-            # includes instance/pod and metric fields
             row.update(s)
             flat.append(row)
 
@@ -255,6 +394,7 @@ def load_experiment_prom_samples(
         df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
 
     return df
+
 
 def experiments_from_series(series_ids, series_size=4, start_exp_id=1):
     experiments = []

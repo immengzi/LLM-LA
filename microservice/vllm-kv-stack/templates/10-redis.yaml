@@ -13,6 +13,20 @@ spec:
       labels:
         app: redis
     spec:
+      {{- if .Values.pin.enabled }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - {{ .Values.pin.nodeName | quote }}
+      tolerations:
+{{- toYaml .Values.pin.tolerations | nindent 8 }}
+      {{- end }}
+
       containers:
         - name: redis
           # image: redis:7-alpine
