@@ -20,7 +20,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 12
+  rate_rps: 9
   duration_s: 1000000000.0
   warmup_reqs: 0
 

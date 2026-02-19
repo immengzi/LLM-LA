@@ -2,7 +2,7 @@
 # Clean test config (explicit knobs, values close to example_config.yaml)
 
 router_url: "http://7.242.102.243:30080"
-total_requests: 20000
+total_requests: 40000
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -20,7 +20,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 9
+  rate_rps: 8
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -65,7 +65,7 @@ transport:
   idle_timeout_s: 600.0
 
 helm:
-  replicas: 8
+  replicas: 24
   batch_size: 8
   autoscaling_enabled: false
   autoscaling_min: 1

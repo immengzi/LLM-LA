@@ -41,6 +41,20 @@ autoscaling:
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
 
+# Pin router + redis to a specific node by name (via kubernetes.io/hostname)
+# Example node names from `kubectl get nodes`: master / master1 / worker1
+pin:
+  enabled: true
+  nodeName: "master"
+  tolerations:
+    # Allow scheduling onto control-plane/master nodes if tainted (common default)
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+    - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
+
 # modelVolume:
 #   create: false
 modelVolume:

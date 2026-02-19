@@ -1533,10 +1533,10 @@ Setup:
 - pattern: "det"
 - rate_rps: 3
 - Methods:
-  157) Pull
-  158) Push-RR
-  159) Push-Random
-  160) Push-Least-Queue
+  161) Pull
+  162) Push-RR
+  163) Push-Random
+  164) Push-Least-Queue
 
 Purpose: 40000 requests experiment on rps 3, repeating the 
 Findings: 3 seems to be a magic number that shows the best performance
@@ -1563,3 +1563,336 @@ Metric                         | Pull (exp161) | Push-RR (exp162)        | Push-
 
 ↑ Success rate (%)             | 99.71*        | 99.62 (−0.10%)          | 99.50 (−0.21%)           | 99.48 (−0.23%)           | Pull
 ↓ Failure rate (%)             | 0.29*         | 0.39 (+32.8%)           | 0.50 (+73.3%)            | 0.52 (+80.2%)            | Pull
+
+
+Series 41:
+Setup:
+- 8 servers
+- No cap on input tokens
+- Request response length: 8192
+- Total requests: 40000
+- pattern: "det"
+- rate_rps: 4
+- Methods:
+  165) Pull
+  166) Push-RR
+  167) Push-Random
+  168) Push-Least-Queue
+
+Purpose: 40000 requests experiment on rps 4, repeating the 
+Findings: Since the servers became over saturated then the queuing latency is now so high that the difference between methdos become marginal
+
+
+Metric (mean / p99)            | Pull (exp165) | Push-RR (exp166)        | Push-Random (exp167)     | Push-LQ (exp168)         | Winner
+-------------------------------|---------------|-------------------------|--------------------------|--------------------------|--------
+↓ End-to-end latency mean (s)  | 1677.90*      | 1725.53 (+2.8%)         | 1724.90 (+2.8%)          | 1724.97 (+2.8%)          | Pull
+↓ End-to-end latency p99 (s)   | 3374.82*      | 3885.56 (+15.1%)        | 3667.20 (+8.7%)          | 3933.40 (+16.6%)         | Pull
+
+↑ Decode TPS mean              | 1753.52*      | 1668.98 (−4.8%)         | 1691.86 (−3.5%)          | 1664.31 (−5.1%)          | Pull
+↑ Prefill TPS mean             | 248.03*       | 235.72 (−5.0%)          | 239.14 (−3.6%)           | 234.85 (−5.3%)           | Pull
+
+↑ Requests running mean        | 61.96*        | 59.09 (−4.6%)           | 59.85 (−3.4%)            | 58.89 (−4.9%)            | Pull
+
+↓ TTFT mean (s)                | 2.394         | 2.342* (−2.2%)          | 2.352 (−1.8%)            | 2.330 (−2.7%)            | Push-LQ
+↓ TPOT mean (s)                | 0.2826        | 0.2702* (−4.4%)         | 0.2732 (−3.3%)           | 0.2691 (−4.8%)           | Push-LQ
+
+
+Metric                         | Pull (exp165) | Push-RR (exp166)        | Push-Random (exp167)     | Push-LQ (exp168)         | Winner
+-------------------------------|---------------|-------------------------|--------------------------|--------------------------|--------
+↑ Successful requests          | 39835*        | 39635 (−0.5%)           | 39743 (−0.2%)            | 39786 (−0.1%)            | Pull
+↓ Connection failures          | 165*          | 365 (+121.2%)           | 257 (+55.8%)             | 214 (+29.7%)             | Pull
+
+↑ Success rate (%)             | 99.5875*      | 99.0875 (−0.5%)         | 99.3575 (−0.2%)          | 99.4650 (−0.1%)          | Pull
+↓ Failure rate (%)             | 0.4125*       | 0.9125 (+121.2%)        | 0.6425 (+55.8%)          | 0.5350 (+29.7%)          | Pull
+
+
+
+Series 42:
+Setup:
+- 8 servers
+- No cap on input tokens
+- Request response length: 8192
+- Total requests: 40000
+- pattern: "det"
+- rate_rps: 5
+- Methods:
+  169) Pull
+  170) Push-RR
+  171) Push-Random
+  172) Push-Least-Queue
+
+Purpose: 40000 requests experiment on rps 5, repeating the 
+Findings: Since the servers became over saturated then the queuing latency is now so high that the difference between methdos become marginal
+
+
+Metric (mean / p99)            | Pull (exp169) | Push-RR (exp170)        | Push-Random (exp171)     | Push-LQ (exp172)         | Winner
+-------------------------------|---------------|-------------------------|--------------------------|--------------------------|--------
+↓ End-to-end latency mean (s)  | 2679.19       | 2712.38 (+1.2%)         | 2676.70* (−0.1%)         | 2720.64 (+1.5%)          | Push-Random
+↓ End-to-end latency p99 (s)   | 5357.46*      | 5794.28 (+8.2%)         | 5569.32 (+4.0%)          | 5763.50 (+7.6%)          | Pull
+
+↑ Decode TPS mean              | 1747.66*      | 1676.36 (−4.1%)         | 1709.97 (−2.2%)          | 1671.81 (−4.3%)          | Pull
+↑ Prefill TPS mean             | 246.99*       | 236.75 (−4.1%)          | 242.19 (−1.9%)           | 236.01 (−4.4%)           | Pull
+
+↑ Requests running mean        | 61.89*        | 59.21 (−4.3%)           | 60.31 (−2.6%)            | 59.19 (−4.4%)            | Pull
+
+↓ TTFT mean (s)                | 2.463         | 2.277* (−7.6%)          | 2.334 (−5.2%)            | 2.340 (−5.0%)            | Push-RR
+↓ TPOT mean (s)                | 0.2828        | 0.2700* (−4.5%)         | 0.2744 (−3.0%)           | 0.2706 (−4.3%)           | Push-RR
+
+
+Metric                         | Pull (exp169) | Push-RR (exp170)         | Push-Random (exp171)      | Push-LQ (exp172)          | Winner
+-------------------------------|---------------|--------------------------|---------------------------|---------------------------|--------
+↑ Successful requests          | 39661         | 39830* (+0.43%)          | 39820 (+0.40%)            | 39822 (+0.41%)            | Push-RR
+↓ Connection failures          | 339           | 170* (−49.85%)           | 180 (−46.90%)             | 178 (−47.49%)             | Push-RR
+
+↑ Success rate (%)             | 99.1525       | 99.5750* (+0.43%)        | 99.5500 (+0.40%)          | 99.5550 (+0.41%)          | Push-RR
+↓ Failure rate (%)             | 0.8475        | 0.4250* (−49.85%)        | 0.4500 (−46.90%)          | 0.4450 (−47.49%)          | Push-RR
+
+
+Series 43:
+Setup:
+- 8 servers
+- No cap on input tokens
+- Request response length: 8192
+- Total requests: 40000
+- pattern: "det"
+- rate_rps: 6
+- Methods:
+  173) Pull
+  174) Push-RR
+  175) Push-Random
+  176) Push-Least-Queue
+
+Purpose: 40000 requests experiment on rps 6, repeating the 
+Findings: Since the servers became over saturated then the queuing latency is now so high that the difference between methdos become marginal
+
+
+Metric (mean / p99)            | Pull (exp173) | Push-RR (exp174)         | Push-Random (exp175)      | Push-LQ (exp176)          | Winner
+-------------------------------|---------------|--------------------------|---------------------------|---------------------------|--------
+↓ End-to-end latency mean (s)  | 3350.92*      | 3357.41 (+0.19%)         | 3356.91 (+0.18%)          | 3379.79 (+0.86%)          | Pull
+↓ End-to-end latency p99 (s)   | 6685.72*      | 7016.50 (+4.95%)         | 6822.28 (+2.04%)          | 7098.09 (+6.17%)          | Pull
+
+↑ Decode TPS mean              | 1750.09*      | 1676.98 (−4.18%)         | 1710.37 (−2.27%)          | 1679.74 (−4.02%)          | Pull
+↑ Prefill TPS mean             | 247.96*       | 237.17 (−4.35%)          | 241.80 (−2.48%)           | 237.15 (−4.36%)           | Pull
+
+↑ Requests running mean        | 62.01*        | 59.22 (−4.49%)           | 60.44 (−2.52%)            | 59.46 (−4.10%)            | Pull
+
+↓ TTFT mean (s)                | 2.466         | 2.311* (−6.29%)          | 2.353 (−4.59%)            | 2.351 (−4.68%)            | Push-RR
+↓ TPOT mean (s)                | 0.2835        | 0.2699* (−4.82%)         | 0.2756 (−2.81%)           | 0.2717 (−4.18%)           | Push-RR
+
+
+Metric                         | Pull (exp173) | Push-RR (exp174)        | Push-Random (exp175)      | Push-LQ (exp176)         | Winner
+-------------------------------|---------------|-------------------------|---------------------------|--------------------------|--------
+↑ Successful requests          | 39813         | 39781 (−0.08%)          | 39845* (+0.08%)           | 39801 (−0.03%)           | Push-Random
+↓ Connection failures          | 187           | 219 (+17.11%)           | 155* (−17.11%)            | 199 (+6.42%)             | Push-Random
+
+↑ Success rate (%)             | 99.5325       | 99.4525 (−0.08%)        | 99.6125* (+0.08%)         | 99.5025 (−0.03%)         | Push-Random
+↓ Failure rate (%)             | 0.4675        | 0.5475 (+17.11%)        | 0.3875* (−17.11%)         | 0.4975 (+6.42%)          | Push-Random
+
+
+Series 44:
+Setup:
+- 16 servers
+- No cap on input tokens
+- Request response length: 8192
+- Total requests: 600
+- pattern: "det"
+- rate_rps: 9
+- Methods:
+  177) Pull
+  178) Push-RR
+  179) Push-Random
+  180) Push-Least-Queue
+
+Purpose: debugging 16 servers on moderate load
+Findings: all good and seems working well
+
+
+Metric (mean / p99)            | Pull (exp177) | Push-RR (exp178)        | Push-Random (exp179)     | Push-LQ (exp180)        | Winner
+-------------------------------|---------------|-------------------------|--------------------------|-------------------------|--------
+↓ End-to-end latency mean (s)  | 38.49         | 36.34* (−5.60%)         | 36.95 (−4.01%)           | 39.57 (+2.79%)          | Push-RR
+↓ End-to-end latency p99 (s)   | 130.60        | 126.10* (−3.45%)        | 131.89 (+0.99%)          | 145.51 (+11.42%)        | Push-RR
+
+↑ Decode TPS mean              | 1305.38       | 1338.76* (+2.56%)       | 1289.94 (−1.18%)         | 1272.36 (−2.53%)        | Push-RR
+↑ Prefill TPS mean             | 183.55        | 189.32* (+3.15%)        | 182.30 (−0.68%)          | 179.92 (−1.98%)         | Push-RR
+
+↑ Requests running mean        | 50.10         | 50.37* (+0.55%)         | 46.83 (−6.52%)           | 49.92 (−0.37%)          | Push-RR
+
+↓ TTFT mean (s)                | 34.99         | 25.27* (−27.78%)        | 26.35 (−24.69%)          | 27.13 (−22.45%)         | Push-RR
+↓ TPOT mean (s)                | 0.4715        | 0.4657 (−1.22%)         | 0.4209* (−10.72%)        | 0.4792 (+1.64%)         | Push-Random
+
+
+Metric                         | Pull (exp177) | Push-RR (exp178)        | Push-Random (exp179)     | Push-LQ (exp180)        | Winner
+-------------------------------|---------------|-------------------------|--------------------------|-------------------------|--------
+↑ Successful requests          | 596*          | 578 (−3.02%)            | 583 (−2.18%)             | 564 (−5.37%)            | Pull
+↓ Connection failures          | 4*            | 22 (+450.00%)           | 17 (+325.00%)            | 36 (+800.00%)           | Pull
+
+↑ Success rate (%)             | 99.33*        | 96.33 (−3.02%)          | 97.17 (−2.18%)           | 94.00 (−5.37%)          | Pull
+↓ Failure rate (%)             | 0.67*         | 3.67 (+450.00%)         | 2.83 (+325.00%)          | 6.00 (+800.00%)         | Pull
+
+
+Series 45:
+Setup:
+- 24 servers
+- No cap on input tokens
+- Request response length: 8192
+- Total requests: 40000
+- pattern: "det"
+- rate_rps: 8
+- Methods:
+  181) Pull
+  182) Push-RR
+  183) Push-Random
+  184) Push-Least-Queue
+
+Purpose: TODO
+Findings: TODO
+
+
+Metric (mean / p99)            | Pull (exp181) | Push-RR (exp182)        | Push-Random (exp183)     | Push-LQ (exp184)        | Winner
+-------------------------------|---------------|--------------------------|---------------------------|--------------------------|--------
+↓ End-to-end latency mean (s)  | 21.05         | 19.31 (−8.29%)          | 20.72 (−1.59%)           | 18.32* (−12.98%)        | Push-LQ
+↓ End-to-end latency p99 (s)   | 254.07        | 231.12 (−9.04%)         | 216.44 (−14.82%)         | 220.14* (−13.35%)       | Push-Random
+
+↑ Decode TPS mean              | 3516.20*      | 2526.03 (−28.16%)       | 2559.40 (−27.22%)        | 2626.61 (−25.30%)       | Pull
+↑ Prefill TPS mean             | 498.39*       | 357.53 (−28.25%)        | 364.14 (−26.93%)         | 373.18 (−25.12%)        | Pull
+
+↑ Requests running mean        | 116.51*       | 75.80 (−34.94%)         | 79.85 (−31.46%)          | 75.07 (−35.56%)         | Pull
+
+↓ TTFT mean (s)                | 28.44         | 20.98 (−26.25%)         | 25.11 (−11.71%)          | 17.21* (−39.51%)        | Push-LQ
+↓ TPOT mean (s)                | 0.8147        | 0.7156 (−12.17%)        | 0.7523 (−7.67%)          | 0.6770* (−16.90%)       | Push-LQ
+
+
+
+Metric                         | Pull (exp181) | Push-RR (exp182)        | Push-Random (exp183)       | Push-LQ (exp184)          | Winner
+-------------------------------|---------------|--------------------------|-----------------------------|----------------------------|--------
+↑ Successful requests          | 38850*        | 37475 (−3.54%)          | 29892 (−23.06%)            | 19210 (−50.55%)           | Pull
+↓ Connection failures          | 1150*         | 2525 (+119.57%)         | 10108 (+778.96%)           | 20790 (+1707.83%)         | Pull
+
+↑ Success rate (%)             | 97.125*       | 93.6875 (−3.54%)        | 74.73 (−23.06%)            | 48.025 (−50.55%)          | Pull
+↓ Failure rate (%)             | 2.875*        | 6.3125 (+119.57%)       | 25.27 (+778.96%)           | 51.975 (+1707.83%)        | Pull
+
+
+
+Series 46:
+Setup:
+- 24 servers
+- No cap on input tokens
+- Request response length: 8192
+- Total requests: 40000
+- pattern: "det"
+- rate_rps: 10
+- Methods:
+  185) Pull
+  186) Push-RR
+  187) Push-Random
+  188) Push-Least-Queue
+
+Purpose: TODO
+Findings: TODO
+
+
+Metric (mean / p99)            | Pull (exp185) | Push-RR (exp186)         | Push-Random (exp187)      | Push-LQ (exp188)          | Winner
+-------------------------------|---------------|---------------------------|----------------------------|----------------------------|--------
+↓ End-to-end latency mean (s)  | 21.37         | 19.28* (−9.76%)          | 17.80* (−16.69%)          | 19.41 (−9.16%)            | Push-Random
+↓ End-to-end latency p99 (s)   | 253.38        | 231.69 (−8.56%)          | 107.55* (−57.55%)         | 229.54 (−9.41%)           | Push-Random
+
+↑ Decode TPS mean              | 3609.08*      | 2547.98 (−29.40%)        | 2496.03 (−30.83%)         | 2622.45 (−27.33%)         | Pull
+↑ Prefill TPS mean             | 509.93*       | 360.81 (−29.25%)         | 353.98 (−30.60%)          | 372.55 (−26.94%)          | Pull
+
+↑ Requests running mean        | 121.46*       | 76.77 (−36.80%)          | 78.32 (−35.53%)           | 79.04 (−34.92%)           | Pull
+
+↓ TTFT mean (s)                | 29.56         | 21.40 (−27.61%)          | 26.11 (−11.67%)           | 20.21* (−31.64%)          | Push-LQ
+↓ TPOT mean (s)                | 0.8215        | 0.7107 (−13.49%)         | 0.7556 (−8.02%)           | 0.7174* (−12.68%)         | Push-RR
+
+
+Metric                         | Pull (exp185) | Push-RR (exp186)        | Push-Random (exp187)        | Push-LQ (exp188)         | Winner
+-------------------------------|---------------|--------------------------|-----------------------------|---------------------------|--------
+↑ Successful requests          | 38576*        | 36790 (−4.63%)           | 1035 (−97.32%)              | 36869 (−4.42%)           | Pull
+↓ Connection failures          | 1424*         | 3210 (+125.42%)          | 38965 (+2636.87%)           | 3131 (+119.88%)          | Pull
+
+↑ Success rate (%)             | 96.44*        | 91.98 (−4.63%)           | 2.59 (−97.32%)              | 92.17 (−4.42%)           | Pull
+↓ Failure rate (%)             | 3.56*         | 8.03 (+125.42%)          | 97.41 (+2636.87%)           | 7.83 (+119.88%)          | Pull
+
+
+
+Series 47:
+Setup:
+- 24 servers
+- No cap on input tokens
+- Request response length: 8192
+- Total requests: 40000
+- pattern: "det"
+- rate_rps: 12
+- Methods:
+  189) Pull
+  190) Push-RR
+  191) Push-Random
+  192) Push-Least-Queue
+
+Purpose: TODO
+Findings: TODO
+
+
+Metric (mean / p99)            | Pull (exp189) | Push-RR (exp190)        | Push-Random (exp191)      | Push-LQ (exp192)         | Winner
+-------------------------------|---------------|--------------------------|---------------------------|---------------------------|--------
+↓ End-to-end latency mean (s)  | 21.12         | 20.00 (−5.31%)           | 21.10 (−0.11%)            | 18.93* (−10.37%)         | Push-LQ
+↓ End-to-end latency p99 (s)   | 254.58        | 231.64* (−9.01%)         | 239.12 (−6.07%)           | 231.17 (−9.19%)          | Push-LQ
+
+↑ Decode TPS mean              | 3481.91*      | 2537.18 (−27.13%)        | 2605.84 (−25.16%)         | 2586.39 (−25.72%)        | Pull
+↑ Prefill TPS mean             | 493.84*       | 359.35 (−27.23%)         | 369.23 (−25.23%)          | 364.88 (−26.11%)         | Pull
+
+↑ Requests running mean        | 116.01*       | 78.43 (−32.39%)          | 82.02 (−29.30%)           | 76.00 (−34.49%)          | Pull
+
+↓ TTFT mean (s)                | 27.97         | 22.93 (−18.01%)          | 25.60 (−8.47%)            | 18.90* (−32.44%)         | Push-LQ
+↓ TPOT mean (s)                | 0.8120        | 0.7441 (−8.37%)          | 0.7424 (−8.58%)           | 0.6928* (−14.67%)        | Push-LQ
+
+
+Metric                         | Pull (exp189) | Push-RR (exp190)        | Push-Random (exp191)     | Push-LQ (exp192)         | Winner
+-------------------------------|---------------|--------------------------|---------------------------|---------------------------|--------
+↑ Successful requests          | 38911*        | 37063 (−4.75%)           | 37002 (−4.91%)            | 36502 (−6.19%)            | Pull
+↓ Connection failures          | 1089*         | 2937 (+169.70%)          | 2998 (+175.32%)           | 3498 (+221.31%)           | Pull
+
+↑ Success rate (%)             | 97.2775*      | 92.6575 (−4.75%)         | 92.5050 (−4.91%)          | 91.2550 (−6.19%)          | Pull
+↓ Failure rate (%)             | 2.7225*       | 7.3425 (+169.70%)        | 7.4950 (+175.32%)         | 8.7450 (+221.31%)         | Pull
+
+
+
+Series 48:
+Setup:
+- 24 servers
+- No cap on input tokens
+- Request response length: 8192
+- Total requests: 40000
+- pattern: "det"
+- rate_rps: 14
+- Methods:
+  193) Pull
+  194) Push-RR
+  195) Push-Random
+  196) Push-Least-Queue
+
+Purpose: TODO
+Findings: TODO
+
+
+Metric (mean / p99)            | Pull (exp193) | Push-RR (exp194)        | Push-Random (exp195)     | Push-LQ (exp196)         | Winner
+-------------------------------|---------------|--------------------------|---------------------------|---------------------------|--------
+↓ End-to-end latency mean (s)  | 20.43         | 19.52 (−4.49%)           | 17.22* (−15.72%)          | 18.93 (−7.35%)            | Push-Random
+↓ End-to-end latency p99 (s)   | 247.67        | 232.27 (−6.22%)          | 200.48* (−19.05%)         | 234.78 (−5.20%)           | Push-Random
+
+↑ Decode TPS mean              | 3531.58*      | 2566.68 (−27.32%)        | 2575.18 (−27.08%)         | 2586.53 (−26.76%)         | Pull
+↑ Prefill TPS mean             | 499.70*       | 362.53 (−27.46%)         | 364.36 (−27.08%)          | 367.74 (−26.41%)          | Pull
+
+↑ Requests running mean        | 114.10*       | 77.85 (−31.77%)          | 70.09 (−38.57%)           | 76.37 (−33.07%)           | Pull
+
+↓ TTFT mean (s)                | 25.72         | 21.96 (−14.63%)          | 14.41* (−43.97%)          | 19.91 (−22.58%)           | Push-Random
+↓ TPOT mean (s)                | 0.7803        | 0.7181 (−7.97%)          | 0.6460* (−17.21%)         | 0.7032 (−9.88%)           | Push-Random
+
+
+Metric                         | Pull (exp193) | Push-RR (exp194)        | Push-Random (exp195)      | Push-LQ (exp196)         | Winner
+-------------------------------|---------------|--------------------------|----------------------------|---------------------------|--------
+↑ Successful requests          | 38851*        | 36863 (−5.12%)           | 5305 (−86.35%)             | 27119 (−30.20%)           | Pull
+↓ Connection failures          | 1149*         | 3137 (+173.02%)          | 34695 (+2920.71%)          | 12881 (+1020.97%)         | Pull
+
+↑ Success rate (%)             | 97.1275*      | 92.1575 (−5.12%)         | 13.2625 (−86.35%)          | 67.7975 (−30.20%)         | Pull
+↓ Failure rate (%)             | 2.8725*       | 7.8425 (+173.02%)        | 86.7375 (+2920.71%)        | 32.2025 (+1020.97%)       | Pull

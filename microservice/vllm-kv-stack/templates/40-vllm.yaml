@@ -17,6 +17,17 @@ spec:
     spec:
       restartPolicy: Always
       shareProcessNamespace: true
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: avoid
+                    operator: NotIn
+                    values:
+                      - vllm-qwen
+
       containers:
         - name: vllm
           # image: quay.io/ascend/vllm-ascend:v0.11.0rc0
