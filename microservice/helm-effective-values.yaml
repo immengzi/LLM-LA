@@ -30,9 +30,9 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 8
+  vllm: 24
 router:
   kvAware: false
   lenAware: true
   lenPolicy: short_first
-  mode: push-rr
+  mode: pull

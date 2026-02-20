@@ -226,6 +226,49 @@ def _wait_ready(namespace: str, timeout_s: float = 900.0) -> None:
 
 
 # ---------------------------
+# redeploy helpers (on wait failure)
+# ---------------------------
+
+def _debug_wait_failure(namespace: str) -> None:
+    """Best-effort diagnostics when kubectl wait fails."""
+    try:
+        click.echo("[diag] pods (wide):")
+        out = _kubectl(["get", "pods", "-n", namespace, "-o", "wide"], check=False, capture=True).stdout or ""
+        click.echo(out.strip())
+    except Exception:
+        pass
+
+    try:
+        click.echo("\n[diag] not-ready pods (describe):")
+        out = _kubectl(["get", "pods", "-n", namespace, "--no-headers"], check=False, capture=True).stdout or ""
+        for ln in out.splitlines():
+            parts = ln.split()
+            if len(parts) < 2:
+                continue
+            name, ready = parts[0], parts[1]  # ready like 1/2
+            try:
+                a, b = ready.split("/")
+                if int(a) == int(b):
+                    continue
+            except Exception:
+                # If parse fails, still try describing
+                pass
+            click.echo(f"\n--- describe pod/{name} ---")
+            desc = _kubectl(["describe", "pod", name, "-n", namespace], check=False, capture=True).stdout or ""
+            click.echo(desc.strip())
+    except Exception:
+        pass
+
+    try:
+        click.echo("\n[diag] recent events (tail):")
+        ev = _kubectl(["get", "events", "-n", namespace, "--sort-by=.lastTimestamp"], check=False, capture=True).stdout or ""
+        lines = ev.splitlines()
+        click.echo("\n".join(lines[-200:]))
+    except Exception:
+        pass
+
+
+# ---------------------------
 # run client
 # ---------------------------
 
@@ -313,13 +356,39 @@ def cli(master_config: str) -> None:
         for k in sorted(set_values):
             click.echo(f"  - {k}={_coerce_set_value(set_values[k])}")
 
-        _helm_install_or_upgrade(
-            release=release,
-            chart_dir=chart_dir,
-            namespace=namespace,
-            values_file=values_file if values_file.is_file() else None,
-            set_values=set_values,
-        )
+        # Redeploy logic if readiness wait fails
+        max_redeploy_attempts = 3
+        redeploy_sleep_s = 10
+
+        last_err: Optional[Exception] = None
+        for attempt in range(1, max_redeploy_attempts + 1):
+            click.echo(f"[deploy] attempt {attempt}/{max_redeploy_attempts}")
+
+            _helm_install_or_upgrade(
+                release=release,
+                chart_dir=chart_dir,
+                namespace=namespace,
+                values_file=values_file if values_file.is_file() else None,
+                set_values=set_values,
+            )
+
+            try:
+                _wait_ready(namespace)  # unchanged
+                last_err = None
+                break
+            except subprocess.CalledProcessError as e:
+                last_err = e
+                click.echo(f"[deploy] WARN: wait_ready failed: {e}")
+                _debug_wait_failure(namespace)
+
+                click.echo("[deploy] redeploying everything (helm uninstall -> sleep -> retry)")
+                _helm_uninstall(release=release, namespace=namespace)
+                time.sleep(redeploy_sleep_s)
+
+        if last_err is not None:
+            raise click.ClickException(
+                f"Deployment not ready after {max_redeploy_attempts} attempts: {last_err}"
+            )
 
         try:
             out = _helm(["get", "values", release, "-n", namespace, "--all"], capture=True).stdout or ""
@@ -327,8 +396,6 @@ def cli(master_config: str) -> None:
             click.echo("[sweep] wrote helm-effective-values.yaml")
         except Exception as e:
             click.echo(f"[sweep] WARN: failed to helm get values: {e}")
-
-        _wait_ready(namespace)
 
         rendered_text = _helm_template(
             release=release,

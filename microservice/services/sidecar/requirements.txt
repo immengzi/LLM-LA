@@ -1,7 +1,0 @@
-fastapi
-uvicorn
-requests
-redis
-msgspec
-pyzmq
-prometheus_client

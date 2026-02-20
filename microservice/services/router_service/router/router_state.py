@@ -9,6 +9,7 @@ from typing import Deque, Dict, Tuple, List, Any, Optional
 import sys
 import uuid
 import asyncio
+import time
 
 from .config import get_config
 from .kv_aware import prefix_len
@@ -46,6 +47,11 @@ class RouterState:
       - Result waiters are asyncio Futures
       - This avoids the router enqueue handler blocking in asyncio.to_thread(...)
         and eliminates massive router_wakeup_s artifacts under load.
+
+    Additions (for async / decoupled flows):
+      - Result retention (TTL) so /submit (async_pubsub) and push-dispatch decoupling
+        don't leak _result_values forever if the client never waits.
+      - Periodic cleanup loop to bound memory.
     """
 
     def __init__(self):
@@ -54,10 +60,15 @@ class RouterState:
         self._queue: Deque[Tuple[str, str, float, dict]] = deque()
 
         # Result tracking (async-native)
-        # req_id -> asyncio.Future that will hold the result
-        self._result_futs: Dict[str, asyncio.Future] = {}
+        # req_id -> asyncio.Future that will hold the result (or None placeholder if no loop)
+        self._result_futs: Dict[str, Any] = {}
         # req_id -> stored result (for early-arriving /result before waiter exists)
         self._result_values: Dict[str, Any] = {}
+        # req_id -> time when result was stored (for TTL cleanup)
+        self._result_store_ts: Dict[str, float] = {}
+
+        # background cleanup task (lazy-start)
+        self._cleanup_task: Optional[asyncio.Task] = None
 
         # initialize gauge
         set_central_queue_length(0)
@@ -213,7 +224,6 @@ class RouterState:
                 ordered.extend(tier)
 
             if kv_enabled:
-                # For debugging: show final (rid, kv_hits) order
                 _log_req(
                     f"KV-first final order endpoint={endpoint}: "
                     f"{[(r, prefix_len(endpoint, r)) for (r, _p, _t, _m) in ordered]}",
@@ -255,7 +265,7 @@ class RouterState:
                 chosen = chosen_raw
 
             # Prom: outgoing dispatch (router -> sidecar) for each assigned item
-            for rid, _prompt, _ts, _meta in chosen:
+            for _rid, _prompt, _ts, _meta in chosen:
                 inc_dispatch(endpoint)
 
             # 6) Requeue leftovers
@@ -281,26 +291,82 @@ class RouterState:
             return items
 
     # -------------------------------------------------------
-    # Result wait/notify (ASYNC)
+    # Result wait/notify (ASYNC) + TTL retention
     # -------------------------------------------------------
+
+    def _ensure_cleanup_task(self) -> None:
+        """
+        Start background TTL cleanup task once we are in an event loop.
+        Safe to call multiple times.
+        """
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        interval = float(getattr(_cfg, "POLL_CLEANUP_INTERVAL_S", 1.0))
+        if interval <= 0:
+            return
+
+        self._cleanup_task = loop.create_task(self._cleanup_loop())
+
+    async def _cleanup_loop(self) -> None:
+        """
+        Periodically remove stored results that have exceeded TTL.
+        Only affects _result_values/_result_store_ts and None-placeholder futs.
+        """
+        interval = max(0.1, float(getattr(_cfg, "POLL_CLEANUP_INTERVAL_S", 1.0)))
+        ttl = max(1.0, float(getattr(_cfg, "POLL_RESULT_TTL_S", 300.0)))
+
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                now = time.time()
+                to_del: List[str] = []
+
+                with self._lock:
+                    for rid, ts in list(self._result_store_ts.items()):
+                        if (now - float(ts)) >= ttl:
+                            to_del.append(rid)
+
+                    for rid in to_del:
+                        self._result_store_ts.pop(rid, None)
+                        self._result_values.pop(rid, None)
+
+                        # Drop placeholder fut=None (created when no loop existed)
+                        fut = self._result_futs.get(rid)
+                        if fut is None:
+                            self._result_futs.pop(rid, None)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
 
     def register_waiter(self, req_id: str) -> None:
         """
         Ensure an asyncio Future exists for this req_id.
         If a result already arrived (early /result), resolve immediately.
+
+        Also kicks off TTL cleanup loop (best-effort).
         """
+        self._ensure_cleanup_task()
+
         with self._lock:
             if req_id in self._result_futs:
                 return
 
-            loop = None
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 loop = None
 
             if loop is None:
-                self._result_futs[req_id] = None  # type: ignore[assignment]
+                # placeholder (so we can later GC if no one ever waits)
+                self._result_futs[req_id] = None
                 return
 
             fut: asyncio.Future = loop.create_future()
@@ -312,16 +378,19 @@ class RouterState:
     def store_result(self, req_id: str, result: Any) -> None:
         """
         Store result and resolve any waiting Future.
+
+        Also records store timestamp for TTL cleanup.
         """
         fut: Optional[asyncio.Future] = None
-        loop = None
+        now = time.time()
+
         with self._lock:
             self._result_values[req_id] = result
-            fut = self._result_futs.get(req_id)
+            self._result_store_ts[req_id] = now
+            maybe = self._result_futs.get(req_id)
+            fut = maybe if isinstance(maybe, asyncio.Future) else None
 
         if fut is None:
-            return
-        if not isinstance(fut, asyncio.Future):
             return
         if fut.done():
             return
@@ -331,16 +400,16 @@ class RouterState:
         except Exception:
             loop = None
 
-        if loop is None:
-            try:
-                fut.set_result(result)
-            except Exception:
-                pass
-            return
-
         def _set():
             if not fut.done():
                 fut.set_result(result)
+
+        if loop is None:
+            try:
+                _set()
+            except Exception:
+                pass
+            return
 
         try:
             loop.call_soon_threadsafe(_set)
@@ -353,27 +422,34 @@ class RouterState:
     async def wait_for_result_async(self, req_id: str, timeout_s: float) -> Optional[Any]:
         """
         Await the result for req_id up to timeout_s.
+
+        Note:
+          - Always drops the waiter Future on exit to avoid leaks.
+          - Does NOT delete stored results on timeout (result may arrive later);
+            TTL cleanup bounds retention.
         """
+        self._ensure_cleanup_task()
+
         loop = asyncio.get_running_loop()
 
         with self._lock:
-            fut = self._result_futs.get(req_id)
-            if not isinstance(fut, asyncio.Future) or fut.get_loop() is not loop:
+            existing = self._result_futs.get(req_id)
+            if not isinstance(existing, asyncio.Future) or existing.get_loop() is not loop:
                 fut = loop.create_future()
                 self._result_futs[req_id] = fut
-                if req_id in self._result_values and not fut.done():
-                    fut.set_result(self._result_values[req_id])
+            else:
+                fut = existing
+
+            if req_id in self._result_values and not fut.done():
+                fut.set_result(self._result_values[req_id])
 
         try:
-            result = await asyncio.wait_for(fut, timeout=float(timeout_s))
+            return await asyncio.wait_for(fut, timeout=float(timeout_s))
         except asyncio.TimeoutError:
             return None
         finally:
             with self._lock:
                 self._result_futs.pop(req_id, None)
-                self._result_values.pop(req_id, None)
-
-        return result
 
     # -------------------------------------------------------
     # Metrics
