@@ -385,7 +385,7 @@ spec:
               value: "1024"
 
             - name: ROUTER_MODE
-              value: "push-rr"
+              value: "pull"
 
             - name: SIDECAR_PORT
               value: "9000"
@@ -457,7 +457,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 8
+  replicas: 24
   selector:
     matchLabels:
       app: vllm-qwen
@@ -659,7 +659,7 @@ spec:
               value: "8"
 
             - name: SIDECAR_MODE
-              value: "push"
+              value: "pull"
 
             - name: PULL_INTERVAL_S
               value: "0.05"

@@ -20,9 +20,10 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 3
+  rate_rps: 15
   duration_s: 1000000000.0
   warmup_reqs: 0
+
 
   burst_on_s: 2.0
   burst_off_s: 2.0
@@ -62,10 +63,10 @@ transport:
   results_zmq: "tcp://7.242.102.243:30559"
   topic: "results"
   run_id: null
-  idle_timeout_s: 600.0
+  idle_timeout_s: 1000.0
 
 helm:
-  replicas: 8
+  replicas: 24
   batch_size: 8
   autoscaling_enabled: false
   autoscaling_min: 1
@@ -73,6 +74,6 @@ helm:
   autoscaling_threshold: "16"
   autoscaling_prometheus_query: |
     max(router_central_queue_length{namespace="vllm"})
-  router_kv_aware: true
+  router_kv_aware: false
   router_len_aware: true
   router_len_policy: "short_first"

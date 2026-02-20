@@ -9,8 +9,9 @@ from fastapi import BackgroundTasks
 import httpx
 import time
 import sys
+import asyncio
 from threading import RLock
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
@@ -25,6 +26,32 @@ from .kv_watcher import KVWatcher
 from .kv_aware import register_request_blocks
 from .push_router import PushRouter
 from .metrics import inc_admission
+
+# Push-dispatch metrics (present in router/metrics.py per prior changes)
+try:
+    from .metrics import (
+        set_push_dispatch_queue_length,   # Gauge
+        inc_push_dispatch_enqueued,       # Counter
+        inc_push_dispatch_started,        # Counter
+        inc_push_dispatch_failed,         # Counter
+        inc_push_dispatch_dropped,        # Counter
+    )
+except Exception:  # pragma: no cover
+    def set_push_dispatch_queue_length(_n: int) -> None:
+        return
+
+    def inc_push_dispatch_enqueued() -> None:
+        return
+
+    def inc_push_dispatch_started() -> None:
+        return
+
+    def inc_push_dispatch_failed() -> None:
+        return
+
+    def inc_push_dispatch_dropped() -> None:
+        return
+
 
 # Async pubsub publisher (added later as router/pubsub.py)
 from .pubsub import ResultPublisher  # type: ignore
@@ -45,9 +72,200 @@ _push_router: PushRouter | None = None
 # PubSub publisher (optional; enabled when TRANSPORT_MODE=async_pubsub)
 _publisher: Optional[ResultPublisher] = None
 
+# Long-lived hash client (avoid creating AsyncClient per request)
+_hash_client: Optional[httpx.AsyncClient] = None
+
 # Map req_id -> run_id (so results publish can include run_id filtering)
 _rid_runid_lock = RLock()
 _rid_to_run_id: Dict[str, str] = {}
+
+
+# ============================================================
+# Push dispatch decoupling (PUSH mode only)
+# ============================================================
+
+# (req_id, prompt, meta, t_submit)
+_PushJob = Tuple[str, str, Dict[str, Any], float]
+
+
+class _PushDispatcher:
+    """
+    Background dispatcher for PUSH mode.
+
+    Goal: decouple request handler latency from sidecar push.
+
+    Behavior:
+      - enqueue job (req_id, prompt, meta) into an asyncio.Queue
+      - N worker tasks do:
+           meta2 = await _maybe_register_kv_blocks(..., is_pull_mode=False)
+           await _push_router.route_and_push(...)
+      - On queue full / failures, store a synthetic error result to unblock /enqueue waiters
+        (and publish via pubsub best-effort).
+    """
+
+    def __init__(self, *, queue_max: int, workers: int, max_delay_s: float):
+        self._queue_max = max(1, int(queue_max))
+        self._workers_n = max(1, int(workers))
+        self._max_delay_s = max(0.0, float(max_delay_s))
+
+        self._q: asyncio.Queue[_PushJob] = asyncio.Queue(maxsize=self._queue_max)
+        self._tasks: List[asyncio.Task] = []
+        self._stopped = False
+
+        set_push_dispatch_queue_length(0)
+
+    def qsize(self) -> int:
+        try:
+            return int(self._q.qsize())
+        except Exception:
+            return 0
+
+    def try_submit(self, req_id: str, prompt: str, meta: Dict[str, Any]) -> bool:
+        """
+        Non-blocking enqueue. Returns False if queue is full or dispatcher stopped.
+        """
+        if self._stopped:
+            return False
+        try:
+            job: _PushJob = (str(req_id), str(prompt), dict(meta or {}), time.time())
+            self._q.put_nowait(job)
+            inc_push_dispatch_enqueued()
+            set_push_dispatch_queue_length(self.qsize())
+            return True
+        except asyncio.QueueFull:
+            inc_push_dispatch_dropped()
+            set_push_dispatch_queue_length(self.qsize())
+            return False
+        except Exception:
+            inc_push_dispatch_dropped()
+            return False
+
+    def start(self) -> None:
+        if self._tasks:
+            return
+        loop = asyncio.get_running_loop()
+        for i in range(self._workers_n):
+            self._tasks.append(loop.create_task(self._worker(i)))
+
+    async def stop(self) -> None:
+        """
+        Stop workers cleanly.
+
+        IMPORTANT: asyncio.CancelledError is not an Exception (it inherits BaseException),
+        so we must swallow it explicitly; otherwise Starlette reports "shutdown failed".
+        """
+        self._stopped = True
+        for t in self._tasks:
+            try:
+                t.cancel()
+            except Exception:
+                pass
+
+        for t in self._tasks:
+            try:
+                await t
+            except asyncio.CancelledError:
+                # Expected during shutdown
+                pass
+            except Exception:
+                pass
+
+        self._tasks = []
+        set_push_dispatch_queue_length(self.qsize())
+
+    async def _worker(self, idx: int) -> None:
+        while True:
+            req_id = "unknown"
+            try:
+                req_id, prompt, meta, t_submit = await self._q.get()
+            except asyncio.CancelledError:
+                # Normal shutdown path: exit quietly
+                return
+            except Exception:
+                await asyncio.sleep(0.01)
+                continue
+
+            try:
+                set_push_dispatch_queue_length(self.qsize())
+                inc_push_dispatch_started()
+
+                # Drop ancient tasks (prevents unbounded lag under overload)
+                if self._max_delay_s > 0.0:
+                    age_s = time.time() - float(t_submit)
+                    if age_s > self._max_delay_s:
+                        inc_push_dispatch_failed()
+                        _store_and_maybe_publish_local_result(
+                            req_id=req_id,
+                            result={"error": f"push_dispatch_stale age_s={age_s:.3f}"},
+                        )
+                        continue
+
+                # KV hashing moved here for push-mode decoupling.
+                meta2 = await _maybe_register_kv_blocks(
+                    req_id,
+                    prompt,
+                    meta=meta,
+                    is_pull_mode=False,
+                )
+
+                if _push_router is None:
+                    raise RuntimeError("PushRouter not initialized")
+
+                await _push_router.route_and_push(req_id, prompt, meta2)
+
+            except asyncio.CancelledError:
+                # If cancelled mid-processing, exit quietly
+                return
+            except Exception as e:
+                inc_push_dispatch_failed()
+                _store_and_maybe_publish_local_result(
+                    req_id=req_id,
+                    result={"error": f"push_dispatch_failed: {type(e).__name__}: {e}"},
+                )
+            finally:
+                try:
+                    self._q.task_done()
+                except Exception:
+                    pass
+                set_push_dispatch_queue_length(self.qsize())
+
+
+_push_dispatcher: Optional[_PushDispatcher] = None
+
+
+def _push_decouple_enabled() -> bool:
+    """
+    Enabled only in push-* router modes and when config enables it.
+    """
+    if not _is_push_mode():
+        return False
+    return bool(getattr(_cfg, "PUSH_DECOUPLE_DISPATCH", False))
+
+
+def _store_and_maybe_publish_local_result(*, req_id: str, result: Any, endpoint: Optional[str] = None) -> None:
+    """
+    Used only for synthetic local errors in push dispatch.
+    Mirrors _ingest_result_payload's publish behavior.
+    """
+    rid = str(req_id)
+    try:
+        router_state.store_result(rid, result)
+    except Exception:
+        pass
+
+    if _publisher is not None:
+        try:
+            run_id = _pop_run_id(rid)
+            pub_payload: Dict[str, Any] = {"req_id": rid, "result": result}
+            if endpoint:
+                pub_payload["endpoint"] = endpoint
+            if run_id:
+                pub_payload["run_id"] = run_id
+            _publisher.publish(pub_payload)
+        except Exception:
+            pass
+    else:
+        _pop_run_id(rid)
 
 
 # ============================================================
@@ -117,7 +335,6 @@ def _log_api_req(msg: str, *, level: str = "summary") -> None:
 def _log_kv_hash(msg: str, *, level: str = "full") -> None:
     """
     KV-hash debug logging (uses existing REQ_LOG_MODE gating).
-    This is intentionally separate so you can grep for KVHASH lines.
     """
     mode = str(_cfg.REQ_LOG_MODE).lower()
     if mode == "off":
@@ -143,6 +360,11 @@ def _safe_int_list(xs: Any) -> List[int]:
     return out
 
 
+def _get_hash_client() -> Optional[httpx.AsyncClient]:
+    # Best-effort: might be None during early startup or if creation failed.
+    return _hash_client
+
+
 async def _maybe_register_kv_blocks(
     req_id: str,
     prompt: str,
@@ -155,18 +377,7 @@ async def _maybe_register_kv_blocks(
 
     Side effects:
     - register_request_blocks(req_id, block_hashes)
-    - If TRACE_ENABLED, attach router-computed block hashes into meta["__trace__"]:
-        trace["router_block_hashes"] = [...]
-      and persist meta back to the queue for pull mode via router_state.update_meta().
-
-    IMPORTANT DEBUGGING GUARANTEE (new):
-      - If TRACE_ENABLED and KV_AWARE, we will ALWAYS set:
-            trace["router_block_hashes"] = [...]
-        even when [] (empty). This lets you distinguish:
-          - "hash computed but empty" vs
-          - "hash not computed / failed".
-        On failure we also set:
-            trace["router_kv_hash_error"] = "..."
+    - If TRACE_ENABLED, attach router-computed block hashes into meta["__trace__"].
     """
     m: Dict[str, Any] = dict(meta or {})
 
@@ -179,7 +390,6 @@ async def _maybe_register_kv_blocks(
         tr0.setdefault("router_block_hashes", None)  # None => not computed yet
         m["__trace__"] = tr0
 
-        # Persist this "not computed yet" marker for pull mode so it survives /pull.
         if is_pull_mode:
             try:
                 router_state.update_meta(req_id, m)
@@ -188,7 +398,21 @@ async def _maybe_register_kv_blocks(
 
     t0 = time.time()
     try:
-        async with httpx.AsyncClient() as client:
+        client = _get_hash_client()
+        close_after = False
+        if client is None:
+            # Fallback (should be rare): create a short-lived client.
+            t = float(getattr(_cfg, "HASH_TIMEOUT_S", 2.0))
+            timeout = httpx.Timeout(connect=t, read=t, write=t, pool=t)
+            limits = httpx.Limits(
+                max_keepalive_connections=int(getattr(_cfg, "HASH_MAX_KEEPALIVE", 50)),
+                max_connections=int(getattr(_cfg, "HASH_MAX_KEEPALIVE", 50)),
+                keepalive_expiry=float(getattr(_cfg, "HASH_KEEPALIVE_EXPIRY_S", 30.0)),
+            )
+            client = httpx.AsyncClient(timeout=timeout, limits=limits)
+            close_after = True
+
+        try:
             resp = await client.post(
                 f"{_cfg.HASH_SERVICE_URL}/compute_hashes",
                 json={"prompt": prompt},
@@ -196,35 +420,37 @@ async def _maybe_register_kv_blocks(
             )
             resp.raise_for_status()
             data = resp.json()
+        finally:
+            if close_after:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
 
-            block_hashes = _safe_int_list(data.get("block_hashes") or [])
+        block_hashes = _safe_int_list(data.get("block_hashes") or [])
 
-            # Debug (only when REQ_LOG_MODE=full)
-            _log_kv_hash(
-                f"req_id={req_id} status={resp.status_code} "
-                f"took_s={(time.time() - t0):.3f} "
-                f"n_hashes={len(block_hashes)}",
-                level="full",
-            )
+        _log_kv_hash(
+            f"req_id={req_id} status={resp.status_code} "
+            f"took_s={(time.time() - t0):.3f} "
+            f"n_hashes={len(block_hashes)}",
+            level="full",
+        )
 
-            # Always register if we got a list (even empty list is "computed")
-            # register_request_blocks stores list(block_hashes); empty list is fine.
-            register_request_blocks(req_id, block_hashes)
+        register_request_blocks(req_id, block_hashes)
 
-            if getattr(_cfg, "TRACE_ENABLED", False):
-                tr = dict(m.get("__trace__") or {})
-                tr["router_block_hashes"] = block_hashes  # ALWAYS set (possibly [])
-                tr.pop("router_kv_hash_error", None)
-                m["__trace__"] = tr
+        if getattr(_cfg, "TRACE_ENABLED", False):
+            tr = dict(m.get("__trace__") or {})
+            tr["router_block_hashes"] = block_hashes  # ALWAYS set (possibly [])
+            tr.pop("router_kv_hash_error", None)
+            m["__trace__"] = tr
 
-                if is_pull_mode:
-                    try:
-                        router_state.update_meta(req_id, m)
-                    except Exception:
-                        pass
+            if is_pull_mode:
+                try:
+                    router_state.update_meta(req_id, m)
+                except Exception:
+                    pass
 
     except Exception as e:
-        # Keep the old warning, but also annotate trace so downstream logs show the failure.
         print(f"[router] WARNING: KV hash compute failed for req_id={req_id}: {e}")
         sys.stdout.flush()
 
@@ -235,7 +461,6 @@ async def _maybe_register_kv_blocks(
 
         if getattr(_cfg, "TRACE_ENABLED", False):
             tr = dict(m.get("__trace__") or {})
-            # If it was still None, keep it None to indicate "not computed"
             tr.setdefault("router_block_hashes", None)
             tr["router_kv_hash_error"] = f"{type(e).__name__}: {e}"
             m["__trace__"] = tr
@@ -252,9 +477,6 @@ async def _maybe_register_kv_blocks(
 def _install_submit_route() -> None:
     """
     Install the /submit endpoint at the configured SUBMIT_PATH.
-
-    We keep a default /submit for convenience, but allow SUBMIT_PATH to be
-    changed without editing code (useful behind gateways).
     """
     async def _submit_handler(req: EnqueueRequest):
         return await submit(req)
@@ -264,7 +486,6 @@ def _install_submit_route() -> None:
         submit_path = "/" + str(submit_path)
 
     if submit_path != "/submit":
-        # Avoid duplicate registration if someone sets SUBMIT_PATH="/submit"
         app.add_api_route(
             submit_path,
             _submit_handler,
@@ -276,8 +497,6 @@ def _install_submit_route() -> None:
 def _install_result_submit_route() -> None:
     """
     Install RESULT_SUBMIT_PATH (default /result_submit) if RESULT_TRANSPORT_MODE=submit_ack.
-
-    Note: we *also* keep /result always available for compatibility.
     """
     async def _result_submit_handler(payload: dict, background_tasks: BackgroundTasks):
         return await result_submit_ack(payload, background_tasks)
@@ -290,7 +509,6 @@ def _install_result_submit_route() -> None:
         path = "/" + str(path)
 
     if path == "/result":
-        # Safety: never alias to /result. Users can still configure it, but we refuse to.
         print("[router] WARNING: RESULT_SUBMIT_PATH=/result is not allowed; ignoring.")
         sys.stdout.flush()
         return
@@ -308,15 +526,6 @@ def _install_result_submit_route() -> None:
 def _ingest_result_payload(payload: dict) -> None:
     """
     Shared ingestion logic for /result and submit-ack result endpoint.
-    This MUST NOT block on network; keep it best-effort.
-
-    Payload format expected:
-      {
-        "req_id": "...",
-        "result": {...},
-        optional "endpoint": "...",
-        optional "trace": {...}  (legacy)
-      }
     """
     req_id_raw = payload.get("req_id")
     if req_id_raw is None:
@@ -352,7 +561,6 @@ def _ingest_result_payload(payload: dict) -> None:
         result["trace"] = tr
         result.pop("__trace__", None)
 
-    # Store for sync (/enqueue) and for potential debugging
     router_state.store_result(rid, result)
 
     # Publish for async_pubsub (best-effort)
@@ -372,7 +580,6 @@ def _ingest_result_payload(payload: dict) -> None:
             print(f"[router] WARNING: pubsub publish failed for rid={rid}: {e}")
             sys.stdout.flush()
     else:
-        # Even if pubsub is off, drop run_id tracking to avoid leaks.
         _pop_run_id(rid)
 
 
@@ -382,18 +589,29 @@ def _ingest_result_payload(payload: dict) -> None:
 
 @app.on_event("startup")
 async def _startup():
-    global _kv_watcher, _push_router, _publisher
+    global _kv_watcher, _push_router, _publisher, _push_dispatcher, _hash_client
 
     print_config(_cfg)
     sys.stdout.flush()
 
-    # Dynamic submit path support
     _install_submit_route()
-
-    # Dynamic /result_submit (submit-ack) support
     _install_result_submit_route()
 
-    # KV watcher
+    # Long-lived hash client (used by _maybe_register_kv_blocks)
+    try:
+        t = float(getattr(_cfg, "HASH_TIMEOUT_S", 2.0))
+        timeout = httpx.Timeout(connect=t, read=t, write=t, pool=t)
+        limits = httpx.Limits(
+            max_keepalive_connections=int(getattr(_cfg, "HASH_MAX_KEEPALIVE", 50)),
+            max_connections=int(getattr(_cfg, "HASH_MAX_KEEPALIVE", 50)),
+            keepalive_expiry=float(getattr(_cfg, "HASH_KEEPALIVE_EXPIRY_S", 30.0)),
+        )
+        _hash_client = httpx.AsyncClient(timeout=timeout, limits=limits)
+    except Exception as e:
+        _hash_client = None
+        print(f"[router] WARNING: failed to init hash AsyncClient: {e}")
+        sys.stdout.flush()
+
     _kv_watcher = KVWatcher()
     _kv_watcher.start()
     print("[router] KVWatcher started.")
@@ -403,7 +621,29 @@ async def _startup():
     if _is_push_mode():
         _push_router = PushRouter(mode=_cfg.ROUTER_MODE)
         print(f"[router] PushRouter started in mode={_cfg.ROUTER_MODE}")
+
+        if _push_decouple_enabled():
+            qmax = int(getattr(_cfg, "PUSH_DISPATCH_QUEUE_MAX", 100000))
+            workers = int(getattr(_cfg, "PUSH_DISPATCH_WORKERS", 32))
+            max_delay_s = float(getattr(_cfg, "PUSH_DISPATCH_MAX_DELAY_S", 60.0))
+
+            _push_dispatcher = _PushDispatcher(
+                queue_max=qmax,
+                workers=workers,
+                max_delay_s=max_delay_s,
+            )
+            _push_dispatcher.start()
+            print(
+                f"[router] PushDispatch enabled: workers={workers} "
+                f"queue_max={qmax} max_delay_s={max_delay_s}"
+            )
+        else:
+            _push_dispatcher = None
+            print("[router] PushDispatch disabled (synchronous push in handlers).")
+
     else:
+        _push_router = None
+        _push_dispatcher = None
         print("[router] running in PULL mode.")
     sys.stdout.flush()
 
@@ -428,14 +668,28 @@ async def _startup():
 
 @app.on_event("shutdown")
 async def _shutdown():
-    global _kv_watcher, _push_router, _publisher
+    global _kv_watcher, _push_router, _publisher, _push_dispatcher, _hash_client
 
     if _kv_watcher:
         _kv_watcher.stop()
         print("[router] KVWatcher stopped.")
+        _kv_watcher = None
 
-    _push_router = None
-    print("[router] PushRouter cleared.")
+    if _push_dispatcher is not None:
+        try:
+            await _push_dispatcher.stop()
+        except Exception:
+            pass
+        _push_dispatcher = None
+        print("[router] PushDispatch stopped.")
+
+    if _push_router is not None:
+        try:
+            await _push_router.aclose()
+        except Exception:
+            pass
+        _push_router = None
+        print("[router] PushRouter cleared.")
 
     if _publisher is not None:
         try:
@@ -444,6 +698,14 @@ async def _shutdown():
             pass
         _publisher = None
         print("[router] PubSub publisher stopped.")
+
+    if _hash_client is not None:
+        try:
+            await _hash_client.aclose()
+        except Exception:
+            pass
+        _hash_client = None
+        print("[router] Hash client closed.")
 
     sys.stdout.flush()
 
@@ -454,7 +716,10 @@ async def _shutdown():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "queue_len": router_state.size()}
+    extra = {}
+    if _push_dispatcher is not None:
+        extra["push_dispatch_queue"] = _push_dispatcher.qsize()
+    return {"status": "ok", "queue_len": router_state.size(), **extra}
 
 
 # ============================================================
@@ -476,15 +741,10 @@ async def submit(req: EnqueueRequest):
     Async submit endpoint:
       - returns immediately with {req_id}
       - completion is delivered via ZMQ PUB (router -> clients), if enabled
-      - DOES NOT change the existing /enqueue semantics (full backward compatibility)
-
-    This endpoint is always available, but is only *useful* when:
-      TRANSPORT_MODE=async_pubsub
     """
     t_start = time.time()
     inc_admission()
 
-    # Construct trace skeleton (same as /enqueue)
     trace = None
     if _cfg.TRACE_ENABLED:
         qlen = router_state.size()
@@ -507,10 +767,8 @@ async def submit(req: EnqueueRequest):
         mode_str = "pull"
         is_pull_mode = True
 
-    # Remember run_id for pubsub filtering (best-effort)
     _remember_run_id(rid, meta or {})
 
-    # Inject trace into meta if enabled (and store into queue meta in pull mode)
     if trace is not None:
         meta = dict(meta)
         meta.setdefault("__trace__", trace)
@@ -523,27 +781,31 @@ async def submit(req: EnqueueRequest):
         level="summary",
     )
 
-    # For consistency, allow /result to arrive before a sync waiter exists.
     router_state.register_waiter(rid)
 
-    # KV hashing (best-effort) + attach router_block_hashes into trace/meta
-    meta = await _maybe_register_kv_blocks(
-        rid,
-        req.prompt,
-        meta=meta,
-        is_pull_mode=is_pull_mode,
-    )
+    if _is_push_mode() and _push_dispatcher is not None:
+        ok = _push_dispatcher.try_submit(rid, req.prompt, meta)
+        if not ok:
+            _store_and_maybe_publish_local_result(
+                req_id=rid,
+                result={"error": "push_dispatch_queue_full"},
+            )
+    else:
+        meta = await _maybe_register_kv_blocks(
+            rid,
+            req.prompt,
+            meta=meta,
+            is_pull_mode=is_pull_mode,
+        )
 
-    # Push-mode dispatch now (still async, but we don't wait for result)
-    if _is_push_mode():
-        if _push_router is None:
-            raise HTTPException(500, "PushRouter not initialized")
-        try:
-            await _push_router.route_and_push(rid, req.prompt, meta)
-        except Exception as e:
-            raise HTTPException(503, f"push failed: {e}")
+        if _is_push_mode():
+            if _push_router is None:
+                raise HTTPException(500, "PushRouter not initialized")
+            try:
+                await _push_router.route_and_push(rid, req.prompt, meta)
+            except Exception as e:
+                raise HTTPException(503, f"push failed: {e}")
 
-    # ACK immediately
     return Response(
         content=f'{{"req_id":"{rid}"}}',
         media_type="application/json",
@@ -557,13 +819,9 @@ async def submit(req: EnqueueRequest):
 
 @app.post("/enqueue")
 async def enqueue(req: EnqueueRequest):
-    """
-    Synchronous enqueue with tracing support.
-    """
     t_start = time.time()
     inc_admission()
 
-    # Construct trace skeleton
     trace = None
     if _cfg.TRACE_ENABLED:
         qlen = router_state.size()
@@ -573,7 +831,6 @@ async def enqueue(req: EnqueueRequest):
             "router_queue_len_at_arrive": qlen,
         }
 
-    # Push vs Pull behavior
     if _is_push_mode():
         rid = router_state.next_req_id()
         mode_str = "push"
@@ -588,7 +845,6 @@ async def enqueue(req: EnqueueRequest):
 
     _remember_run_id(rid, meta or {})
 
-    # Inject trace into meta if enabled
     if trace is not None:
         meta = dict(meta)
         meta.setdefault("__trace__", trace)
@@ -603,30 +859,34 @@ async def enqueue(req: EnqueueRequest):
 
     router_state.register_waiter(rid)
 
-    # KV hashing (best-effort) + attach router_block_hashes into trace/meta
-    meta = await _maybe_register_kv_blocks(
-        rid,
-        req.prompt,
-        meta=meta,
-        is_pull_mode=is_pull_mode,
-    )
+    if _is_push_mode() and _push_dispatcher is not None:
+        ok = _push_dispatcher.try_submit(rid, req.prompt, meta)
+        if not ok:
+            _store_and_maybe_publish_local_result(
+                req_id=rid,
+                result={"error": "push_dispatch_queue_full"},
+            )
+    else:
+        meta = await _maybe_register_kv_blocks(
+            rid,
+            req.prompt,
+            meta=meta,
+            is_pull_mode=is_pull_mode,
+        )
 
-    # Push-mode dispatch
-    if _is_push_mode():
-        if _push_router is None:
-            raise HTTPException(500, "PushRouter not initialized")
-        try:
-            await _push_router.route_and_push(rid, req.prompt, meta)
-        except Exception as e:
-            raise HTTPException(503, f"push failed: {e}")
+        if _is_push_mode():
+            if _push_router is None:
+                raise HTTPException(500, "PushRouter not initialized")
+            try:
+                await _push_router.route_and_push(rid, req.prompt, meta)
+            except Exception as e:
+                raise HTTPException(503, f"push failed: {e}")
 
-    # Wait for result (async)
     result = await router_state.wait_for_result_async(
         rid,
         _cfg.RESULT_TIMEOUT_S,
     )
 
-    # Trace: unblock
     if _cfg.TRACE_ENABLED and isinstance(result, dict):
         tr = result.get("trace") or result.get("__trace__") or {}
         tr = dict(tr)
@@ -645,7 +905,6 @@ async def enqueue(req: EnqueueRequest):
     if not isinstance(result, dict):
         result = {"output": result}
 
-    # Merge router final timestamps into trace
     if _cfg.TRACE_ENABLED:
         tr = result.get("trace") or result.get("__trace__") or {}
         tr = dict(tr)
@@ -654,7 +913,6 @@ async def enqueue(req: EnqueueRequest):
         result["trace"] = tr
         result.pop("__trace__", None)
 
-    # RESPONSE-ONLY rename endpoint -> pod
     if "endpoint" in result and "pod" not in result:
         result["pod"] = result.pop("endpoint")
 
@@ -671,34 +929,14 @@ async def enqueue(req: EnqueueRequest):
     return {"req_id": rid, "result": result}
 
 
-# ============================================================
-# SIDE CAR → ROUTER RESULT CALLBACK (SYNC/COMPAT)
-# ============================================================
-
 @app.post("/result")
 async def result_callback(payload: dict):
-    """
-    Backward-compatible result ingestion.
-    """
     _log_api_req("result callback", level="full")
     _ingest_result_payload(payload)
     return {"status": "ok"}
 
 
-# ============================================================
-# SIDE CAR → ROUTER RESULT SUBMIT (ACK IMMEDIATELY)
-# ============================================================
-
 async def result_submit_ack(payload: dict, background_tasks: BackgroundTasks):
-    """
-    New: sidecar submits results, router ACKs immediately (202),
-    and ingestion runs in a background task.
-
-    Enabled when:
-      RESULT_TRANSPORT_MODE=submit_ack
-    Exposed at:
-      RESULT_SUBMIT_PATH (default /result_submit)
-    """
     req_id_raw = payload.get("req_id")
     if req_id_raw is None:
         return {"status": "missing req_id"}
@@ -711,10 +949,6 @@ async def result_submit_ack(payload: dict, background_tasks: BackgroundTasks):
         status_code=status.HTTP_202_ACCEPTED,
     )
 
-
-# ============================================================
-# SIDE CAR → ROUTER /pull
-# ============================================================
 
 @app.post("/pull", response_model=PullResponse)
 async def pull(req: PullRequest):

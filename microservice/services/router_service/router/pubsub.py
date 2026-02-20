@@ -88,13 +88,9 @@ class ResultPublisher:
         Message wire format:
           [topic_bytes, json_bytes]
         Where topic_bytes = f"{topic}.{run_id or 'default'}"
-        """
-        sock = None
-        with self._lock:
-            if not self._started or self._sock is None:
-                return
-            sock = self._sock
 
+        NOTE: ZeroMQ sockets are not thread-safe. We serialize access with _lock.
+        """
         try:
             run_id = payload.get("run_id")
             if not isinstance(run_id, str) or not run_id:
@@ -103,8 +99,13 @@ class ResultPublisher:
             topic = f"{self._topic}.{run_id}".encode("utf-8", errors="strict")
             body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
-            # DONTWAIT => never block router thread; drop if cannot enqueue.
-            sock.send_multipart([topic, body], flags=zmq.DONTWAIT)
+            # Serialize socket access (ZMQ sockets are not thread-safe).
+            with self._lock:
+                if not self._started or self._sock is None:
+                    return
+                # DONTWAIT => never block router thread; drop if cannot enqueue.
+                self._sock.send_multipart([topic, body], flags=zmq.DONTWAIT)
+
         except zmq.Again:
             # HWM hit; drop.
             return

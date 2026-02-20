@@ -58,16 +58,12 @@ class RouterConfig:
     # --------------------------------------------------------------------
     # ACK+POLL / retention support (used by router_state cleanup too)
     # --------------------------------------------------------------------
-    # These are also used to prevent unbounded growth of stored results/waiters
-    # under submit_ack / async_pubsub where the client never waits.
     POLL_RESULT_TTL_S: float = 300.0
     POLL_CLEANUP_INTERVAL_S: float = 1.0
 
     # --------------------------------------------------------------------
     # Sidecar -> router result ingestion transport
     # --------------------------------------------------------------------
-    # "sync":       sidecar POSTs to /result (old behavior)
-    # "submit_ack": sidecar POSTs to RESULT_SUBMIT_PATH and router ACKs immediately
     RESULT_TRANSPORT_MODE: str = "sync"         # sync | submit_ack
     RESULT_SUBMIT_PATH: str = "/result_submit"  # only used when RESULT_TRANSPORT_MODE=submit_ack
 
@@ -100,6 +96,14 @@ class RouterConfig:
     # Push least-queue behavior
     # --------------------------------------------------------------------
     PUSH_LEASTQ_MODE: str = "health"     # health | local
+
+    # --------------------------------------------------------------------
+    # Push-mode decoupling (ACK fast; dispatch in background)
+    # --------------------------------------------------------------------
+    PUSH_DECOUPLE_DISPATCH: bool = True
+    PUSH_DISPATCH_QUEUE_MAX: int = 100000
+    PUSH_DISPATCH_WORKERS: int = 32
+    PUSH_DISPATCH_MAX_DELAY_S: float = 60.0
 
     # --------------------------------------------------------------------
     # Per-request routing logs
@@ -176,9 +180,7 @@ def get_config() -> RouterConfig:
         cfg.POLL_RESULT_TTL_S = 300.0
     if cfg.POLL_CLEANUP_INTERVAL_S <= 0:
         cfg.POLL_CLEANUP_INTERVAL_S = 1.0
-    # don't allow absurdly tight loops
     cfg.POLL_CLEANUP_INTERVAL_S = max(0.1, float(cfg.POLL_CLEANUP_INTERVAL_S))
-    # don't allow TTL too tiny (would delete results before any observer sees them)
     cfg.POLL_RESULT_TTL_S = max(1.0, float(cfg.POLL_RESULT_TTL_S))
 
     # sidecar -> router result transport knobs
@@ -187,7 +189,7 @@ def get_config() -> RouterConfig:
     if cfg.RESULT_SUBMIT_PATH and not str(cfg.RESULT_SUBMIT_PATH).startswith("/"):
         cfg.RESULT_SUBMIT_PATH = "/" + str(cfg.RESULT_SUBMIT_PATH)
 
-    # Normalize/validate transport mode
+    # Normalize/validate result transport mode
     rtm = _norm_mode(cfg.RESULT_TRANSPORT_MODE)
     if rtm not in ("sync", "submit_ack"):
         rtm = "sync"
@@ -196,6 +198,9 @@ def get_config() -> RouterConfig:
     # Async pubsub transport knobs
     cfg.TRANSPORT_MODE = os.getenv("TRANSPORT_MODE", cfg.TRANSPORT_MODE)
     cfg.SUBMIT_PATH = os.getenv("SUBMIT_PATH", cfg.SUBMIT_PATH)
+    if cfg.SUBMIT_PATH and not str(cfg.SUBMIT_PATH).startswith("/"):
+        cfg.SUBMIT_PATH = "/" + str(cfg.SUBMIT_PATH)
+
     cfg.RESULTS_ZMQ_BIND = os.getenv("RESULTS_ZMQ_BIND", cfg.RESULTS_ZMQ_BIND)
     cfg.RESULTS_ZMQ_TOPIC = os.getenv("RESULTS_ZMQ_TOPIC", cfg.RESULTS_ZMQ_TOPIC)
     cfg.RESULTS_ZMQ_HWM = int(os.getenv("RESULTS_ZMQ_HWM", cfg.RESULTS_ZMQ_HWM))
@@ -212,13 +217,90 @@ def get_config() -> RouterConfig:
 
     # Keepalive/pooling knobs
     cfg.HASH_MAX_KEEPALIVE = int(os.getenv("HASH_MAX_KEEPALIVE", cfg.HASH_MAX_KEEPALIVE))
-    cfg.HASH_KEEPALIVE_EXPIRY_S = float(os.getenv("HASH_KEEPALIVE_EXPIRY_S", cfg.HASH_KEEPALIVE_EXPIRY_S))
+    cfg.HASH_KEEPALIVE_EXPIRY_S = float(
+        os.getenv("HASH_KEEPALIVE_EXPIRY_S", cfg.HASH_KEEPALIVE_EXPIRY_S)
+    )
 
     cfg.PUSH_MAX_KEEPALIVE = int(os.getenv("PUSH_MAX_KEEPALIVE", cfg.PUSH_MAX_KEEPALIVE))
-    cfg.PUSH_KEEPALIVE_EXPIRY_S = float(os.getenv("PUSH_KEEPALIVE_EXPIRY_S", cfg.PUSH_KEEPALIVE_EXPIRY_S))
+    cfg.PUSH_KEEPALIVE_EXPIRY_S = float(
+        os.getenv("PUSH_KEEPALIVE_EXPIRY_S", cfg.PUSH_KEEPALIVE_EXPIRY_S)
+    )
 
     # Push leastq
     cfg.PUSH_LEASTQ_MODE = os.getenv("PUSH_LEASTQ_MODE", cfg.PUSH_LEASTQ_MODE)
+
+    # Push-mode decoupling knobs
+    if "PUSH_DECOUPLE_DISPATCH" in os.environ:
+        cfg.PUSH_DECOUPLE_DISPATCH = (
+            os.getenv("PUSH_DECOUPLE_DISPATCH", "true").lower() == "true"
+        )
+    if "PUSH_DISPATCH_QUEUE_MAX" in os.environ:
+        try:
+            cfg.PUSH_DISPATCH_QUEUE_MAX = int(
+                os.getenv("PUSH_DISPATCH_QUEUE_MAX", str(cfg.PUSH_DISPATCH_QUEUE_MAX))
+            )
+        except Exception:
+            pass
+    if "PUSH_DISPATCH_WORKERS" in os.environ:
+        try:
+            cfg.PUSH_DISPATCH_WORKERS = int(
+                os.getenv("PUSH_DISPATCH_WORKERS", str(cfg.PUSH_DISPATCH_WORKERS))
+            )
+        except Exception:
+            pass
+    if "PUSH_DISPATCH_MAX_DELAY_S" in os.environ:
+        try:
+            cfg.PUSH_DISPATCH_MAX_DELAY_S = float(
+                os.getenv("PUSH_DISPATCH_MAX_DELAY_S", str(cfg.PUSH_DISPATCH_MAX_DELAY_S))
+            )
+        except Exception:
+            pass
+
+    # -----------------------------
+    # Normalize / sanitize inputs
+    # -----------------------------
+
+    # ROUTER_MODE normalization + allowlist
+    rm = _norm_mode(cfg.ROUTER_MODE)
+
+    # ✅ Accept common aliases (so you don't silently fall back to pull)
+    if rm in ("push-least-queue", "push_least_queue", "push-leastqueue", "push_leastqueue"):
+        rm = "push-leastq"
+
+    if rm not in ("pull", "push-rr", "push-random", "push-leastq"):
+        rm = "pull"
+    cfg.ROUTER_MODE = rm
+
+    # PUSH_LEASTQ_MODE normalization + allowlist
+    lqm = _norm_mode(cfg.PUSH_LEASTQ_MODE)
+    if lqm not in ("health", "local"):
+        lqm = "health"
+    cfg.PUSH_LEASTQ_MODE = lqm
+
+    # LEN_POLICY allowlist (when enabled)
+    lp = _norm_mode(cfg.LEN_POLICY)
+    if lp and lp not in ("short_first", "long_first"):
+        lp = "short_first"
+    cfg.LEN_POLICY = lp
+
+    # clamp numeric knobs
+    cfg.POOL_FACTOR = max(1, int(cfg.POOL_FACTOR))
+    cfg.DEFAULT_MAX_TOKENS = max(1, int(cfg.DEFAULT_MAX_TOKENS))
+
+    cfg.RESULTS_ZMQ_HWM = max(1, int(cfg.RESULTS_ZMQ_HWM))
+    cfg.RESULTS_GRACE_S = max(0.0, float(cfg.RESULTS_GRACE_S))
+
+    cfg.HASH_TIMEOUT_S = max(0.001, float(cfg.HASH_TIMEOUT_S))
+    cfg.PUSH_HTTP_TIMEOUT_S = max(0.001, float(cfg.PUSH_HTTP_TIMEOUT_S))
+
+    cfg.HASH_MAX_KEEPALIVE = max(1, int(cfg.HASH_MAX_KEEPALIVE))
+    cfg.PUSH_MAX_KEEPALIVE = max(1, int(cfg.PUSH_MAX_KEEPALIVE))
+    cfg.HASH_KEEPALIVE_EXPIRY_S = max(0.0, float(cfg.HASH_KEEPALIVE_EXPIRY_S))
+    cfg.PUSH_KEEPALIVE_EXPIRY_S = max(0.0, float(cfg.PUSH_KEEPALIVE_EXPIRY_S))
+
+    cfg.PUSH_DISPATCH_QUEUE_MAX = max(1, int(cfg.PUSH_DISPATCH_QUEUE_MAX))
+    cfg.PUSH_DISPATCH_WORKERS = max(1, int(cfg.PUSH_DISPATCH_WORKERS))
+    cfg.PUSH_DISPATCH_MAX_DELAY_S = max(0.0, float(cfg.PUSH_DISPATCH_MAX_DELAY_S))
 
     # Logging verbosity (normalize to avoid surprising behavior)
     cfg.REQ_LOG_MODE = _norm_log_mode(os.getenv("REQ_LOG_MODE", cfg.REQ_LOG_MODE))
