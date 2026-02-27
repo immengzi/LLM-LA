@@ -3,6 +3,37 @@ kind: Namespace
 metadata:
   name: registry
 ---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: registry-pv
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - nfsvers=4.1
+    - hard
+    - timeo=600
+  nfs:
+    server: 7.242.102.243
+    path: /registry-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-pvc
+  namespace: registry
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  volumeName: registry-pv
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,9 +61,9 @@ spec:
             - name: data
               mountPath: /var/lib/registry
       volumes:
-        # minimal: non-persistent storage (registry contents lost if pod moves/restarts)
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: registry-pvc
 ---
 apiVersion: v1
 kind: Service

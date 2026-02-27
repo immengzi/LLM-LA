@@ -16,11 +16,11 @@ images:
   vllm: quay.io/ascend/vllm-ascend:v0.11.0rc0
 modelVolume:
   create: true
-  nfsPath: /
+  nfsPath: /saeid/models/qwen3-8b
   nfsServer: nfs.local
 pin:
   enabled: true
-  nodeName: master
+  nodeName: master1
   tolerations:
   - effect: NoSchedule
     key: node-role.kubernetes.io/control-plane
@@ -30,9 +30,9 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 24
+  vllm: 4
 router:
   kvAware: false
   lenAware: true
   lenPolicy: short_first
-  mode: pull
+  mode: push-random

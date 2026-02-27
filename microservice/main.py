@@ -18,7 +18,7 @@ from scheduler import build_schedule
 from load_runner import run_open_loop_load
 from experiment_io import init_experiment
 
-# NEW: event-driven pod->node mapping snapshots (autoscaler / churn)
+# event-driven pod->node mapping snapshots (autoscaler / churn)
 from k8s_event_podmap import EventDrivenPodMapLogger
 
 # Optional metrics
@@ -118,7 +118,7 @@ def main():
     )
     print(f"[client] experiment_dir={exp_dir}")
 
-    # NEW: start event-driven pod->node mapping watcher (writes JSONL beside other logs)
+    # start event-driven pod->node mapping watcher (writes JSONL beside other logs)
     podmap_logger = None
     try:
         podmap_logger = EventDrivenPodMapLogger(
@@ -204,7 +204,7 @@ def main():
             except Exception as e:
                 print(f"[metrics] failed to stop metrics collection: {e}")
 
-        # NEW: stop event-driven podmap logger
+        # stop event-driven podmap logger
         if podmap_logger is not None:
             try:
                 podmap_logger.stop()

@@ -25,13 +25,13 @@ spec:
     - nfsvers=4.1
   # nfs:
   #   server: 7.242.102.243
-  #   path: /
+  #   path: /saeid/models/qwen3-8b
   # nfs:
   #   server: nfs.local
-  #   path: /
+  #   path: /saeid/models/qwen3-8b
   nfs:
     server: "nfs.local"
-    path: "/"
+    path: "/saeid/models/qwen3-8b"
 ---
 # Source: vllm-kv-stack/templates/02-model-pvc.yaml
 apiVersion: v1
@@ -173,7 +173,7 @@ spec:
                   - key: "kubernetes.io/hostname"
                     operator: In
                     values:
-                      - "master"
+                      - "master1"
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
@@ -238,7 +238,7 @@ spec:
                   - key: "kubernetes.io/hostname"
                     operator: In
                     values:
-                      - "master"
+                      - "master1"
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
@@ -315,7 +315,7 @@ spec:
                   - key: "kubernetes.io/hostname"
                     operator: In
                     values:
-                      - "master"
+                      - "master1"
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
@@ -385,7 +385,7 @@ spec:
               value: "1024"
 
             - name: ROUTER_MODE
-              value: "pull"
+              value: "push-random"
 
             - name: SIDECAR_PORT
               value: "9000"
@@ -457,7 +457,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 24
+  replicas: 4
   selector:
     matchLabels:
       app: vllm-qwen
@@ -481,7 +481,7 @@ spec:
 
       containers:
         - name: vllm
-          # image: quay.io/ascend/vllm-ascend:v0.11.0rc0
+          # image: quay.io/ascend/vllm-ascend:latest
           image: reg.local:32000/ascend/vllm-ascend:v0.11.0rc0
           imagePullPolicy: IfNotPresent
           command:
@@ -659,7 +659,7 @@ spec:
               value: "8"
 
             - name: SIDECAR_MODE
-              value: "pull"
+              value: "push"
 
             - name: PULL_INTERVAL_S
               value: "0.05"

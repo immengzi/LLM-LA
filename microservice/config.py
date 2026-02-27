@@ -74,7 +74,7 @@ class GenerationConfig:
 @dataclass
 class PrometheusMetricsConfig:
     enabled: bool = True
-    prometheus_base_url: str = "http://localhost:31190"
+    prometheus_base_url: str = "http://10.175.113.44:31190"
     scrape_interval_s: float = 2.0
     window_s: float = 10.0
     include_debug_metrics: bool = False

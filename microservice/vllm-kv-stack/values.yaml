@@ -12,6 +12,8 @@ images:
   router: kv-router:latest
   sidecar: kv-sidecar:latest
   vllm: quay.io/ascend/vllm-ascend:v0.11.0rc0
+  # vllm: ascend/vllm-ascend:v0.11.0rc0
+  # vllm: quay.io/ascend/vllm-ascend:latest
   cpuHash: vllm-cpu-hash:latest
   redis: redis:7-alpine
 
@@ -45,7 +47,7 @@ autoscaling:
 # Example node names from `kubectl get nodes`: master / master1 / worker1
 pin:
   enabled: true
-  nodeName: "master"
+  nodeName: "master1"
   tolerations:
     # Allow scheduling onto control-plane/master nodes if tainted (common default)
     - key: "node-role.kubernetes.io/control-plane"
@@ -59,6 +61,5 @@ pin:
 #   create: false
 modelVolume:
   create: true
-  nfsServer: "nfs.local"
-  nfsPath: "/"
-  # nfsPath: "/mnt/nvme1/saeid/models/qwen3-8b"
+  nfsServer: nfs.local
+  nfsPath: /saeid/models/qwen3-8b

@@ -1,31 +1,37 @@
 ## vLLM Multi-Node Infrastructure Setup Guide
-(Ascend NPU, Shared NFS Models, Private Registry, Kubernetes Cluster Already Installed)
+(Ascend NPU, Shared NFSv4 Models, Kubernetes NodePort Registry, Production-Grade Reference)
 
-This document describes the infrastructure configuration used in the current multi-node environment. It excludes Kubernetes installation and focuses on:
+This document describes the complete infrastructure configuration used in the current multi-node environment.
+It excludes Kubernetes installation and focuses on:
 
 - Multi-node considerations
-- NFS-backed model storage
+- NFSv4-backed model storage
 - PersistentVolume (PV) and PersistentVolumeClaim (PVC)
-- Ascend NPU device plugin (or manual device exposure)
-- Private container registry (split-horizon DNS)
-- Node labeling and scheduling
-- Proxy + NO_PROXY configuration
+- Helm PV lifecycle behavior
+- Ascend NPU runtime configuration
+- Kubernetes-based private container registry
+- Split-horizon DNS behavior
+- Proxy + NO_PROXY production requirements
 - Startup probe tuning for large models
-- Production considerations observed in practice
+- Full diagnostic and forensic procedures
+- Operational checklist before experiments
+
 
 ----------------------------------------------------------------------
 ### 1. Cluster Topology (Current Setup)
 ----------------------------------------------------------------------
 
-- 1 control-plane node (master)
+- 1 control-plane node
 - Multiple worker nodes with Ascend NPUs
-- Shared NFS server hosting model weights
-- Private container registry exposed on cluster network
+- Dedicated NFS server (7.242.102.243)
+- Registry running inside Kubernetes (NodePort 32000)
 - vLLM namespace used for deployments
 
 Important:
-Master node may run workloads only if taint removed.
-All NPU workloads run on labeled worker nodes.
+- Master may run workloads only if taint removed.
+- All NPU workloads run on labeled worker nodes.
+- Registry is NOT running as a standalone Docker container anymore.
+- reg.local must resolve to a Kubernetes node IP.
 
 Verify nodes:
 
@@ -35,20 +41,20 @@ kubectl get nodes -o wide
 
 If master should be schedulable:
 
-```bash
 kubectl taint nodes master node-role.kubernetes.io/control-plane-
-```
-----------------------------------------------------------------------  
-### 2. Split-Horizon DNS for Registry and NFS (CRITICAL FAILURE SOURCE)  
+
+----------------------------------------------------------------------
+### 2. Split-Horizon DNS for Registry and NFS (CRITICAL FAILURE SOURCE)
 ----------------------------------------------------------------------
 
-The most common fatal issue observed:
+Historically observed fatal issue:
 NFS resolving to 127.0.0.1 inside pods.
 
 Symptom:
 
-```bash
 /proc/mounts shows:
+
+```bash
 nfs.local:/ /model ... addr=127.0.0.1
 ```
 
@@ -57,21 +63,22 @@ This causes:
 - ls /model hanging
 - dd test hanging
 
-Correct configuration:
+Current Correct DNS Rules:
 
-On master:
-/etc/hosts:
+nfs.local must resolve to:
 
 ```bash
-127.0.0.1 reg.local
-127.0.0.1 nfs.local
+7.242.102.243
 ```
 
-On other nodes:
-  /etc/hosts:
+reg.local must resolve to:
+A Kubernetes node IP (e.g. 10.175.113.44)
+
+Example /etc/hosts on all nodes:
 
 ```bash
-<MASTER_IP> reg.local nfs.local
+10.175.113.44 reg.local
+7.242.102.243 nfs.local
 ```
 
 Verify on every node:
@@ -81,14 +88,10 @@ getent hosts reg.local
 getent hosts nfs.local
 ```
 
-Master must resolve to 127.0.0.1.
-Workers must resolve to MASTER_IP.
-Pods must see the real NFS server IP.
-
-Inside pod verification:
+Verify inside pod:
 
 ```bash
-grep /model /proc/mounts
+kubectl -n vllm exec -it <pod> -- grep /model /proc/mounts
 ```
 
 Must NOT show:
@@ -97,100 +100,165 @@ Must NOT show:
 addr=127.0.0.1
 ```
 
-----------------------------------------------------------------------  
-### 3. Shared Model Storage via NFS  
+----------------------------------------------------------------------
+### 3. Shared Model Storage via NFSv4 (Structural Change)
 ----------------------------------------------------------------------
 
-Host models centrally on NFS.
-Do NOT use hostPath for models in multi-node setup.
-
-DO NOT mount "/" as NFS path.
-Mount only the actual model directory.
-
-Wrong (causes metadata scan slowness and hangs):
+NFSv4 root export (fsid=0) is now on:
 
 ```bash
-nfsPath: "/"
-```
-
-Correct:
-```bash
-nfsPath: "/data/models/qwen3-8b"
+/mnt/nvme1
 ```
 
 Example /etc/exports:
 
 ```bash
-/data/models 127.0.0.1(ro,sync,no_subtree_check,fsid=0) 10.175.112.0/22(ro,sync,no_subtree_check,fsid=0)
+/mnt/nvme1 127.0.0.1(ro,sync,no_subtree_check,fsid=0) \
+            10.175.112.0/22(ro,sync,no_subtree_check,fsid=0)
+
+/mnt/nvme1/registry-data 10.175.112.0/22(rw,sync,no_subtree_check)
 ```
 
-Notes:
-- Include 127.0.0.1 if master mounts locally
-- Include worker subnet
-- fsid=0 required for NFSv4 root export
+Important NFSv4 behavior:
+
+Because fsid=0 is on /mnt/nvme1,
+clients mount:
+
+```bash
+7.242.102.243:/
+```
+
+Inside that namespace:
+
+```bash
+/saeid/models/qwen3-8b
+/registry-data
+```
+
+CRITICAL RULE:
+Do NOT include /mnt/nvme1 in PV path.
+Use NFSv4 namespace path.
+
+Correct model PV path:
+
+```bash
+/saeid/models/qwen3-8b
+```
+
+Wrong (causes breakage after fsid change):
+
+```bash
+/mnt/nvme1/saeid/models/qwen3-8b
+/
+```
 
 Test from every node:
 
 ```bash
-mount -t nfs -o nfsvers=4.1 nfs.local:/data/models /tmp/test
-ls /tmp/test | head
+sudo mount -t nfs -o nfsvers=4.1 7.242.102.243:/ /tmp/nfsroot
+ls /tmp/nfsroot/saeid/models/qwen3-8b | head
+sudo umount /tmp/nfsroot
 ```
 
-Test inside pod:
+Test shard read:
 
 ```bash
-ls /model
-dd if=<first_shard>.safetensors of=/dev/null bs=8M count=32
+sudo mount -t nfs -o nfsvers=4.1 7.242.102.243:/ /tmp/nfsroot
+dd if=/tmp/nfsroot/saeid/models/qwen3-8b/model-00001-of-00005.safetensors of=/dev/null bs=8M count=32
+sudo umount /tmp/nfsroot
 ```
 
-If dd hangs → NFS bottleneck or wrong DNS.
+If dd hangs → NFS bottleneck or DNS issue.
 
-----------------------------------------------------------------------  
-### 4. PersistentVolume (PV) Configuration  
+----------------------------------------------------------------------
+### 4. PersistentVolume (PV) Configuration
 ----------------------------------------------------------------------
 
 Key rule:
-Mount only the specific model directory, never "/".
+Mount only the specific model directory.
+Never mount "/".
 
-model-pv.yaml:
+Correct example:
 
 ```yaml
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: model-pv
+  name: qwen-local-pv
+  annotations:
+    "helm.sh/resource-policy": keep
 spec:
   capacity:
-    storage: 2Ti
+    storage: 20Gi
   accessModes:
     - ReadOnlyMany
   persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
   mountOptions:
+    - ro
     - nfsvers=4.1
-    - rsize=1048576
-    - wsize=1048576
-    - hard
-    - timeo=600
   nfs:
     server: nfs.local
-    path: /data/models/qwen3-8b
+    path: /saeid/models/qwen3-8b
 ```
 
-----------------------------------------------------------------------  
-### 5. PVC Stability Rule  
+PVC:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qwen-local-pvc
+  namespace: vllm
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: ""
+  volumeName: qwen-local-pv
+```
+
+----------------------------------------------------------------------
+### 5. PVC Stability Rule (Helm Behavior)
 ----------------------------------------------------------------------
 
-If Helm conditionally creates PVC:
-DO NOT toggle create flag repeatedly.
+If Helm conditionally creates PVC with:
 
-This causes:
+```yaml
+"helm.sh/resource-policy": keep
+```
 
-  persistentvolumeclaim "..." is being deleted
+Then:
+
+- Helm uninstall DOES NOT delete PV/PVC
+- Helm upgrade DOES NOT modify immutable fields
+- Changing nfsPath in values.yaml has NO effect
+  unless PV is manually deleted
+
+Correct recreation procedure:
+
+```bash
+helm uninstall vllm -n vllm
+kubectl -n vllm delete pvc qwen-local-pvc
+kubectl delete pv qwen-local-pv
+helm upgrade --install vllm <chart> -n vllm -f values.yaml
+```
 
 PVC must be Bound before deploying pods.
 
-----------------------------------------------------------------------  
-### 6. Mounting PVC in vLLM Deployment  
+Verify:
+
+```bash
+kubectl get pv qwen-local-pv
+kubectl -n vllm get pvc qwen-local-pvc
+```
+
+----------------------------------------------------------------------
+### 6. Mounting PVC in vLLM Deployment
 ----------------------------------------------------------------------
 
 ```yaml
@@ -202,28 +270,30 @@ volumeMounts:
 volumes:
   - name: model-volume
     persistentVolumeClaim:
-      claimName: model-pvc
+      claimName: qwen-local-pvc
 ```
 
 Verify inside pod:
 
 ```bash
-ls /model
-grep /model /proc/mounts
+kubectl -n vllm exec -it <pod> -- ls /model
+kubectl -n vllm exec -it <pod> -- grep /model /proc/mounts
 ```
 
-----------------------------------------------------------------------  
-### 7. Ascend NPU Configuration  
+----------------------------------------------------------------------
+### 7. Ascend NPU Configuration
 ----------------------------------------------------------------------
 
 Common runtime failures observed:
 
-Error:
-  aclInit error 507000
-  Runtime boot failed
-  Resources are busy
+```bash
+aclInit error 507000
+Runtime boot failed
+Resources are busy
+```
 
 Causes:
+
 - Another process holding NPU
 - Driver / toolkit mismatch
 - Missing libmpi_dvpp_adapter.so
@@ -231,25 +301,21 @@ Causes:
 
 Inside container must mount:
 
-```bash
 /usr/local/Ascend/driver/lib64
 /etc/ascend_install.info
 /usr/local/dcmi
 /usr/local/bin/npu-smi
-```
 
 Verify inside container:
 
-```bash
 npu-smi info
-```
 
 If "device is used":
-  Check other pods using same NPU
-  Ensure resource limits request huawei.com/Ascend: 1
+- Check other pods using same NPU
+- Ensure resource limits request huawei.com/Ascend: 1
 
-----------------------------------------------------------------------  
-### 8. Startup Probe for Large Models (CRITICAL)  
+----------------------------------------------------------------------
+### 8. Startup Probe for Large Models (CRITICAL)
 ----------------------------------------------------------------------
 
 Large safetensors models over NFS may take 5–20+ minutes.
@@ -272,8 +338,8 @@ This gives ~30 minutes before Kubernetes kills container.
 
 Never rely only on livenessProbe for large model loads.
 
-----------------------------------------------------------------------  
-### 9. Multi-Node Scheduling Strategy  
+----------------------------------------------------------------------
+### 9. Multi-Node Scheduling Strategy
 ----------------------------------------------------------------------
 
 Label NPU nodes:
@@ -295,11 +361,18 @@ Verify:
 kubectl get pods -o wide
 ```
 
-----------------------------------------------------------------------  
-### 10. Private Container Registry  
+----------------------------------------------------------------------
+### 10. Private Container Registry (Kubernetes NodePort)
 ----------------------------------------------------------------------
 
-Helm global image registry rewriting can break image names.
+Registry runs as:
+
+- Deployment
+- Service type: NodePort
+- Port: 32000
+- Namespace: registry
+
+Helm global imageRegistry rewriting can break image names.
 
 If using:
 
@@ -312,32 +385,49 @@ Ensure:
 - Images pushed WITHOUT duplicate registry prefix
 - stripRegistry helper handles quay.io images
 
-Test pull on every node:
+Test:
 
 ```bash
-docker pull reg.local:32000/ascend/vllm-ascend:v0.11.0rc0
+curl http://reg.local:32000/v2/_catalog
+curl http://reg.local:32000/v2/ascend/vllm-ascend/tags/list
 ```
 
-----------------------------------------------------------------------  
-### 11. Proxy and NO_PROXY (Production Critical)  
+Docker insecure registries must include:
+
+```bash
+7.242.102.243:32000
+reg.local:32000
+10.175.113.44:32000
+```
+
+Verify:
+
+```bash
+docker info | grep -i "Insecure Registries" -A5
+```
+
+----------------------------------------------------------------------
+### 11. Proxy and NO_PROXY (Production Critical)
 ----------------------------------------------------------------------
 
 NO_PROXY must include:
 
-- localhost
-- 127.0.0.1
-- ::1
-- reg.local
-- nfs.local
-- actual registry IP
-- .cluster.local
-- pod CIDR
-- service CIDR
+```bash
+localhost
+127.0.0.1
+::1
+reg.local
+nfs.local
+7.242.102.243
+.cluster.local
+pod CIDR
+service CIDR
+```
 
 If missing:
 - ImagePullBackOff
 - NFS hangs
-- Registry 504 errors
+- Registry HTTPS/HTTP mismatch errors
 
 Verify:
 
@@ -345,15 +435,13 @@ Verify:
 systemctl show docker -p Environment
 ```
 
-----------------------------------------------------------------------  
-### 12. Diagnosing Model Load Stalls  
+----------------------------------------------------------------------
+### 12. Diagnosing Model Load Stalls
 ----------------------------------------------------------------------
 
 If stuck at:
 
-```bash
 Loading safetensors checkpoint shards: 0% Completed
-```
 
 Checklist:
 
@@ -365,8 +453,8 @@ Checklist:
 6. Check startupProbe present
 7. Ensure only one pod loading at a time (avoid NFS saturation)
 
-----------------------------------------------------------------------  
-### 13. Operational Checklist Before Experiments  
+----------------------------------------------------------------------
+### 13. Operational Checklist Before Experiments
 ----------------------------------------------------------------------
 
 1. kubectl get nodes

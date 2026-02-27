@@ -30,7 +30,7 @@ spec:
 
       containers:
         - name: vllm
-          # image: quay.io/ascend/vllm-ascend:v0.11.0rc0
+          # image: quay.io/ascend/vllm-ascend:latest
           image: {{ include "vllmkv.image" (list . .Values.images.vllm) }}
           imagePullPolicy: IfNotPresent
           command:

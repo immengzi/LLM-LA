@@ -17,10 +17,10 @@ spec:
     - nfsvers=4.1
   # nfs:
   #   server: 7.242.102.243
-  #   path: /
+  #   path: /saeid/models/qwen3-8b
   # nfs:
   #   server: nfs.local
-  #   path: /
+  #   path: /saeid/models/qwen3-8b
   nfs:
     server: {{ .Values.modelVolume.nfsServer | quote }}
     path: {{ .Values.modelVolume.nfsPath | quote }}
