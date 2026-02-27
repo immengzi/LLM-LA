@@ -24,7 +24,7 @@ ROUTER_DISPATCH_REQUESTS_TOTAL = Counter(
 )
 
 # -------------------------------------------------
-# NEW: Push dispatch decoupling metrics
+# Push dispatch decoupling metrics
 # -------------------------------------------------
 
 ROUTER_PUSH_DISPATCH_QUEUE_LENGTH = Gauge(

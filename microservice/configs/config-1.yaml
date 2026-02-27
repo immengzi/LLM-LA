@@ -1,8 +1,8 @@
 # test_config.yaml
 # Clean test config (explicit knobs, values close to example_config.yaml)
 
-router_url: "http://7.242.102.243:30080"
-total_requests: 40000
+router_url: "http://10.175.113.44:30080"
+total_requests: 300
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -20,7 +20,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 9
+  rate_rps: 5
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -50,7 +50,7 @@ print_trace: false
 
 metrics:
   enabled: true
-  prometheus_base_url: "http://localhost:31190"
+  prometheus_base_url: "http://10.175.113.44:31190"
   scrape_interval_s: 1.0
   window_s: 2.0
   include_debug_metrics: false
@@ -60,13 +60,13 @@ metrics:
 transport:
   mode: "async_pubsub"
   submit_path: "/submit"
-  results_zmq: "tcp://7.242.102.243:30559"
+  results_zmq: "tcp://10.175.113.44:30559"
   topic: "results"
   run_id: null
   idle_timeout_s: 1000.0
 
 helm:
-  replicas: 24
+  replicas: 4
   batch_size: 8
   autoscaling_enabled: false
   autoscaling_min: 1
