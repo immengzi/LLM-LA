@@ -8,13 +8,74 @@ import threading
 import select
 import json
 import requests
+import re
+import csv
 
 class DockerVLLMOrchestrator:
     def __init__(self):
         self.container_name = "lmcache-ascend-haiting"
         self.processes = []
         self.reported_exits = set()
+        self.last_hit_tokens = 0
+        self.last_total_tokens = 0
+        self.last_throughput = "0.0"
+        self.log_file = "lmcache_performance_stats.csv"
+        self._init_csv()
+
+    def _init_csv(self):
+        """Creates the CSV file with headers if it doesn't exist"""
+        if not os.path.exists(self.log_file):
+            with open(self.log_file, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Timestamp", "Service", "Action", "Hit_Tokens", "Total_Tokens", "Hit_Rate_%", "Throughput_GBps", "Size_GB"])
+
+    # --- NEW METHOD ADDED ---
+    def log_kv_info(self, service, action, hit=0, total=0, rate=0.0, tp="0.0", size="0.0"):
+        """Saves a row of KV information to the CSV file"""
+        with open(self.log_file, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), service, action, hit, total, f"{rate:.2f}", tp, size])
+
+    def parse_lmcache_stats(self, service_name, line):
+        # Change: Combined search for both values in one line
+        hit_match = re.search(r"Total tokens (\d+), LMCache hit tokens: (\d+)", line)
+        if hit_match:
+            total, hit = int(hit_match.group(1)), int(hit_match.group(2))
+            rate = (hit / total) * 100
+            # Change: Now calls the log_kv_info method to save to disk
+            self.log_kv_info(service_name, "RETRIEVE_SUMMARY", hit=hit, total=total, rate=rate)
+
+        # Change: Unified patterns for 'Retrieved' and 'Stored'
+        tp_match = re.search(r"(Retrieved|Stored) (\d+).*size: ([\d\.]+) gb.*throughput: ([\d\.]+) GB/s", line)
+        if tp_match:
+            action, tokens, size, tp = tp_match.groups()
+            self.log_kv_info(service_name, action.upper(), total=tokens, tp=tp, size=size)
+
+    def stream_logs(self):
+        """Unified stream loop: parses AND prints to ensure nothing is missed"""
+        print(f"\n📊 Monitoring & Logging to {self.log_file}...")
+        service_names = ["Prefiller", "Decoder", "Proxy"]
         
+        try:
+            while True:
+                for i, proc in enumerate(self.processes):
+                    if proc and proc.poll() is None:
+                        # Non-blocking read
+                        while True:
+                            line = proc.stdout.readline()
+                            if not line: break
+                            
+                            service = service_names[i] if i < len(service_names) else f"Proc_{i}"
+                            clean_line = line.rstrip()
+                            
+                            # RUN PARSER
+                            self.parse_lmcache_stats(service, clean_line)
+                            
+                            # PRINT TO TERMINAL
+                            print(f"[{service}] {clean_line}")
+                time.sleep(0.01)
+        except KeyboardInterrupt:
+            print("\n⚠️ Stopping...")       
     def cleanup(self, signum=None, frame=None):
         """Cleanup processes and container on exit"""
         print("\n🧹 Cleaning up...")
@@ -61,6 +122,7 @@ class DockerVLLMOrchestrator:
             '-e', f'http_proxy={os.environ.get("http_proxy", "")}',
             '-e', f'https_proxy={os.environ.get("https_proxy", "")}',
             '-e', f'no_proxy={os.environ.get("no_proxy", "")}',
+            '-e', 'PROMETHEUS_MULTIPROC_DIR=/tmp/lmcache_prometheus',
             '--device', '/dev/davinci0',
             '--device', '/dev/davinci1',
             '--device', '/dev/davinci2',
@@ -75,7 +137,7 @@ class DockerVLLMOrchestrator:
             '-v', '/etc/ascend_install.info:/etc/ascend_install.info',
             '-v', '/etc/hccn.conf:/etc/hccn.conf',
             '-v', '/usr/local/bin/npu-smi:/usr/local/bin/npu-smi',
-            'lmcache-ascend:env-v2',
+            'lmcache-ascend:env-v1',
             'tail', '-f', '/dev/null'
         ]
         
@@ -109,6 +171,7 @@ class DockerVLLMOrchestrator:
             universal_newlines=True
         )
         return proc
+    
     
     def print_logs_nonblocking(self, proc, service_name, stop_event):
         """Print logs from a process in a separate thread"""
@@ -187,57 +250,114 @@ class DockerVLLMOrchestrator:
         
         print(f"⚠️  {service_name} health check timed out")
         return False
-    
-    def wait_for_service(self, port, service_name, proc, timeout=180):
-        """Wait for a service to be ready while printing its logs"""
-        print(f"⏳ Waiting for {service_name} on port {port}...")
-        start_time = time.time()
-        
-        stop_logging = threading.Event()
-        log_thread = threading.Thread(
-            target=self.print_logs_nonblocking, 
-            args=(proc, service_name, stop_logging),
-            daemon=True
+    def prepare_prometheus_directory(self):
+        """Ensure the Prometheus multiproc directory exists"""
+        print("📁 Creating Prometheus metrics directory...")
+        cmd = "mkdir -p /tmp/lmcache_prometheus && chmod 777 /tmp/lmcache_prometheus"
+        result = subprocess.run(
+            ['docker', 'exec', self.container_name, 'bash', '-c', cmd],
+            capture_output=True, text=True
         )
-        log_thread.start()
+        if result.returncode != 0:
+            print(f"⚠️  Warning: Failed to create Prometheus directory: {result.stderr}")
+        else:
+            print("✅ Prometheus metrics directory created")
+    
+    # def wait_for_service(self, port, service_name, proc, timeout=180):
+    #     """Wait for a service to be ready while printing its logs"""
+    #     print(f"⏳ Waiting for {service_name} on port {port}...")
+    #     start_time = time.time()
         
-        last_check_time = 0
-        while time.time() - start_time < timeout:
-            if proc.poll() is not None:
-                stop_logging.set()
-                log_thread.join(timeout=1)
-                print(f"\n❌ {service_name} exited with code {proc.returncode}")
-                return False
+    #     stop_logging = threading.Event()
+    #     log_thread = threading.Thread(
+    #         target=self.print_logs_nonblocking, 
+    #         args=(proc, service_name, stop_logging),
+    #         daemon=True
+    #     )
+    #     log_thread.start()
+        
+    #     last_check_time = 0
+    #     while time.time() - start_time < timeout:
+    #         if proc.poll() is not None:
+    #             stop_logging.set()
+    #             log_thread.join(timeout=1)
+    #             print(f"\n❌ {service_name} exited with code {proc.returncode}")
+    #             return False
             
-            current_time = time.time()
-            if current_time - last_check_time >= 2:
-                last_check_time = current_time
+    #         current_time = time.time()
+    #         if current_time - last_check_time >= 2:
+    #             last_check_time = current_time
                 
-                if self.check_port_listening(port):
-                    stop_logging.set()
-                    log_thread.join(timeout=1)
-                    print(f"\n✅ {service_name} port {port} is listening")
-                    return True
+    #             if self.check_port_listening(port):
+    #                 stop_logging.set()
+    #                 log_thread.join(timeout=1)
+    #                 print(f"\n✅ {service_name} port {port} is listening")
+    #                 return True
             
-            time.sleep(0.1)
+    #         time.sleep(0.1)
         
-        stop_logging.set()
-        log_thread.join(timeout=1)
-        print(f"\n⚠️  Timeout waiting for {service_name} on port {port}")
-        return False
+    #     stop_logging.set()
+    #     log_thread.join(timeout=1)
+    #     print(f"\n⚠️  Timeout waiting for {service_name} on port {port}")
+    #     return False
+
+
+    def wait_for_service(self, port, service_name, proc, timeout=180):
+            """Wait for service to be ready using non-blocking reads to avoid 'stealing' logs"""
+            print(f"⏳ Waiting for {service_name} on port {port}...")
+            start_time = time.time()
+            
+            # Make the process output non-blocking so we can read 'available' lines
+            # without getting stuck
+            os.set_blocking(proc.stdout.fileno(), False)
+            
+            last_check_time = 0
+            while time.time() - start_time < timeout:
+                # 1. Check if process crashed
+                if proc.poll() is not None:
+                    print(f"\n❌ {service_name} exited with code {proc.returncode}")
+                    return False
+                
+                # 2. Print any available logs in real-time
+                try:
+                    while True:
+                        line = proc.stdout.readline()
+                        if not line: break
+                        print(f"[{service_name}-init] {line.rstrip()}")
+                except (IOError, TypeError):
+                    pass  # No data available to read right now
+                
+                # 3. Check if the port is listening
+                current_time = time.time()
+                if current_time - last_check_time >= 2:
+                    last_check_time = current_time
+                    if self.check_port_listening(port):
+                        print(f"\n✅ {service_name} port {port} is listening")
+                        # Reset blocking for the final stream_logs method
+                        os.set_blocking(proc.stdout.fileno(), True)
+                        return True
+                
+                time.sleep(0.1)
+                
+            print(f"\n⚠️  Timeout waiting for {service_name} on port {port}")
+            return False
     
     def start_prefiller(self):
         """Start the prefiller service"""
         print("🔧 Starting prefiller service on NPUs 0,1...")
         
         env = {
+            'PROMETHEUS_MULTIPROC_DIR': '/tmp/lmcache_prometheus', 
             'LMCACHE_CONFIG_FILE': '/workspace/LMCache-Ascend/examples/disagg_prefill/1p1d/configs/lmcache-prefiller-config.yaml',
             'ASCEND_RT_VISIBLE_DEVICES': '0,1',
             'VLLM_ENABLE_V1_MULTIPROCESSING': '1',
             'VLLM_WORKER_MULTIPROC_METHOD': 'spawn',
             'PYTHONHASHSEED': '0',
             'VLLM_VERSION': '0.11.0',
-            'PYTHONUNBUFFERED': '1'
+            'PYTHONUNBUFFERED': '1',
+            'LMCACHE_METRICS_ENABLED': 'True',
+            'LMCACHE_INTERNAL_API_SERVER_PORT_START': '6990',
+            'LMCACHE_INTERNAL_API_SERVER_ENABLED': 'True'
         }
         
         cmd = '''cd / && python3 -u -m vllm.entrypoints.openai.api_server --port 7100 --model /model --tensor-parallel-size 2 --enforce-eager --no-enable-prefix-caching --trust-remote-code --disable-log-requests --block-size 128 --max-model-len 32768 --gpu-memory-utilization 0.6 --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_producer","kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1","kv_connector_extra_config":{"discard_partial_chunks":false,"lmcache_rpc_port":"producer1"}}'
@@ -252,13 +372,18 @@ class DockerVLLMOrchestrator:
         print("\n🔧 Starting decoder service on NPUs 2,3...")
         
         env = {
+            'PROMETHEUS_MULTIPROC_DIR': '/tmp/lmcache_prometheus', 
             'LMCACHE_CONFIG_FILE': '/workspace/LMCache-Ascend/examples/disagg_prefill/1p1d/configs/lmcache-decoder-config.yaml',
             'ASCEND_RT_VISIBLE_DEVICES': '2,3',
             'VLLM_ENABLE_V1_MULTIPROCESSING': '1',
             'VLLM_WORKER_MULTIPROC_METHOD': 'spawn',
             'PYTHONHASHSEED': '0',
             'VLLM_VERSION': '0.11.0',
-            'PYTHONUNBUFFERED': '1'
+            'PYTHONUNBUFFERED': '1',
+            'LMCACHE_METRICS_ENABLED': 'True',
+            'LMCACHE_METRICS_PORT': '8002', # Force LMCache to use its own port
+            'LMCACHE_INTERNAL_API_SERVER_PORT_START': '7000',
+            'LMCACHE_INTERNAL_API_SERVER_ENABLED': 'True'
         }
         
         cmd = '''cd / && python3 -u -m vllm.entrypoints.openai.api_server --port 7200 --model /model --tensor-parallel-size 2 --enforce-eager --no-enable-prefix-caching --trust-remote-code --disable-log-requests --block-size 128 --max-model-len 32768 --gpu-memory-utilization 0.6 --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_consumer","kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1","kv_connector_extra_config":{"discard_partial_chunks":false,"lmcache_rpc_port":"consumer1","skip_last_n_tokens":1}}'
@@ -291,6 +416,7 @@ class DockerVLLMOrchestrator:
                 print(f"⚠️  {service} has crashed (exit code: {proc.returncode})")
                 all_alive = False
         return all_alive
+
     
     def comprehensive_health_check(self):
         """Perform comprehensive health checks on all services"""
@@ -496,6 +622,7 @@ class DockerVLLMOrchestrator:
         
         try:
             self.start_container()
+            self.prepare_prometheus_directory()
             
             # Start all services
             if not self.start_prefiller():
