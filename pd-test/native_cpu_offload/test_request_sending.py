@@ -6,7 +6,7 @@ from openai import AsyncOpenAI
 # Configuration matching your startup script
 MODEL_NAME = "qwen3-8b"
 API_URL = "http://localhost:10000/v1"
-PROMPTS_FILE = "prompts/prompts_long_prefix_example.json"  # The file you provided
+PROMPTS_FILE = "prompt/prompts_long_prefix_example.json"  # The file you provided
 
 client = AsyncOpenAI(api_key="token-is-ignored", base_url=API_URL)
 
