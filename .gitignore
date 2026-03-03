@@ -28,3 +28,15 @@ uv.tar.gz
 /pd-test/Mooncake/
 /pd-test/vllm
 /pd-test/vllm-ascend
+pd-test/LMCache-Ascend/
+/pd-test/launch_cluster.py
+/pd-test/lmcache_test/backup_script/
+/pd-test/lmcache_test/lmcache_hit_rates_example.csv
+/pd-test/lmcache_test/lmcache_analysis_plots/
+/pd-test/lmcache_test/monitor_lmcache_metrics.sh
+/pd-test/native_cpu_offload/test_script
+experiments
+.ipynb_checkpoints
+figures
+thread_dump.txt
+llm-lb.code-workspace
