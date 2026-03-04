@@ -1,7 +1,7 @@
 # AIBrix Deployment Repo#
 Repo link: `https://aibrix.readthedocs.io/latest/getting_started/quickstart.html` 
 
-# Install aibrix components #
+# Install aibrix components
 ```bash
 kubectl apply -f aibrix-dependency-v0.5.0.yaml
 kubectl apply -f aibrix-core-v0.5.0.yaml
