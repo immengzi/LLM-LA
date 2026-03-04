@@ -37,6 +37,12 @@ curl http://10.175.113.44:31639/v1/chat/completions \
     "stream": false
   }'
   ```
+The request hit the LoadBalancer port on 31639, the LoadBalancer is deployed in envoy gateway with `kubectl get svc -n envoy-gateway-system`:
+```bash
+NAME                                     TYPE           CLUSTER-IP       EXTERNAL-IP   PORT(S)                                   AGE
+envoy-aibrix-system-aibrix-eg-903790dc   LoadBalancer   10.107.167.62    <pending>     80:31639/TCP                              15d
+envoy-gateway                            ClusterIP      10.101.250.146   <none>        18000/TCP,18001/TCP,18002/TCP,19001/TCP   15d
+```
 
 ## Routing strategies that supported by AIBrix:
 
