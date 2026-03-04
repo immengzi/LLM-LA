@@ -1,3 +1,6 @@
+# AIBrix Deployment Repo#
+Repo link: `https://aibrix.readthedocs.io/latest/getting_started/quickstart.html` 
+
 # Install aibrix components #
 ```bash
 kubectl apply -f aibrix-dependency-v0.5.0.yaml
@@ -63,3 +66,17 @@ AIBrix ships with a set of built-in algorithms, each optimized for different wor
 
 Link to the AIbrix website: https://aibrix.readthedocs.io/latest/designs/aibrix-router.html
 
+# Varify the routing strategy #
+To varify the effectiveness of the selected routing strategy, check the log of the aibrix-gateway-plugin:
+``` bash
+kubectl logs -n aibrix-system aibrix-gateway-plugins-c799bdf64-xknrx
+```
+This is an example of using `prefix-cache` strategy:
+``` bash
+I0226 10:00:05.411473       1 gateway_rsp_body.go:157] request end, requestID: 1ff62efd-95d2-4486-8d00-1ee689c4e2d4 - targetPod: 10.244.2.126:8000, elapsed: 1m20.298186s
+I0226 10:00:35.862250       1 gateway.go:94] "processing request" requestID="8e6b18b0-0ba0-4dee-890a-ecb3fcf7af7f"
+I0226 10:00:35.862990       1 prefix_cache.go:390] "prefix_hashes" request_id="8e6b18b0-0ba0-4dee-890a-ecb3fcf7af7f" prefix_hashes=[11101383234103911057,10567911157487975518,10940731342814491049,14662744175302431366,6416781936656417679,2326810982398165491,10744583744877777871,12614930204957311465,5497798066146226109,8791514844250438609]
+I0226 10:00:35.863052       1 prefix_cache.go:395] "prefix_cache_matched_pods" request_id="8e6b18b0-0ba0-4dee-890a-ecb3fcf7af7f" target_pod="qwen3-8b-5697f55846-4lrjg" target_pod_ip="10.244.2.126" matched_pods={"qwen3-8b-5697f55846-4lrjg":100} pod_request_count={"qwen3-8b-5697f55846-4lrjg":0,"qwen3-8b-5697f55846-ljbpz":0}
+I0226 10:00:35.863102       1 gateway_req_body.go:91] "request start" requestID="8e6b18b0-0ba0-4dee-890a-ecb3fcf7af7f" requestPath="/v1/chat/completions" model="qwen3-8b" stream=false routingAlgorithm="prefix-cache" targetPodIP="10.244.2.126:8000" routingDuration="722.6µs"
+I0226 10:01:57.198942       1 gateway_rsp_body.go:157] request end, requestID: 8e6b18b0-0ba0-4dee-890a-ecb3fcf7af7f - targetPod: 10.244.2.126:8000, elapsed: 1m21.33657004s
+```
