@@ -1,11 +1,21 @@
-# AIBrix Deployment Repo#
+# AIBrix Deployment Repo
 Repo link: `https://aibrix.readthedocs.io/latest/getting_started/quickstart.html` 
 
 # Install aibrix components
+
+
 ```bash
 kubectl apply -f aibrix-dependency-v0.5.0.yaml
 kubectl apply -f aibrix-core-v0.5.0.yaml
 ```
+To make the NodePort (31639) to be reachable via any cluster node IP (not only the node running the Envoy pod), change the Service traffic policy to Cluster.
+
+```bash
+kubectl -n envoy-gateway-system patch svc envoy-aibrix-system-aibrix-eg-903790dc -p '{"spec":{"externalTrafficPolicy":"Cluster"}}'
+```
+
+This allows requests to 31639 on any node to be forwarded to the Envoy pod, but it may change client source IP behavior.
+
 run kubectl get pods -n aibrix-system to check pod status util they are ready:
 
 ```bash
@@ -18,11 +28,20 @@ aibrix-metadata-service-6b4d44d5bd-h5g2r     1/1     Running   0          5h24m
 aibrix-redis-master-84769768cb-fsq45         1/1     Running   0          5h24m
 ```
 
-# Deploy base model #
+# Deploy base model
 ```bash
 kubectl apply -f ascend_test_deploy.yaml
 ```
-# Send request with routing strategy #
+# Send request with routing strategy
+
+After the installation the endpoints are reachable over:
+
+```bash
+kubectl get svc -A | grep 31639
+envoy-gateway-system   envoy-aibrix-system-aibrix-eg-903790dc               LoadBalancer   10.107.167.62    <pending>     80:31639/TCP                              15d
+```
+
+And reachable through the <ip address>:<port number>:
 
 ```bash
 curl http://10.175.113.44:31639/v1/chat/completions \
@@ -43,6 +62,7 @@ NAME                                     TYPE           CLUSTER-IP       EXTERNA
 envoy-aibrix-system-aibrix-eg-903790dc   LoadBalancer   10.107.167.62    <pending>     80:31639/TCP                              15d
 envoy-gateway                            ClusterIP      10.101.250.146   <none>        18000/TCP,18001/TCP,18002/TCP,19001/TCP   15d
 ```
+
 
 ## Routing strategies that supported by AIBrix:
 
@@ -72,7 +92,7 @@ AIBrix ships with a set of built-in algorithms, each optimized for different wor
 
 Link to the AIbrix website: https://aibrix.readthedocs.io/latest/designs/aibrix-router.html
 
-# Varify the routing strategy #
+# Varify the routing strategy
 To varify the effectiveness of the selected routing strategy, check the log of the aibrix-gateway-plugin:
 ``` bash
 kubectl logs -n aibrix-system aibrix-gateway-plugins-c799bdf64-xknrx
