@@ -30,7 +30,7 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 4
+  vllm: 2
 router:
   kvAware: false
   lenAware: true
