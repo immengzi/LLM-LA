@@ -1,15 +1,22 @@
+# router/router_state.py
 # -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
 from collections import deque
-from threading import RLock, Event
+from threading import RLock
 from typing import Deque, Dict, Tuple, List, Any, Optional
 import sys
 import uuid
+import asyncio
+import time
 
 from .config import get_config
 from .kv_aware import prefix_len
 from .predictors import get_length_predictor
 from .len_select import select_len_aware
 from .models import JobItem, now_s
+from .metrics import set_central_queue_length, inc_dispatch
 
 _cfg = get_config()
 _pred = get_length_predictor()
@@ -36,6 +43,15 @@ def _log_req(msg: str, *, level: str = "summary") -> None:
 class RouterState:
     """
     Central queue of pending jobs + KV + length-aware selection.
+
+      - Result waiters are asyncio Futures
+      - This avoids the router enqueue handler blocking in asyncio.to_thread(...)
+        and eliminates massive router_wakeup_s artifacts under load.
+
+    Additions (for async / decoupled flows):
+      - Result retention (TTL) so /submit (async_pubsub) and push-dispatch decoupling
+        don't leak _result_values forever if the client never waits.
+      - Periodic cleanup loop to bound memory.
     """
 
     def __init__(self):
@@ -43,9 +59,19 @@ class RouterState:
         # queue entries: (req_id, prompt, t_enq_client_or_router, meta)
         self._queue: Deque[Tuple[str, str, float, dict]] = deque()
 
-        # Result tracking
-        self._result_events: Dict[str, Event] = {}
+        # Result tracking (async-native)
+        # req_id -> asyncio.Future that will hold the result (or None placeholder if no loop)
+        self._result_futs: Dict[str, Any] = {}
+        # req_id -> stored result (for early-arriving /result before waiter exists)
         self._result_values: Dict[str, Any] = {}
+        # req_id -> time when result was stored (for TTL cleanup)
+        self._result_store_ts: Dict[str, float] = {}
+
+        # background cleanup task (lazy-start)
+        self._cleanup_task: Optional[asyncio.Task] = None
+
+        # initialize gauge
+        set_central_queue_length(0)
 
     # -------------------------------------------------------
     # ID allocation
@@ -70,6 +96,7 @@ class RouterState:
             rid = self.next_req_id()
             ts = float(t_enq_client) if t_enq_client else now_s()
             self._queue.append((rid, prompt, ts, meta or {}))
+            set_central_queue_length(len(self._queue))
             return rid
 
     def update_meta(self, req_id: str, meta: dict) -> None:
@@ -94,6 +121,9 @@ class RouterState:
                     new_q.append((rid, prompt, ts, old_meta))
             self._queue = new_q
 
+            # length unchanged, but keep gauge consistent anyway
+            set_central_queue_length(len(self._queue))
+
     # -------------------------------------------------------
     # Pull (KV-aware + length-aware)
     # -------------------------------------------------------
@@ -104,6 +134,7 @@ class RouterState:
 
         with self._lock:
             if not self._queue:
+                set_central_queue_length(0)
                 return []
 
             pool_factor = max(1, int(_cfg.POOL_FACTOR))
@@ -115,6 +146,9 @@ class RouterState:
                 rid, prompt, ts, meta = self._queue.popleft()
                 pool.append((rid, prompt, ts, meta))
 
+            # queue length changed after draining pool
+            set_central_queue_length(len(self._queue))
+
             _log_req(
                 f"endpoint={endpoint} want={want} pool_size={len(pool)} "
                 f"queue_remaining={len(self._queue)}",
@@ -123,83 +157,124 @@ class RouterState:
 
             kv_enabled = bool(_cfg.KV_AWARE)
             len_enabled = bool(_cfg.LEN_AWARE)
-            len_policy = _cfg.LEN_POLICY
+            len_policy = str(_cfg.LEN_POLICY or "")
 
-            # 2) KV scoring
+            # ---------------------------------------------------
+            # KV-first ordering, then length refinement ONLY
+            # within equal KV-hit tiers (no KV overwrite).
+            # ---------------------------------------------------
+
+            # 2) Compute KV hits for the pool (or 0s if KV disabled)
+            kv_pairs: List[Tuple[str, int]] = []
+            pool_with_kv: List[Tuple[str, str, float, dict, int]] = []
+
             if kv_enabled:
-                kv_pairs = []
-                scored = []
                 for rid, prompt, ts, meta in pool:
                     kv_hits = prefix_len(endpoint, rid)
                     kv_pairs.append((rid, kv_hits))
-                    scored.append((rid, prompt, ts, meta, kv_hits))
+                    pool_with_kv.append((rid, prompt, ts, meta, kv_hits))
 
                 _log_req(
                     f"KV raw endpoint={endpoint}: {kv_pairs}",
                     level="full",
                 )
-
-                scored.sort(key=lambda x: (-x[4], x[0]))
-                ordered: List[Tuple[str, str, float, dict]] = [
-                    (r, p, t, m) for (r, p, t, m, _) in scored
-                ]
-
-                _log_req(
-                    f"KV sorted endpoint={endpoint}: "
-                    f"{[(r, kv) for (r, _p, _t, _m, kv) in scored]}",
-                    level="full",
-                )
             else:
-                ordered = list(pool)
+                for rid, prompt, ts, meta in pool:
+                    pool_with_kv.append((rid, prompt, ts, meta, 0))
 
-            # 3) Length-aware refinement
-            if len_enabled and len_policy:
-                refined = select_len_aware(ordered, _pred, len_policy)
-                ordered = refined
+            kv_hits_map: Dict[str, int] = {}
+            if kv_enabled:
+                for rid, _prompt, _ts, _meta, kv_hits in pool_with_kv:
+                    kv_hits_map[rid] = int(kv_hits)
+
+            # 3) Group by kv_hits, descending (KV is always primary)
+            kv_to_items: Dict[int, List[Tuple[str, str, float, dict]]] = {}
+            for rid, prompt, ts, meta, kv_hits in pool_with_kv:
+                kv_to_items.setdefault(int(kv_hits), []).append((rid, prompt, ts, meta))
+
+            kv_levels = sorted(kv_to_items.keys(), reverse=True)
+
+            # Log KV tiering deterministically
+            if kv_enabled:
                 _log_req(
-                    f"Len policy='{len_policy}' ordering: "
-                    f"{[r for (r, _p, _t, _m) in refined]}",
+                    f"KV tiers endpoint={endpoint}: "
+                    f"{[(k, [r for (r, _p, _t, _m) in kv_to_items[k]]) for k in kv_levels]}",
                     level="full",
                 )
 
-            # 4) Choose
+            # 4) Build final ordered list: concatenate KV tiers, and (optionally)
+            #    apply length-aware ordering ONLY within each tier.
+            ordered: List[Tuple[str, str, float, dict]] = []
+            for kv_hits in kv_levels:
+                tier = kv_to_items[kv_hits]
+
+                # Stable deterministic baseline inside tier: req_id
+                tier.sort(key=lambda x: x[0])
+
+                if len_enabled and len_policy:
+                    tier_refined = select_len_aware(tier, _pred, len_policy)
+                    tier = tier_refined
+
+                    _log_req(
+                        f"Len refine within KV={kv_hits} policy='{len_policy}': "
+                        f"{[r for (r, _p, _t, _m) in tier]}",
+                        level="full",
+                    )
+
+                ordered.extend(tier)
+
+            if kv_enabled:
+                _log_req(
+                    f"KV-first final order endpoint={endpoint}: "
+                    f"{[(r, prefix_len(endpoint, r)) for (r, _p, _t, _m) in ordered]}",
+                    level="full",
+                )
+
+            # 5) Choose
             chosen_raw = ordered[:want]
             chosen_ids = [rid for (rid, _p, _t, _m) in chosen_raw]
-
-            chosen_kv_hits = [(rid, prefix_len(endpoint, rid)) for rid in chosen_ids]
+            chosen_kv_hits = [(rid, prefix_len(endpoint, rid)) for rid in chosen_ids] if kv_enabled else []
 
             _log_req(
                 f"chosen endpoint={endpoint}: {chosen_ids} kv_hits={chosen_kv_hits}",
                 level="summary",
             )
 
-            # 4a) Attach trace info (if enabled)
+            # 5a) Attach trace info (if enabled)
             chosen: List[Tuple[str, str, float, dict]] = []
             dispatch_ts = now_s()
             if getattr(_cfg, "TRACE_ENABLED", False):
-                # ★ NEW: capture queue_length_at_dispatch
                 qlen_at_dispatch = len(self._queue)
 
                 for rid, prompt, ts, meta in chosen_raw:
                     m = dict(meta or {})
                     tr = dict(m.get("__trace__") or {})
 
-                    # preserve earlier fields if any
                     tr.setdefault("t_enq_router_queue", ts)
                     tr.setdefault("endpoint", endpoint)
 
                     tr["t_dispatch_router"] = dispatch_ts
-                    tr["router_queue_len_at_dispatch"] = qlen_at_dispatch  # ★ NEW
+                    tr["router_queue_len_at_dispatch"] = qlen_at_dispatch
+
+                    if kv_enabled:
+                        tr["kv_hits_len"] = int(kv_hits_map.get(rid, 0))
 
                     m["__trace__"] = tr
                     chosen.append((rid, prompt, ts, m))
             else:
                 chosen = chosen_raw
 
-            # 5) Requeue leftovers
+            # Prom: outgoing dispatch (router -> sidecar) for each assigned item
+            for _rid, _prompt, _ts, _meta in chosen:
+                inc_dispatch(endpoint)
+
+            # 6) Requeue leftovers
             leftovers = ordered[want:]
             for rid, prompt, ts, meta in leftovers:
                 self._queue.appendleft((rid, prompt, ts, meta))
+
+            # queue length changed after requeue
+            set_central_queue_length(len(self._queue))
 
             if leftovers:
                 _log_req(
@@ -208,47 +283,173 @@ class RouterState:
                     level="full",
                 )
 
-            # 6) Build output
+            # 7) Build output
             items = [
                 JobItem(req_id=rid, prompt=prompt, t_enq_client=ts, meta=meta)
                 for (rid, prompt, ts, meta) in chosen
             ]
-
             return items
 
     # -------------------------------------------------------
-    # Result wait/notify
+    # Result wait/notify (ASYNC) + TTL retention
     # -------------------------------------------------------
 
+    def _ensure_cleanup_task(self) -> None:
+        """
+        Start background TTL cleanup task once we are in an event loop.
+        Safe to call multiple times.
+        """
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        interval = float(getattr(_cfg, "POLL_CLEANUP_INTERVAL_S", 1.0))
+        if interval <= 0:
+            return
+
+        self._cleanup_task = loop.create_task(self._cleanup_loop())
+
+    async def _cleanup_loop(self) -> None:
+        """
+        Periodically remove stored results that have exceeded TTL.
+        Only affects _result_values/_result_store_ts and None-placeholder futs.
+        """
+        interval = max(0.1, float(getattr(_cfg, "POLL_CLEANUP_INTERVAL_S", 1.0)))
+        ttl = max(1.0, float(getattr(_cfg, "POLL_RESULT_TTL_S", 300.0)))
+
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                now = time.time()
+                to_del: List[str] = []
+
+                with self._lock:
+                    for rid, ts in list(self._result_store_ts.items()):
+                        if (now - float(ts)) >= ttl:
+                            to_del.append(rid)
+
+                    for rid in to_del:
+                        self._result_store_ts.pop(rid, None)
+                        self._result_values.pop(rid, None)
+
+                        # Drop placeholder fut=None (created when no loop existed)
+                        fut = self._result_futs.get(rid)
+                        if fut is None:
+                            self._result_futs.pop(rid, None)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+
     def register_waiter(self, req_id: str) -> None:
+        """
+        Ensure an asyncio Future exists for this req_id.
+        If a result already arrived (early /result), resolve immediately.
+
+        Also kicks off TTL cleanup loop (best-effort).
+        """
+        self._ensure_cleanup_task()
+
         with self._lock:
-            if req_id not in self._result_events:
-                self._result_events[req_id] = Event()
+            if req_id in self._result_futs:
+                return
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is None:
+                # placeholder (so we can later GC if no one ever waits)
+                self._result_futs[req_id] = None
+                return
+
+            fut: asyncio.Future = loop.create_future()
+            self._result_futs[req_id] = fut
+
+            if req_id in self._result_values and not fut.done():
+                fut.set_result(self._result_values[req_id])
 
     def store_result(self, req_id: str, result: Any) -> None:
-        evt: Optional[Event] = None
+        """
+        Store result and resolve any waiting Future.
+
+        Also records store timestamp for TTL cleanup.
+        """
+        fut: Optional[asyncio.Future] = None
+        now = time.time()
+
         with self._lock:
             self._result_values[req_id] = result
-            evt = self._result_events.get(req_id)
-        if evt is not None:
-            evt.set()
+            self._result_store_ts[req_id] = now
+            maybe = self._result_futs.get(req_id)
+            fut = maybe if isinstance(maybe, asyncio.Future) else None
 
-    def wait_for_result(self, req_id: str, timeout_s: float) -> Optional[Any]:
+        if fut is None:
+            return
+        if fut.done():
+            return
+
+        try:
+            loop = fut.get_loop()
+        except Exception:
+            loop = None
+
+        def _set():
+            if not fut.done():
+                fut.set_result(result)
+
+        if loop is None:
+            try:
+                _set()
+            except Exception:
+                pass
+            return
+
+        try:
+            loop.call_soon_threadsafe(_set)
+        except Exception:
+            try:
+                _set()
+            except Exception:
+                pass
+
+    async def wait_for_result_async(self, req_id: str, timeout_s: float) -> Optional[Any]:
+        """
+        Await the result for req_id up to timeout_s.
+
+        Note:
+          - Always drops the waiter Future on exit to avoid leaks.
+          - Does NOT delete stored results on timeout (result may arrive later);
+            TTL cleanup bounds retention.
+        """
+        self._ensure_cleanup_task()
+
+        loop = asyncio.get_running_loop()
+
         with self._lock:
-            evt = self._result_events.get(req_id)
-            if evt is None:
-                evt = Event()
-                self._result_events[req_id] = evt
+            existing = self._result_futs.get(req_id)
+            if not isinstance(existing, asyncio.Future) or existing.get_loop() is not loop:
+                fut = loop.create_future()
+                self._result_futs[req_id] = fut
+            else:
+                fut = existing
 
-        ok = evt.wait(timeout_s)
-        if not ok:
+            if req_id in self._result_values and not fut.done():
+                fut.set_result(self._result_values[req_id])
+
+        try:
+            return await asyncio.wait_for(fut, timeout=float(timeout_s))
+        except asyncio.TimeoutError:
             return None
-
-        with self._lock:
-            result = self._result_values.get(req_id)
-            self._result_events.pop(req_id, None)
-            self._result_values.pop(req_id, None)
-            return result
+        finally:
+            with self._lock:
+                self._result_futs.pop(req_id, None)
 
     # -------------------------------------------------------
     # Metrics

@@ -1,10 +1,15 @@
 # main.py
 # Entry point: read YAML config, build prompts, build schedule, run open-loop load.
+#
+# NOTE: Helm knobs live in cfg.helm but are used by sweep_methods.py (cluster lifecycle),
+# not by main.py. main.py behavior remains identical.
 
 from __future__ import annotations
 
 import argparse
+import json
 import time
+import os
 from pathlib import Path
 
 from config import load_config
@@ -12,6 +17,16 @@ from prompts import load_prompts_from_file, build_prompts_from_lmsys
 from scheduler import build_schedule
 from load_runner import run_open_loop_load
 from experiment_io import init_experiment
+
+# event-driven pod->node mapping snapshots (autoscaler / churn)
+from k8s_event_podmap import EventDrivenPodMapLogger
+
+# Optional metrics
+try:
+    from metrics_prom import start_metrics_collection, stop_metrics_collection
+except Exception:
+    start_metrics_collection = None  # type: ignore
+    stop_metrics_collection = None   # type: ignore
 
 
 def main():
@@ -34,20 +49,14 @@ def main():
     )
     args = parser.parse_args()
 
-    # Resolve config path:
-    # - If --config is a bare name (no parent dir, no suffix): use ./configs/<name>.yaml
-    # - If --config has a parent dir or suffix: treat it as a path
-    # - Else fall back to ./configs/example_config.yaml
+    # Resolve config path
     if args.config:
         raw = Path(args.config)
         if raw.parent != Path(".") or raw.suffix:
-            # Has a directory component or explicit suffix -> treat as given path
             config_path = raw
         else:
-            # Bare logical name -> assume under ./configs/<name>.yaml
             config_path = Path("configs") / f"{args.config}.yaml"
     else:
-        # Default config under configs/
         config_path = Path("configs") / "example_config.yaml"
 
     cfg = load_config(str(config_path))
@@ -55,7 +64,7 @@ def main():
     if args.n is not None:
         cfg.total_requests = int(args.n)
 
-    # Build prompts.
+    # Build prompts
     if cfg.prompt_source == "file":
         prompts = load_prompts_from_file(
             path=cfg.file_prompts.path,
@@ -75,16 +84,33 @@ def main():
         print("[client] No prompts available; exiting.")
         return
 
+    # Transport summary (non-breaking)
+    tcfg = getattr(cfg, "transport", None)
+    transport_mode = getattr(tcfg, "mode", "sync") if tcfg is not None else "sync"
+    submit_path = getattr(tcfg, "submit_path", "/submit") if tcfg is not None else "/submit"
+    results_zmq = getattr(tcfg, "results_zmq", None) if tcfg is not None else None
+    topic = getattr(tcfg, "topic", "") if tcfg is not None else ""
+    run_id = getattr(tcfg, "run_id", None) if tcfg is not None else None
+
     print(
         f"[client] router-url={cfg.router_url}, "
         f"n={total}, pattern={cfg.load_pattern.pattern}, "
         f"prompt-source={cfg.prompt_source}, "
         f"warmup_reqs={cfg.load_pattern.warmup_reqs}, "
         f"output_log_mode={cfg.output_log_mode}, "
-        f"print_trace={cfg.print_trace}"
+        f"print_trace={cfg.print_trace}, "
+        f"metrics_enabled={bool(cfg.metrics.enabled)}, "
+        f"transport_mode={transport_mode}"
     )
 
-    # Initialize experiment directory + logger:
+    if str(transport_mode).lower() == "async_pubsub":
+        print(
+            f"[client] async_pubsub: submit_path={submit_path} "
+            f"results_zmq={results_zmq} topic={topic!r} run_id={run_id!r}"
+        )
+
+    # Initialize experiment directory + logger
+    # (Now also captures node clock offsets at run start into config.json)
     exp_dir, exp_logger = init_experiment(
         cfg,
         config_path=str(config_path),
@@ -92,7 +118,27 @@ def main():
     )
     print(f"[client] experiment_dir={exp_dir}")
 
-    # Build schedule.
+    # start event-driven pod->node mapping watcher (writes JSONL beside other logs)
+    podmap_logger = None
+    try:
+        podmap_logger = EventDrivenPodMapLogger(
+            out_path=Path(exp_dir) / "pod_node_mapping_events.jsonl",
+            namespace=os.environ.get("PODMAP_NAMESPACE", "vllm"),
+            deployment_name=os.environ.get("PODMAP_DEPLOYMENT", "vllm-qwen"),
+            kubectl=os.environ.get("PODMAP_KUBECTL", "kubectl"),
+            quiet_window_s=float(os.environ.get("PODMAP_QUIET_S", "10") or "10"),
+            snapshot_timeout_s=float(os.environ.get("PODMAP_TIMEOUT_S", "5") or "5"),
+        )
+        podmap_logger.start()
+        print(
+            f"[client] event podmap logger started -> "
+            f"{Path(exp_dir) / 'pod_node_mapping_events.jsonl'}"
+        )
+    except Exception as e:
+        print(f"[client] WARN: event podmap logger failed to start: {e}")
+        podmap_logger = None
+
+    # Build schedule
     lp = cfg.load_pattern
     plan_times = build_schedule(
         pattern=lp.pattern,
@@ -115,7 +161,25 @@ def main():
         total = len(prompts)
         print(f"[client] schedule shorter than prompts; trimming to {total} events")
 
+    # Start metrics (best-effort)
+    metrics_started = False
+    if cfg.metrics.enabled:
+        if start_metrics_collection is None:
+            print("[metrics] enabled but metrics_prom.py not available; skipping.")
+        else:
+            try:
+                start_metrics_collection(
+                    run_dir=str(exp_dir),
+                    cfg=cfg.metrics,
+                )
+                metrics_started = True
+                print("[metrics] collection started")
+            except Exception as e:
+                print(f"[metrics] failed to start metrics collection: {e}")
+
     t_start_wall = time.time()
+    t_start_load = time.time()
+    t_end_load = None
 
     try:
         run_open_loop_load(
@@ -126,14 +190,51 @@ def main():
             warmup_reqs=cfg.load_pattern.warmup_reqs,
             logger=exp_logger,
             output_log_mode=cfg.output_log_mode,
-            print_trace=cfg.print_trace,  # <-- wire through config
+            print_trace=cfg.print_trace,
+            transport=getattr(cfg, "transport", None),
         )
     finally:
-        # Ensure we always close the logger (flush + close logs.json).
+        t_end_load = time.time()
+
+        # Stop metrics first (flush), then close request logger
+        if metrics_started and stop_metrics_collection is not None:
+            try:
+                stop_metrics_collection()
+                print("[metrics] collection stopped")
+            except Exception as e:
+                print(f"[metrics] failed to stop metrics collection: {e}")
+
+        # stop event-driven podmap logger
+        if podmap_logger is not None:
+            try:
+                podmap_logger.stop()
+                print("[client] event podmap logger stopped")
+            except Exception:
+                pass
+
         exp_logger.close()
 
-    dt = time.time() - t_start_wall
-    print(f"[client] done. Total elapsed wall time = {dt:.3f}s")
+    dt_wall = time.time() - t_start_wall
+    dt_load = (t_end_load - t_start_load) if t_end_load is not None else None
+
+    # Persist a small, machine-readable run summary for reproducibility
+    run_summary = {
+        "total_requests": int(total),
+        "load_runner_duration_s": round(float(dt_load), 3) if dt_load is not None else None,
+        "wall_time_s": round(float(dt_wall), 3),
+        "transport_mode": str(transport_mode),
+        "submit_path": str(submit_path),
+        "results_zmq": results_zmq,
+        "topic": str(topic),
+        "run_id": run_id,
+    }
+    try:
+        with (Path(exp_dir) / "run_summary.json").open("w", encoding="utf-8") as f:
+            json.dump(run_summary, f, indent=2, sort_keys=True)
+    except Exception as e:
+        print(f"[client] WARN: failed to write run_summary.json: {e}")
+
+    print(f"[client] done. Total elapsed wall time = {dt_wall:.3f}s")
 
 
 if __name__ == "__main__":

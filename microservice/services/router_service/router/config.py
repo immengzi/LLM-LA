@@ -1,3 +1,4 @@
+# router/config.py
 # -*- coding: utf-8 -*-
 from dataclasses import dataclass, asdict
 import os
@@ -29,7 +30,7 @@ class RouterConfig:
     KV_WATCH_INTERVAL_S: float = 1.0
     KV_WATCH_MAX_KEYS: int = 200
     KV_DISCOVERY_INTERVAL_S: float = 5.0
-    KV_LOG_KEYS: str = "summary"  # off | summary | full
+    KV_LOG_KEYS: str = "off"  # off | summary | full
 
     # Routing knobs
     KV_AWARE: bool = True
@@ -49,10 +50,32 @@ class RouterConfig:
     SIDECAR_PORT: int = 9000         # sidecar FastAPI port
 
     # --------------------------------------------------------------------
-    # Synchronous response flow
+    # Synchronous response flow (existing /enqueue)
     # --------------------------------------------------------------------
     RESULT_TIMEOUT_S: float = 60.0
-    RESULT_POLL_INTERVAL_S: float = 0.02
+    RESULT_POLL_INTERVAL_S: float = 0.02  # (kept for compatibility; not used by ACK+poll)
+
+    # --------------------------------------------------------------------
+    # ACK+POLL / retention support (used by router_state cleanup too)
+    # --------------------------------------------------------------------
+    POLL_RESULT_TTL_S: float = 300.0
+    POLL_CLEANUP_INTERVAL_S: float = 1.0
+
+    # --------------------------------------------------------------------
+    # Sidecar -> router result ingestion transport
+    # --------------------------------------------------------------------
+    RESULT_TRANSPORT_MODE: str = "sync"         # sync | submit_ack
+    RESULT_SUBMIT_PATH: str = "/result_submit"  # only used when RESULT_TRANSPORT_MODE=submit_ack
+
+    # --------------------------------------------------------------------
+    # ASYNC PUBSUB transport (client submit + ZMQ publish results)
+    # --------------------------------------------------------------------
+    TRANSPORT_MODE: str = "sync"          # "sync" | "async_pubsub"
+    SUBMIT_PATH: str = "/submit"          # client submit endpoint (FastAPI path)
+    RESULTS_ZMQ_BIND: str = "tcp://0.0.0.0:5559"  # router PUB bind
+    RESULTS_ZMQ_TOPIC: str = "results"    # pubsub topic prefix
+    RESULTS_ZMQ_HWM: int = 100000         # high-water mark (best-effort safety)
+    RESULTS_GRACE_S: float = 30.0         # client-side wait-after-submit; router doesn't enforce
 
     # --------------------------------------------------------------------
     # HTTP timeouts
@@ -61,9 +84,26 @@ class RouterConfig:
     PUSH_HTTP_TIMEOUT_S: float = 2.0     # push-mode health + push
 
     # --------------------------------------------------------------------
+    # HTTP connection pooling / keepalive knobs (NO semantic changes)
+    # --------------------------------------------------------------------
+    HASH_MAX_KEEPALIVE: int = 50
+    HASH_KEEPALIVE_EXPIRY_S: float = 30.0
+
+    PUSH_MAX_KEEPALIVE: int = 200
+    PUSH_KEEPALIVE_EXPIRY_S: float = 30.0
+
+    # --------------------------------------------------------------------
     # Push least-queue behavior
     # --------------------------------------------------------------------
     PUSH_LEASTQ_MODE: str = "health"     # health | local
+
+    # --------------------------------------------------------------------
+    # Push-mode decoupling (ACK fast; dispatch in background)
+    # --------------------------------------------------------------------
+    PUSH_DECOUPLE_DISPATCH: bool = True
+    PUSH_DISPATCH_QUEUE_MAX: int = 100000
+    PUSH_DISPATCH_WORKERS: int = 32
+    PUSH_DISPATCH_MAX_DELAY_S: float = 60.0
 
     # --------------------------------------------------------------------
     # Per-request routing logs
@@ -71,13 +111,21 @@ class RouterConfig:
     REQ_LOG_MODE: str = "off"   # off | summary | full
 
     # --------------------------------------------------------------------
-    # TRACE SYSTEM (NEW)
+    # TRACE SYSTEM
     # --------------------------------------------------------------------
-    # When true, router/sidecar propagate full timing events.
     TRACE_ENABLED: bool = False
-
-    # Optional: sample 0 < rate ≤ 1.0 (e.g. 0.1 = trace 10% of requests)
     TRACE_SAMPLING_RATE: float = 1.0
+
+
+def _norm_mode(s: str) -> str:
+    return str(s or "").strip().lower()
+
+
+def _norm_log_mode(s: str) -> str:
+    s = str(s or "").strip().lower()
+    if s not in ("off", "summary", "full"):
+        return "off"
+    return s
 
 
 def get_config() -> RouterConfig:
@@ -92,6 +140,9 @@ def get_config() -> RouterConfig:
     cfg = RouterConfig()
 
     # Basic overrides
+    cfg.HOST = os.getenv("HOST", cfg.HOST)
+    cfg.PORT = int(os.getenv("PORT", cfg.PORT))
+
     cfg.REDIS_HOST = os.getenv("REDIS_HOST", cfg.REDIS_HOST)
     cfg.REDIS_PORT = int(os.getenv("REDIS_PORT", cfg.REDIS_PORT))
     cfg.MODEL_NAME = os.getenv("MODEL_NAME", cfg.MODEL_NAME)
@@ -118,19 +169,143 @@ def get_config() -> RouterConfig:
         os.getenv("RESULT_POLL_INTERVAL_S", cfg.RESULT_POLL_INTERVAL_S)
     )
 
+    # Poll retention knobs (also used by router_state cleanup loop)
+    cfg.POLL_RESULT_TTL_S = float(os.getenv("POLL_RESULT_TTL_S", cfg.POLL_RESULT_TTL_S))
+    cfg.POLL_CLEANUP_INTERVAL_S = float(
+        os.getenv("POLL_CLEANUP_INTERVAL_S", cfg.POLL_CLEANUP_INTERVAL_S)
+    )
+
+    # Harden against bad envs (avoid disabling cleanup accidentally)
+    if cfg.POLL_RESULT_TTL_S <= 0:
+        cfg.POLL_RESULT_TTL_S = 300.0
+    if cfg.POLL_CLEANUP_INTERVAL_S <= 0:
+        cfg.POLL_CLEANUP_INTERVAL_S = 1.0
+    cfg.POLL_CLEANUP_INTERVAL_S = max(0.1, float(cfg.POLL_CLEANUP_INTERVAL_S))
+    cfg.POLL_RESULT_TTL_S = max(1.0, float(cfg.POLL_RESULT_TTL_S))
+
+    # sidecar -> router result transport knobs
+    cfg.RESULT_TRANSPORT_MODE = os.getenv("RESULT_TRANSPORT_MODE", cfg.RESULT_TRANSPORT_MODE)
+    cfg.RESULT_SUBMIT_PATH = os.getenv("RESULT_SUBMIT_PATH", cfg.RESULT_SUBMIT_PATH)
+    if cfg.RESULT_SUBMIT_PATH and not str(cfg.RESULT_SUBMIT_PATH).startswith("/"):
+        cfg.RESULT_SUBMIT_PATH = "/" + str(cfg.RESULT_SUBMIT_PATH)
+
+    # Normalize/validate result transport mode
+    rtm = _norm_mode(cfg.RESULT_TRANSPORT_MODE)
+    if rtm not in ("sync", "submit_ack"):
+        rtm = "sync"
+    cfg.RESULT_TRANSPORT_MODE = rtm
+
+    # Async pubsub transport knobs
+    cfg.TRANSPORT_MODE = os.getenv("TRANSPORT_MODE", cfg.TRANSPORT_MODE)
+    cfg.SUBMIT_PATH = os.getenv("SUBMIT_PATH", cfg.SUBMIT_PATH)
+    if cfg.SUBMIT_PATH and not str(cfg.SUBMIT_PATH).startswith("/"):
+        cfg.SUBMIT_PATH = "/" + str(cfg.SUBMIT_PATH)
+
+    cfg.RESULTS_ZMQ_BIND = os.getenv("RESULTS_ZMQ_BIND", cfg.RESULTS_ZMQ_BIND)
+    cfg.RESULTS_ZMQ_TOPIC = os.getenv("RESULTS_ZMQ_TOPIC", cfg.RESULTS_ZMQ_TOPIC)
+    cfg.RESULTS_ZMQ_HWM = int(os.getenv("RESULTS_ZMQ_HWM", cfg.RESULTS_ZMQ_HWM))
+    cfg.RESULTS_GRACE_S = float(os.getenv("RESULTS_GRACE_S", cfg.RESULTS_GRACE_S))
+
+    tm = _norm_mode(cfg.TRANSPORT_MODE)
+    if tm not in ("sync", "async_pubsub"):
+        tm = "sync"
+    cfg.TRANSPORT_MODE = tm
+
     # Timeouts
     cfg.HASH_TIMEOUT_S = float(os.getenv("HASH_TIMEOUT_S", cfg.HASH_TIMEOUT_S))
     cfg.PUSH_HTTP_TIMEOUT_S = float(os.getenv("PUSH_HTTP_TIMEOUT_S", cfg.PUSH_HTTP_TIMEOUT_S))
 
+    # Keepalive/pooling knobs
+    cfg.HASH_MAX_KEEPALIVE = int(os.getenv("HASH_MAX_KEEPALIVE", cfg.HASH_MAX_KEEPALIVE))
+    cfg.HASH_KEEPALIVE_EXPIRY_S = float(
+        os.getenv("HASH_KEEPALIVE_EXPIRY_S", cfg.HASH_KEEPALIVE_EXPIRY_S)
+    )
+
+    cfg.PUSH_MAX_KEEPALIVE = int(os.getenv("PUSH_MAX_KEEPALIVE", cfg.PUSH_MAX_KEEPALIVE))
+    cfg.PUSH_KEEPALIVE_EXPIRY_S = float(
+        os.getenv("PUSH_KEEPALIVE_EXPIRY_S", cfg.PUSH_KEEPALIVE_EXPIRY_S)
+    )
+
     # Push leastq
     cfg.PUSH_LEASTQ_MODE = os.getenv("PUSH_LEASTQ_MODE", cfg.PUSH_LEASTQ_MODE)
 
-    # Logging verbosity
-    cfg.REQ_LOG_MODE = os.getenv("REQ_LOG_MODE", cfg.REQ_LOG_MODE)
+    # Push-mode decoupling knobs
+    if "PUSH_DECOUPLE_DISPATCH" in os.environ:
+        cfg.PUSH_DECOUPLE_DISPATCH = (
+            os.getenv("PUSH_DECOUPLE_DISPATCH", "true").lower() == "true"
+        )
+    if "PUSH_DISPATCH_QUEUE_MAX" in os.environ:
+        try:
+            cfg.PUSH_DISPATCH_QUEUE_MAX = int(
+                os.getenv("PUSH_DISPATCH_QUEUE_MAX", str(cfg.PUSH_DISPATCH_QUEUE_MAX))
+            )
+        except Exception:
+            pass
+    if "PUSH_DISPATCH_WORKERS" in os.environ:
+        try:
+            cfg.PUSH_DISPATCH_WORKERS = int(
+                os.getenv("PUSH_DISPATCH_WORKERS", str(cfg.PUSH_DISPATCH_WORKERS))
+            )
+        except Exception:
+            pass
+    if "PUSH_DISPATCH_MAX_DELAY_S" in os.environ:
+        try:
+            cfg.PUSH_DISPATCH_MAX_DELAY_S = float(
+                os.getenv("PUSH_DISPATCH_MAX_DELAY_S", str(cfg.PUSH_DISPATCH_MAX_DELAY_S))
+            )
+        except Exception:
+            pass
 
-    # ------------------------------------------------------------
-    # TRACE OVERRIDES (NEW)
-    # ------------------------------------------------------------
+    # -----------------------------
+    # Normalize / sanitize inputs
+    # -----------------------------
+
+    # ROUTER_MODE normalization + allowlist
+    rm = _norm_mode(cfg.ROUTER_MODE)
+
+    # ✅ Accept common aliases (so you don't silently fall back to pull)
+    if rm in ("push-least-queue", "push_least_queue", "push-leastqueue", "push_leastqueue"):
+        rm = "push-leastq"
+
+    if rm not in ("pull", "push-rr", "push-random", "push-leastq"):
+        rm = "pull"
+    cfg.ROUTER_MODE = rm
+
+    # PUSH_LEASTQ_MODE normalization + allowlist
+    lqm = _norm_mode(cfg.PUSH_LEASTQ_MODE)
+    if lqm not in ("health", "local"):
+        lqm = "health"
+    cfg.PUSH_LEASTQ_MODE = lqm
+
+    # LEN_POLICY allowlist (when enabled)
+    lp = _norm_mode(cfg.LEN_POLICY)
+    if lp and lp not in ("short_first", "long_first"):
+        lp = "short_first"
+    cfg.LEN_POLICY = lp
+
+    # clamp numeric knobs
+    cfg.POOL_FACTOR = max(1, int(cfg.POOL_FACTOR))
+    cfg.DEFAULT_MAX_TOKENS = max(1, int(cfg.DEFAULT_MAX_TOKENS))
+
+    cfg.RESULTS_ZMQ_HWM = max(1, int(cfg.RESULTS_ZMQ_HWM))
+    cfg.RESULTS_GRACE_S = max(0.0, float(cfg.RESULTS_GRACE_S))
+
+    cfg.HASH_TIMEOUT_S = max(0.001, float(cfg.HASH_TIMEOUT_S))
+    cfg.PUSH_HTTP_TIMEOUT_S = max(0.001, float(cfg.PUSH_HTTP_TIMEOUT_S))
+
+    cfg.HASH_MAX_KEEPALIVE = max(1, int(cfg.HASH_MAX_KEEPALIVE))
+    cfg.PUSH_MAX_KEEPALIVE = max(1, int(cfg.PUSH_MAX_KEEPALIVE))
+    cfg.HASH_KEEPALIVE_EXPIRY_S = max(0.0, float(cfg.HASH_KEEPALIVE_EXPIRY_S))
+    cfg.PUSH_KEEPALIVE_EXPIRY_S = max(0.0, float(cfg.PUSH_KEEPALIVE_EXPIRY_S))
+
+    cfg.PUSH_DISPATCH_QUEUE_MAX = max(1, int(cfg.PUSH_DISPATCH_QUEUE_MAX))
+    cfg.PUSH_DISPATCH_WORKERS = max(1, int(cfg.PUSH_DISPATCH_WORKERS))
+    cfg.PUSH_DISPATCH_MAX_DELAY_S = max(0.0, float(cfg.PUSH_DISPATCH_MAX_DELAY_S))
+
+    # Logging verbosity (normalize to avoid surprising behavior)
+    cfg.REQ_LOG_MODE = _norm_log_mode(os.getenv("REQ_LOG_MODE", cfg.REQ_LOG_MODE))
+
+    # TRACE overrides
     if "TRACE_ENABLED" in os.environ:
         cfg.TRACE_ENABLED = os.getenv("TRACE_ENABLED", "false").lower() == "true"
 
@@ -140,7 +315,7 @@ def get_config() -> RouterConfig:
             if 0 < r <= 1.0:
                 cfg.TRACE_SAMPLING_RATE = r
         except Exception:
-            pass  # ignore invalid number
+            pass
 
     _CONFIG = cfg
     return cfg

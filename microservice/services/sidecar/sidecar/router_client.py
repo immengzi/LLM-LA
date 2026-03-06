@@ -5,11 +5,30 @@ import time
 from typing import Dict, Any
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from .config import get_config
 from .local_queue import LocalQueue
+from .metrics import inc_received
 
 _cfg = get_config()
+
+
+def _make_pooled_session(pool_connections: int, pool_maxsize: int) -> requests.Session:
+    """
+    Create a requests.Session with a larger urllib3 connection pool.
+    This reduces TCP churn and makes connection reuse much more reliable.
+    """
+    s = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=int(pool_connections),
+        pool_maxsize=int(pool_maxsize),
+        max_retries=0,
+        pool_block=False,
+    )
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
+    return s
 
 
 class RouterPullWorker:
@@ -46,7 +65,13 @@ class RouterPullWorker:
         if self._session is not None:
             return
         self._stop_evt.clear()
-        self._session = requests.Session()
+
+        # pooled session (no semantic change)
+        self._session = _make_pooled_session(
+            pool_connections=_cfg.ROUTER_POOL_CONNECTIONS,
+            pool_maxsize=_cfg.ROUTER_POOL_MAXSIZE,
+        )
+
         print(f"[sidecar] RouterPullWorker ready (endpoint_id={self.endpoint_id})")
 
     def stop(self):
@@ -93,7 +118,10 @@ class RouterPullWorker:
             session = self._session
             tmp_session = False
             if session is None:
-                session = requests.Session()
+                session = _make_pooled_session(
+                    pool_connections=_cfg.ROUTER_POOL_CONNECTIONS,
+                    pool_maxsize=_cfg.ROUTER_POOL_MAXSIZE,
+                )
                 tmp_session = True
 
             try:
@@ -144,6 +172,9 @@ class RouterPullWorker:
                     rid = str(item["req_id"])
                     prompt = str(item["prompt"])
                     meta: Dict[str, Any] = item.get("meta") or {}
+
+                    # Prom: received (router -> sidecar) for each pulled item
+                    inc_received(self.endpoint_id)
 
                     # Trace injection for pull arrival + queue lengths
                     if getattr(_cfg, "TRACE_ENABLED", False):

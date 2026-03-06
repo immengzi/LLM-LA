@@ -381,7 +381,7 @@ def wait_for_ready_pod_ips(
     )
 
 
-# --- NEW: drain-first helpers to switch batch cleanly ---
+# --- drain-first helpers to switch batch cleanly ---
 
 
 def deployment_exists(namespace: str, deployment_name: str) -> bool:

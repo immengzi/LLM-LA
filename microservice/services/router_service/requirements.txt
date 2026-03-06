@@ -3,3 +3,5 @@ uvicorn[standard]
 httpx
 redis
 kubernetes
+prometheus_client
+pyzmq>=25.0.0

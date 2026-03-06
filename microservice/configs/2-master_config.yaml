@@ -1,0 +1,6 @@
+config-7.yaml:
+  - pull
+  - push-rr
+  - push-random
+  - push-least-queue
+

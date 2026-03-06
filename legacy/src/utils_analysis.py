@@ -267,7 +267,7 @@ def make_runs_index(
                 "output_path":  os.path.join(base, "output.jsonl"),
                 "queue_path":   os.path.join(base, "queue.json"),
                 "results_path": os.path.join(base, "results.json"),
-                # New: load-gen files
+                # load-gen files
                 "load_trace_path": os.path.join(base, "load_trace.jsonl"),
                 "load_path":       os.path.join(base, "load.jsonl"),
                 "base_dir": base_dir,

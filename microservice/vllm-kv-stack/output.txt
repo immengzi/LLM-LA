@@ -1,0 +1,1129 @@
+===== FOLDER STRUCTURE =====
+.
+├── Chart.yaml
+├── crawl.sh
+├── output.txt
+├── templates
+│   ├── 01-model-pv.yaml
+│   ├── 02-model-pvc.yaml
+│   ├── 10-redis.yaml
+│   ├── 20-cpu-hash.yaml
+│   ├── 30-router-rbac.yaml
+│   ├── 31-router.yaml
+│   ├── 40-vllm.yaml
+│   ├── 50-podmonitors.yaml
+│   ├── 60-keda-scaledobject.yaml
+│   └── _helpers.tpl
+└── values.yaml
+
+1 directory, 14 files
+
+===== FILE CONTENTS =====
+
+---------------- FILE: ./values.yaml ----------------
+
+replicas:
+  router: 1
+  vllm: 1
+
+# Global override: if set, ALL images are rewritten to use this registry
+global:
+  imageRegistry: "reg.local:32000"
+  # imageRegistry: "7.242.102.243:32000"  # set "" to disable rewriting
+  # imageRegistry: ""  # set "" to disable rewriting
+
+images:
+  router: kv-router:latest
+  sidecar: kv-sidecar:latest
+  vllm: quay.io/ascend/vllm-ascend:v0.11.0rc0
+  cpuHash: vllm-cpu-hash:latest
+  redis: redis:7-alpine
+
+router:
+  # pull | push-rr | push-random | push-leastq
+  mode: pull
+
+  # Enable/disable KV-aware routing
+  kvAware: true
+
+  # Enable/disable length-aware batching/scheduling
+  lenAware: true
+
+  # Used only when lenAware=true
+  # short_first | long_first | even_short_long
+  lenPolicy: short_first
+
+batchSize: 8
+
+autoscaling:
+  enabled: false
+
+  minReplicaCount: null
+  maxReplicaCount: 16
+  threshold: "16"
+
+  prometheusQuery: |
+    max(router_central_queue_length{namespace="vllm"})
+
+# modelVolume:
+#   create: false
+modelVolume:
+  create: true
+  nfsServer: "nfs.local"
+  nfsPath: "/"
+  # nfsPath: "/mnt/nvme1/saeid/models/qwen3-8b"
+
+---------------- END FILE: ./values.yaml ----------------
+
+---------------- FILE: ./output.txt ----------------
+
+===== FOLDER STRUCTURE =====
+.
+├── Chart.yaml
+├── crawl.sh
+├── output.txt
+├── templates
+│   ├── 01-model-pv.yaml
+│   ├── 02-model-pvc.yaml
+│   ├── 10-redis.yaml
+│   ├── 20-cpu-hash.yaml
+│   ├── 30-router-rbac.yaml
+│   ├── 31-router.yaml
+│   ├── 40-vllm.yaml
+│   ├── 50-podmonitors.yaml
+│   ├── 60-keda-scaledobject.yaml
+│   └── _helpers.tpl
+└── values.yaml
+
+1 directory, 14 files
+
+===== FILE CONTENTS =====
+
+---------------- FILE: ./values.yaml ----------------
+
+replicas:
+  router: 1
+  vllm: 1
+
+# Global override: if set, ALL images are rewritten to use this registry
+global:
+  imageRegistry: "reg.local:32000"
+  # imageRegistry: "7.242.102.243:32000"  # set "" to disable rewriting
+  # imageRegistry: ""  # set "" to disable rewriting
+
+images:
+  router: kv-router:latest
+  sidecar: kv-sidecar:latest
+  vllm: quay.io/ascend/vllm-ascend:v0.11.0rc0
+  cpuHash: vllm-cpu-hash:latest
+  redis: redis:7-alpine
+
+router:
+  # pull | push-rr | push-random | push-leastq
+  mode: pull
+
+  # Enable/disable KV-aware routing
+  kvAware: true
+
+  # Enable/disable length-aware batching/scheduling
+  lenAware: true
+
+  # Used only when lenAware=true
+  # short_first | long_first | even_short_long
+  lenPolicy: short_first
+
+batchSize: 8
+
+autoscaling:
+  enabled: false
+
+  minReplicaCount: null
+  maxReplicaCount: 16
+  threshold: "16"
+
+  prometheusQuery: |
+    max(router_central_queue_length{namespace="vllm"})
+
+# modelVolume:
+#   create: false
+modelVolume:
+  create: true
+  nfsServer: "nfs.local"
+  nfsPath: "/"
+  # nfsPath: "/mnt/nvme1/saeid/models/qwen3-8b"
+
+---------------- END FILE: ./values.yaml ----------------
+
+---------------- FILE: ./output.txt ----------------
+
+
+---------------- END FILE: ./output.txt ----------------
+
+---------------- FILE: ./crawl.sh ----------------
+
+#!/usr/bin/env bash
+# Usage:
+#   ./crawl.sh /path/to/folder
+#   ./crawl.sh /path/to/folder -o out.txt
+#   ./crawl.sh /path/to/folder -x node_modules -x .venv -x README.md
+
+ROOT="${1:-.}"
+OUTFILE=""
+shift 1 || true  # shift root path
+
+EXCLUDES=()    # array to store folder or file names to exclude
+
+# parse optional flags
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output)
+      OUTFILE="$2"
+      shift 2
+      ;;
+    -x|--exclude)
+      EXCLUDES+=("$2")
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+run_crawl() {
+
+  echo "===== FOLDER STRUCTURE ====="
+  tree -a "$ROOT"
+
+  if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
+    echo ""
+    echo "===== EXCLUDED PATHS (still shown above) ====="
+    for ex in "${EXCLUDES[@]}"; do
+      echo "  - $ex"
+    done
+  fi
+
+  echo ""
+  echo "===== FILE CONTENTS ====="
+
+  # Build find exclusion arguments
+  FIND_EXCLUDES=()
+  for ex in "${EXCLUDES[@]}"; do
+    # Skip any file with this exact name
+    FIND_EXCLUDES+=( -not -name "$ex" )
+    # Skip everything under any directory with this name
+    FIND_EXCLUDES+=( -not -path "*/${ex}/*" )
+  done
+
+  # Execute the find with dynamic exclusions
+  find "$ROOT" -type f "${FIND_EXCLUDES[@]}" | while read -r file; do
+      echo ""
+      echo "---------------- FILE: $file ----------------"
+      echo ""
+      cat "$file"
+      echo ""
+      echo "---------------- END FILE: $file ----------------"
+  done
+}
+
+# output logic
+if [[ -n "$OUTFILE" ]]; then
+  run_crawl | tee "$OUTFILE"
+else
+  run_crawl
+fi
+
+---------------- END FILE: ./crawl.sh ----------------
+
+---------------- FILE: ./Chart.yaml ----------------
+
+apiVersion: v2
+name: vllm-kv-stack
+description: Minimal Helm chart for vLLM + KV-aware router + sidecar (block-style YAML)
+type: application
+version: 0.1.0
+appVersion: "1.0"
+
+---------------- END FILE: ./Chart.yaml ----------------
+
+---------------- FILE: ./templates/31-router.yaml ----------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: router-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicas.router }}
+  selector:
+    matchLabels:
+      app: router-service
+  template:
+    metadata:
+      labels:
+        app: router-service
+    spec:
+      serviceAccountName: kv-router-sa
+      containers:
+        - name: router
+          # image: kv-router:latest
+          image: {{ include "vllmkv.image" (list . .Values.images.router) }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8080"
+            - name: ACCESS_LOG
+              value: "false"
+
+            - name: KV_LOG_KEYS
+              value: "off"
+            - name: REQ_LOG_MODE
+              value: "summary"
+
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: MODEL_NAME
+              value: "served-model"
+
+            - name: NAMESPACE
+              value: "vllm"
+            - name: LABEL_SELECTOR
+              value: "app=vllm-qwen"
+            - name: VLLM_PORT
+              value: "8200"
+
+            - name: KV_WATCH_INTERVAL_S
+              value: "1.0"
+            - name: KV_WATCH_MAX_KEYS
+              value: "200"
+            - name: KV_DISCOVERY_INTERVAL_S
+              value: "5.0"
+
+            - name: HASH_SERVICE_URL
+              value: "http://vllm-cpu-hash:9095"
+            - name: HASH_TIMEOUT_S
+              value: "2.0"
+
+            # ---- Helm-controlled routing knobs ----
+            - name: KV_AWARE
+              value: {{ ternary "true" "false" .Values.router.kvAware | quote }}
+
+            - name: LEN_AWARE
+              value: {{ ternary "true" "false" .Values.router.lenAware | quote }}
+
+            - name: LEN_POLICY
+              value: {{ quote .Values.router.lenPolicy }}
+            # --------------------------------------
+
+            - name: POOL_FACTOR
+              value: "4"
+            - name: DEFAULT_MAX_TOKENS
+              value: "1024"
+
+            - name: ROUTER_MODE
+              value: {{ quote .Values.router.mode }}
+
+            - name: SIDECAR_PORT
+              value: "9000"
+
+            - name: PUSH_LEASTQ_MODE
+              value: "local"
+
+            - name: RESULT_TIMEOUT_S
+              value: "1000.0"
+            - name: RESULT_POLL_INTERVAL_S
+              value: "0.02"
+
+            - name: PUSH_HTTP_TIMEOUT_S
+              value: "2.0"
+
+            - name: TRACE_ENABLED
+              value: "true"
+
+            - name: TRANSPORT_MODE
+              value: "async_pubsub"
+            - name: SUBMIT_PATH
+              value: "/submit"
+            - name: RESULTS_ZMQ_BIND
+              value: "tcp://0.0.0.0:5559"
+            - name: RESULTS_ZMQ_TOPIC
+              value: "results"
+            - name: RESULTS_ZMQ_HWM
+              value: "500000"
+            - name: RESULTS_GRACE_S
+              value: "5.0"
+
+            - name: RESULT_TRANSPORT_MODE
+              value: "submit_ack"
+            - name: RESULT_SUBMIT_PATH
+              value: "/result_submit"
+
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 5559
+              name: results-zmq
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: router-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: NodePort
+  selector:
+    app: router-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080
+    - name: results-zmq
+      port: 5559
+      targetPort: 5559
+      nodePort: 30559
+
+---------------- END FILE: ./templates/31-router.yaml ----------------
+
+---------------- FILE: ./templates/02-model-pvc.yaml ----------------
+
+{{- if .Values.modelVolume.create }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qwen-local-pvc
+  namespace: vllm
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: ""
+  volumeName: qwen-local-pv
+{{- end }}
+
+---------------- END FILE: ./templates/02-model-pvc.yaml ----------------
+
+---------------- FILE: ./templates/60-keda-scaledobject.yaml ----------------
+
+{{- if .Values.autoscaling.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vllm-qwen-scale-by-router-queue
+  namespace: {{ .Release.Namespace }}
+spec:
+  scaleTargetRef:
+    kind: Deployment
+    name: vllm-qwen
+
+  minReplicaCount: {{ include "vllmkv.kedaMinReplicas" . }}
+  maxReplicaCount: {{ .Values.autoscaling.maxReplicaCount }}
+
+  pollingInterval: 10
+  cooldownPeriod: 300
+
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 60
+            - type: Pods
+              value: 4
+              periodSeconds: 60
+          selectPolicy: Max
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Percent
+              value: 20
+              periodSeconds: 60
+          selectPolicy: Max
+
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-kube-prometheus-prometheus.observability:9090
+        metricName: router_queue_pressure
+        query: |
+{{ .Values.autoscaling.prometheusQuery | indent 10 }}
+        threshold: {{ quote .Values.autoscaling.threshold }}
+{{- end }}
+
+---------------- END FILE: ./templates/60-keda-scaledobject.yaml ----------------
+
+---------------- FILE: ./templates/01-model-pv.yaml ----------------
+
+{{- if .Values.modelVolume.create }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: qwen-local-pv
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  mountOptions:
+    - ro
+    - nfsvers=4.1
+  # nfs:
+  #   server: 7.242.102.243
+  #   path: /
+  # nfs:
+  #   server: nfs.local
+  #   path: /
+  nfs:
+    server: {{ .Values.modelVolume.nfsServer | quote }}
+    path: {{ .Values.modelVolume.nfsPath | quote }}
+
+{{- end }}
+
+---------------- END FILE: ./templates/01-model-pv.yaml ----------------
+
+---------------- FILE: ./templates/10-redis.yaml ----------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          # image: redis:7-alpine
+          image: {{ include "vllmkv.image" (list . .Values.images.redis) }}
+          args:
+            - redis-server
+            - --save
+            - "60"
+            - "1"
+            - --loglevel
+            - warning
+          ports:
+            - containerPort: 6379
+              name: redis
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 10
+            periodSeconds: 20
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: vllm
+spec:
+  type: NodePort
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      nodePort: 30079
+
+---------------- END FILE: ./templates/10-redis.yaml ----------------
+
+---------------- FILE: ./templates/30-router-rbac.yaml ----------------
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kv-router-sa
+  namespace: vllm
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kv-router-role
+  namespace: vllm
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kv-router-rolebinding
+  namespace: vllm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kv-router-role
+subjects:
+  - kind: ServiceAccount
+    name: kv-router-sa
+    namespace: vllm
+
+---------------- END FILE: ./templates/30-router-rbac.yaml ----------------
+
+---------------- FILE: ./templates/_helpers.tpl ----------------
+
+{{- define "vllmkv.sidecarMode" -}}
+{{- if eq (lower .Values.router.mode) "pull" -}}
+pull
+{{- else -}}
+push
+{{- end -}}
+{{- end -}}
+
+{{- define "vllmkv.kedaMinReplicas" -}}
+{{- if .Values.autoscaling.minReplicaCount -}}
+{{- .Values.autoscaling.minReplicaCount -}}
+{{- else -}}
+{{- .Values.replicas.vllm -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Strip an existing registry from an image reference, if present.
+
+Examples:
+- "redis:7-alpine" -> "redis:7-alpine"
+- "kv-router:latest" -> "kv-router:latest"
+- "quay.io/ascend/vllm-ascend:v0.11.0rc0" -> "ascend/vllm-ascend:v0.11.0rc0"
+- "7.242.102.243:32000/kv-sidecar:latest" -> "kv-sidecar:latest"
+*/}}
+{{- define "vllmkv.stripRegistry" -}}
+{{- $img := . | trim -}}
+{{- $parts := splitList "/" $img -}}
+{{- if lt (len $parts) 2 -}}
+{{- $img -}}
+{{- else -}}
+  {{- $first := index $parts 0 -}}
+  {{- $hasRegistry := or (contains "." $first) (contains ":" $first) (eq $first "localhost") -}}
+  {{- if $hasRegistry -}}
+    {{- join "/" (slice $parts 1) -}}
+  {{- else -}}
+    {{- $img -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Force all images to use .Values.global.imageRegistry if set, even if image already has a registry.
+*/}}
+{{- define "vllmkv.image" -}}
+{{- $root := index . 0 -}}
+{{- $img := index . 1 -}}
+{{- $reg := default "" $root.Values.global.imageRegistry | trimSuffix "/" -}}
+{{- if $reg -}}
+{{- printf "%s/%s" $reg (include "vllmkv.stripRegistry" $img) -}}
+{{- else -}}
+{{- $img -}}
+{{- end -}}
+{{- end -}}
+
+---------------- END FILE: ./templates/_helpers.tpl ----------------
+
+---------------- FILE: ./templates/40-vllm.yaml ----------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen
+  namespace: {{ .Release.Namespace }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicas.vllm }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen
+    spec:
+      restartPolicy: Always
+      shareProcessNamespace: true
+      containers:
+        - name: vllm
+          # image: quay.io/ascend/vllm-ascend:v0.11.0rc0
+          image: {{ include "vllmkv.image" (list . .Values.images.vllm) }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+          args:
+            - |
+              set -euo pipefail
+
+              echo "--- ASCEND_TOOLKIT_HOME before sourcing: [$ASCEND_TOOLKIT_HOME]"
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
+
+              # --- start vLLM in background so we can launch a tiny exporter too
+              python -m vllm.entrypoints.openai.api_server \
+                --model /model \
+                --tokenizer /model \
+                --port 8200 \
+                --served-model-name served-model \
+                --tensor-parallel-size 1 \
+                --dtype float16 \
+                --kv-cache-dtype auto \
+                --max-num-seqs {{ .Values.batchSize }} \
+                --prefix-caching-hash-algo sha256_cbor \
+                --host 0.0.0.0 \
+                --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
+                &
+              VLLM_PID=$!
+              echo "[vllm-wrapper] vLLM PID=$VLLM_PID"
+
+              # --- tiny Prometheus exporter on :9101 (serves ONLY /metrics)
+              #     Exposes ONE metric: vllm_threads{pod="<podname>"} <N>
+              VLLM_PID="$VLLM_PID" POD_NAME="$POD_NAME" python - <<'PY' &
+              import os
+              import time
+              from http.server import BaseHTTPRequestHandler, HTTPServer
+
+              PID = int(os.environ["VLLM_PID"])
+              POD = os.environ.get("POD_NAME", "unknown")
+              PORT = 9101
+
+              def threads(pid: int):
+                  try:
+                      return len(os.listdir(f"/proc/{pid}/task"))
+                  except Exception:
+                      return None
+
+              # Wait until /proc/PID exists (avoid startup race)
+              for _ in range(120):
+                  if os.path.exists(f"/proc/{PID}"):
+                      break
+                  time.sleep(0.25)
+
+              class H(BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      if self.path != "/metrics":
+                          self.send_response(404)
+                          self.end_headers()
+                          return
+
+                      n = threads(PID)
+                      if n is None:
+                          body = "# vLLM pid not visible\n"
+                      else:
+                          # IMPORTANT: do NOT produce '{{' '}}' anywhere (Helm will try to template it)
+                          body = 'vllm_threads{pod="%s"} %d\n' % (POD, n)
+
+                      self.send_response(200)
+                      self.send_header("Content-Type", "text/plain; version=0.0.4")
+                      self.end_headers()
+                      self.wfile.write(body.encode("utf-8"))
+
+                  def log_message(self, *args):
+                      pass
+
+              print(f"[vllm-thread-exporter] listening on :{PORT} (GET /metrics), pid={PID}, pod={POD}", flush=True)
+              HTTPServer(("0.0.0.0", PORT), H).serve_forever()
+              PY
+
+              # keep container alive as long as vLLM lives
+              wait "$VLLM_PID"
+          env:
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: HF_HUB_DISABLE_TELEMETRY
+              value: "1"
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - containerPort: 8200
+              name: http
+              protocol: TCP
+            - containerPort: 5557
+              name: kvpub
+              protocol: TCP
+            - containerPort: 9101
+              name: vllmthr
+              protocol: TCP
+          volumeMounts:
+            - name: model
+              mountPath: /model
+              readOnly: true
+            - name: dcmi-volume
+              mountPath: /usr/local/dcmi
+            - name: npu-smi-volume
+              mountPath: /usr/local/bin/npu-smi
+            - name: ascend-driver-lib64-volume
+              mountPath: /usr/local/Ascend/driver/lib64/
+            - name: version-info-volume
+              mountPath: /usr/local/Ascend/driver/version.info
+            - name: ascend-install-info-volume
+              mountPath: /etc/ascend_install.info
+            - name: cache-volume
+              mountPath: /root/.cache
+
+          # ---- Startup probe (protect long model load) ----
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            periodSeconds: 10
+            failureThreshold: 180   # 30 minutes max startup
+            timeoutSeconds: 2
+
+          # ---- Readiness probe ----
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            periodSeconds: 10
+            failureThreshold: 12
+            timeoutSeconds: 2
+
+          # ---- Liveness probe (only active AFTER startupProbe succeeds) ----
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            periodSeconds: 20
+            failureThreshold: 6
+            timeoutSeconds: 2
+
+          resources:
+            requests:
+              huawei.com/Ascend910: 1
+              ephemeral-storage: "2Gi"
+            limits:
+              huawei.com/Ascend910: 1
+              ephemeral-storage: "4Gi"
+
+        - name: kv-sidecar
+          # image: kv-sidecar:latest
+          image: {{ include "vllmkv.image" (list . .Values.images.sidecar) }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ROUTER_URL
+              value: "http://router-service:8080"
+            - name: VLLM_URL
+              value: "http://127.0.0.1:8200"
+            - name: MODEL_NAME
+              value: "served-model"
+
+            - name: SIDECAR_PORT
+              value: "9000"
+
+            - name: BATCH_SIZE
+              value: "{{ .Values.batchSize }}"
+
+            - name: SIDECAR_MODE
+              value: {{ quote (include "vllmkv.sidecarMode" .) }}
+
+            - name: PULL_INTERVAL_S
+              value: "0.05"
+
+            - name: ROUTER_PULL_TIMEOUT_S
+              value: "1000.0"
+            - name: VLLM_TIMEOUT_S
+              value: "1000.0"
+            - name: ROUTER_RESULT_TIMEOUT_S
+              value: "1000.0"
+
+            - name: RESULT_TRANSPORT_MODE
+              value: "submit_ack"
+            - name: RESULT_SUBMIT_PATH
+              value: "/result_submit"
+
+            - name: VLLM_HOST
+              value: "127.0.0.1"
+            - name: VLLM_SUB_PORT
+              value: "5557"
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: CONTAINER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: MODEL_NAME_REDIS
+              value: "served-model"
+
+            - name: TRACE_ENABLED
+              value: "true"
+
+          ports:
+            - containerPort: 9000
+              name: sidecar-http
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+
+      volumes:
+        - name: model
+          persistentVolumeClaim:
+            claimName: qwen-local-pvc
+        - name: dcmi-volume
+          hostPath:
+            path: /usr/local/dcmi
+            type: Directory
+        - name: npu-smi-volume
+          hostPath:
+            path: /usr/local/bin/npu-smi
+            type: File
+        - name: ascend-driver-lib64-volume
+          hostPath:
+            path: /usr/local/Ascend/driver/lib64/
+            type: Directory
+        - name: version-info-volume
+          hostPath:
+            path: /usr/local/Ascend/driver/version.info
+            type: File
+        - name: ascend-install-info-volume
+          hostPath:
+            path: /etc/ascend_install.info
+            type: File
+        - name: cache-volume
+          hostPath:
+            path: /root/.cache
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-qwen
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: NodePort
+  selector:
+    app: vllm-qwen
+  ports:
+    - name: http
+      port: 8200
+      targetPort: 8200
+      nodePort: 30034
+
+---------------- END FILE: ./templates/40-vllm.yaml ----------------
+
+---------------- FILE: ./templates/50-podmonitors.yaml ----------------
+
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: vllm-qwen
+  namespace: vllm
+  labels:
+    release: prometheus-kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  podMetricsEndpoints:
+    # 1) vLLM built-in metrics (KEEP this so vllm:* returns and your sampler can discover :8200)
+    - path: /metrics
+      port: http
+      scheme: http
+      honorLabels: true
+      interval: 1s
+
+    # 2) your thread exporter metrics
+    - path: /metrics
+      port: vllmthr
+      scheme: http
+      honorLabels: true
+      interval: 1s
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kv-router
+  namespace: vllm
+  labels:
+    release: prometheus-kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: router-service
+  podMetricsEndpoints:
+    - path: /metrics
+      port: http
+      scheme: http
+      honorLabels: true
+      interval: 1s
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kv-sidecar
+  namespace: vllm
+  labels:
+    release: prometheus-kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  podMetricsEndpoints:
+    - path: /metrics
+      port: sidecar-http
+      scheme: http
+      honorLabels: true
+      interval: 1s
+
+---------------- END FILE: ./templates/50-podmonitors.yaml ----------------
+
+---------------- FILE: ./templates/20-cpu-hash.yaml ----------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-cpu-hash
+  namespace: vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-cpu-hash
+  template:
+    metadata:
+      labels:
+        app: vllm-cpu-hash
+    spec:
+      containers:
+        - name: vllm-cpu-hash
+          # image: vllm-cpu-hash:latest
+          image: {{ include "vllmkv.image" (list . .Values.images.cpuHash) }}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command:
+            - /bin/bash
+            - -c
+          args:
+            - |
+              source /opt/venv/bin/activate 2>/dev/null || true && \
+              python kv_cache_aware/prefix_hash_service.py \
+                --model-path /model \
+                --host 0.0.0.0 \
+                --port 9095 \
+                --block-size 128
+          env:
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: PYTHONHASHSEED
+              value: "0"
+          ports:
+            - containerPort: 9095
+              name: http
+          volumeMounts:
+            - name: model
+              mountPath: /model
+              readOnly: true
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "4Gi"
+            limits:
+              cpu: "4000m"
+              memory: "8Gi"
+      volumes:
+        - name: model
+          persistentVolumeClaim:
+            claimName: qwen-local-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-cpu-hash
+  namespace: vllm
+spec:
+  type: NodePort
+  selector:
+    app: vllm-cpu-hash
+  ports:
+    - name: http
+      port: 9095
+      targetPort: 9095
+      nodePort: 30095
+
+---------------- END FILE: ./templates/20-cpu-hash.yaml ----------------

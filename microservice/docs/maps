@@ -1,0 +1,144 @@
+                       ┌───────────────────────────────────────────────┐
+                       │                  CLIENTS                      │
+                       │  /enqueue (sync)   or   /submit (async ack)   │
+                       └───────────────┬───────────────────────────────┘
+                                       │  EnqueueRequest{prompt, meta, t_enq_client}
+                                       v
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                                  ROUTER (FastAPI)                                 │
+│                                     api.py                                        │
+│                                                                                   │
+│  1) Allocate req_id                                                               │
+│     - PULL mode: router_state.enqueue()                                           │
+│     - PUSH mode: router_state.next_req_id() (not queued centrally)                │
+│                                                                                   │
+│  2) Register waiter (for sync /enqueue AND for early results in async submit)     │
+│     router_state.register_waiter(req_id)                                          │
+│                                                                                   │
+│  3) Best-effort KV block hashing (KV_AWARE)                                       │
+│     POST HASH_SERVICE_URL/compute_hashes {prompt}                                 │
+│       -> block_hashes = [h1,h2,h3,...]                                            │
+│     kv_aware.register_request_blocks(req_id, block_hashes)                        │
+│                                                                                   │
+│  4) Dispatch path depends on mode                                                 │
+│     - PULL: nothing pushed now; sidecars pull later                               │
+│     - PUSH: push_router.route_and_push(req_id, prompt, meta) now                  │
+└───────────────────────────────┬───────────────────────────────────────────────────┘
+                                │
+                                │ background
+                                v
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                           KV WATCHER (background thread)                          │
+│                                  kv_watcher.py                                    │
+│                                                                                   │
+│  Loop every KV_WATCH_INTERVAL_S (default 1s):                                     │
+│    A) Discover pods every KV_DISCOVERY_INTERVAL_S (default 5s)                    │
+│       - list pods in NAMESPACE with LABEL_SELECTOR                                │
+│       - build {pod_name -> pod_ip}                                                │
+│       - endpoint identity = pod_name                                              │
+│                                                                                   │
+│    B) Scan Redis for owned KV blocks                                              │
+│       - pattern:  MODEL_NAME:kvblock:*                                            │
+│       - for each key:                                                             │
+│           block_hash = int(last segment)                                          │
+│           owners = HGETALL(key).keys()  # pod names                               │
+│           kv_aware.register_block_owners(block_hash, owners_as_endpoints)         │
+│                                                                                   │
+│  Result: router has an in-memory map of:                                          │
+│     block_hash -> {endpoint(pod_name): True, ...}                                 │
+└───────────────────────────────────────────────────────────────────────────────────┘
+
+
+============================== PULL MODE DISPATCH ==============================
+
+   (sidecars repeatedly ask router for work)
+
+┌───────────────────────────┐            POST /pull {endpoint, want}
+│        SIDECAR / POD      │ ───────────────────────────────────────────────►
+│ endpoint = pod_name       │
+│ want = its capacity       │
+└───────────────────────────┘
+                                             v
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                           ROUTER CENTRAL QUEUE + SELECT                           │
+│                                 router_state.py                                   │
+│                                                                                   │
+│ pull_for_endpoint(endpoint, want):                                                │
+│                                                                                   │
+│  0) Pop a POOL from the central queue                                             │
+│     max_scan = min(queue_len, want * POOL_FACTOR)                                 │
+│     pool = pop_left(max_scan)                                                     │
+│                                                                                   │
+│  1) KV scoring (if KV_AWARE)                                                      │
+│     For each request rid in pool:                                                 │
+│       kv_hits = kv_aware.prefix_len(endpoint, rid)                                │
+│                                                                                   │
+│     prefix_len(endpoint, rid) works like:                                         │
+│       blocks = REQ_BLOCKS[rid] = [h1,h2,h3,...]                                   │
+│       count prefix blocks owned by endpoint until first miss                      │
+│                                                                                   │
+│     Sort pool by:                                                                 │
+│       -kv_hits (descending), then rid                                             │
+│                                                                                   │
+│  2) Length refinement (if LEN_AWARE)                                              │
+│     predictor = char-len proxy                                                    │
+│     pred_out_tokens = len(prompt)//2                                              │
+│     Sort by:                                                                      │
+│       short_first or long_first                                                   │
+│                                                                                   │
+│  3) Choose                                                                        │
+│     chosen = first 'want' items from ordered list                                 │
+│     leftovers = rest                                                              │
+│                                                                                   │
+│  4) Requeue leftovers                                                             │
+│     push leftovers back to the front of central queue (appendleft)                │
+│                                                                                   │
+│  5) Return chosen as JobItem list to that endpoint                                │
+└───────────────────────────────────────────────────────────────────────────────────┘
+
+
+============================== PUSH MODE DISPATCH ==============================
+
+   (router chooses an endpoint immediately; KV is NOT used here today)
+
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                                  PushRouter                                       │
+│                                 push_router.py                                    │
+│                                                                                   │
+│ route_and_push(req_id, prompt, meta):                                             │
+│   - discover pods -> sidecar URLs (pod_ip:SIDECAR_PORT)                           │
+│   - pick endpoint by: RR / Random / LeastQ(health or local)                       │
+│   - POST {req_id, prompt, meta} to sidecar /push                                  │
+│                                                                                   │
+│ NOTE: KV hashes may exist, KVWatcher may run, but PushRouter selection ignores KV │
+└───────────────────────────────────────────────────────────────────────────────────┘
+
+
+============================== RESULT RETURN PATH ==============================
+
+┌───────────────────────────┐      POST /result  (or /result_submit ACK+bg ingest)
+│        SIDECAR / POD      │ ───────────────────────────────────────────────►
+└───────────────────────────┘
+                                             v
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                                   ROUTER INTAKE                                   │
+│                                     api.py                                        │
+│                                                                                   │
+│ _ingest_result_payload(payload):                                                  │
+│   - rid = payload["req_id"]                                                       │
+│   - router_state.store_result(rid, result)                                        │
+│       -> resolves any asyncio Future waiter                                       │
+│   - (optional) notify PushRouter to decrement local leastq inflight               │
+│   - (optional) publish result over ZMQ PUB if async_pubsub enabled                │
+└───────────────────────────────────────────────────────────────────────────────────┘
+
+
+============================== SYNC vs ASYNC CLIENTS ==============================
+
+SYNC CLIENT (/enqueue):
+  client ── /enqueue ──► router waits on Future ──► returns {req_id, result}
+
+ASYNC CLIENT (/submit + pubsub):
+  client ── /submit ──► router returns 202 {req_id} immediately
+  client SUBscribes to ZMQ topic results.<run_id> and receives completion events
+
