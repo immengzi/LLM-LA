@@ -1,0 +1,63 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: vllm-qwen
+  namespace: vllm
+  labels:
+    release: prometheus-kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  podMetricsEndpoints:
+    # 1) vLLM built-in metrics (KEEP this so vllm:* returns and your sampler can discover :8200)
+    - path: /metrics
+      port: http
+      scheme: http
+      honorLabels: true
+      interval: 1s
+
+    # 2) your thread exporter metrics
+    - path: /metrics
+      port: vllmthr
+      scheme: http
+      honorLabels: true
+      interval: 1s
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kv-router
+  namespace: vllm
+  labels:
+    release: prometheus-kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: router-service
+  podMetricsEndpoints:
+    - path: /metrics
+      port: http
+      scheme: http
+      honorLabels: true
+      interval: 1s
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kv-sidecar
+  namespace: vllm
+  labels:
+    release: prometheus-kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  podMetricsEndpoints:
+    - path: /metrics
+      port: sidecar-http
+      scheme: http
+      honorLabels: true
+      interval: 1s

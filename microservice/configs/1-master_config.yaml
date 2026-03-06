@@ -1,0 +1,95 @@
+config-1.yaml:
+  # - pull
+  # - push-rr
+  - push-random
+#   - push-least-queue
+
+# config-2.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+# config-3.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+# config-4.yaml:
+  # - pull
+  # - push-rr
+  # - push-random
+  # - push-least-queue
+
+# config-5.yaml:
+  # - pull
+  # - push-rr
+  # - push-random
+  # - push-least-queue
+
+# config-6.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+# config-7.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+# config-8.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+# config-9.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+# config-10.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+# config-11.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+# config-12.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+# config-13.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+# config-14.yaml:
+  # - pull
+  # - push-rr
+  # - push-random
+  # - push-least-queue
+
+# config-15.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue
+
+# config-16.yaml:
+#   - pull
+#   - push-rr
+#   - push-random
+#   - push-least-queue

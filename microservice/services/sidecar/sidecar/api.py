@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 from fastapi import FastAPI
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Dict, Any
 import time
 
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
 from .local_queue import LocalQueue
 from .config import get_config
+from .metrics import inc_received
 
 _cfg = get_config()
 
@@ -23,6 +27,11 @@ class PushItem(BaseModel):
     req_id: str
     prompt: str
     meta: Dict[str, Any] = {}
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health")
@@ -48,9 +57,15 @@ async def push(item: PushItem) -> dict:
       - sidecar_queue_len_before / after
       - sidecar_inflight_before
       - sidecar_logical_before / after
+
+    Also stamps a receipt marker so this can be surfaced in experiment logs:
+      - rcpt_push_recv_wall
     """
     if _local_q is None:
         return {"status": "error", "msg": "local queue not bound"}
+
+    # Prom: received (router -> sidecar)
+    inc_received(_cfg.CONTAINER_NAME)
 
     meta = dict(item.meta or {})
 
@@ -64,7 +79,12 @@ async def push(item: PushItem) -> dict:
     if getattr(_cfg, "TRACE_ENABLED", False):
         now_push = time.time()
         tr = dict(meta.get("__trace__") or {})
+
+        # Existing trace
         tr["t_arrive_sidecar_push"] = now_push
+
+        # receipt marker (lets you audit "did sidecar receive it?" from experiment logs)
+        tr["rcpt_push_recv_wall"] = now_push
 
         # Sidecar-local queue lengths
         tr["sidecar_queue_len_before"] = pending_before

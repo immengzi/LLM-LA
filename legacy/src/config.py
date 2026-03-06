@@ -127,7 +127,7 @@ class RouterConfig:
     # =========================
     # Project paths
     # =========================
-    PROJECT_PATH: str = "/home/saeid/llm-lb"
+    PROJECT_PATH: str = "/home/saeid/llm-lb/legacy"
     PROMPTS: str = "prompts"
     BASE_CONFIGS_PATH: str = os.path.join(PROJECT_PATH, "configs")
     PROMPTS_FOLDER_PATH: str = os.path.join(PROJECT_PATH, "prompts")
