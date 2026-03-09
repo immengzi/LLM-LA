@@ -41,3 +41,4 @@ tiny-model
 uv.tar.gz
 /venv/
 .vscode
+vllm

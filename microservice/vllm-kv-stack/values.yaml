@@ -63,3 +63,17 @@ modelVolume:
   create: true
   nfsServer: nfs.local
   nfsPath: /saeid/models/qwen3-8b
+
+# ------------------------------------------------------------
+# AIBrix integration (disabled by default)
+# When enabled, vLLM pods expose labels so AIBrix gateway
+# can discover them as model endpoints.
+# ------------------------------------------------------------
+aibrix:
+  enabled: false
+
+  # Must match the vLLM --served-model-name
+  modelName: "served-model"
+
+  # Port where vLLM OpenAI server listens
+  port: 8200

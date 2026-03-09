@@ -339,6 +339,10 @@ def cli(master_config: str) -> None:
             "router.kvAware": bool(getattr(h, "router_kv_aware", True)),
             "router.lenAware": bool(getattr(h, "router_len_aware", True)),
             "router.lenPolicy": str(getattr(h, "router_len_policy", "short_first")),
+            # aibrix values
+            "aibrix.enabled": bool(getattr(h, "aibrix_enabled", False)),
+            "aibrix.modelName": str(getattr(h, "aibrix_modelName", "default-model")),
+            "aibrix.port": int(getattr(h, "aibrix_port", 8000)),
         }
 
         set_values["autoscaling.enabled"] = bool(h.autoscaling_enabled)

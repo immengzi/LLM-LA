@@ -272,10 +272,12 @@ def _request_thread_sync(
     logger: Optional[ExperimentLogger] = None,
     output_log_mode: str = "preview",
     print_trace: bool = True,
+    aibrix_enabled: bool = False,  # added flag for AIBrix
+    aibrix_model_name: str = "qwen3-8b",  # added model name for AIBrix
+    aibrix_port: int = 8000,  # added AIBrix port
 ):
     """
     Sync worker: blocks on /enqueue.
-    (This is your existing behavior, kept intact.)
     """
     session = requests.Session()
     try:
@@ -308,7 +310,15 @@ def _request_thread_sync(
 
         t0 = time.time()
         try:
-            rid, result = send_one(session, router_url, task.prompt, meta)
+            rid, result = send_one(
+                session,
+                router_url,
+                task.prompt,
+                meta,
+                aibrix_enabled=aibrix_enabled,   # Pass AIBrix info
+                aibrix_model_name=aibrix_model_name,  # AIBrix model name
+                aibrix_port=aibrix_port,  # AIBrix port
+            )
             t1 = time.time()
             end_to_end_s = t1 - t0
 

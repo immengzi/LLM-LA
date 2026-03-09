@@ -14,6 +14,10 @@ spec:
     metadata:
       labels:
         app: vllm-qwen
+        {{- if .Values.aibrix.enabled }}
+        model.aibrix.ai/name: {{ .Values.aibrix.modelName | quote }}
+        model.aibrix.ai/port: {{ printf "%d" (.Values.aibrix.port | int) | quote }}
+        {{- end }}
     spec:
       restartPolicy: Always
       shareProcessNamespace: true
