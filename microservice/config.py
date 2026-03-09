@@ -139,11 +139,6 @@ class TransportConfig:
     orphan_ttl_s: float = 300.0
     orphan_max: int = 100000
 
-
-# =========================
-# Helm knobs for sweeps (MINIMAL, only what you asked + router kv/len toggles)
-# =========================
-
 @dataclass
 class HelmConfig:
     """
@@ -155,6 +150,7 @@ class HelmConfig:
       - autoscaling enabled + key autoscaling fields
       - sidecar batch size
       - router KV-aware and LEN-aware toggles + policy
+      - AIBrix specific configuration (model name, port)
     """
     # initial replicas for vLLM deployment (even when autoscaling is enabled)
     replicas: int = 4
@@ -175,6 +171,11 @@ class HelmConfig:
     router_kv_aware: bool = True
     router_len_aware: bool = True
     router_len_policy: str = "short_first"  # short_first | long_first | even_short_long
+
+    # AIBrix configuration
+    aibrix_enabled: bool = False
+    aibrix_model_name: str = "qwen3-8b"
+    aibrix_port: int = 8000
     # ------------------------------------------------------------------------
 
 

@@ -1,8 +1,4 @@
 # main.py
-# Entry point: read YAML config, build prompts, build schedule, run open-loop load.
-#
-# NOTE: Helm knobs live in cfg.helm but are used by sweep_methods.py (cluster lifecycle),
-# not by main.py. main.py behavior remains identical.
 
 from __future__ import annotations
 
@@ -192,6 +188,9 @@ def main():
             output_log_mode=cfg.output_log_mode,
             print_trace=cfg.print_trace,
             transport=getattr(cfg, "transport", None),
+            aibrix_enabled=cfg.helm.autoscaling_enabled,  # added flag for AIBrix
+            aibrix_model_name="qwen3-8b",  # added AIBrix model name
+            aibrix_port=8000,  # added AIBrix port
         )
     finally:
         t_end_load = time.time()

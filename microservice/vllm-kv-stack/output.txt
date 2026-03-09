@@ -36,6 +36,8 @@ images:
   router: kv-router:latest
   sidecar: kv-sidecar:latest
   vllm: quay.io/ascend/vllm-ascend:v0.11.0rc0
+  # vllm: ascend/vllm-ascend:v0.11.0rc0
+  # vllm: quay.io/ascend/vllm-ascend:latest
   cpuHash: vllm-cpu-hash:latest
   redis: redis:7-alpine
 
@@ -65,13 +67,26 @@ autoscaling:
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
 
+# Pin router + redis to a specific node by name (via kubernetes.io/hostname)
+# Example node names from `kubectl get nodes`: master / master1 / worker1
+pin:
+  enabled: true
+  nodeName: "master1"
+  tolerations:
+    # Allow scheduling onto control-plane/master nodes if tainted (common default)
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+    - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
+
 # modelVolume:
 #   create: false
 modelVolume:
   create: true
-  nfsServer: "nfs.local"
-  nfsPath: "/"
-  # nfsPath: "/mnt/nvme1/saeid/models/qwen3-8b"
+  nfsServer: nfs.local
+  nfsPath: /saeid/models/qwen3-8b
 
 ---------------- END FILE: ./values.yaml ----------------
 
@@ -115,6 +130,8 @@ images:
   router: kv-router:latest
   sidecar: kv-sidecar:latest
   vllm: quay.io/ascend/vllm-ascend:v0.11.0rc0
+  # vllm: ascend/vllm-ascend:v0.11.0rc0
+  # vllm: quay.io/ascend/vllm-ascend:latest
   cpuHash: vllm-cpu-hash:latest
   redis: redis:7-alpine
 
@@ -144,13 +161,26 @@ autoscaling:
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
 
+# Pin router + redis to a specific node by name (via kubernetes.io/hostname)
+# Example node names from `kubectl get nodes`: master / master1 / worker1
+pin:
+  enabled: true
+  nodeName: "master1"
+  tolerations:
+    # Allow scheduling onto control-plane/master nodes if tainted (common default)
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+    - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
+
 # modelVolume:
 #   create: false
 modelVolume:
   create: true
-  nfsServer: "nfs.local"
-  nfsPath: "/"
-  # nfsPath: "/mnt/nvme1/saeid/models/qwen3-8b"
+  nfsServer: nfs.local
+  nfsPath: /saeid/models/qwen3-8b
 
 ---------------- END FILE: ./values.yaml ----------------
 
@@ -265,6 +295,21 @@ spec:
         app: router-service
     spec:
       serviceAccountName: kv-router-sa
+
+      {{- if .Values.pin.enabled }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - {{ .Values.pin.nodeName | quote }}
+      tolerations:
+{{- toYaml .Values.pin.tolerations | nindent 8 }}
+      {{- end }}
+
       containers:
         - name: router
           # image: kv-router:latest
@@ -432,7 +477,6 @@ spec:
   storageClassName: ""
   volumeName: qwen-local-pv
 {{- end }}
-
 ---------------- END FILE: ./templates/02-model-pvc.yaml ----------------
 
 ---------------- FILE: ./templates/60-keda-scaledobject.yaml ----------------
@@ -508,16 +552,15 @@ spec:
     - nfsvers=4.1
   # nfs:
   #   server: 7.242.102.243
-  #   path: /
+  #   path: /saeid/models/qwen3-8b
   # nfs:
   #   server: nfs.local
-  #   path: /
+  #   path: /saeid/models/qwen3-8b
   nfs:
     server: {{ .Values.modelVolume.nfsServer | quote }}
     path: {{ .Values.modelVolume.nfsPath | quote }}
 
 {{- end }}
-
 ---------------- END FILE: ./templates/01-model-pv.yaml ----------------
 
 ---------------- FILE: ./templates/10-redis.yaml ----------------
@@ -537,6 +580,20 @@ spec:
       labels:
         app: redis
     spec:
+      {{- if .Values.pin.enabled }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - {{ .Values.pin.nodeName | quote }}
+      tolerations:
+{{- toYaml .Values.pin.tolerations | nindent 8 }}
+      {{- end }}
+
       containers:
         - name: redis
           # image: redis:7-alpine
@@ -708,9 +765,20 @@ spec:
     spec:
       restartPolicy: Always
       shareProcessNamespace: true
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: avoid
+                    operator: NotIn
+                    values:
+                      - vllm-qwen
+
       containers:
         - name: vllm
-          # image: quay.io/ascend/vllm-ascend:v0.11.0rc0
+          # image: quay.io/ascend/vllm-ascend:latest
           image: {{ include "vllmkv.image" (list . .Values.images.vllm) }}
           imagePullPolicy: IfNotPresent
           command:
@@ -1067,6 +1135,20 @@ spec:
       labels:
         app: vllm-cpu-hash
     spec:
+      {{- if .Values.pin.enabled }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - {{ .Values.pin.nodeName | quote }}
+      tolerations:
+{{- toYaml .Values.pin.tolerations | nindent 8 }}
+      {{- end }}
+
       containers:
         - name: vllm-cpu-hash
           # image: vllm-cpu-hash:latest

@@ -15,6 +15,9 @@ def send_one(
     router_url: str,
     prompt: str,
     meta: Dict[str, Any] | None = None,
+    aibrix_enabled: bool = False,   # added flag for AIBrix
+    aibrix_model_name: str = "qwen3-8b",  # added AIBrix model name
+    aibrix_port: int = 8000,  # added AIBrix port
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
     Send one synchronous /enqueue request.
@@ -29,18 +32,9 @@ def send_one(
              "output": "...",
              "finish_reason": "stop",
              "latency_s": 0.342,
-
-             # ---  (if server-side trace is enabled) ---
-             "trace": { ... },
-
-             "raw": { ... full vLLM response ... }
+             ...
           }
         }
-
-    IMPORTANT:
-    - The client does NOT generate or modify trace data.
-    - The client simply returns whatever the server gives.
-    - load_runner.py is responsible for printing/consuming trace fields.
 
     Returns:
         (req_id, result_dict_or_None)
@@ -51,6 +45,10 @@ def send_one(
         "t_enq_client": t_enq,
         "meta": meta or {},
     }
+
+    if aibrix_enabled:
+        payload["aibrix_model_name"] = aibrix_model_name  # Include model name if AIBrix is enabled
+        payload["aibrix_port"] = aibrix_port  # Include port if AIBrix is enabled
 
     url = f"{router_url}/enqueue"
     try:
@@ -74,7 +72,6 @@ def send_one(
     rid = str(data["req_id"])
     result = data.get("result")
 
-    # Sanity: result should be a dict, but don't crash if it's not.
     if result is not None and not isinstance(result, dict):
         print(f"[client] WARNING: unexpected 'result' type for req_id={rid}: {type(result)}")
         result = None
