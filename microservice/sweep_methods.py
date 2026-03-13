@@ -6,10 +6,12 @@
 # - BEFORE EACH EXPERIMENT: clean cluster (helm uninstall, ignore errors)
 # - Deploy via Helm with per-experiment knobs read from the client config YAML:
 #     cfg.helm.replicas, cfg.helm.batch_size, cfg.helm.autoscaling_* and cfg.helm.autoscaling_prometheus_query
-# - Also sets router mode per job (method)
+# - Interprets "method" based on backend:
+#     backend=router  -> router.mode = method
+#     backend=aibrix -> aibrix.routing_strategy = method
 # - Waits for readiness
 # - Writes repo_root/vllm-k8s.yaml = helm template output so experiment snapshot stays identical
-# - Runs main.py unchanged and snapshots sweep_meta.json
+# - Runs main.py using a temporary per-job config and snapshots sweep_meta.json
 
 from __future__ import annotations
 
@@ -18,6 +20,8 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
+from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -126,6 +130,40 @@ def _load_master_plan(master_path: Path) -> Dict[Path, List[str]]:
         plan[cfg_path] = methods
 
     return plan
+
+
+# ---------------------------
+# temp config helper
+# ---------------------------
+
+def _write_temp_job_config(cfg, method: str) -> Path:
+    """
+    Write a per-job temporary config so main.py sees the correct method for the chosen backend.
+
+    backend=router  -> keep router config; method is applied only through Helm router.mode
+    backend=aibrix -> override cfg.aibrix.routing_strategy = method
+    """
+    cfg_dict = asdict(cfg)
+    backend = str(cfg_dict.get("backend", "router") or "router").strip().lower()
+
+    if backend == "aibrix":
+        cfg_dict.setdefault("aibrix", {})
+        cfg_dict["aibrix"]["routing_strategy"] = method
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        prefix="sweep_job_",
+        suffix=".yaml",
+        delete=False,
+        encoding="utf-8",
+    )
+    try:
+        yaml.safe_dump(cfg_dict, tmp, sort_keys=False)
+        tmp_path = Path(tmp.name)
+    finally:
+        tmp.close()
+
+    return tmp_path
 
 
 # ---------------------------
@@ -245,13 +283,12 @@ def _debug_wait_failure(namespace: str) -> None:
             parts = ln.split()
             if len(parts) < 2:
                 continue
-            name, ready = parts[0], parts[1]  # ready like 1/2
+            name, ready = parts[0], parts[1]
             try:
                 a, b = ready.split("/")
                 if int(a) == int(b):
                     continue
             except Exception:
-                # If parse fails, still try describing
                 pass
             click.echo(f"\n--- describe pod/{name} ---")
             desc = _kubectl(["describe", "pod", name, "-n", namespace], check=False, capture=True).stdout or ""
@@ -277,7 +314,7 @@ def _run_client(config_path: Path) -> None:
 
 
 # ---------------------------
-# Click CLI (same interface)
+# Click CLI
 # ---------------------------
 
 @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
@@ -302,7 +339,6 @@ def cli(master_config: str) -> None:
         if not cfg.is_file():
             raise click.ClickException(f"Client config not found: {cfg}")
 
-    # HELM defaults (hardcoded)
     release = "vllm"
     namespace = "vllm"
     chart_dir = (REPO_ROOT / "vllm-kv-stack").resolve()
@@ -330,20 +366,27 @@ def cli(master_config: str) -> None:
         if h is None:
             raise click.ClickException(f"Config has no 'helm' section: {cfg_path}")
 
+        backend = str(getattr(cfg, "backend", "router") or "router").strip().lower()
+        if backend not in ("router", "aibrix"):
+            raise click.ClickException(f"Invalid backend '{backend}' in {cfg_path}")
+
         _helm_uninstall(release=release, namespace=namespace)
 
         set_values: Dict[str, object] = {
-            "router.mode": method,
+            "backend": backend,
             "replicas.vllm": int(h.replicas),
             "batchSize": int(h.batch_size),
             "router.kvAware": bool(getattr(h, "router_kv_aware", True)),
             "router.lenAware": bool(getattr(h, "router_len_aware", True)),
             "router.lenPolicy": str(getattr(h, "router_len_policy", "short_first")),
-            # aibrix values
             "aibrix.enabled": bool(getattr(h, "aibrix_enabled", False)),
-            "aibrix.modelName": str(getattr(h, "aibrix_modelName", "default-model")),
-            "aibrix.port": int(getattr(h, "aibrix_port", 8000)),
+            "aibrix.modelName": str(getattr(h, "aibrix_model_name", "served-model")),
+            "aibrix.port": int(getattr(h, "aibrix_port", 8200)),
         }
+
+        # Interpret method family from backend.
+        if backend == "router":
+            set_values["router.mode"] = method
 
         set_values["autoscaling.enabled"] = bool(h.autoscaling_enabled)
 
@@ -356,11 +399,11 @@ def cli(master_config: str) -> None:
             q = " ".join(q.split())
             set_values["autoscaling.prometheusQuery"] = q
 
+        click.echo(f"[sweep] backend={backend}")
         click.echo("[sweep] helm --set values:")
         for k in sorted(set_values):
             click.echo(f"  - {k}={_coerce_set_value(set_values[k])}")
 
-        # Redeploy logic if readiness wait fails
         max_redeploy_attempts = 3
         redeploy_sleep_s = 10
 
@@ -377,7 +420,7 @@ def cli(master_config: str) -> None:
             )
 
             try:
-                _wait_ready(namespace)  # unchanged
+                _wait_ready(namespace)
                 last_err = None
                 break
             except subprocess.CalledProcessError as e:
@@ -410,8 +453,17 @@ def cli(master_config: str) -> None:
         )
         (REPO_ROOT / "vllm-k8s.yaml").write_text(rendered_text, encoding="utf-8")
 
+        tmp_cfg_path = _write_temp_job_config(cfg, method)
+
         before = _snapshot_existing_experiments()
-        _run_client(cfg_path)
+        try:
+            _run_client(tmp_cfg_path)
+        finally:
+            try:
+                tmp_cfg_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
         exp_dir = _newest_experiment_dir(before)
 
         if exp_dir is None:
@@ -425,7 +477,8 @@ def cli(master_config: str) -> None:
 
         meta = {
             "client_config": str(cfg_path),
-            "router_method": method,
+            "backend": backend,
+            "method": method,
             "master_config": str(master_path),
             "ts_unix": time.time(),
             "helm_release": release,
@@ -443,6 +496,9 @@ def cli(master_config: str) -> None:
                 "router_kv_aware": bool(getattr(h, "router_kv_aware", True)),
                 "router_len_aware": bool(getattr(h, "router_len_aware", True)),
                 "router_len_policy": str(getattr(h, "router_len_policy", "short_first")),
+                "aibrix_enabled": bool(getattr(h, "aibrix_enabled", False)),
+                "aibrix_model_name": str(getattr(h, "aibrix_model_name", "served-model")),
+                "aibrix_port": int(getattr(h, "aibrix_port", 8200)),
             },
         }
         (exp_dir / "sweep_meta.json").write_text(

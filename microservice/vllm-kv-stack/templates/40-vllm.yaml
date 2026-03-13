@@ -34,7 +34,6 @@ spec:
 
       containers:
         - name: vllm
-          # image: quay.io/ascend/vllm-ascend:latest
           image: {{ include "vllmkv.image" (list . .Values.images.vllm) }}
           imagePullPolicy: IfNotPresent
           command:
@@ -60,7 +59,9 @@ spec:
                 --max-num-seqs {{ .Values.batchSize }} \
                 --prefix-caching-hash-algo sha256_cbor \
                 --host 0.0.0.0 \
+                {{- if eq (lower .Values.backend) "router" }}
                 --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
+                {{- end }}
                 &
               VLLM_PID=$!
               echo "[vllm-wrapper] vLLM PID=$VLLM_PID"
@@ -99,7 +100,6 @@ spec:
                       if n is None:
                           body = "# vLLM pid not visible\n"
                       else:
-                          # IMPORTANT: do NOT produce '{{' '}}' anywhere (Helm will try to template it)
                           body = 'vllm_threads{pod="%s"} %d\n' % (POD, n)
 
                       self.send_response(200)
@@ -135,9 +135,11 @@ spec:
             - containerPort: 8200
               name: http
               protocol: TCP
+            {{- if eq (lower .Values.backend) "router" }}
             - containerPort: 5557
               name: kvpub
               protocol: TCP
+            {{- end }}
             - containerPort: 9101
               name: vllmthr
               protocol: TCP
@@ -158,16 +160,14 @@ spec:
             - name: cache-volume
               mountPath: /root/.cache
 
-          # ---- Startup probe (protect long model load) ----
           startupProbe:
             httpGet:
               path: /health
               port: 8200
             periodSeconds: 10
-            failureThreshold: 180   # 30 minutes max startup
+            failureThreshold: 180
             timeoutSeconds: 2
 
-          # ---- Readiness probe ----
           readinessProbe:
             httpGet:
               path: /health
@@ -176,7 +176,6 @@ spec:
             failureThreshold: 12
             timeoutSeconds: 2
 
-          # ---- Liveness probe (only active AFTER startupProbe succeeds) ----
           livenessProbe:
             httpGet:
               path: /health
@@ -193,8 +192,8 @@ spec:
               huawei.com/Ascend: 1
               ephemeral-storage: "4Gi"
 
+        {{- if eq (lower .Values.backend) "router" }}
         - name: kv-sidecar
-          # image: kv-sidecar:latest
           image: {{ include "vllmkv.image" (list . .Values.images.sidecar) }}
           imagePullPolicy: IfNotPresent
           env:
@@ -258,6 +257,7 @@ spec:
             limits:
               cpu: "1000m"
               memory: "1Gi"
+        {{- end }}
 
       volumes:
         - name: model

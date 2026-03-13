@@ -1,3 +1,4 @@
+{{- if eq (lower .Values.backend) "router" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,7 +30,6 @@ spec:
 
       containers:
         - name: vllm-cpu-hash
-          # image: vllm-cpu-hash:latest
           image: {{ include "vllmkv.image" (list . .Values.images.cpuHash) }}
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
@@ -85,3 +85,4 @@ spec:
       port: 9095
       targetPort: 9095
       nodePort: 30095
+{{- end }}

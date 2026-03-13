@@ -1,3 +1,4 @@
+{{- if eq (lower .Values.backend) "router" }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -34,3 +35,4 @@ subjects:
   - kind: ServiceAccount
     name: kv-router-sa
     namespace: vllm
+{{- end }}

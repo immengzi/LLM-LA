@@ -80,7 +80,9 @@ def main():
         print("[client] No prompts available; exiting.")
         return
 
-    # Transport summary (non-breaking)
+    backend = str(getattr(cfg, "backend", "router") or "router").strip().lower()
+
+    # Transport summary
     tcfg = getattr(cfg, "transport", None)
     transport_mode = getattr(tcfg, "mode", "sync") if tcfg is not None else "sync"
     submit_path = getattr(tcfg, "submit_path", "/submit") if tcfg is not None else "/submit"
@@ -89,7 +91,8 @@ def main():
     run_id = getattr(tcfg, "run_id", None) if tcfg is not None else None
 
     print(
-        f"[client] router-url={cfg.router_url}, "
+        f"[client] backend={backend}, "
+        f"router-url={cfg.router_url}, "
         f"n={total}, pattern={cfg.load_pattern.pattern}, "
         f"prompt-source={cfg.prompt_source}, "
         f"warmup_reqs={cfg.load_pattern.warmup_reqs}, "
@@ -99,14 +102,22 @@ def main():
         f"transport_mode={transport_mode}"
     )
 
-    if str(transport_mode).lower() == "async_pubsub":
+    if backend == "router" and str(transport_mode).lower() == "async_pubsub":
         print(
             f"[client] async_pubsub: submit_path={submit_path} "
             f"results_zmq={results_zmq} topic={topic!r} run_id={run_id!r}"
         )
 
+    if backend == "aibrix":
+        print(
+            f"[client] aibrix: base_url={cfg.aibrix.base_url} "
+            f"chat_path={cfg.aibrix.chat_path} "
+            f"model={cfg.aibrix.model!r} "
+            f"routing_strategy={cfg.aibrix.routing_strategy!r} "
+            f"stream={bool(cfg.aibrix.stream)}"
+        )
+
     # Initialize experiment directory + logger
-    # (Now also captures node clock offsets at run start into config.json)
     exp_dir, exp_logger = init_experiment(
         cfg,
         config_path=str(config_path),
@@ -188,9 +199,8 @@ def main():
             output_log_mode=cfg.output_log_mode,
             print_trace=cfg.print_trace,
             transport=getattr(cfg, "transport", None),
-            aibrix_enabled=cfg.helm.autoscaling_enabled,  # added flag for AIBrix
-            aibrix_model_name="qwen3-8b",  # added AIBrix model name
-            aibrix_port=8000,  # added AIBrix port
+            backend=backend,
+            aibrix=getattr(cfg, "aibrix", None),
         )
     finally:
         t_end_load = time.time()
@@ -219,6 +229,7 @@ def main():
     # Persist a small, machine-readable run summary for reproducibility
     run_summary = {
         "total_requests": int(total),
+        "backend": backend,
         "load_runner_duration_s": round(float(dt_load), 3) if dt_load is not None else None,
         "wall_time_s": round(float(dt_wall), 3),
         "transport_mode": str(transport_mode),
@@ -226,6 +237,11 @@ def main():
         "results_zmq": results_zmq,
         "topic": str(topic),
         "run_id": run_id,
+        "aibrix_base_url": getattr(getattr(cfg, "aibrix", None), "base_url", None),
+        "aibrix_chat_path": getattr(getattr(cfg, "aibrix", None), "chat_path", None),
+        "aibrix_model": getattr(getattr(cfg, "aibrix", None), "model", None),
+        "aibrix_routing_strategy": getattr(getattr(cfg, "aibrix", None), "routing_strategy", None),
+        "aibrix_stream": getattr(getattr(cfg, "aibrix", None), "stream", None),
     }
     try:
         with (Path(exp_dir) / "run_summary.json").open("w", encoding="utf-8") as f:

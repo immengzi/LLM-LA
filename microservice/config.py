@@ -83,13 +83,13 @@ class PrometheusMetricsConfig:
 
 
 # =========================
-# Transport (sync vs async_pubsub)
+# Transport (router backend)
 # =========================
 
 @dataclass
 class TransportConfig:
     """
-    Transport selection for the client.
+    Transport selection for the router backend.
 
     - "sync": existing behavior (POST /enqueue, block until completion).
     - "async_pubsub": submit+ack (POST /submit) + receive completions via one ZMQ SUB socket.
@@ -139,6 +139,37 @@ class TransportConfig:
     orphan_ttl_s: float = 300.0
     orphan_max: int = 100000
 
+
+# =========================
+# AIBrix backend
+# =========================
+
+@dataclass
+class AIBrixConfig:
+    """
+    Runtime config for AIBrix gateway requests.
+
+    This is separate from Helm knobs. Helm only controls whether the deployed
+    vLLM pods expose the labels AIBrix needs for discovery.
+    """
+    base_url: str = "http://127.0.0.1:31639"
+    chat_path: str = "/v1/chat/completions"
+    model: str = "served-model"
+    routing_strategy: str = "least-request"
+    timeout_s: float = 1000.0
+
+    # Keep HTTP responses open; threaded open-loop client will issue concurrent requests.
+    stream: bool = False
+
+    # Forward non-standard generation fields to AIBrix so its requests stay aligned
+    # with the router path. This is especially important for disabling thinking mode.
+    forward_extra_generation_fields: bool = True
+
+
+# =========================
+# Helm knobs for sweeps
+# =========================
+
 @dataclass
 class HelmConfig:
     """
@@ -150,7 +181,7 @@ class HelmConfig:
       - autoscaling enabled + key autoscaling fields
       - sidecar batch size
       - router KV-aware and LEN-aware toggles + policy
-      - AIBrix specific configuration (model name, port)
+      - whether the deployed vLLM pods expose AIBrix discovery labels
     """
     # initial replicas for vLLM deployment (even when autoscaling is enabled)
     replicas: int = 4
@@ -172,11 +203,11 @@ class HelmConfig:
     router_len_aware: bool = True
     router_len_policy: str = "short_first"  # short_first | long_first | even_short_long
 
-    # AIBrix configuration
+    # ---- AIBrix exposure knobs (maps to Helm chart values.aibrix.*) ----
     aibrix_enabled: bool = False
-    aibrix_model_name: str = "qwen3-8b"
-    aibrix_port: int = 8000
-    # ------------------------------------------------------------------------
+    aibrix_model_name: str = "served-model"
+    aibrix_port: int = 8200
+    # --------------------------------------------------------------------
 
 
 # =========================
@@ -188,6 +219,11 @@ class ClientConfig:
     router_url: str = "http://127.0.0.1:30080"
     total_requests: int = 50
     prompt_source: str = "file"
+
+    # Chooses how requests are executed and how methods are interpreted in sweeps:
+    # - router  -> methods are router modes (pull, push-rr, ...)
+    # - aibrix -> methods are AIBrix routing strategies (least-request, prefix-cache, ...)
+    backend: str = "router"  # router | aibrix
 
     file_prompts: FilePromptsConfig = field(default_factory=FilePromptsConfig)
     hf_lmsys: HFLmsysConfig = field(default_factory=HFLmsysConfig)
@@ -201,10 +237,13 @@ class ClientConfig:
     # Metrics
     metrics: PrometheusMetricsConfig = field(default_factory=PrometheusMetricsConfig)
 
-    # Transport (new; backward-compatible default is sync)
+    # Router transport config
     transport: TransportConfig = field(default_factory=TransportConfig)
 
-    # Helm knobs (new; optional in YAML; safe defaults)
+    # AIBrix runtime config
+    aibrix: AIBrixConfig = field(default_factory=AIBrixConfig)
+
+    # Helm knobs
     helm: HelmConfig = field(default_factory=HelmConfig)
 
 
@@ -250,35 +289,36 @@ def load_config(path: str) -> ClientConfig:
     total_requests = int(raw.get("total_requests", ClientConfig.total_requests))
     prompt_source = raw.get("prompt_source", ClientConfig.prompt_source)
 
+    backend = str(raw.get("backend", ClientConfig.backend) or ClientConfig.backend).strip().lower()
+    if backend not in ("router", "aibrix"):
+        raise ValueError(f"Invalid backend '{backend}'. Expected 'router' or 'aibrix'.")
+
     file_prompts = _merge_dataclass(FilePromptsConfig, raw.get("file_prompts", {}))
     hf_lmsys = _merge_dataclass(HFLmsysConfig, raw.get("hf_lmsys", {}))
     load_pattern = _merge_dataclass(LoadPatternConfig, raw.get("load_pattern", {}))
     generation = _merge_dataclass(GenerationConfig, raw.get("generation", {}))
     metrics = _merge_dataclass(PrometheusMetricsConfig, raw.get("metrics", {}))
 
-    # transport config (fully optional in YAML)
+    # backend-specific config
     transport = _merge_dataclass(TransportConfig, raw.get("transport", {}))
+    aibrix = _merge_dataclass(AIBrixConfig, raw.get("aibrix", {}))
 
-    # helm config (fully optional in YAML)
+    # helm config
     helm = _merge_dataclass(HelmConfig, raw.get("helm", {}))
 
-    # Only special-case: output_log_mode. Use the dataclass default if not in YAML.
     output_log_mode = raw.get("output_log_mode", ClientConfig.output_log_mode)
     print_trace = raw.get("print_trace", ClientConfig.print_trace)
 
     # -----------------------------
-    # Transport defaults/fixes
+    # Normalize router transport
     # -----------------------------
-    if str(transport.mode).lower() == "async_pubsub":
-        # If user forgot results_zmq, derive a sane default.
+    if backend == "router" and str(transport.mode).lower() == "async_pubsub":
         if not str(transport.results_zmq or "").strip():
             transport.results_zmq = _derive_results_zmq_from_router_url(router_url)
 
-        # IMPORTANT: do NOT auto-force run_id="default".
         if transport.run_id is not None and not str(transport.run_id).strip():
             transport.run_id = None
 
-        # Sanity: numeric fields
         try:
             transport.results_hwm = int(transport.results_hwm)
         except Exception:
@@ -290,12 +330,10 @@ def load_config(path: str) -> ClientConfig:
             transport.idle_timeout_s = 60.0
         transport.idle_timeout_s = max(1.0, transport.idle_timeout_s)
 
-        # fleet idle detector window
         try:
             transport.idle_zero_running_s = float(getattr(transport, "idle_zero_running_s", 10.0))
         except Exception:
             transport.idle_zero_running_s = 10.0
-        # allow <=0 to disable
         if transport.idle_zero_running_s < 0.0:
             transport.idle_zero_running_s = 0.0
 
@@ -311,10 +349,42 @@ def load_config(path: str) -> ClientConfig:
             transport.orphan_max = 100000
         transport.orphan_max = max(1000, transport.orphan_max)
 
+    # -----------------------------
+    # Normalize AIBrix config
+    # -----------------------------
+    if backend == "aibrix":
+        aibrix.base_url = str(aibrix.base_url or AIBrixConfig.base_url).rstrip("/")
+        aibrix.chat_path = str(aibrix.chat_path or AIBrixConfig.chat_path)
+        if not aibrix.chat_path.startswith("/"):
+            aibrix.chat_path = "/" + aibrix.chat_path
+
+        try:
+            aibrix.timeout_s = float(aibrix.timeout_s)
+        except Exception:
+            aibrix.timeout_s = 1000.0
+        aibrix.timeout_s = max(1.0, aibrix.timeout_s)
+
+        aibrix.forward_extra_generation_fields = bool(
+            getattr(aibrix, "forward_extra_generation_fields", True)
+        )
+
+        # The chart exposes labels for the vLLM service port, not the gateway port.
+        # In the current chart, vLLM serves on 8200.
+        chart_vllm_port = 8200
+
+        # Align Helm labels with runtime config unless user explicitly overrides in helm block.
+        if "helm" not in raw or "aibrix_enabled" not in raw.get("helm", {}):
+            helm.aibrix_enabled = True
+        if "helm" not in raw or "aibrix_model_name" not in raw.get("helm", {}):
+            helm.aibrix_model_name = str(aibrix.model)
+        if "helm" not in raw or "aibrix_port" not in raw.get("helm", {}):
+            helm.aibrix_port = chart_vllm_port
+
     return ClientConfig(
         router_url=router_url,
         total_requests=total_requests,
         prompt_source=prompt_source,
+        backend=backend,
         file_prompts=file_prompts,
         hf_lmsys=hf_lmsys,
         load_pattern=load_pattern,
@@ -323,5 +393,6 @@ def load_config(path: str) -> ClientConfig:
         print_trace=print_trace,
         metrics=metrics,
         transport=transport,
+        aibrix=aibrix,
         helm=helm,
     )

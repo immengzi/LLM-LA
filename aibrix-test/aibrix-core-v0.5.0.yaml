@@ -45162,7 +45162,7 @@ spec:
         - /manager
         env:
         - name: AIBRIX_GATEWAY_TIMEOUT_SECONDS
-          value: "120"
+          value: "1000"
         image: aibrix/controller-manager:v0.5.0
         imagePullPolicy: IfNotPresent
         livenessProbe:
@@ -45650,7 +45650,7 @@ spec:
         name: original_route
         route:
           cluster: original_destination_cluster
-          timeout: 120s
+          timeout: 1000s
         typed_per_filter_config:
           envoy.filters.http.ext_proc/envoyextensionpolicy/aibrix-system/aibrix-gateway-plugins-extension-policy/extproc/0:
             '@type': type.googleapis.com/envoy.config.route.v3.FilterConfig

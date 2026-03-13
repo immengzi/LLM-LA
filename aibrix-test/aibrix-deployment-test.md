@@ -44,7 +44,7 @@ envoy-gateway-system   envoy-aibrix-system-aibrix-eg-903790dc               Load
 And reachable through the <ip address>:<port number>:
 
 ```bash
-curl http://10.175.113.44:31639/v1/chat/completions \
+curl http://10.175.113.43:31639/v1/chat/completions \
   -H "routing-strategy: least-request" \
   -H "Content-Type: application/json" \
   -H "model: qwen3-8b" \

@@ -1,15 +1,13 @@
 # load_runner.py
-# Per-request threaded load runner:
+# Per-request load runner:
 # - Optional request-based warmup before the main load.
-# - For each (plan_time, prompt), spawn a thread.
+# - Router backend:
+#     - sync: thread-per-request, POST /enqueue
+#     - async_pubsub: single submit scheduler + single ZMQ SUB listener
+# - AIBrix backend:
+#     - threaded_http: thread-per-request, OpenAI-compatible HTTP calls to AIBrix gateway
 #
-# TRANSPORT MODES:
-#   - sync (default): each thread calls POST /enqueue and blocks for the response.
-#   - async_pubsub: submits requests on schedule from a SINGLE scheduler loop
-#                   (no thread-per-request), while a single ZMQ SUB listener receives
-#                   completion events and emits the SAME per-request log schema as sync mode.
-#
-# Termination policy for async_pubsub (preferred + backstop):
+# Termination policy for router async_pubsub (preferred + backstop):
 #   1) Preferred: Prometheus fleet-idle detection:
 #        - If vLLM reports requests_running==0 (and requests_waiting==0 when available)
 #          continuously for idle_zero_running_s seconds => stop early (mark remaining as LOST).
@@ -27,8 +25,8 @@ import json
 
 import requests
 
-from http_client import send_one, submit_one
-from config import GenerationConfig
+from http_client import send_one, submit_one, send_one_aibrix
+from config import GenerationConfig, AIBrixConfig
 from trace_utils import print_trace_block, compute_trace_metrics
 from experiment_io import ExperimentLogger
 
@@ -156,7 +154,6 @@ def _choose_log_output(
         if output_full is not None:
             return output_full
         return output_preview
-    # preview mode
     if output_preview is not None:
         return output_preview
     return output_full
@@ -172,8 +169,8 @@ def _emit_completion_from_result(
     print_trace: bool,
 ):
     """
-    Emit stdout + optional logger record, using the EXACT SAME schema as sync mode.
-    This is shared by:
+    Emit stdout + optional logger record, using the same schema as sync mode.
+    Shared by:
       - pubsub listener (normal)
       - async submitter loop (race-fix path: orphan result arrived before pending)
     """
@@ -215,7 +212,6 @@ def _emit_completion_from_result(
     if print_trace and isinstance(result, dict):
         tr = result.get("trace")
         if isinstance(tr, dict):
-            # keep old print_trace_block signature happy (expects {"req_id":..., "result":...})
             print_trace_block(idx, {"req_id": rid, "result": result})
 
     logger: Optional[ExperimentLogger] = info.get("logger")
@@ -264,7 +260,30 @@ def _note_last_recv(progress: Dict[str, float], progress_lock: threading.Lock) -
         progress["last_recv_wall"] = now
 
 
-def _request_thread_sync(
+def _build_generation_meta(gen_cfg: GenerationConfig) -> Dict[str, Any]:
+    meta = {
+        "max_tokens": int(gen_cfg.max_tokens),
+        "temperature": float(gen_cfg.temperature),
+        "length_mode": gen_cfg.length_mode,
+        "enable_thinking": bool(gen_cfg.think),
+    }
+    if gen_cfg.target_output_tokens is not None:
+        meta["target_output_tokens"] = int(gen_cfg.target_output_tokens)
+    if gen_cfg.target_total_tokens is not None:
+        meta["target_total_tokens"] = int(gen_cfg.target_total_tokens)
+    return meta
+
+
+def _log_send_tick(now_send: float, t0_mono: float) -> None:
+    rel = now_send - t0_mono
+    sec = int(rel)
+    with _sec_lock:
+        _sec_counts[sec] = _sec_counts.get(sec, 0) + 1
+        count_in_sec = _sec_counts[sec]
+    print(f"[load_runner][SEC] t=[{sec},{sec+1}) sent_so_far_in_sec={count_in_sec}")
+
+
+def _request_thread_router_sync(
     task: RequestTask,
     router_url: str,
     gen_cfg: GenerationConfig,
@@ -272,12 +291,9 @@ def _request_thread_sync(
     logger: Optional[ExperimentLogger] = None,
     output_log_mode: str = "preview",
     print_trace: bool = True,
-    aibrix_enabled: bool = False,  # added flag for AIBrix
-    aibrix_model_name: str = "qwen3-8b",  # added model name for AIBrix
-    aibrix_port: int = 8000,  # added AIBrix port
 ):
     """
-    Sync worker: blocks on /enqueue.
+    Router sync worker: blocks on /enqueue.
     """
     session = requests.Session()
     try:
@@ -286,39 +302,132 @@ def _request_thread_sync(
         if delay > 0:
             time.sleep(delay)
 
-        # Per-second logging at actual send time
         now_send = time.monotonic()
-        rel = now_send - t0_mono
-        sec = int(rel)
-        with _sec_lock:
-            _sec_counts[sec] = _sec_counts.get(sec, 0) + 1
-            count_in_sec = _sec_counts[sec]
-        print(f"[load_runner][SEC] t=[{sec},{sec+1}) sent_so_far_in_sec={count_in_sec}")
+        _log_send_tick(now_send, t0_mono)
 
-        meta = {
-            "max_tokens": int(gen_cfg.max_tokens),
-            "temperature": float(gen_cfg.temperature),
-            "length_mode": gen_cfg.length_mode,
-            "enable_thinking": bool(gen_cfg.think),
-        }
-        if gen_cfg.target_output_tokens is not None:
-            meta["target_output_tokens"] = int(gen_cfg.target_output_tokens)
-        if gen_cfg.target_total_tokens is not None:
-            meta["target_total_tokens"] = int(gen_cfg.target_total_tokens)
+        meta = _build_generation_meta(gen_cfg)
 
         print(f"[client][SEND][T{task.idx}] idx={task.idx} planned_ts={task.ts_mono:.6f}")
 
         t0 = time.time()
         try:
-            rid, result = send_one(
-                session,
-                router_url,
-                task.prompt,
-                meta,
-                aibrix_enabled=aibrix_enabled,   # Pass AIBrix info
-                aibrix_model_name=aibrix_model_name,  # AIBrix model name
-                aibrix_port=aibrix_port,  # AIBrix port
-            )
+            rid, result = send_one(session, router_url, task.prompt, meta)
+            t1 = time.time()
+            end_to_end_s = t1 - t0
+
+            (
+                latency_s,
+                finish_reason,
+                output_preview,
+                output_full,
+                usage_prompt_tokens,
+                usage_completion_tokens,
+                usage_total_tokens,
+                trace_dict,
+                trace_metrics,
+            ) = _extract_result_fields(result)
+
+            if latency_s is not None:
+                print(
+                    f"[client][RECV][T{task.idx}] idx={task.idx} req_id={rid} "
+                    f"wait_wall={end_to_end_s:.3f}s model_latency={latency_s:.3f}s"
+                )
+            else:
+                print(
+                    f"[client][RECV][T{task.idx}] idx={task.idx} req_id={rid} "
+                    f"wait_wall={end_to_end_s:.3f}s"
+                )
+
+            if finish_reason is not None:
+                print(f"[client][T{task.idx}]   finish_reason={finish_reason}")
+
+            if print_trace and output_preview is not None:
+                print(f"[client][T{task.idx}]   output_preview={output_preview!r}")
+
+            if isinstance(result, dict):
+                trace = result.get("trace")
+                if isinstance(trace, dict) and print_trace:
+                    print_trace_block(task.idx, {"req_id": rid, "result": result})
+
+            if logger is not None:
+                record: Dict[str, Any] = {
+                    "idx": task.idx,
+                    "req_id": rid,
+                    "prompt": task.prompt,
+                    "planned_ts_mono": task.ts_mono,
+                    "actual_send_ts_mono": now_send,
+                    "t0_wall": t0,
+                    "t1_wall": t1,
+                    "end_to_end_s": end_to_end_s,
+                    "model_latency_s": latency_s,
+                    "finish_reason": finish_reason,
+                }
+
+                if usage_prompt_tokens is not None:
+                    record["prompt_tokens"] = usage_prompt_tokens
+                if usage_completion_tokens is not None:
+                    record["completion_tokens"] = usage_completion_tokens
+                if usage_total_tokens is not None:
+                    record["total_tokens"] = usage_total_tokens
+
+                log_output = _choose_log_output(
+                    output_log_mode=output_log_mode,
+                    output_full=output_full,
+                    output_preview=output_preview,
+                )
+                if log_output is not None:
+                    record["output"] = log_output
+
+                if trace_dict is not None:
+                    record["trace"] = trace_dict
+                if trace_metrics is not None:
+                    record["trace_metrics"] = trace_metrics
+
+                logger.log_request(record)
+
+        except Exception as e:
+            print(f"[client][RECV][T{task.idx}] ✗ ERROR idx={task.idx}: {e}")
+            if logger is not None:
+                err_record: Dict[str, Any] = {
+                    "idx": task.idx,
+                    "error": str(e),
+                    "prompt": task.prompt,
+                    "planned_ts_mono": task.ts_mono,
+                    "send_failed": True,
+                }
+                logger.log_request(err_record)
+    finally:
+        session.close()
+
+
+def _request_thread_aibrix_http(
+    task: RequestTask,
+    aibrix_cfg: AIBrixConfig,
+    gen_cfg: GenerationConfig,
+    t0_mono: float,
+    logger: Optional[ExperimentLogger] = None,
+    output_log_mode: str = "preview",
+    print_trace: bool = True,
+):
+    """
+    AIBrix worker: one open HTTP request per thread.
+    The connection stays open until the AIBrix/vLLM response completes.
+    """
+    session = requests.Session()
+    try:
+        now = time.monotonic()
+        delay = task.ts_mono - now
+        if delay > 0:
+            time.sleep(delay)
+
+        now_send = time.monotonic()
+        _log_send_tick(now_send, t0_mono)
+
+        print(f"[client][SEND][T{task.idx}] idx={task.idx} planned_ts={task.ts_mono:.6f}")
+
+        t0 = time.time()
+        try:
+            rid, result = send_one_aibrix(session, aibrix_cfg, task.prompt, gen_cfg)
             t1 = time.time()
             end_to_end_s = t1 - t0
 
@@ -414,14 +523,12 @@ def _pubsub_listener_thread(
     run_id: Optional[str],
     pending: Dict[str, Dict[str, Any]],
     pending_lock: threading.Lock,
-    # orphan buffer for race where SUB result arrives before pending[rid] exists
     orphans: Dict[str, Dict[str, Any]],
     orphans_lock: threading.Lock,
     orphan_ttl_s: float,
     orphan_max: int,
     done_counter: Dict[str, int],
     done_evt: threading.Event,
-    # idle-timeout progress tracking
     progress: Dict[str, float],
     progress_lock: threading.Lock,
     output_log_mode: str,
@@ -450,7 +557,6 @@ def _pubsub_listener_thread(
     try:
         sock.connect(results_zmq)
 
-        # Subscribe: if topic is empty, subscribe to everything.
         if topic:
             sock.setsockopt(zmq.SUBSCRIBE, topic.encode("utf-8"))
         else:
@@ -458,7 +564,6 @@ def _pubsub_listener_thread(
 
         while not done_evt.is_set():
             try:
-                # Use poll so we can exit promptly.
                 if sock.poll(timeout=200) == 0:
                     continue
                 msg = sock.recv_multipart(flags=0)
@@ -489,15 +594,12 @@ def _pubsub_listener_thread(
             if not rid or not isinstance(rid, str):
                 continue
 
-            # Normal path: try to match pending
             with pending_lock:
                 info = pending.pop(rid, None)
 
             if info is None:
-                # RACE FIX: stash as orphan, best-effort bounded by ttl+max
                 now = time.time()
                 with orphans_lock:
-                    # cleanup old entries occasionally
                     if len(orphans) > 0 and (len(orphans) % 256 == 0):
                         dead = [
                             k
@@ -507,7 +609,6 @@ def _pubsub_listener_thread(
                         for k in dead:
                             orphans.pop(k, None)
 
-                    # enforce max size (drop expired first; if still full, drop arbitrary one)
                     if len(orphans) >= int(orphan_max):
                         dead = [
                             k
@@ -525,7 +626,6 @@ def _pubsub_listener_thread(
                     orphans[rid] = {"t_recv_wall": now, "result": result}
                 continue
 
-            # Matched: emit completion
             _emit_completion_from_result(
                 rid=rid,
                 result=result,
@@ -534,7 +634,6 @@ def _pubsub_listener_thread(
                 output_log_mode=output_log_mode,
                 print_trace=print_trace,
             )
-            # IMPORTANT: update idle-timeout progress only when we actually EMIT a completion
             _note_last_recv(progress, progress_lock)
 
     finally:
@@ -565,7 +664,6 @@ def _fleet_idle_from_metrics_tick(tick: Optional[Dict[str, Any]]) -> Tuple[Optio
     for rec in samples:
         if not isinstance(rec, dict):
             continue
-        # Only treat as vLLM row if any of these keys are present.
         if ("requests_running" not in rec) and ("requests_waiting" not in rec):
             continue
 
@@ -589,14 +687,12 @@ def _fleet_idle_from_metrics_tick(tick: Optional[Dict[str, Any]]) -> Tuple[Optio
     max_running = max(running_vals) if running_vals else None
     max_waiting = max(waiting_vals) if waiting_vals else None
 
-    # Decide idle
     if max_running is None:
         return None, {"reason": "no_running_metric", "max_waiting": max_waiting}
 
     if max_running != 0.0:
         return False, {"max_running": max_running, "max_waiting": max_waiting}
 
-    # running is zero; if waiting exists, also require waiting==0
     if max_waiting is not None and max_waiting != 0.0:
         return False, {"max_running": max_running, "max_waiting": max_waiting}
 
@@ -613,18 +709,21 @@ def run_open_loop_load(
     logger: Optional[ExperimentLogger] = None,
     output_log_mode: str = "preview",
     print_trace: bool = True,
-    # optional: transport config
     transport: Any = None,
+    backend: str = "router",
+    aibrix: Optional[AIBrixConfig] = None,
 ):
     """
     Execute a precomputed schedule.
 
-    transport:
-      - None or TransportConfig(mode="sync") => existing /enqueue behavior.
-      - TransportConfig(mode="async_pubsub") => /submit + ZMQ completion events
-        with end-of-run policy:
-          - Preferred: fleet idle (requests_running==0) for idle_zero_running_s
-          - Backstop: idle_timeout_s since last emitted completion
+    backend:
+      - "router":
+          - transport.mode == "sync"         -> existing /enqueue behavior
+          - transport.mode == "async_pubsub" -> /submit + ZMQ completion events
+      - "aibrix":
+          - concurrent threaded HTTP requests to AIBrix gateway
+          - no ZMQ
+          - each request keeps its HTTP connection open until completion
     """
     if len(prompts) != len(plan_times):
         raise ValueError("prompts and plan_times length mismatch")
@@ -634,18 +733,18 @@ def run_open_loop_load(
         print("[load_runner] No jobs to send.")
         return
 
-    # Normalize transport
+    backend = str(backend or "router").strip().lower()
+    if backend not in ("router", "aibrix"):
+        raise ValueError(f"Invalid backend '{backend}'")
+
     mode = "sync"
     submit_path = "/submit"
     results_zmq = None
     topic = ""
     run_id = None
 
-    # async_pubsub end conditions
     idle_timeout_s = 60.0
-    idle_zero_running_s = 10.0  # <=0 disables fleet-idle shortcut
-
-    # Orphan buffering knobs (hardcoded safe defaults)
+    idle_zero_running_s = 10.0
     orphan_ttl_s = 300.0
     orphan_max = 100000
 
@@ -670,7 +769,6 @@ def run_open_loop_load(
         except Exception:
             mode = "sync"
 
-    # Safety clamp for idle_timeout_s
     try:
         idle_timeout_s = float(idle_timeout_s)
     except Exception:
@@ -682,35 +780,28 @@ def run_open_loop_load(
         print(f"[load_runner] WARNING: idle_timeout_s={idle_timeout_s} very large; clamping to 3600s")
         idle_timeout_s = 3600.0
 
-    # Safety clamp for idle_zero_running_s (<=0 disables)
     try:
         idle_zero_running_s = float(idle_zero_running_s)
     except Exception:
         idle_zero_running_s = 10.0
 
-    # Warmup (kept synchronous even in async_pubsub mode)
     warmup_reqs = int(warmup_reqs or 0)
     if warmup_reqs > 0:
         print(f"[load_runner] warmup: sending {warmup_reqs} dummy requests before timed load")
 
         session = requests.Session()
-        meta = {
-            "max_tokens": int(gen_cfg.max_tokens),
-            "temperature": float(gen_cfg.temperature),
-            "length_mode": gen_cfg.length_mode,
-            "enable_thinking": bool(gen_cfg.think),
-        }
-        if gen_cfg.target_output_tokens is not None:
-            meta["target_output_tokens"] = int(gen_cfg.target_output_tokens)
-        if gen_cfg.target_total_tokens is not None:
-            meta["target_total_tokens"] = int(gen_cfg.target_total_tokens)
-
+        meta = _build_generation_meta(gen_cfg)
         warm_prompt = "WARMUP: dummy request to warm up vLLM workers, router, and caches."
 
         t_w0 = time.time()
         for i in range(warmup_reqs):
             try:
-                rid, _result = send_one(session, router_url, warm_prompt, meta)
+                if backend == "aibrix":
+                    if aibrix is None:
+                        raise RuntimeError("backend='aibrix' requires aibrix config")
+                    rid, _result = send_one_aibrix(session, aibrix, warm_prompt, gen_cfg)
+                else:
+                    rid, _result = send_one(session, router_url, warm_prompt, meta)
                 print(f"[client][warmup] i={i} req_id={rid}")
             except Exception as e:
                 print(f"[client][warmup] ERROR i={i}: {e}")
@@ -718,18 +809,42 @@ def run_open_loop_load(
         t_w1 = time.time()
         print(f"[load_runner] warmup done in {t_w1 - t_w0:.3f}s")
 
-    print(f"[load_runner] Starting load for {total} requests (transport_mode={mode})")
+    print(f"[load_runner] Starting load for {total} requests (backend={backend}, transport_mode={mode})")
 
     if not plan_times:
         print("[load_runner] Empty schedule, nothing to send.")
         return
 
-    # Re-anchor schedule so first planned time starts now.
     t0_mono = time.monotonic()
     t0_plan = plan_times[0]
     adj_plan_times = [t0_mono + (ts - t0_plan) for ts in plan_times]
 
-    # SYNC path: unchanged behavior (thread-per-request)
+    # AIBrix backend: threaded open-loop HTTP requests.
+    if backend == "aibrix":
+        if aibrix is None:
+            raise RuntimeError("backend='aibrix' requires aibrix config")
+
+        threads: List[threading.Thread] = []
+        t0_wall = time.time()
+
+        for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
+            task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
+            t = threading.Thread(
+                target=_request_thread_aibrix_http,
+                args=(task, aibrix, gen_cfg, t0_mono, logger, output_log_mode, print_trace),
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
+
+        elapsed = time.time() - t0_wall
+        print(f"[load_runner] Done. Sent {total} requests in {elapsed:.3f}s")
+        return
+
+    # Router sync path: thread-per-request /enqueue
     if mode != "async_pubsub":
         threads: List[threading.Thread] = []
         t0_wall = time.time()
@@ -737,7 +852,7 @@ def run_open_loop_load(
         for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
             task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
             t = threading.Thread(
-                target=_request_thread_sync,
+                target=_request_thread_router_sync,
                 args=(task, router_url, gen_cfg, t0_mono, logger, output_log_mode, print_trace),
                 daemon=True,
             )
@@ -751,7 +866,7 @@ def run_open_loop_load(
         print(f"[load_runner] Done. Sent {total} requests in {elapsed:.3f}s")
         return
 
-    # ASYNC_PUBSUB path
+    # Router async_pubsub path
     if not results_zmq:
         raise RuntimeError("transport.mode=async_pubsub requires transport.results_zmq to be set")
 
@@ -768,18 +883,15 @@ def run_open_loop_load(
     pending: Dict[str, Dict[str, Any]] = {}
     pending_lock = threading.Lock()
 
-    # orphan buffer (rid -> {"t_recv_wall": ..., "result": ...})
     orphans: Dict[str, Dict[str, Any]] = {}
     orphans_lock = threading.Lock()
 
     done_evt = threading.Event()
     done_counter: Dict[str, int] = {"done": 0}
 
-    # progress tracking for idle-timeout termination
     progress = {"last_recv_wall": time.time()}
     progress_lock = threading.Lock()
 
-    # Start one subscriber thread (single long-lived connection)
     sub_t = threading.Thread(
         target=_pubsub_listener_thread,
         kwargs={
@@ -803,38 +915,19 @@ def run_open_loop_load(
     )
     sub_t.start()
 
-    # ------------------------------------------------------------------
-    # SUBMISSION: single scheduler loop (NO thread-per-request)
-    # ------------------------------------------------------------------
     t0_wall = time.time()
     session = requests.Session()
     try:
         for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
-            # sleep until scheduled time
             now = time.monotonic()
             delay = ts_mono - now
             if delay > 0:
                 time.sleep(delay)
 
-            # Per-second logging at actual send time
             now_send = time.monotonic()
-            rel = now_send - t0_mono
-            sec = int(rel)
-            with _sec_lock:
-                _sec_counts[sec] = _sec_counts.get(sec, 0) + 1
-                count_in_sec = _sec_counts[sec]
-            print(f"[load_runner][SEC] t=[{sec},{sec+1}) sent_so_far_in_sec={count_in_sec}")
+            _log_send_tick(now_send, t0_mono)
 
-            meta = {
-                "max_tokens": int(gen_cfg.max_tokens),
-                "temperature": float(gen_cfg.temperature),
-                "length_mode": gen_cfg.length_mode,
-                "enable_thinking": bool(gen_cfg.think),
-            }
-            if gen_cfg.target_output_tokens is not None:
-                meta["target_output_tokens"] = int(gen_cfg.target_output_tokens)
-            if gen_cfg.target_total_tokens is not None:
-                meta["target_total_tokens"] = int(gen_cfg.target_total_tokens)
+            meta = _build_generation_meta(gen_cfg)
 
             print(f"[client][SEND][T{idx}] idx={idx} planned_ts={ts_mono:.6f}")
 
@@ -861,14 +954,12 @@ def run_open_loop_load(
                 "planned_ts_mono": ts_mono,
                 "actual_send_ts_mono": now_send,
                 "t0_wall": t0,
-                "logger": logger,  # stored for convenience (could be None)
+                "logger": logger,
             }
 
-            # Store pending
             with pending_lock:
                 pending[rid] = info
 
-            # Race fix: if we already received this rid, consume it and emit now.
             orphan_entry = None
             with orphans_lock:
                 orphan_entry = orphans.pop(rid, None)
@@ -892,18 +983,11 @@ def run_open_loop_load(
     finally:
         session.close()
 
-    # After all submits: wait while completions keep arriving.
-    # Stop condition (whichever happens first):
-    #   - pending drains
-    #   - fleet idle for idle_zero_running_s (if enabled)
-    #   - idle_timeout_s since last emitted completion (backstop)
     wait_start = time.time()
     next_progress_print = wait_start + 5.0
 
     timed_out = False
     timeout_reason: Optional[str] = None
-
-    # For fleet-idle shortcut
     zero_run_start_wall: Optional[float] = None
     last_fleet_debug: Dict[str, Any] = {}
 
@@ -919,7 +1003,6 @@ def run_open_loop_load(
             last_recv_wall = float(progress.get("last_recv_wall", now))
         idle_s = now - last_recv_wall
 
-        # Preferred: fleet-idle shortcut
         fleet_idle_ok: Optional[bool] = None
         if idle_zero_running_s > 0 and get_last_metrics_tick is not None:
             tick = get_last_metrics_tick()
@@ -935,7 +1018,6 @@ def run_open_loop_load(
             else:
                 zero_run_start_wall = None
 
-        # Backstop: idle since last recv
         if idle_s > float(idle_timeout_s):
             timed_out = True
             timeout_reason = f"idle_timeout_after_last_recv ({idle_timeout_s}s)"
@@ -966,14 +1048,12 @@ def run_open_loop_load(
 
         time.sleep(0.1)
 
-    # Stop listener
     done_evt.set()
     try:
         sub_t.join(timeout=1.0)
     except Exception:
         pass
 
-    # If timed out: mark remaining pending as LOST and log with backward-compatible schema
     lost = 0
     if timed_out:
         with pending_lock:

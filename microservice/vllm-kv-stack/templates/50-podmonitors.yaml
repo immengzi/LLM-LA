@@ -10,14 +10,12 @@ spec:
     matchLabels:
       app: vllm-qwen
   podMetricsEndpoints:
-    # 1) vLLM built-in metrics (KEEP this so vllm:* returns and your sampler can discover :8200)
     - path: /metrics
       port: http
       scheme: http
       honorLabels: true
       interval: 1s
 
-    # 2) your thread exporter metrics
     - path: /metrics
       port: vllmthr
       scheme: http
@@ -25,6 +23,7 @@ spec:
       interval: 1s
 
 ---
+{{- if eq (lower .Values.backend) "router" }}
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
@@ -61,3 +60,4 @@ spec:
       scheme: http
       honorLabels: true
       interval: 1s
+{{- end }}

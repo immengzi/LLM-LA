@@ -1,3 +1,4 @@
+{{- if eq (lower .Values.backend) "router" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,7 +32,6 @@ spec:
 
       containers:
         - name: router
-          # image: kv-router:latest
           image: {{ include "vllmkv.image" (list . .Values.images.router) }}
           imagePullPolicy: IfNotPresent
           env:
@@ -174,3 +174,4 @@ spec:
       port: 5559
       targetPort: 5559
       nodePort: 30559
+{{- end }}

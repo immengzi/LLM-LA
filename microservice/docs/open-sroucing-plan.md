@@ -80,6 +80,12 @@ KV-Aware Scale-Down\
 Replicas containing valuable KV states may be preserved during
 scale-down.
 
+Cross Engine p2p KV cache reuse\
+Similar to the Clyde project being able to locate the relevant KV cache block
+
+KV Offloading\
+KV offloading for increased kv pooling capacity. Similar projects https://aibrix.readthedocs.io/latest/designs/aibrix-kvcache-offloading-framework.html#aibrix-kvcache-offloading-framework
+
 Fast Replica Startup\
 Replica startup latency may be reduced using optimized container images
 and layered model loading.
@@ -153,6 +159,9 @@ Model weights may load incrementally to reduce startup time.
 
 ## Backend and Infrastructure Abstraction
 
+Envoy Proxy Support\
+The backend should support routing through the envoy as the gateway instead of nodeported router
+
 Multi-Backend Support\
 The framework supports multiple inference engines.
 
@@ -167,6 +176,9 @@ Scheduling accounts for accelerator differences.
 
 GPU/NPU Time-Sharing\
 Accelerators may be partitioned or time-shared.
+
+Multi Cloud Support\
+Support Multi Cloud Platform like Huawei Cloud, Ali Cloud, GCP etc
 
 ------------------------------------------------------------------------
 
@@ -399,3 +411,68 @@ recovery
   v0.2      2--3 months    scheduling & routing
   v0.3      3--5 months    KV infrastructure
   v1.0      6--12 months   production platform
+
+## Roadmap
+
+## Roadmap
+ 
+1. Energy-Aware Routing based on GPUs and NPUs\
+The scheduler is extended to incorporate per-accelerator power draw,
+thermal state, and power headroom as routing signals alongside existing
+utilization and memory metrics. A thermally throttled or power-capped
+GPU incurs higher latency per token than a cooler device even at similar
+utilization, so routing without energy visibility produces unpredictable
+tail latency under sustained load. The sidecar collects and normalizes
+these signals across GPU and NPU device classes, the scheduler uses power
+headroom as a soft preference when latency SLOs are tight, and aggregate
+energy metrics are surfaced for cluster-level cost reporting and carbon
+accounting.
+ 
+2. Operator and Fine-Grained Scaling\
+Current autoscaling operates at replica granularity, which is too coarse
+for LLM inference because prefill and decode stages have different
+resource profiles and different sensitivity to scale events. Fine-grained
+scaling tracks prefill workers, decode workers, and KV cache managers as
+independent scaling targets, each with its own queue pressure signals and
+autoscaling policy. Scale-up decisions are driven by token-level backlog
+rather than request count, scale-down defers termination of replicas
+holding reusable KV states until those states expire or transfer, and
+fast startup using pre-warmed images reduces the latency cost of
+scale-out events.
+ 
+3. Agentic-Aware Routing and Scaling\
+Multi-stage agentic workloads produce many dependent inference calls
+within a single session, each extending the prior prompt with tool
+results or observations. The KV cache from stage N is almost entirely
+reusable in stage N+1, but a scheduler unaware of session identity routes
+successive calls to different workers and forces redundant full prefill
+on every stage. The framework introduces session identity as a first-class
+metadata field, uses session-affinity scheduling to prefer the worker
+already holding the relevant KV state, gives blocking tool-use calls
+stage-aware priority, and accounts for expected future requests from
+active sessions in queue pressure and autoscaling signals.
+ 
+4. LoRA Adapter Support\
+Serving a base model with many fine-tuned LoRA adapters is a common
+multi-tenant pattern, but without adapter awareness the scheduler cannot
+avoid redundant adapter loading or missed batching opportunities. Adapter
+identity is propagated as a first-class field through admission, queue,
+and scheduling layers. The worker registry tracks currently loaded
+adapters per worker, the scheduler routes requests toward workers with
+the required adapter already resident, and requests sharing an adapter
+are grouped into the same batch window where possible. The prefix
+location map is keyed by model, adapter, and prefix hash combined, since
+KV states are adapter-specific and cross-adapter reuse is invalid.
+ 
+5. Heterogeneity-Aware Autoscaling\
+Clusters increasingly mix GPU generations, NPUs, and devices with
+different memory and compute characteristics, but standard autoscalers
+treat all replicas as equivalent and scale on aggregate utilization,
+which is not comparable across device classes. The framework maintains a
+capacity model per accelerator class tracking token throughput, maximum
+batch size, and KV memory headroom, and scales each class as an
+independent pool. Requests are matched to device classes at admission
+based on prompt length and expected KV footprint, cost-weighted
+scale-out prefers lower-cost classes when latency constraints allow, and
+capacity models are periodically recalibrated against observed sidecar
+throughput rather than relying on static vendor specifications.
