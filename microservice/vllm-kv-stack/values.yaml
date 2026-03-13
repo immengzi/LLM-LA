@@ -1,3 +1,5 @@
+backend: router
+
 replicas:
   router: 1
   vllm: 1
@@ -64,11 +66,8 @@ modelVolume:
   nfsServer: nfs.local
   nfsPath: /saeid/models/qwen3-8b
 
-# ------------------------------------------------------------
-# AIBrix integration (disabled by default)
-# When enabled, vLLM pods expose labels so AIBrix gateway
-# can discover them as model endpoints.
-# ------------------------------------------------------------
+# AIBrix integration.
+# In backend=aibrix, vLLM pods expose labels so AIBrix gateway can discover them.
 aibrix:
   enabled: false
 

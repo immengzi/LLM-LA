@@ -1,3 +1,4 @@
+{{- if eq (lower .Values.backend) "router" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,7 +30,6 @@ spec:
 
       containers:
         - name: redis
-          # image: redis:7-alpine
           image: {{ include "vllmkv.image" (list . .Values.images.redis) }}
           args:
             - redis-server
@@ -74,3 +74,4 @@ spec:
       port: 6379
       targetPort: 6379
       nodePort: 30079
+{{- end }}

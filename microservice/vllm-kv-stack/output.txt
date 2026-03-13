@@ -88,6 +88,19 @@ modelVolume:
   nfsServer: nfs.local
   nfsPath: /saeid/models/qwen3-8b
 
+# ------------------------------------------------------------
+# AIBrix integration (disabled by default)
+# When enabled, vLLM pods expose labels so AIBrix gateway
+# can discover them as model endpoints.
+# ------------------------------------------------------------
+aibrix:
+  enabled: false
+
+  # Must match the vLLM --served-model-name
+  modelName: "served-model"
+
+  # Port where vLLM OpenAI server listens
+  port: 8200
 ---------------- END FILE: ./values.yaml ----------------
 
 ---------------- FILE: ./output.txt ----------------
@@ -182,6 +195,19 @@ modelVolume:
   nfsServer: nfs.local
   nfsPath: /saeid/models/qwen3-8b
 
+# ------------------------------------------------------------
+# AIBrix integration (disabled by default)
+# When enabled, vLLM pods expose labels so AIBrix gateway
+# can discover them as model endpoints.
+# ------------------------------------------------------------
+aibrix:
+  enabled: false
+
+  # Must match the vLLM --served-model-name
+  modelName: "served-model"
+
+  # Port where vLLM OpenAI server listens
+  port: 8200
 ---------------- END FILE: ./values.yaml ----------------
 
 ---------------- FILE: ./output.txt ----------------
@@ -762,6 +788,10 @@ spec:
     metadata:
       labels:
         app: vllm-qwen
+        {{- if .Values.aibrix.enabled }}
+        model.aibrix.ai/name: {{ .Values.aibrix.modelName | quote }}
+        model.aibrix.ai/port: {{ printf "%d" (.Values.aibrix.port | int) | quote }}
+        {{- end }}
     spec:
       restartPolicy: Always
       shareProcessNamespace: true
@@ -1047,7 +1077,6 @@ spec:
       port: 8200
       targetPort: 8200
       nodePort: 30034
-
 ---------------- END FILE: ./templates/40-vllm.yaml ----------------
 
 ---------------- FILE: ./templates/50-podmonitors.yaml ----------------

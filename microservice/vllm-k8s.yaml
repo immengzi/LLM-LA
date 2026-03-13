@@ -1,11 +1,4 @@
 ---
-# Source: vllm-kv-stack/templates/30-router-rbac.yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: kv-router-sa
-  namespace: vllm
----
 # Source: vllm-kv-stack/templates/01-model-pv.yaml
 apiVersion: v1
 kind: PersistentVolume
@@ -50,89 +43,6 @@ spec:
   storageClassName: ""
   volumeName: qwen-local-pv
 ---
-# Source: vllm-kv-stack/templates/30-router-rbac.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: kv-router-role
-  namespace: vllm
-rules:
-  - apiGroups:
-      - ""
-    resources:
-      - pods
-    verbs:
-      - get
-      - list
-      - watch
----
-# Source: vllm-kv-stack/templates/30-router-rbac.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: kv-router-rolebinding
-  namespace: vllm
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: kv-router-role
-subjects:
-  - kind: ServiceAccount
-    name: kv-router-sa
-    namespace: vllm
----
-# Source: vllm-kv-stack/templates/10-redis.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: redis
-  namespace: vllm
-spec:
-  type: NodePort
-  selector:
-    app: redis
-  ports:
-    - name: redis
-      port: 6379
-      targetPort: 6379
-      nodePort: 30079
----
-# Source: vllm-kv-stack/templates/20-cpu-hash.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: vllm-cpu-hash
-  namespace: vllm
-spec:
-  type: NodePort
-  selector:
-    app: vllm-cpu-hash
-  ports:
-    - name: http
-      port: 9095
-      targetPort: 9095
-      nodePort: 30095
----
-# Source: vllm-kv-stack/templates/31-router.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: router-service
-  namespace: vllm
-spec:
-  type: NodePort
-  selector:
-    app: router-service
-  ports:
-    - name: http
-      port: 8080
-      targetPort: 8080
-      nodePort: 30080
-    - name: results-zmq
-      port: 5559
-      targetPort: 5559
-      nodePort: 30559
----
 # Source: vllm-kv-stack/templates/40-vllm.yaml
 apiVersion: v1
 kind: Service
@@ -149,307 +59,6 @@ spec:
       targetPort: 8200
       nodePort: 30034
 ---
-# Source: vllm-kv-stack/templates/10-redis.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: redis
-  namespace: vllm
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: redis
-  template:
-    metadata:
-      labels:
-        app: redis
-    spec:
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: "kubernetes.io/hostname"
-                    operator: In
-                    values:
-                      - "master1"
-      tolerations:
-        - effect: NoSchedule
-          key: node-role.kubernetes.io/control-plane
-          operator: Exists
-        - effect: NoSchedule
-          key: node-role.kubernetes.io/master
-          operator: Exists
-
-      containers:
-        - name: redis
-          # image: redis:7-alpine
-          image: reg.local:32000/redis:7-alpine
-          args:
-            - redis-server
-            - --save
-            - "60"
-            - "1"
-            - --loglevel
-            - warning
-          ports:
-            - containerPort: 6379
-              name: redis
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "256Mi"
-            limits:
-              cpu: "500m"
-              memory: "512Mi"
-          readinessProbe:
-            tcpSocket:
-              port: 6379
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          livenessProbe:
-            tcpSocket:
-              port: 6379
-            initialDelaySeconds: 10
-            periodSeconds: 20
----
-# Source: vllm-kv-stack/templates/20-cpu-hash.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: vllm-cpu-hash
-  namespace: vllm
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: vllm-cpu-hash
-  template:
-    metadata:
-      labels:
-        app: vllm-cpu-hash
-    spec:
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: "kubernetes.io/hostname"
-                    operator: In
-                    values:
-                      - "master1"
-      tolerations:
-        - effect: NoSchedule
-          key: node-role.kubernetes.io/control-plane
-          operator: Exists
-        - effect: NoSchedule
-          key: node-role.kubernetes.io/master
-          operator: Exists
-
-      containers:
-        - name: vllm-cpu-hash
-          # image: vllm-cpu-hash:latest
-          image: reg.local:32000/vllm-cpu-hash:latest
-          imagePullPolicy: IfNotPresent
-          workingDir: /workspace
-          command:
-            - /bin/bash
-            - -c
-          args:
-            - |
-              source /opt/venv/bin/activate 2>/dev/null || true && \
-              python kv_cache_aware/prefix_hash_service.py \
-                --model-path /model \
-                --host 0.0.0.0 \
-                --port 9095 \
-                --block-size 128
-          env:
-            - name: HF_HUB_OFFLINE
-              value: "1"
-            - name: TRANSFORMERS_OFFLINE
-              value: "1"
-            - name: PYTHONHASHSEED
-              value: "0"
-          ports:
-            - containerPort: 9095
-              name: http
-          volumeMounts:
-            - name: model
-              mountPath: /model
-              readOnly: true
-          resources:
-            requests:
-              cpu: "1000m"
-              memory: "4Gi"
-            limits:
-              cpu: "4000m"
-              memory: "8Gi"
-      volumes:
-        - name: model
-          persistentVolumeClaim:
-            claimName: qwen-local-pvc
----
-# Source: vllm-kv-stack/templates/31-router.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: router-service
-  namespace: vllm
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: router-service
-  template:
-    metadata:
-      labels:
-        app: router-service
-    spec:
-      serviceAccountName: kv-router-sa
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: "kubernetes.io/hostname"
-                    operator: In
-                    values:
-                      - "master1"
-      tolerations:
-        - effect: NoSchedule
-          key: node-role.kubernetes.io/control-plane
-          operator: Exists
-        - effect: NoSchedule
-          key: node-role.kubernetes.io/master
-          operator: Exists
-
-      containers:
-        - name: router
-          # image: kv-router:latest
-          image: reg.local:32000/kv-router:latest
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: HOST
-              value: "0.0.0.0"
-            - name: PORT
-              value: "8080"
-            - name: ACCESS_LOG
-              value: "false"
-
-            - name: KV_LOG_KEYS
-              value: "off"
-            - name: REQ_LOG_MODE
-              value: "summary"
-
-            - name: REDIS_HOST
-              value: "redis"
-            - name: REDIS_PORT
-              value: "6379"
-            - name: MODEL_NAME
-              value: "served-model"
-
-            - name: NAMESPACE
-              value: "vllm"
-            - name: LABEL_SELECTOR
-              value: "app=vllm-qwen"
-            - name: VLLM_PORT
-              value: "8200"
-
-            - name: KV_WATCH_INTERVAL_S
-              value: "1.0"
-            - name: KV_WATCH_MAX_KEYS
-              value: "200"
-            - name: KV_DISCOVERY_INTERVAL_S
-              value: "5.0"
-
-            - name: HASH_SERVICE_URL
-              value: "http://vllm-cpu-hash:9095"
-            - name: HASH_TIMEOUT_S
-              value: "2.0"
-
-            # ---- Helm-controlled routing knobs ----
-            - name: KV_AWARE
-              value: "false"
-
-            - name: LEN_AWARE
-              value: "true"
-
-            - name: LEN_POLICY
-              value: "short_first"
-            # --------------------------------------
-
-            - name: POOL_FACTOR
-              value: "4"
-            - name: DEFAULT_MAX_TOKENS
-              value: "1024"
-
-            - name: ROUTER_MODE
-              value: "push-random"
-
-            - name: SIDECAR_PORT
-              value: "9000"
-
-            - name: PUSH_LEASTQ_MODE
-              value: "local"
-
-            - name: RESULT_TIMEOUT_S
-              value: "1000.0"
-            - name: RESULT_POLL_INTERVAL_S
-              value: "0.02"
-
-            - name: PUSH_HTTP_TIMEOUT_S
-              value: "2.0"
-
-            - name: TRACE_ENABLED
-              value: "true"
-
-            - name: TRANSPORT_MODE
-              value: "async_pubsub"
-            - name: SUBMIT_PATH
-              value: "/submit"
-            - name: RESULTS_ZMQ_BIND
-              value: "tcp://0.0.0.0:5559"
-            - name: RESULTS_ZMQ_TOPIC
-              value: "results"
-            - name: RESULTS_ZMQ_HWM
-              value: "500000"
-            - name: RESULTS_GRACE_S
-              value: "5.0"
-
-            - name: RESULT_TRANSPORT_MODE
-              value: "submit_ack"
-            - name: RESULT_SUBMIT_PATH
-              value: "/result_submit"
-
-          ports:
-            - containerPort: 8080
-              name: http
-            - containerPort: 5559
-              name: results-zmq
-
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 10
-
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8080
-            initialDelaySeconds: 10
-            periodSeconds: 20
-
-          resources:
-            requests:
-              cpu: "250m"
-              memory: "512Mi"
-            limits:
-              cpu: "1000m"
-              memory: "1Gi"
----
 # Source: vllm-kv-stack/templates/40-vllm.yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -457,7 +66,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 2
+  replicas: 4
   selector:
     matchLabels:
       app: vllm-qwen
@@ -465,6 +74,8 @@ spec:
     metadata:
       labels:
         app: vllm-qwen
+        model.aibrix.ai/name: "served-model"
+        model.aibrix.ai/port: "8200"
     spec:
       restartPolicy: Always
       shareProcessNamespace: true
@@ -481,7 +92,6 @@ spec:
 
       containers:
         - name: vllm
-          # image: quay.io/ascend/vllm-ascend:latest
           image: reg.local:32000/ascend/vllm-ascend:v0.11.0rc0
           imagePullPolicy: IfNotPresent
           command:
@@ -507,7 +117,6 @@ spec:
                 --max-num-seqs 8 \
                 --prefix-caching-hash-algo sha256_cbor \
                 --host 0.0.0.0 \
-                --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
                 &
               VLLM_PID=$!
               echo "[vllm-wrapper] vLLM PID=$VLLM_PID"
@@ -546,7 +155,6 @@ spec:
                       if n is None:
                           body = "# vLLM pid not visible\n"
                       else:
-                          # IMPORTANT: do NOT produce '32' anywhere (Helm will try to template it)
                           body = 'vllm_threads{pod="%s"} %d\n' % (POD, n)
 
                       self.send_response(200)
@@ -582,9 +190,6 @@ spec:
             - containerPort: 8200
               name: http
               protocol: TCP
-            - containerPort: 5557
-              name: kvpub
-              protocol: TCP
             - containerPort: 9101
               name: vllmthr
               protocol: TCP
@@ -605,16 +210,14 @@ spec:
             - name: cache-volume
               mountPath: /root/.cache
 
-          # ---- Startup probe (protect long model load) ----
           startupProbe:
             httpGet:
               path: /health
               port: 8200
             periodSeconds: 10
-            failureThreshold: 180   # 30 minutes max startup
+            failureThreshold: 180
             timeoutSeconds: 2
 
-          # ---- Readiness probe ----
           readinessProbe:
             httpGet:
               path: /health
@@ -623,7 +226,6 @@ spec:
             failureThreshold: 12
             timeoutSeconds: 2
 
-          # ---- Liveness probe (only active AFTER startupProbe succeeds) ----
           livenessProbe:
             httpGet:
               path: /health
@@ -639,72 +241,6 @@ spec:
             limits:
               huawei.com/Ascend910: 1
               ephemeral-storage: "4Gi"
-
-        - name: kv-sidecar
-          # image: kv-sidecar:latest
-          image: reg.local:32000/kv-sidecar:latest
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: ROUTER_URL
-              value: "http://router-service:8080"
-            - name: VLLM_URL
-              value: "http://127.0.0.1:8200"
-            - name: MODEL_NAME
-              value: "served-model"
-
-            - name: SIDECAR_PORT
-              value: "9000"
-
-            - name: BATCH_SIZE
-              value: "8"
-
-            - name: SIDECAR_MODE
-              value: "push"
-
-            - name: PULL_INTERVAL_S
-              value: "0.05"
-
-            - name: ROUTER_PULL_TIMEOUT_S
-              value: "1000.0"
-            - name: VLLM_TIMEOUT_S
-              value: "1000.0"
-            - name: ROUTER_RESULT_TIMEOUT_S
-              value: "1000.0"
-
-            - name: RESULT_TRANSPORT_MODE
-              value: "submit_ack"
-            - name: RESULT_SUBMIT_PATH
-              value: "/result_submit"
-
-            - name: VLLM_HOST
-              value: "127.0.0.1"
-            - name: VLLM_SUB_PORT
-              value: "5557"
-            - name: REDIS_HOST
-              value: "redis"
-            - name: REDIS_PORT
-              value: "6379"
-            - name: CONTAINER_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: MODEL_NAME_REDIS
-              value: "served-model"
-
-            - name: TRACE_ENABLED
-              value: "true"
-
-          ports:
-            - containerPort: 9000
-              name: sidecar-http
-              protocol: TCP
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "512Mi"
-            limits:
-              cpu: "1000m"
-              memory: "1Gi"
 
       volumes:
         - name: model
@@ -748,54 +284,14 @@ spec:
     matchLabels:
       app: vllm-qwen
   podMetricsEndpoints:
-    # 1) vLLM built-in metrics (KEEP this so vllm:* returns and your sampler can discover :8200)
     - path: /metrics
       port: http
       scheme: http
       honorLabels: true
       interval: 1s
 
-    # 2) your thread exporter metrics
     - path: /metrics
       port: vllmthr
-      scheme: http
-      honorLabels: true
-      interval: 1s
----
-# Source: vllm-kv-stack/templates/50-podmonitors.yaml
-apiVersion: monitoring.coreos.com/v1
-kind: PodMonitor
-metadata:
-  name: kv-router
-  namespace: vllm
-  labels:
-    release: prometheus-kube-prometheus
-spec:
-  selector:
-    matchLabels:
-      app: router-service
-  podMetricsEndpoints:
-    - path: /metrics
-      port: http
-      scheme: http
-      honorLabels: true
-      interval: 1s
----
-# Source: vllm-kv-stack/templates/50-podmonitors.yaml
-apiVersion: monitoring.coreos.com/v1
-kind: PodMonitor
-metadata:
-  name: kv-sidecar
-  namespace: vllm
-  labels:
-    release: prometheus-kube-prometheus
-spec:
-  selector:
-    matchLabels:
-      app: vllm-qwen
-  podMetricsEndpoints:
-    - path: /metrics
-      port: sidecar-http
       scheme: http
       honorLabels: true
       interval: 1s

@@ -1,13 +1,48 @@
 # http_client.py
-# Thin wrapper around POST /enqueue (sync) and POST /submit (async_pubsub).
+# Thin wrapper around:
+#   - POST /enqueue (sync router backend)
+#   - POST /submit (async_pubsub router backend)
+#   - POST /v1/chat/completions (AIBrix backend)
 
 from __future__ import annotations
 
 from typing import Dict, Any, Tuple, Optional
 import time
+import uuid
 
 import requests
 from requests.exceptions import RequestException
+
+from config import AIBrixConfig, GenerationConfig
+
+
+def _build_aibrix_extra_generation_fields(gen_cfg: GenerationConfig) -> Dict[str, Any]:
+    """
+    Build the extra generation fields that should be forwarded to AIBrix so the
+    AIBrix path receives the same relevant generation controls as the working
+    sidecar/vLLM path.
+
+    Important:
+    - Thinking control must be nested under chat_template_kwargs, matching the
+      payload shape used by sidecar/vllm_client.py.
+    - Other non-standard fields are forwarded only when present.
+    """
+    extra: Dict[str, Any] = {
+        "chat_template_kwargs": {
+            "enable_thinking": bool(gen_cfg.think),
+        }
+    }
+
+    if gen_cfg.length_mode is not None:
+        extra["length_mode"] = gen_cfg.length_mode
+
+    if gen_cfg.target_output_tokens is not None:
+        extra["target_output_tokens"] = int(gen_cfg.target_output_tokens)
+
+    if gen_cfg.target_total_tokens is not None:
+        extra["target_total_tokens"] = int(gen_cfg.target_total_tokens)
+
+    return extra
 
 
 def send_one(
@@ -15,42 +50,25 @@ def send_one(
     router_url: str,
     prompt: str,
     meta: Dict[str, Any] | None = None,
-    aibrix_enabled: bool = False,   # added flag for AIBrix
-    aibrix_model_name: str = "qwen3-8b",  # added AIBrix model name
-    aibrix_port: int = 8000,  # added AIBrix port
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
     Send one synchronous /enqueue request.
 
     The router blocks until the sidecar posts /result or timeout.
 
-    Response shape (happy path):
-
-        {
-          "req_id": "abc123",
-          "result": {
-             "output": "...",
-             "finish_reason": "stop",
-             "latency_s": 0.342,
-             ...
-          }
-        }
-
     Returns:
         (req_id, result_dict_or_None)
     """
     t_enq = time.time()
+
     payload: Dict[str, Any] = {
         "prompt": prompt,
         "t_enq_client": t_enq,
         "meta": meta or {},
     }
 
-    if aibrix_enabled:
-        payload["aibrix_model_name"] = aibrix_model_name  # Include model name if AIBrix is enabled
-        payload["aibrix_port"] = aibrix_port  # Include port if AIBrix is enabled
-
     url = f"{router_url}/enqueue"
+
     try:
         resp = session.post(url, json=payload, timeout=1000000.0)
     except RequestException as e:
@@ -73,7 +91,9 @@ def send_one(
     result = data.get("result")
 
     if result is not None and not isinstance(result, dict):
-        print(f"[client] WARNING: unexpected 'result' type for req_id={rid}: {type(result)}")
+        print(
+            f"[client] WARNING: unexpected 'result' type for req_id={rid}: {type(result)}"
+        )
         result = None
 
     return rid, result
@@ -85,7 +105,6 @@ def submit_one(
     submit_path: str,
     prompt: str,
     meta: Dict[str, Any] | None = None,
-    # run_id is optional; when provided we stamp meta["__run_id"] for router pubsub isolation.
     run_id: Optional[str] = None,
 ) -> str:
     """
@@ -98,15 +117,12 @@ def submit_one(
     Returns:
         req_id (string)
     """
+
     t_enq = time.time()
 
-    # IMPORTANT: copy meta so we never mutate caller dict (caller may reuse it).
     m: Dict[str, Any] = dict(meta or {})
 
-    # Attach run_id so router can publish on results.<run_id>
-    # (router may look for meta["__run_id"]).
     if run_id is not None and str(run_id).strip():
-        # If caller already provided __run_id, keep it (don't overwrite).
         m.setdefault("__run_id", str(run_id).strip())
 
     payload: Dict[str, Any] = {
@@ -115,20 +131,18 @@ def submit_one(
         "meta": m,
     }
 
-    # Normalize submit_path
     sp = submit_path or "/submit"
     if not sp.startswith("/"):
         sp = "/" + sp
 
     url = f"{router_url}{sp}"
+
     try:
-        # Keep timeout short: this is submit+ack only.
         resp = session.post(url, json=payload, timeout=10.0)
     except RequestException as e:
         print(f"[client] ✗ HTTP error talking to router submit endpoint: {e}")
         raise
 
-    # Accept either 202 (preferred) or 200 (tolerate)
     if resp.status_code not in (200, 202):
         print(f"[client] ✗ {sp} failed: {resp.status_code} {resp.text}")
         raise RuntimeError(f"{sp} failed: {resp.status_code} {resp.text}")
@@ -142,7 +156,150 @@ def submit_one(
         raise RuntimeError(f"{sp} response missing 'req_id': {data!r}")
 
     rid = str(data["req_id"]).strip()
+
     if not rid:
         raise RuntimeError(f"{sp} returned empty 'req_id': {data!r}")
 
     return rid
+
+
+def send_one_aibrix(
+    session: requests.Session,
+    aibrix_cfg: AIBrixConfig,
+    prompt: str,
+    gen_cfg: GenerationConfig,
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """
+    Send one request to the AIBrix gateway using the OpenAI-compatible chat API.
+
+    This is a normal HTTP request whose connection remains open until the response
+    completes. Open-loop concurrency is handled by load_runner.py via multiple
+    in-flight threads/tasks, not via ZMQ.
+
+    NOTE:
+    - This helper supports non-streaming JSON responses only.
+    - If stream=True is needed later, SSE parsing should be implemented separately.
+    """
+
+    if bool(aibrix_cfg.stream):
+        raise RuntimeError("AIBrix streaming responses are not supported by send_one_aibrix()")
+
+    t_send = time.time()
+
+    url = f"{str(aibrix_cfg.base_url).rstrip('/')}{str(aibrix_cfg.chat_path)}"
+
+    payload: Dict[str, Any] = {
+        "model": str(aibrix_cfg.model),
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "max_tokens": int(gen_cfg.max_tokens),
+        "temperature": float(gen_cfg.temperature),
+    }
+
+    if bool(getattr(aibrix_cfg, "forward_extra_generation_fields", True)):
+        payload.update(_build_aibrix_extra_generation_fields(gen_cfg))
+
+    headers = {
+        "Content-Type": "application/json",
+        "model": str(aibrix_cfg.model),
+        "routing-strategy": str(aibrix_cfg.routing_strategy),
+    }
+
+    try:
+        resp = session.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=(10, float(aibrix_cfg.timeout_s)),
+            stream=False,
+        )
+    except RequestException as e:
+        print(f"[client] ✗ HTTP error talking to AIBrix gateway: {e}")
+        raise
+
+    t_recv = time.time()
+
+    # ---------- inspection block ----------
+    if not resp.ok:
+        print("[client] ✗ AIBrix request failed")
+        print(f"[client] status_code = {resp.status_code}")
+        print(f"[client] reason      = {resp.reason}")
+        print(f"[client] url         = {resp.url}")
+        print(f"[client] elapsed_s   = {resp.elapsed.total_seconds():.3f}")
+
+        print("[client] response_headers:")
+        for k, v in resp.headers.items():
+            print(f"    {k}: {v}")
+
+        body_preview = resp.text
+        if len(body_preview) > 2000:
+            body_preview = body_preview[:2000] + "...<truncated>"
+
+        print("[client] response_body:")
+        print(body_preview)
+
+        req = resp.request
+
+        print("[client] request_headers:")
+        for k, v in req.headers.items():
+            print(f"    {k}: {v}")
+
+        if req.body:
+            print("[client] request_body:")
+            print(req.body)
+
+        raise RuntimeError(
+            f"AIBrix request failed: {resp.status_code} {resp.reason}"
+        )
+    # ---------- end inspection ----------
+
+    try:
+        data = resp.json()
+    except Exception:
+        raise RuntimeError(f"AIBrix returned non-JSON body: {resp.text!r}")
+
+    rid_raw = data.get("id")
+    if isinstance(rid_raw, str) and rid_raw.strip():
+        rid = rid_raw.strip()
+    else:
+        rid = f"aibrix-{uuid.uuid4().hex}"
+
+    output: Optional[str] = None
+    finish_reason: Optional[str] = None
+    usage: Optional[Dict[str, Any]] = None
+
+    choices = data.get("choices")
+
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        c0 = choices[0]
+
+        msg = c0.get("message")
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, str):
+                output = content
+
+        fr = c0.get("finish_reason")
+        if isinstance(fr, str):
+            finish_reason = fr
+
+    if isinstance(data.get("usage"), dict):
+        usage = data["usage"]
+
+    result: Dict[str, Any] = {
+        "output": output,
+        "finish_reason": finish_reason,
+        "latency_s": float(t_recv - t_send),
+        "trace": {
+            "trace_mode": "client_only",
+            "t_send_client": t_send,
+            "t_recv_client": t_recv,
+            "client_roundtrip_s": float(t_recv - t_send),
+        },
+        "raw": data,
+    }
+
+    if usage is not None:
+        result["usage"] = usage
+
+    return rid, result

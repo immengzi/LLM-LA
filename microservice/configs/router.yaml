@@ -1,8 +1,10 @@
-# test_config.yaml
-# Clean test config (explicit knobs, values close to example_config.yaml)
+# router_config.yaml
+# Router-based experiment config
 
-router_url: "http://7.242.102.243:30080"
-total_requests: 40000
+backend: "router"
+
+router_url: "http://10.175.113.44:30080"
+total_requests: 400
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -19,8 +21,8 @@ hf_lmsys:
   repeat_each: 1
 
 load_pattern:
-  pattern: "det"
-  rate_rps: 13
+  pattern: "dump"
+  rate_rps: 1
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -49,7 +51,7 @@ print_trace: false
 
 metrics:
   enabled: true
-  prometheus_base_url: "http://localhost:31190"
+  prometheus_base_url: "http://10.175.113.44:31190"
   scrape_interval_s: 1.0
   window_s: 2.0
   include_debug_metrics: false
@@ -59,20 +61,28 @@ metrics:
 transport:
   mode: "async_pubsub"
   submit_path: "/submit"
-  results_zmq: "tcp://7.242.102.243:30559"
+  results_zmq: "tcp://10.175.113.44:30559"
   topic: "results"
   run_id: null
-  idle_timeout_s: 600.0
+  idle_timeout_s: 1000.0
+  idle_zero_running_s: 10.0
 
 helm:
-  replicas: 24
+  replicas: 4
   batch_size: 8
+
   autoscaling_enabled: false
   autoscaling_min: 1
   autoscaling_max: 16
   autoscaling_threshold: "16"
   autoscaling_prometheus_query: |
     max(router_central_queue_length{namespace="vllm"})
-  router_kv_aware: true
+
+  router_kv_aware: false
   router_len_aware: true
   router_len_policy: "short_first"
+
+  # Disable AIBrix exposure for router experiments
+  aibrix_enabled: false
+  aibrix_model_name: "served-model"
+  aibrix_port: 8200
