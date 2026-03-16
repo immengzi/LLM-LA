@@ -2,17 +2,17 @@
 #   - pull
 #   - push-rr
 #   - push-random
-  # - push-least-queue
+#   - push-least-queue
 
 aibrix:
-#   - random
-  # - least-request
+  - random
+  - least-request
   - throughput
   - prefix-cache
   - least-busy-time
   - least-kv-cache
-  # - least-latency
+  - least-latency
   - prefix-cache-preble
   - vtc-basic
-  - pd
-  - session-affinity
+  # - pd
+  # - session-affinity

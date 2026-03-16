@@ -414,6 +414,12 @@ def _request_thread_aibrix_http(
     The connection stays open until the AIBrix/vLLM response completes.
     """
     session = requests.Session()
+    # Disable keep-alive: each thread makes exactly one request so connection
+    # pooling buys nothing here. Without this, urllib3 returns the socket to
+    # the pool after the response; if Envoy has since closed its end, the next
+    # thread that gets that socket will hit ECONNRESET 104.
+    session.headers.update({"Connection": "close"})
+    # OLD: session = requests.Session()
     try:
         now = time.monotonic()
         delay = task.ts_mono - now
@@ -827,7 +833,30 @@ def run_open_loop_load(
         threads: List[threading.Thread] = []
         t0_wall = time.time()
 
+        # OLD: all threads started upfront in a tight loop, causing every thread
+        # to exist simultaneously (sleeping) even if its send time is far in the
+        # future. With large total_requests this exhausts the OS thread limit.
+        #
+        # for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
+        #     task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
+        #     t = threading.Thread(
+        #         target=_request_thread_aibrix_http,
+        #         args=(task, aibrix, gen_cfg, t0_mono, logger, output_log_mode, print_trace),
+        #         daemon=True,
+        #     )
+        #     t.start()
+        #     threads.append(t)
+        #
+        # FIX: sleep in the main loop until just before each request is due,
+        # then start the thread. Peak live threads = rate_rps * avg_latency_s,
+        # which is constant regardless of total_requests. Schedule timing is
+        # preserved — the thread still has ts_mono and sleeps the remaining few ms.
         for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
+            now = time.monotonic()
+            sleep_until = ts_mono - 0.005  # wake 5ms early to absorb scheduling jitter
+            if sleep_until > now:
+                time.sleep(sleep_until - now)
+
             task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
             t = threading.Thread(
                 target=_request_thread_aibrix_http,

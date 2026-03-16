@@ -35,7 +35,7 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 4
+  vllm: 8
 router:
   kvAware: false
   lenAware: true

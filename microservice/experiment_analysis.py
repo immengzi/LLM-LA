@@ -404,3 +404,12 @@ def experiments_from_series(series_ids, series_size=4, start_exp_id=1):
         start = start_exp_id + s * series_size
         experiments.extend(range(start, start + series_size))
     return experiments
+
+
+def experiments_from_series(start_exp_id, end_exp_id):
+    """
+    Return a list of experiment IDs from start_exp_id to end_exp_id (inclusive).
+    """
+    if start_exp_id > end_exp_id:
+        raise ValueError("start_exp_id must be <= end_exp_id")
+    return list(range(start_exp_id, end_exp_id + 1))
