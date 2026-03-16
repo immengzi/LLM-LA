@@ -4,7 +4,7 @@
 backend: "aibrix"
 
 router_url: "http://10.175.113.44:30080"
-total_requests: 400
+total_requests: 40000
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -21,8 +21,8 @@ hf_lmsys:
   repeat_each: 1
 
 load_pattern:
-  pattern: "dump"
-  rate_rps: 1
+  pattern: "det"
+  rate_rps: 5
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -78,7 +78,7 @@ aibrix:
   forward_extra_generation_fields: true
 
 helm:
-  replicas: 4
+  replicas: 8
   batch_size: 8
   autoscaling_enabled: false
   autoscaling_min: 1

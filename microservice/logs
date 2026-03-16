@@ -1896,3 +1896,16 @@ Metric                         | Pull (exp193) | Push-RR (exp194)        | Push-
 
 ↑ Success rate (%)             | 97.1275*      | 92.1575 (−5.12%)         | 13.2625 (−86.35%)          | 67.7975 (−30.20%)         | Pull
 ↓ Failure rate (%)             | 2.8725*       | 7.8425 (+173.02%)        | 86.7375 (+2920.71%)        | 32.2025 (+1020.97%)       | Pull
+
+
+201-225
+300 requests experriments
+
+226-238
+10000 requests experiments on 6 rps
+
+241-253
+10000 requests experiments on 5 rps
+
+254-TODO
+40000 requests experiments on 5 rps
