@@ -78,7 +78,7 @@ aibrix:
   forward_extra_generation_fields: true
 
 helm:
-  replicas: 8
+  replicas: 16
   batch_size: 8
   autoscaling_enabled: false
   autoscaling_min: 1
