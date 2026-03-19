@@ -1,18 +1,19 @@
 router:
   - pull
-  - push-rr
-  - push-random
-  - push-least-queue
+  # - push-rr
+#   - push-random
+  # - push-least-queue
 
 # aibrix:
-#   - random
-#   - least-request
-#   - throughput
-#   - prefix-cache
-#   - least-busy-time
-#   - least-kv-cache
-#   - least-latency
-#   - prefix-cache-preble
-#   - vtc-basic
+  # - random
+  # - prefix-cache
+  # - least-request
+  # - throughput
+  # - prefix-cache
+  # - least-busy-time
+  # - least-kv-cache
+  # - least-latency
+  # - prefix-cache-preble
+  # - vtc-basic
   # - pd
   # - session-affinity

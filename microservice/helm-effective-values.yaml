@@ -1,6 +1,6 @@
 COMPUTED VALUES:
 aibrix:
-  enabled: true
+  enabled: false
   modelName: served-model
   port: 8200
 autoscaling:
@@ -9,7 +9,7 @@ autoscaling:
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
   threshold: "16"
-backend: aibrix
+backend: router
 batchSize: 8
 global:
   imageRegistry: reg.local:32000
@@ -35,9 +35,9 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 8
+  vllm: 16
 router:
-  kvAware: false
+  kvAware: true
   lenAware: true
   lenPolicy: short_first
   mode: pull
