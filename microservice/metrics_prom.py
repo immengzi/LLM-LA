@@ -277,9 +277,10 @@ CPU_ONLY_METRICS_CATALOG: List[Dict[str, str]] = [
     {"name": "vllm:generation_tokens_total", "kind": "counter_rate", "field": "gen_tokens_per_sec"},
     {"name": "vllm:prompt_tokens_total", "kind": "counter_rate", "field": "prefill_tokens_per_sec"},
 
-    # KV cache (may be absent depending on vLLM build/config; ok if null)
-    {"name": "vllm:gpu_cache_usage_perc", "kind": "gauge", "field": "gpu_kv_cache_usage_frac"},
-    {"name": "vllm:cpu_cache_usage_perc", "kind": "gauge", "field": "cpu_kv_cache_usage_frac"},
+    # KV cache + prefix cache (ok if absent; hit_rate derived per-tick as hits_per_sec / queries_per_sec)
+    {"name": "vllm:kv_cache_usage_perc",       "kind": "gauge",        "field": "kv_cache_usage_perc"},
+    {"name": "vllm:prefix_cache_hits_total",   "kind": "counter_rate", "field": "prefix_cache_hits_per_sec"},
+    {"name": "vllm:prefix_cache_queries_total","kind": "counter_rate", "field": "prefix_cache_queries_per_sec"},
 
     # Latency hist avgs
     {"name": "vllm:time_to_first_token_seconds", "kind": "hist_avg", "field": "ttft_seconds_avg"},
@@ -395,6 +396,10 @@ class _MetricsSampler(threading.Thread):
         self._sum_prefill_tps = 0.0
         self._sum_reqs_running = 0.0
         self._sum_reqs_waiting = 0.0
+
+        # prefix cache hit rate rollup (own counter so absent ticks don't dilute the average)
+        self._sum_prefix_cache_hit_rate = 0.0
+        self._prefix_cache_hit_rate_samples = 0
 
         # router + sidecar rollups
         self._sum_router_q = 0.0
@@ -792,6 +797,20 @@ class _MetricsSampler(threading.Thread):
                 _add_key(inst)
                 per_inst[inst][field] = val
 
+        # ----------------------------
+        # Derived: prefix_cache_hit_rate per instance (hits_rate / queries_rate)
+        # ----------------------------
+        for inst in list(keys):
+            rec = per_inst.get(inst)
+            if rec is None:
+                continue
+            queries = _safe_float(rec.get("prefix_cache_queries_per_sec"))
+            hits = _safe_float(rec.get("prefix_cache_hits_per_sec"))
+            if queries is not None and queries > 0.0 and hits is not None:
+                rec["prefix_cache_hit_rate"] = hits / queries
+            else:
+                rec["prefix_cache_hit_rate"] = None
+
         # Broadcast aggregated router scalars into every vLLM row
         for inst in vllm_instances:
             _add_key(inst)
@@ -837,7 +856,7 @@ class _MetricsSampler(threading.Thread):
             return sum(vals)
 
         # existing rollups
-        a_kv = _avg("gpu_kv_cache_usage_frac")
+        a_kv = _avg("kv_cache_usage_perc")
         a_run = _avg("requests_running")
         a_wait = _avg("requests_waiting")
         s_gen = _sum("gen_tokens_per_sec")
@@ -853,6 +872,12 @@ class _MetricsSampler(threading.Thread):
             self._sum_gen_tps += s_gen
         if s_pre is not None:
             self._sum_prefill_tps += s_pre
+
+        # prefix cache hit rate rollup
+        a_hit_rate = _avg("prefix_cache_hit_rate")
+        if a_hit_rate is not None:
+            self._sum_prefix_cache_hit_rate += a_hit_rate
+            self._prefix_cache_hit_rate_samples += 1
 
         # router + sidecar rollups
         a_router_q = _avg("router_queue_length")
@@ -903,11 +928,17 @@ class _MetricsSampler(threading.Thread):
                 "tick_errors": self._tick_errors,
                 "overall": {
                     # existing
-                    "avg_gpu_kv_cache_usage_frac": (self._sum_gpu_kv / self._samples) if self._samples else None,
+                    "avg_kv_cache_usage_perc": (self._sum_gpu_kv / self._samples) if self._samples else None,
                     "avg_requests_running": self._sum_reqs_running / self._samples,
                     "avg_requests_waiting": self._sum_reqs_waiting / self._samples,
                     "sum_generation_tokens_per_sec": self._sum_gen_tps / self._samples,
                     "sum_prefill_tokens_per_sec": self._sum_prefill_tps / self._samples,
+
+                    # prefix cache
+                    "avg_prefix_cache_hit_rate": (
+                        self._sum_prefix_cache_hit_rate / self._prefix_cache_hit_rate_samples
+                        if self._prefix_cache_hit_rate_samples > 0 else None
+                    ),
 
                     # router + sidecar
                     "avg_router_queue_length": self._sum_router_q / self._samples,

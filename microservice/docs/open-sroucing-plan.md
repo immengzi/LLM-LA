@@ -412,7 +412,6 @@ recovery
   v0.3      3--5 months    KV infrastructure
   v1.0      6--12 months   production platform
 
-## Roadmap
 
 ## Roadmap
  

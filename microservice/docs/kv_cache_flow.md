@@ -22,13 +22,13 @@ The KV cache flow spans three processes — vLLM, the sidecar, and the router �
 
 ```
                     ┌─────────────────────────────────────────────────┐
-                    │  vLLM pod                                        │
-                    │                                                  │
-                    │  GPU allocates / evicts KV blocks                │
-                    │       │                                          │
+                    │  vLLM pod                                       │
+                    │                                                 │
+                    │  GPU allocates / evicts KV blocks               │
+                    │       │                                         │
                     │       │ ZMQ PUB  port 5557  topic="kv@"         │
-                    │       ▼                                          │
-                    │  [BlockStored | BlockRemoved | AllBlocksCleared] │
+                    │       ▼                                         │
+                    │  [BlockStored | BlockRemoved | AllBlocksCleared]│
                     └──────────────────┬──────────────────────────────┘
                                        │ ZMQ SUB (daemon thread)
                                        ▼
@@ -41,28 +41,28 @@ The KV cache flow spans three processes — vLLM, the sidecar, and the router �
                                        │ HSET / SADD
                                        ▼
                               ┌─────────────────┐
-                              │      Redis       │
-                              │                  │
-                              │  kvblock:{H}     │
-                              │  podblocks:{pod} │
-                              │  kvblocks        │
-                              └────────┬─────────┘
+                              │      Redis      │
+                              │                 │
+                              │  kvblock:{H}    │
+                              │  podblocks:{pod}│
+                              │  kvblocks       │
+                              └────────┬────────┘
                                        │ async scan_iter
                                        ▼
                     ┌──────────────────────────────────────────────────┐
                     │  Router  KVWatcher                               │
                     │                                                  │
-                    │  _BLOCK_OWNERS  { H: {pod-a, pod-b}, ... }      │
-                    │  _REQ_BLOCKS    { req_id: [H1,H2,H3], ... }     │
+                    │  _BLOCK_OWNERS  { H: {pod-a, pod-b}, ... }       │
+                    │  _REQ_BLOCKS    { req_id: [H1,H2,H3], ... }      │
                     └──────────────────┬───────────────────────────────┘
                                        │ prefix_len scoring at pull time
                                        ▼
                     ┌──────────────────────────────────────────────────┐
                     │  pull_for_endpoint                               │
                     │                                                  │
-                    │  tier kv=N  → [ req-A ]                         │
-                    │  tier kv=M  → [ req-B, req-C ]                  │
-                    │  tier kv=0  → [ req-D ]                         │
+                    │  tier kv=N  → [ req-A ]                          │
+                    │  tier kv=M  → [ req-B, req-C ]                   │
+                    │  tier kv=0  → [ req-D ]                          │
                     └──────────────────────────────────────────────────┘
 ```
 

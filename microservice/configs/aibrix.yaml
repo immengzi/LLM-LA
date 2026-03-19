@@ -39,7 +39,8 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
-  max_tokens: 8192
+  max_tokens: 5
+  # max_tokens: 8192
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null
