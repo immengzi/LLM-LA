@@ -284,6 +284,25 @@ def get_histogram_mean_p99(base_name: str, metrics: Dict[str, list]) -> Tuple[Op
     return mean, p99
 
 
+def get_histogram_buckets(base_name: str, metrics: Dict[str, list]) -> Optional[Dict[str, float]]:
+    """
+    Extract cumulative bucket counts from a histogram.
+    Returns {le_str: cumulative_count} dict, or None if no bucket data found.
+    Used to store request_prompt_tokens bucket distribution in the JSONL for
+    accurate per-request context length distribution plotting.
+    """
+    bucket_samples = metrics.get(base_name + "_bucket", [])
+    if not bucket_samples:
+        return None
+    le_map: Dict[str, float] = defaultdict(float)
+    for labels, v in bucket_samples:
+        le_val = labels.get("le", "+Inf")
+        le_map[le_val] += v
+    if not le_map:
+        return None
+    return dict(le_map)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Metric collector
 # ─────────────────────────────────────────────────────────────────────────────
@@ -347,6 +366,12 @@ class VllmMetricsCollector:
                     if p99 is not None and not math.isinf(p99):
                         fields[field_name + "__p99"] = p99
                     seen_fields[field_name] = True
+                    # For request_prompt_tokens: also store bucket distribution so
+                    # vllm_analyze.py can plot the true per-request context length histogram.
+                    if metric_name == "vllm:request_prompt_tokens":
+                        buckets = get_histogram_buckets(metric_name, metrics)
+                        if buckets:
+                            fields["request_prompt_tokens__buckets"] = buckets
 
             elif metric_type == "counter_rate":
                 # Read raw cumulative counter; derive rate as delta/dt.
