@@ -47,3 +47,4 @@ microservice.zip
 zibC6vzD
 operator-go-bundle.tar.gz
 *.gz
+HQ-production/monitor/vllm_logs/
