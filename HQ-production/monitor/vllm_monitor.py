@@ -12,6 +12,7 @@ Storage format is fully consistent with prom_utils.py and metrics_prom.py:
     counter    -> plain float/s     (rate over poll interval, e.g. gen_tokens_per_sec = 312.4)
     histogram  -> plain float       (lifetime mean = sum/count, e.g. ttft_seconds_avg = 0.342)
                   PLUS extra p99 field: ttft_seconds_avg__p99 = 0.51
+                  PLUS extra buckets field: ttft_seconds__buckets = {"0.001": 12, ...}
                   The _avg field is a plain float matching prom_utils/metrics_prom semantics.
 
   Error ticks:
@@ -47,8 +48,11 @@ Latency field naming (matches prom_utils/metrics_prom hist_avg fields):
     request_max_generation_tokens_avg vllm:request_max_num_generation_tokens
 
   Each histogram field FOO_avg is a plain float (the cumulative mean).
-  A companion FOO_avg__p99 float is also written (vllm_monitor extension,
-  not in prom_utils — downstream can ignore it if not needed).
+  A companion FOO_avg__p99 float is also written.
+  A companion FOO__buckets dict is also written for all histograms listed in
+  HISTOGRAM_SAVE_BUCKETS (cumulative _bucket counts keyed by le string).
+  Downstream analysis scripts should diff consecutive __buckets snapshots to
+  recover per-interval or whole-experiment request distributions.
 """
 
 from __future__ import annotations
@@ -73,7 +77,7 @@ import urllib.error
 # Version
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Metric catalog
@@ -125,7 +129,9 @@ METRIC_TARGETS: List[Tuple[str, str, str]] = [
     ("vllm:num_preemptions_total",                  "preemptions_per_sec",                  "counter_rate"),
 
     # ── Latency histograms (→ plain float = cumulative mean) ──────────────
-    # field names match prom_utils / metrics_prom hist_avg fields exactly
+    # field names match prom_utils / metrics_prom hist_avg fields exactly.
+    # All entries in this block are also listed in HISTOGRAM_SAVE_BUCKETS
+    # so that cumulative _bucket data is persisted for distribution analysis.
     ("vllm:e2e_request_latency_seconds",            "e2e_latency_seconds_avg",              "histogram"),
     ("vllm:time_to_first_token_seconds",            "ttft_seconds_avg",                     "histogram"),
 
@@ -165,6 +171,33 @@ METRIC_TARGETS: List[Tuple[str, str, str]] = [
     ("vllm:spec_decode_num_draft_tokens_total",     "spec_tokens_draft_per_sec",            "counter_rate"),
     ("vllm:spec_decode_num_emitted_tokens_total",   "spec_tokens_emitted_per_sec",          "counter_rate"),
 ]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Histograms for which raw cumulative _bucket data is persisted in JSONL.
+#
+# For each metric_name listed here, collect() writes an extra field:
+#   <field_name minus "_avg"> + "__buckets"
+# e.g. "ttft_seconds_avg" → "ttft_seconds__buckets": {"0.001": 12, ..., "+Inf": 200}
+#
+# The bucket values are CUMULATIVE (monotonically increasing counters).
+# Analysis scripts must diff consecutive snapshots to recover per-interval
+# or whole-experiment distributions.  To get the full-experiment distribution,
+# subtract the first non-zero snapshot from the last snapshot.
+# ─────────────────────────────────────────────────────────────────────────────
+
+HISTOGRAM_SAVE_BUCKETS: set[str] = {
+    "vllm:e2e_request_latency_seconds",
+    "vllm:time_to_first_token_seconds",
+    "vllm:time_per_output_token_seconds",
+    "vllm:request_time_per_output_token_seconds",   # alias; whichever is present
+    "vllm:request_queue_time_seconds",
+    "vllm:request_prefill_time_seconds",
+    "vllm:request_decode_time_seconds",
+    "vllm:request_inference_time_seconds",
+    "vllm:request_prompt_tokens",
+    "vllm:request_generation_tokens",
+    "vllm:request_max_num_generation_tokens",
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # JsonlLogger
@@ -241,7 +274,7 @@ def _sum_samples(samples: list) -> Optional[float]:
 def get_histogram_mean_p99(base_name: str, metrics: Dict[str, list]) -> Tuple[Optional[float], Optional[float]]:
     """
     Returns (mean, p99) from cumulative histogram _sum/_count/_bucket.
-    mean = sum / count  (cumulative lifetime average, analogous to prom rate(_sum)/rate(_count))
+    mean = sum / count  (cumulative lifetime average)
     p99  = interpolated from bucket boundaries
     """
     total_count = _sum_samples(metrics.get(base_name + "_count", []))
@@ -288,8 +321,6 @@ def get_histogram_buckets(base_name: str, metrics: Dict[str, list]) -> Optional[
     """
     Extract cumulative bucket counts from a histogram.
     Returns {le_str: cumulative_count} dict, or None if no bucket data found.
-    Used to store request_prompt_tokens bucket distribution in the JSONL for
-    accurate per-request context length distribution plotting.
     """
     bucket_samples = metrics.get(base_name + "_bucket", [])
     if not bucket_samples:
@@ -327,12 +358,14 @@ class VllmMetricsCollector:
         Fetch /metrics and return a flat sample dict.
 
         Field semantics — consistent with prom_utils.py and metrics_prom.py:
-          gauge fields       -> plain float
-          counter_rate fields -> plain float/s  (delta / dt)
-          histogram _avg fields -> plain float  (cumulative mean = sum/count)
-          histogram _avg__p99 fields -> plain float  (p99 estimate; vllm_monitor extension)
-          counter_cumulative fields -> plain float  (raw cumulative; prefix cache extras)
-          derived fields     -> plain float  (hit_rate, free_frac, acceptance_rate)
+          gauge fields            -> plain float
+          counter_rate fields     -> plain float/s  (delta / dt)
+          histogram _avg fields   -> plain float    (cumulative mean = sum/count)
+          histogram __p99 fields  -> plain float    (p99 estimate from buckets)
+          histogram __buckets     -> dict[str, float]  (cumulative _bucket counts;
+                                     present for all metrics in HISTOGRAM_SAVE_BUCKETS)
+          counter_cumulative      -> plain float    (raw cumulative; prefix cache extras)
+          derived fields          -> plain float    (hit_rate, free_frac, acceptance_rate)
         """
         now_ts = time.time()
         raw = self.fetch_raw()
@@ -360,18 +393,20 @@ class VllmMetricsCollector:
                     continue
                 mean, p99 = get_histogram_mean_p99(metric_name, metrics)
                 if mean is not None:
-                    # Store mean as plain float — matches prom_utils hist_avg field type.
+                    # Cumulative mean — matches prom_utils hist_avg field type.
                     fields[field_name] = mean
-                    # Store p99 as a companion field (extension; not in prom_utils).
+                    # p99 companion field.
                     if p99 is not None and not math.isinf(p99):
                         fields[field_name + "__p99"] = p99
                     seen_fields[field_name] = True
-                    # For request_prompt_tokens: also store bucket distribution so
-                    # vllm_analyze.py can plot the true per-request context length histogram.
-                    if metric_name == "vllm:request_prompt_tokens":
+                    # Persist raw cumulative bucket data for distribution analysis.
+                    # bucket_key: strip "_avg" suffix, append "__buckets"
+                    # e.g. "ttft_seconds_avg" → "ttft_seconds__buckets"
+                    if metric_name in HISTOGRAM_SAVE_BUCKETS:
                         buckets = get_histogram_buckets(metric_name, metrics)
                         if buckets:
-                            fields["request_prompt_tokens__buckets"] = buckets
+                            bucket_key = field_name.removesuffix("_avg") + "__buckets"
+                            fields[bucket_key] = buckets
 
             elif metric_type == "counter_rate":
                 # Read raw cumulative counter; derive rate as delta/dt.
@@ -420,8 +455,8 @@ class VllmMetricsCollector:
             fields["gpu_kv_cache_free_frac"] = round(1.0 - gpu_usage, 4)
 
         # Prefix cache hit rate (interval rate from cumulative counters).
-        q     = fields.get("prefix_cache_queries")
-        h     = fields.get("prefix_cache_hits")
+        q      = fields.get("prefix_cache_queries")
+        h      = fields.get("prefix_cache_hits")
         q_prev = self._prev_counters.get("vllm:prefix_cache_queries")
         h_prev = self._prev_counters.get("vllm:prefix_cache_hits")
         if q is not None and h is not None and q_prev is not None and h_prev is not None:
@@ -444,8 +479,8 @@ class VllmMetricsCollector:
             fields["external_prefix_cache_hit_rate_cumulative"] = round(eh / eq, 4)
 
         # Speculative decoding acceptance rate (accepted_per_sec / draft_per_sec).
-        acc  = fields.get("spec_tokens_accepted_per_sec")
-        dft  = fields.get("spec_tokens_draft_per_sec")
+        acc = fields.get("spec_tokens_accepted_per_sec")
+        dft = fields.get("spec_tokens_draft_per_sec")
         if acc is not None and dft is not None and dft > 0:
             fields["spec_decode_acceptance_rate"] = round(acc / dft, 4)
 
@@ -567,8 +602,8 @@ def main():
         help="Poll interval in seconds  (env: VLLM_INTERVAL, default: 15)")
     parser.add_argument(
         "--log-dir", type=Path,
-        default=Path(os.environ.get("VLLM_LOG_DIR", "./vllm_logs")),
-        help="Directory for log files  (env: VLLM_LOG_DIR, default: ./vllm_logs)")
+        default=Path(os.environ.get("VLLM_LOG_DIR", "/mnt/nvme1/haiting_jd/llm-lb/vllm_logs")),
+        help="Directory for log files  (env: VLLM_LOG_DIR, default: /mnt/nvme1/haiting_jd/llm-lb/vllm_logs)")
     parser.add_argument(
         "--mode", default="monitor",
         help="Mode label in each JSONL record (default: monitor)")
