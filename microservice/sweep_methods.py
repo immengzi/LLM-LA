@@ -306,6 +306,86 @@ def _debug_wait_failure(namespace: str) -> None:
 
 
 # ---------------------------
+# operator-mode helpers
+# ---------------------------
+
+def _flat_to_nested(flat: Dict[str, object]) -> Dict[str, object]:
+    """Convert {'a.b.c': 1, 'a.b.d': 2} to {'a': {'b': {'c': 1, 'd': 2}}}."""
+    result: Dict[str, object] = {}
+    for key, val in flat.items():
+        parts = key.split(".")
+        d = result
+        for part in parts[:-1]:
+            if part not in d or not isinstance(d[part], dict):
+                d[part] = {}
+            d = d[part]
+        d[parts[-1]] = val
+    return result
+
+
+def _operator_delete(*, cr_name: str, namespace: str) -> None:
+    _kubectl(
+        ["delete", "vllmkvstack", cr_name, "-n", namespace, "--ignore-not-found"],
+        check=False,
+        capture=True,
+    )
+    time.sleep(5)
+
+
+def _operator_apply(
+    *,
+    cr_name: str,
+    namespace: str,
+    set_values: Dict[str, object],
+) -> None:
+    """Generate a VllmKvStack CR and kubectl-apply it."""
+    nested = _flat_to_nested(set_values)
+    cr = {
+        "apiVersion": "kvstack.llm.io/v1alpha1",
+        "kind": "VllmKvStack",
+        "metadata": {
+            "name": cr_name,
+            "namespace": namespace,
+        },
+        "spec": nested,
+    }
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", prefix="sweep_cr_", suffix=".yaml", delete=False, encoding="utf-8",
+    )
+    try:
+        yaml.safe_dump(cr, tmp, sort_keys=False)
+        tmp.close()
+        _kubectl(["apply", "-f", tmp.name], check=True)
+    finally:
+        try:
+            Path(tmp.name).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _wait_cr_phase(cr_name: str, namespace: str, timeout_s: float = 120.0) -> None:
+    """Poll until VllmKvStack .status.phase == Ready (best-effort)."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        proc = _kubectl(
+            ["get", "vllmkvstack", cr_name, "-n", namespace,
+             "-o", "jsonpath={.status.phase}"],
+            check=False,
+            capture=True,
+        )
+        phase = (proc.stdout or "").strip()
+        if phase == "Ready":
+            click.echo(f"[operator] CR {cr_name} phase=Ready")
+            return
+        if phase == "Error":
+            click.echo(f"[operator] CR {cr_name} phase=Error; continuing to pod wait")
+            return
+        time.sleep(5)
+    click.echo("[operator] CR phase timeout; falling through to pod readiness check")
+
+
+# ---------------------------
 # run client
 # ---------------------------
 
@@ -370,7 +450,13 @@ def cli(master_config: str) -> None:
         if backend not in ("router", "aibrix"):
             raise click.ClickException(f"Invalid backend '{backend}' in {cfg_path}")
 
-        _helm_uninstall(release=release, namespace=namespace)
+        deploy_mode = str(getattr(h, "deploy_mode", "helm")).strip().lower()
+        cr_name = str(getattr(h, "operator_cr_name", "vllm")).strip() or release
+
+        if deploy_mode == "operator":
+            _operator_delete(cr_name=cr_name, namespace=namespace)
+        else:
+            _helm_uninstall(release=release, namespace=namespace)
 
         set_values: Dict[str, object] = {
             "backend": backend,
@@ -388,6 +474,12 @@ def cli(master_config: str) -> None:
         if backend == "router":
             set_values["router.mode"] = method
 
+        service_impl = str(getattr(h, "service_impl", "python")).strip().lower()
+        if service_impl == "go":
+            set_values["images.router"] = "kv-router-go:latest"
+            set_values["images.sidecar"] = "kv-sidecar-go:latest"
+            set_values["images.cpuHash"] = "kv-prefixhash-go:latest"
+
         set_values["autoscaling.enabled"] = bool(h.autoscaling_enabled)
 
         if bool(h.autoscaling_enabled):
@@ -399,8 +491,8 @@ def cli(master_config: str) -> None:
             q = " ".join(q.split())
             set_values["autoscaling.prometheusQuery"] = q
 
-        click.echo(f"[sweep] backend={backend}")
-        click.echo("[sweep] helm --set values:")
+        click.echo(f"[sweep] backend={backend}  deploy_mode={deploy_mode}")
+        click.echo("[sweep] set values:")
         for k in sorted(set_values):
             click.echo(f"  - {k}={_coerce_set_value(set_values[k])}")
 
@@ -411,13 +503,17 @@ def cli(master_config: str) -> None:
         for attempt in range(1, max_redeploy_attempts + 1):
             click.echo(f"[deploy] attempt {attempt}/{max_redeploy_attempts}")
 
-            _helm_install_or_upgrade(
-                release=release,
-                chart_dir=chart_dir,
-                namespace=namespace,
-                values_file=values_file if values_file.is_file() else None,
-                set_values=set_values,
-            )
+            if deploy_mode == "operator":
+                _operator_apply(cr_name=cr_name, namespace=namespace, set_values=set_values)
+                _wait_cr_phase(cr_name, namespace)
+            else:
+                _helm_install_or_upgrade(
+                    release=release,
+                    chart_dir=chart_dir,
+                    namespace=namespace,
+                    values_file=values_file if values_file.is_file() else None,
+                    set_values=set_values,
+                )
 
             try:
                 _wait_ready(namespace)
@@ -428,8 +524,11 @@ def cli(master_config: str) -> None:
                 click.echo(f"[deploy] WARN: wait_ready failed: {e}")
                 _debug_wait_failure(namespace)
 
-                click.echo("[deploy] redeploying everything (helm uninstall -> sleep -> retry)")
-                _helm_uninstall(release=release, namespace=namespace)
+                click.echo("[deploy] redeploying (teardown -> sleep -> retry)")
+                if deploy_mode == "operator":
+                    _operator_delete(cr_name=cr_name, namespace=namespace)
+                else:
+                    _helm_uninstall(release=release, namespace=namespace)
                 time.sleep(redeploy_sleep_s)
 
         if last_err is not None:
@@ -437,15 +536,16 @@ def cli(master_config: str) -> None:
                 f"Deployment not ready after {max_redeploy_attempts} attempts: {last_err}"
             )
 
+        effective_release = cr_name if deploy_mode == "operator" else release
         try:
-            out = _helm(["get", "values", release, "-n", namespace, "--all"], capture=True).stdout or ""
+            out = _helm(["get", "values", effective_release, "-n", namespace, "--all"], capture=True).stdout or ""
             (REPO_ROOT / "helm-effective-values.yaml").write_text(out, encoding="utf-8")
             click.echo("[sweep] wrote helm-effective-values.yaml")
         except Exception as e:
             click.echo(f"[sweep] WARN: failed to helm get values: {e}")
 
         rendered_text = _helm_template(
-            release=release,
+            release=effective_release,
             chart_dir=chart_dir,
             namespace=namespace,
             values_file=values_file if values_file.is_file() else None,
@@ -479,9 +579,10 @@ def cli(master_config: str) -> None:
             "client_config": str(cfg_path),
             "backend": backend,
             "method": method,
+            "deploy_mode": deploy_mode,
             "master_config": str(master_path),
             "ts_unix": time.time(),
-            "helm_release": release,
+            "helm_release": effective_release,
             "helm_namespace": namespace,
             "helm_chart_dir": str(chart_dir),
             "helm_set_values": set_values,
@@ -499,6 +600,7 @@ def cli(master_config: str) -> None:
                 "aibrix_enabled": bool(getattr(h, "aibrix_enabled", False)),
                 "aibrix_model_name": str(getattr(h, "aibrix_model_name", "served-model")),
                 "aibrix_port": int(getattr(h, "aibrix_port", 8200)),
+                "service_impl": str(getattr(h, "service_impl", "python")),
             },
         }
         (exp_dir / "sweep_meta.json").write_text(

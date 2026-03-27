@@ -1,0 +1,30 @@
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /src
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ENV http_proxy=${HTTP_PROXY}
+ENV https_proxy=${HTTPS_PROXY}
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+
+COPY go.mod ./
+COPY go.sum* ./
+RUN go mod download || true
+
+COPY . .
+RUN go mod tidy && CGO_ENABLED=0 GOOS=linux go build -o /router ./cmd/router
+
+FROM alpine:3.20
+
+ENV http_proxy=""
+ENV https_proxy=""
+ENV HTTP_PROXY=""
+ENV HTTPS_PROXY=""
+
+RUN adduser -D -u 1000 appuser
+COPY --from=builder --chown=appuser:appuser /router /usr/local/bin/router
+
+USER appuser
+ENTRYPOINT ["router"]

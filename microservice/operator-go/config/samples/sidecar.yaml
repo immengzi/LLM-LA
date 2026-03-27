@@ -1,0 +1,18 @@
+apiVersion: kvstack.llm.io/v1alpha1
+kind: VllmSidecar
+metadata:
+  name: my-sidecar
+  namespace: vllm
+spec:
+  image: reg.local:32000/kv-sidecar-go:latest
+  sidecarMode: pull
+  batchSize: 8
+  routerURL: "http://router-service:8080"
+  vllmURL: "http://127.0.0.1:8200"
+  modelName: served-model
+  redisHost: redis
+  redisPort: 6379
+  port: 9000
+  env:
+    VLLM_HOST: "127.0.0.1"
+    VLLM_SUB_PORT: "5557"

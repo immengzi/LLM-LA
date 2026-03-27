@@ -173,7 +173,7 @@ spec:
                   - key: "kubernetes.io/hostname"
                     operator: In
                     values:
-                      - "master1"
+                      - "node1"
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
@@ -237,7 +237,7 @@ spec:
                   - key: "kubernetes.io/hostname"
                     operator: In
                     values:
-                      - "master1"
+                      - "node1"
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
@@ -313,7 +313,7 @@ spec:
                   - key: "kubernetes.io/hostname"
                     operator: In
                     values:
-                      - "master1"
+                      - "node1"
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
@@ -732,7 +732,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
   labels:
-    release: prometheus-kube-prometheus
+    release: prometheus
 spec:
   selector:
     matchLabels:
@@ -757,7 +757,7 @@ metadata:
   name: kv-router
   namespace: vllm
   labels:
-    release: prometheus-kube-prometheus
+    release: prometheus
 spec:
   selector:
     matchLabels:
@@ -776,7 +776,7 @@ metadata:
   name: kv-sidecar
   namespace: vllm
   labels:
-    release: prometheus-kube-prometheus
+    release: prometheus
 spec:
   selector:
     matchLabels:

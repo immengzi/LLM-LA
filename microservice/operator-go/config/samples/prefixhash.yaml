@@ -1,0 +1,10 @@
+apiVersion: kvstack.llm.io/v1alpha1
+kind: VllmPrefixHash
+metadata:
+  name: my-prefixhash
+  namespace: vllm
+spec:
+  image: reg.local:32000/kv-prefixhash-go:latest
+  replicas: 1
+  blockSize: 16
+  port: 9095

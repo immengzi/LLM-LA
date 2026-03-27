@@ -2,7 +2,7 @@ backend: router
 
 replicas:
   router: 1
-  vllm: 1
+  vllm: 16
 
 # Global override: if set, ALL images are rewritten to use this registry
 global:
@@ -49,7 +49,7 @@ autoscaling:
 # Example node names from `kubectl get nodes`: master / master1 / worker1
 pin:
   enabled: true
-  nodeName: "master1"
+  nodeName: "node1"
   tolerations:
     # Allow scheduling onto control-plane/master nodes if tainted (common default)
     - key: "node-role.kubernetes.io/control-plane"
