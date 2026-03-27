@@ -1,0 +1,21 @@
+apiVersion: kvstack.llm.io/v1alpha1
+kind: VllmRouter
+metadata:
+  name: my-router
+  namespace: vllm
+spec:
+  image: reg.local:32000/kv-router-go:latest
+  replicas: 1
+  routerMode: pull
+  kvAware: true
+  lenAware: true
+  lenPolicy: short_first
+  poolFactor: 4
+  transportMode: sync
+  redisHost: redis
+  redisPort: 6379
+  port: 8080
+  env:
+    MODEL_NAME: served-model
+    NAMESPACE: vllm
+    LABEL_SELECTOR: "app=vllm-qwen"

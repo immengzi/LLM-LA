@@ -74,7 +74,7 @@ class GenerationConfig:
 @dataclass
 class PrometheusMetricsConfig:
     enabled: bool = True
-    prometheus_base_url: str = "http://10.175.113.44:31190"
+    prometheus_base_url: str = "http://7.216.57.215:31190"
     scrape_interval_s: float = 2.0
     window_s: float = 10.0
     include_debug_metrics: bool = False
@@ -207,6 +207,20 @@ class HelmConfig:
     aibrix_enabled: bool = False
     aibrix_model_name: str = "served-model"
     aibrix_port: int = 8200
+    # --------------------------------------------------------------------
+
+    # ---- Deploy mode: "helm" (direct Helm CLI) or "operator" (VllmKvStack CR) ----
+    deploy_mode: str = "helm"  # helm | operator
+    operator_cr_name: str = "vllm"  # metadata.name for the VllmKvStack CR
+    # --------------------------------------------------------------------
+
+    # ---- Service implementation: "python" (default) or "go" (operator-go images) ----
+    # When "go", sweep_methods overrides Helm image values to use Go binaries:
+    #   images.router  -> kv-router-go:latest
+    #   images.sidecar -> kv-sidecar-go:latest
+    #   images.cpuHash -> kv-prefixhash-go:latest
+    # All endpoints, env vars, and behavior remain identical.
+    service_impl: str = "python"  # python | go
     # --------------------------------------------------------------------
 
 
