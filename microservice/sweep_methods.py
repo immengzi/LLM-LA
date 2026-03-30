@@ -239,7 +239,7 @@ def _helm_install_or_upgrade(
     _helm(cmd, check=True, capture=False)
 
 
-def _wait_ready(namespace: str, timeout_s: float = 900.0) -> None:
+def _wait_ready(namespace: str, timeout_s: float = 36000) -> None:
     deadline = time.time() + float(timeout_s)
 
     for kind in ("deploy", "sts", "ds"):
@@ -462,6 +462,7 @@ def cli(master_config: str) -> None:
             "backend": backend,
             "replicas.vllm": int(h.replicas),
             "batchSize": int(h.batch_size),
+            "tensorParallelSize": int(getattr(h, "tensor_parallel_size", 1)),
             "router.kvAware": bool(getattr(h, "router_kv_aware", True)),
             "router.lenAware": bool(getattr(h, "router_len_aware", True)),
             "router.lenPolicy": str(getattr(h, "router_len_policy", "short_first")),

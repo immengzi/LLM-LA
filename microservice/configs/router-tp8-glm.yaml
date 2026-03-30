@@ -1,5 +1,5 @@
-# router_config.yaml
-# Router-based experiment config
+# router-tp2.yaml
+# Router-based experiment config with Tensor Parallelism = 2
 
 backend: "router"
 
@@ -14,7 +14,8 @@ file_prompts:
 hf_lmsys:
   dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
   split: "train"
-  tokenizer_name: "/mnt/nvme1/saeid/models/qwen3-8b"
+  # tokenizer_name: "/mnt/nvme1/saeid/models/qwen3-8b"
+  tokenizer_name: "/mnt/nvme1/saeid/models/GLM-5-w4a8-mtp-QuaRot"
   streaming: false
   min_input_tokens: 256
   max_input_tokens: 10000000
@@ -69,9 +70,9 @@ transport:
   idle_zero_running_s: 10.0
 
 helm:
-  replicas: 4
+  replicas: 1
   batch_size: 8
-  tensor_parallel_size: 1  # 1 = no TP, 2 = 2-way, 4 = 4-way, etc.
+  tensor_parallel_size: 8  # 2-way tensor parallelism
 
   autoscaling_enabled: false
   autoscaling_min: 16

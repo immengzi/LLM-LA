@@ -173,7 +173,7 @@ spec:
                   - key: "kubernetes.io/hostname"
                     operator: In
                     values:
-                      - "node1"
+                      - "node2"
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
@@ -237,7 +237,7 @@ spec:
                   - key: "kubernetes.io/hostname"
                     operator: In
                     values:
-                      - "node1"
+                      - "node2"
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
@@ -313,7 +313,7 @@ spec:
                   - key: "kubernetes.io/hostname"
                     operator: In
                     values:
-                      - "node1"
+                      - "node2"
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
@@ -454,7 +454,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 16
+  replicas: 2
   selector:
     matchLabels:
       app: vllm-qwen
@@ -497,7 +497,7 @@ spec:
                 --tokenizer /model \
                 --port 8200 \
                 --served-model-name served-model \
-                --tensor-parallel-size 1 \
+                --tensor-parallel-size 2 \
                 --dtype float16 \
                 --kv-cache-dtype auto \
                 --max-num-seqs 8 \
@@ -573,6 +573,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: ASCEND_RT_VISIBLE_DEVICES
+              value: "0,1"
           ports:
             - containerPort: 8200
               name: http
@@ -587,6 +589,8 @@ spec:
             - name: model
               mountPath: /model
               readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
             - name: dcmi-volume
               mountPath: /usr/local/dcmi
             - name: npu-smi-volume
@@ -604,14 +608,16 @@ spec:
             httpGet:
               path: /health
               port: 8200
+            initialDelaySeconds: 60
             periodSeconds: 10
-            failureThreshold: 180
+            failureThreshold: 360
             timeoutSeconds: 2
 
           readinessProbe:
             httpGet:
               path: /health
               port: 8200
+            initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 12
             timeoutSeconds: 2
@@ -620,16 +626,17 @@ spec:
             httpGet:
               path: /health
               port: 8200
+            initialDelaySeconds: 120
             periodSeconds: 20
             failureThreshold: 6
             timeoutSeconds: 2
 
           resources:
             requests:
-              huawei.com/Ascend910: 1
+              huawei.com/Ascend910: 2
               ephemeral-storage: "2Gi"
             limits:
-              huawei.com/Ascend910: 1
+              huawei.com/Ascend910: 2
               ephemeral-storage: "4Gi"
         - name: kv-sidecar
           image: reg.local:32000/kv-sidecar:latest
@@ -700,6 +707,10 @@ spec:
         - name: model
           persistentVolumeClaim:
             claimName: qwen-local-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
         - name: dcmi-volume
           hostPath:
             path: /usr/local/dcmi

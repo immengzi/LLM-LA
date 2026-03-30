@@ -13,9 +13,10 @@ global:
 images:
   router: kv-router:latest
   sidecar: kv-sidecar:latest
-  vllm: quay.io/ascend/vllm-ascend:v0.11.0rc0
+  # vllm: quay.io/ascend/vllm-ascend:v0.11.0rc0
   # vllm: ascend/vllm-ascend:v0.11.0rc0
   # vllm: quay.io/ascend/vllm-ascend:latest
+  vllm: quay.io/ascend/vllm-ascend:glm5-openeuler
   cpuHash: vllm-cpu-hash:latest
   redis: redis:7-alpine
 
@@ -35,6 +36,10 @@ router:
 
 batchSize: 8
 
+# Tensor parallelism size for vLLM (1 = no TP, 2 = 2-way, 4 = 4-way, etc.)
+# This affects: --tensor-parallel-size, NPU resource limits, ASCEND_RT_VISIBLE_DEVICES, /dev/shm size
+tensorParallelSize: 1
+
 autoscaling:
   enabled: false
 
@@ -49,7 +54,7 @@ autoscaling:
 # Example node names from `kubectl get nodes`: master / master1 / worker1
 pin:
   enabled: true
-  nodeName: "node1"
+  nodeName: "node4"
   tolerations:
     # Allow scheduling onto control-plane/master nodes if tainted (common default)
     - key: "node-role.kubernetes.io/control-plane"
@@ -64,7 +69,8 @@ pin:
 modelVolume:
   create: true
   nfsServer: nfs.local
-  nfsPath: /saeid/models/qwen3-8b
+  # nfsPath: /saeid/models/qwen3-8b
+  nfsPath: /saeid/models/GLM-5-w4a8-mtp-QuaRot
 
 # AIBrix integration.
 # In backend=aibrix, vLLM pods expose labels so AIBrix gateway can discover them.

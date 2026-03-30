@@ -52,3 +52,23 @@ Force all images to use .Values.global.imageRegistry if set, even if image alrea
 {{- $img -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Generate comma-separated device list for ASCEND_RT_VISIBLE_DEVICES.
+Examples:
+- tp=1 -> "0"
+- tp=2 -> "0,1"
+- tp=4 -> "0,1,2,3"
+*/}}
+{{- define "vllmkv.tpDevices" -}}
+{{- $tp := .tp | int -}}
+{{- $devices := "" -}}
+{{- range $i := until $tp -}}
+  {{- if gt $i 0 -}}
+    {{- $devices = printf "%s,%d" $devices $i -}}
+  {{- else -}}
+    {{- $devices = printf "0" -}}
+  {{- end -}}
+{{- end -}}
+{{- $devices -}}
+{{- end -}}

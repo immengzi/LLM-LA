@@ -189,6 +189,9 @@ class HelmConfig:
     # sidecar batch size
     batch_size: int = 8
 
+    # tensor parallelism size for vLLM (1 = no parallelism, 2 = 2-way TP, etc.)
+    tensor_parallel_size: int = 1
+
     # autoscaling toggle + core knobs
     autoscaling_enabled: bool = False
     autoscaling_min: int = 1
