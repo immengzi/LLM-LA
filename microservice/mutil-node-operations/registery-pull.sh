@@ -12,6 +12,9 @@ docker pull ${REGISTRY}/redis:7-alpine
 # vllm-ascend (mirrored from quay.io)
 docker pull ${REGISTRY}/ascend/vllm-ascend:v0.11.0rc0
 
+# vllm-ascend (mirrored from quay.io)
+docker pull ${REGISTRY}/ascend/quay.io/ascend/vllm-ascend:glm5-openeuler
+
 # kv-router
 docker pull ${REGISTRY}/kv-router:latest
 

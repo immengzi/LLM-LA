@@ -53,8 +53,10 @@ spec:
                 --tokenizer /model \
                 --port 8200 \
                 --served-model-name served-model \
-                --tensor-parallel-size 1 \
+                --tensor-parallel-size {{ .Values.tensorParallelSize }} \
                 --dtype float16 \
+                --quantization ascend \
+                --enable-expert-parallel \
                 --kv-cache-dtype auto \
                 --max-num-seqs {{ .Values.batchSize }} \
                 --prefix-caching-hash-algo sha256_cbor \
@@ -131,6 +133,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            {{- $tp := .Values.tensorParallelSize }}
+            - name: ASCEND_RT_VISIBLE_DEVICES
+              value: {{ include "vllmkv.tpDevices" (dict "tp" $tp) | quote }}
           ports:
             - containerPort: 8200
               name: http
@@ -147,6 +152,8 @@ spec:
             - name: model
               mountPath: /model
               readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
             - name: dcmi-volume
               mountPath: /usr/local/dcmi
             - name: npu-smi-volume
@@ -164,14 +171,16 @@ spec:
             httpGet:
               path: /health
               port: 8200
+            initialDelaySeconds: 60
             periodSeconds: 10
-            failureThreshold: 180
+            failureThreshold: 360
             timeoutSeconds: 2
 
           readinessProbe:
             httpGet:
               path: /health
               port: 8200
+            initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 12
             timeoutSeconds: 2
@@ -180,16 +189,17 @@ spec:
             httpGet:
               path: /health
               port: 8200
+            initialDelaySeconds: 120
             periodSeconds: 20
             failureThreshold: 6
             timeoutSeconds: 2
 
           resources:
             requests:
-              huawei.com/Ascend: 1
+              huawei.com/Ascend: {{ .Values.tensorParallelSize }}
               ephemeral-storage: "2Gi"
             limits:
-              huawei.com/Ascend: 1
+              huawei.com/Ascend: {{ .Values.tensorParallelSize }}
               ephemeral-storage: "4Gi"
 
         {{- if eq (lower .Values.backend) "router" }}
@@ -263,6 +273,10 @@ spec:
         - name: model
           persistentVolumeClaim:
             claimName: qwen-local-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ mul .Values.tensorParallelSize 16 }}Gi
         - name: dcmi-volume
           hostPath:
             path: /usr/local/dcmi

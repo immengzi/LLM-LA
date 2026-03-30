@@ -14,7 +14,7 @@ import time
 import logging
 from typing import List, Tuple, Dict, Any
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 # vLLM imports
 from vllm.sampling_params import SamplingParams
@@ -83,11 +83,13 @@ class BlockHashComputer:
             HASH_IMPL_NAME,
         )
 
-        # Load tokenizer (same files as GPU vLLM pods)
-        self.tokenizer = AutoTokenizer.from_pretrained(
+        # Load tokenizer directly from tokenizer.json, bypassing AutoConfig
+        # (needed for models like GLM-5 whose model_type is not recognized
+        # by older transformers versions)
+        self.tokenizer = PreTrainedTokenizerFast.from_pretrained(
             model_path,
-            trust_remote_code=True,
             local_files_only=True,
+            extra_special_tokens={},
         )
         logger.info(
             "[prefix-hash] Loaded tokenizer from %s (vocab_size=%s, has_chat_template=%s)",

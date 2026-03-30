@@ -6,10 +6,12 @@ set -e
 REGISTRY="reg.local:32000"
 
 SOURCE_IMAGE="quay.io/ascend/vllm-ascend"
-SOURCE_TAG="v0.11.0rc0"
+SOURCE_TAG="glm5-openeuler"
 
+# TARGET_IMAGE="ascend/vllm-ascend"
+# TARGET_TAG="v0.11.0rc0"
 TARGET_IMAGE="ascend/vllm-ascend"
-TARGET_TAG="v0.11.0rc0"
+TARGET_TAG="glm5-openeuler"
 
 echo "=== Pulling from upstream ==="
 docker pull ${SOURCE_IMAGE}:${SOURCE_TAG}

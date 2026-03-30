@@ -1,4 +1,17 @@
-router:
+# router:
+#   - pull
+  # - push-rr
+#   - push-random
+  # - push-least-queue
+
+# router-tp2:
+#   - pull
+  # - push-rr
+#   - push-random
+  # - push-least-queue
+
+
+router-tp8-glm:
   - pull
   # - push-rr
 #   - push-random
