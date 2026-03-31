@@ -11,6 +11,11 @@ autoscaling:
   threshold: "16"
 backend: router
 batchSize: 8
+deploy:
+  cpuHash: true
+  redis: true
+  router: true
+  vllm: true
 global:
   imageRegistry: reg.local:32000
 images:

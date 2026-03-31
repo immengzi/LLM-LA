@@ -12,6 +12,13 @@
 # - Waits for readiness
 # - Writes repo_root/vllm-k8s.yaml = helm template output so experiment snapshot stays identical
 # - Runs main.py using a temporary per-job config and snapshots sweep_meta.json
+#
+# --skip-vllm mode:
+# - Uses the same release "vllm" to avoid RBAC ownership conflicts
+# - Checks if vllm-qwen pods are already running; sets deploy.vllm=true if so
+#   (prevents Helm from deleting them during upgrade)
+# - Only redeploys router + redis + cpu-hash
+# - vLLM must already be running (deployed via deploy_vllm.py)
 
 from __future__ import annotations
 
@@ -34,6 +41,9 @@ from config import load_config
 REPO_ROOT = Path(__file__).resolve().parent
 CONFIGS_DIR = REPO_ROOT / "configs"
 EXPERIMENTS_ROOT = REPO_ROOT / "experiments"
+
+# Single release name for all modes — avoids RBAC ownership conflicts
+RELEASE = "vllm"
 
 
 # ---------------------------
@@ -239,12 +249,15 @@ def _helm_install_or_upgrade(
     _helm(cmd, check=True, capture=False)
 
 
-def _wait_ready(namespace: str, timeout_s: float = 36000) -> None:
+def _wait_ready(namespace: str, timeout_s: float = 36000, label_selector: Optional[str] = None) -> None:
     deadline = time.time() + float(timeout_s)
 
     for kind in ("deploy", "sts", "ds"):
         try:
-            out = _kubectl(["get", kind, "-n", namespace, "-o", "name"], capture=True).stdout or ""
+            cmd = ["get", kind, "-n", namespace, "-o", "name"]
+            if label_selector:
+                cmd.extend(["-l", label_selector])
+            out = _kubectl(cmd, capture=True).stdout or ""
         except subprocess.CalledProcessError:
             continue
 
@@ -257,10 +270,28 @@ def _wait_ready(namespace: str, timeout_s: float = 36000) -> None:
                 click.echo(f"[warn] rollout status failed for {name}, continuing...")
 
     remaining = max(1, int(deadline - time.time()))
-    _kubectl(
-        ["wait", "-n", namespace, "--for=condition=Ready", "pod", "--all", f"--timeout={remaining}s"],
-        check=True,
-    )
+    wait_cmd = ["wait", "-n", namespace, "--for=condition=Ready", "pod", f"--timeout={remaining}s"]
+    if label_selector:
+        wait_cmd.extend(["-l", label_selector])
+    else:
+        wait_cmd.append("--all")
+    _kubectl(wait_cmd, check=True)
+
+
+# ---------------------------
+# vLLM pod detection
+# ---------------------------
+
+def _vllm_pods_exist(namespace: str) -> bool:
+    """Return True if any vllm-qwen pods exist (any phase) in the namespace."""
+    try:
+        out = _kubectl(
+            ["get", "pods", "-n", namespace, "-l", "app=vllm-qwen", "-o", "name"],
+            check=False, capture=True,
+        ).stdout or ""
+        return bool(out.strip())
+    except Exception:
+        return False
 
 
 # ---------------------------
@@ -405,7 +436,17 @@ def _run_client(config_path: Path) -> None:
     show_default=True,
     help="Master sweep config file (suffix .yaml optional; relative to configs/ or absolute path).",
 )
-def cli(master_config: str) -> None:
+@click.option(
+    "--skip-vllm",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip vLLM deployment. Checks if vllm-qwen pods already exist and preserves them. "
+        "vLLM must already be running (deployed via deploy_vllm.py). "
+        "Only router, redis, and cpu-hash are deployed/redeployed between experiments."
+    ),
+)
+def cli(master_config: str, skip_vllm: bool) -> None:
     """
     Reads configs/<master_config>.yaml (mapping: config -> methods),
     cleans cluster before each experiment, deploys via Helm, then runs main.py.
@@ -419,7 +460,7 @@ def cli(master_config: str) -> None:
         if not cfg.is_file():
             raise click.ClickException(f"Client config not found: {cfg}")
 
-    release = "vllm"
+    release = RELEASE
     namespace = "vllm"
     chart_dir = (REPO_ROOT / "vllm-kv-stack").resolve()
     values_file = chart_dir / "values.yaml"
@@ -434,6 +475,7 @@ def cli(master_config: str) -> None:
     click.echo(f"[sweep] master_config={master_path}")
     click.echo(f"[sweep] chart_dir={chart_dir}")
     click.echo(f"[sweep] release={release} namespace={namespace}")
+    click.echo(f"[sweep] skip_vllm={skip_vllm}")
     click.echo(f"[sweep] jobs={len(jobs)}")
 
     for i, (cfg_path, method) in enumerate(jobs, start=1):
@@ -456,7 +498,9 @@ def cli(master_config: str) -> None:
         if deploy_mode == "operator":
             _operator_delete(cr_name=cr_name, namespace=namespace)
         else:
-            _helm_uninstall(release=release, namespace=namespace)
+            # In --skip-vllm mode we upgrade (not uninstall) to preserve vLLM pods
+            if not skip_vllm:
+                _helm_uninstall(release=release, namespace=namespace)
 
         set_values: Dict[str, object] = {
             "backend": backend,
@@ -470,6 +514,26 @@ def cli(master_config: str) -> None:
             "aibrix.modelName": str(getattr(h, "aibrix_model_name", "served-model")),
             "aibrix.port": int(getattr(h, "aibrix_port", 8200)),
         }
+
+        # ---- deploy component flags ----
+        if skip_vllm:
+            # Check if vLLM pods exist — if so keep deploy.vllm=true so Helm
+            # doesn't delete them. If not, warn but still proceed with stack only.
+            vllm_running = _vllm_pods_exist(namespace)
+            set_values["deploy.vllm"] = vllm_running
+            set_values["deploy.router"] = True
+            set_values["deploy.redis"] = True
+            set_values["deploy.cpuHash"] = True
+            if vllm_running:
+                click.echo("[sweep] vllm-qwen pods detected — deploy.vllm=true (pods preserved)")
+            else:
+                click.echo("[sweep] WARNING: --skip-vllm set but no vllm-qwen pods found")
+        else:
+            set_values["deploy.vllm"] = True
+            set_values["deploy.router"] = True
+            set_values["deploy.redis"] = True
+            set_values["deploy.cpuHash"] = True
+        # --------------------------------
 
         # Interpret method family from backend.
         if backend == "router":
@@ -515,7 +579,7 @@ def cli(master_config: str) -> None:
             set_values["vllm.speculativeConfig"] = str(h.vllm_speculative_config)
         # ----------------------------
 
-        click.echo(f"[sweep] backend={backend}  deploy_mode={deploy_mode}")
+        click.echo(f"[sweep] backend={backend}  deploy_mode={deploy_mode}  skip_vllm={skip_vllm}")
         click.echo("[sweep] set values:")
         for k in sorted(set_values):
             click.echo(f"  - {k}={_coerce_set_value(set_values[k])}")
@@ -540,7 +604,14 @@ def cli(master_config: str) -> None:
                 )
 
             try:
-                _wait_ready(namespace)
+                # In --skip-vllm mode only wait for stack pods, not vLLM pods
+                if skip_vllm:
+                    _wait_ready(
+                        namespace,
+                        label_selector="app in (router-service,redis,vllm-cpu-hash)",
+                    )
+                else:
+                    _wait_ready(namespace)
                 last_err = None
                 break
             except subprocess.CalledProcessError as e:
@@ -552,7 +623,8 @@ def cli(master_config: str) -> None:
                 if deploy_mode == "operator":
                     _operator_delete(cr_name=cr_name, namespace=namespace)
                 else:
-                    _helm_uninstall(release=release, namespace=namespace)
+                    if not skip_vllm:
+                        _helm_uninstall(release=release, namespace=namespace)
                 time.sleep(redeploy_sleep_s)
 
         if last_err is not None:
@@ -604,6 +676,7 @@ def cli(master_config: str) -> None:
             "backend": backend,
             "method": method,
             "deploy_mode": deploy_mode,
+            "skip_vllm": skip_vllm,
             "master_config": str(master_path),
             "ts_unix": time.time(),
             "helm_release": effective_release,
