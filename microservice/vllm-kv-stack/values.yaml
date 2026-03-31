@@ -38,7 +38,7 @@ batchSize: 8
 
 # Tensor parallelism size for vLLM (1 = no TP, 2 = 2-way, 4 = 4-way, etc.)
 # This affects: --tensor-parallel-size, NPU resource limits, ASCEND_RT_VISIBLE_DEVICES, /dev/shm size
-tensorParallelSize: 1
+tensorParallelSize: 8
 
 autoscaling:
   enabled: false
@@ -82,3 +82,28 @@ aibrix:
 
   # Port where vLLM OpenAI server listens
   port: 8200
+
+# vLLM runtime flags — all optional, set null to disable
+vllm:
+  # Memory / performance
+  gpuMemoryUtilization: 0.95       # null = use vLLM default
+  quantization: "ascend"           # null = no quantization
+  enableExpertParallel: true       # false = disable
+  maxModelLen: 80000               # null = use model's default; set lower to save KV cache memory
+  compilationConfig:
+    cudagraphMode: "FULL_DECODE_ONLY"   # null = disable compilation config entirely
+
+  # Additional optional flags (disabled by default)
+  trustRemoteCode: false
+  maxNumBatchedTokens: null        # null = use vLLM default
+  seed: null                       # null = use vLLM default
+  additionalConfig: null           # set to {multistreamOverlapSharedExpert: true} to enable
+  speculativeConfig: null          # set to {numSpeculativeTokens: 3, method: "deepseek_mtp"} to enable
+
+# Component deployment control
+# Set to false to skip deploying a component (used for decoupled vLLM/stack deploys)
+deploy:
+  vllm: true      # set false in stack-only deploys (sweep_methods --skip-vllm)
+  router: true    # set false in vllm-only deploys (deploy_vllm.py)
+  redis: true     # set false in vllm-only deploys (deploy_vllm.py)
+  cpuHash: true   # set false in vllm-only deploys (deploy_vllm.py)

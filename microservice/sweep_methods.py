@@ -492,6 +492,29 @@ def cli(master_config: str) -> None:
             q = " ".join(q.split())
             set_values["autoscaling.prometheusQuery"] = q
 
+        # ---- vLLM runtime flags ----
+        if getattr(h, "vllm_gpu_memory_utilization", None) is not None:
+            set_values["vllm.gpuMemoryUtilization"] = float(h.vllm_gpu_memory_utilization)
+        if getattr(h, "vllm_quantization", None) is not None:
+            set_values["vllm.quantization"] = str(h.vllm_quantization)
+        set_values["vllm.enableExpertParallel"] = bool(getattr(h, "vllm_enable_expert_parallel", True))
+        if getattr(h, "vllm_compilation_config", None) is not None:
+            try:
+                cc = json.loads(h.vllm_compilation_config)
+                set_values["vllm.compilationConfig.cudagraphMode"] = cc.get("cudagraph_mode", "FULL_DECODE_ONLY")
+            except Exception:
+                set_values["vllm.compilationConfig.cudagraphMode"] = "FULL_DECODE_ONLY"
+        set_values["vllm.trustRemoteCode"] = bool(getattr(h, "vllm_trust_remote_code", False))
+        if getattr(h, "vllm_max_num_batched_tokens", None) is not None:
+            set_values["vllm.maxNumBatchedTokens"] = int(h.vllm_max_num_batched_tokens)
+        if getattr(h, "vllm_seed", None) is not None:
+            set_values["vllm.seed"] = int(h.vllm_seed)
+        if getattr(h, "vllm_additional_config", None) is not None:
+            set_values["vllm.additionalConfig"] = str(h.vllm_additional_config)
+        if getattr(h, "vllm_speculative_config", None) is not None:
+            set_values["vllm.speculativeConfig"] = str(h.vllm_speculative_config)
+        # ----------------------------
+
         click.echo(f"[sweep] backend={backend}  deploy_mode={deploy_mode}")
         click.echo("[sweep] set values:")
         for k in sorted(set_values):
@@ -602,6 +625,15 @@ def cli(master_config: str) -> None:
                 "aibrix_model_name": str(getattr(h, "aibrix_model_name", "served-model")),
                 "aibrix_port": int(getattr(h, "aibrix_port", 8200)),
                 "service_impl": str(getattr(h, "service_impl", "python")),
+                "vllm_gpu_memory_utilization": getattr(h, "vllm_gpu_memory_utilization", None),
+                "vllm_quantization": getattr(h, "vllm_quantization", None),
+                "vllm_enable_expert_parallel": bool(getattr(h, "vllm_enable_expert_parallel", True)),
+                "vllm_compilation_config": getattr(h, "vllm_compilation_config", None),
+                "vllm_trust_remote_code": bool(getattr(h, "vllm_trust_remote_code", False)),
+                "vllm_max_num_batched_tokens": getattr(h, "vllm_max_num_batched_tokens", None),
+                "vllm_seed": getattr(h, "vllm_seed", None),
+                "vllm_additional_config": getattr(h, "vllm_additional_config", None),
+                "vllm_speculative_config": getattr(h, "vllm_speculative_config", None),
             },
         }
         (exp_dir / "sweep_meta.json").write_text(

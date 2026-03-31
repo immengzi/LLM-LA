@@ -1,11 +1,11 @@
-# router-tp2.yaml
-# Router-based experiment config with Tensor Parallelism = 2
+# router-tp8.yaml
+# Router-based experiment config with Tensor Parallelism = 8
 
 backend: "router"
 
 router_url: "http://7.216.57.215:30080"
 total_requests: 128
-prompt_source: "hf-lmsys"
+prompt_source: "hf_lmsys"
 
 file_prompts:
   path: "prompts.json"
@@ -57,7 +57,7 @@ metrics:
   scrape_interval_s: 1.0
   window_s: 2.0
   include_debug_metrics: false
-  model_name: null
+  model_name: "served-model"
   max_instances: null
 
 transport:
@@ -72,7 +72,7 @@ transport:
 helm:
   replicas: 1
   batch_size: 8
-  tensor_parallel_size: 8  # 2-way tensor parallelism
+  tensor_parallel_size: 8
 
   autoscaling_enabled: false
   autoscaling_min: 16
@@ -85,7 +85,6 @@ helm:
   router_len_aware: true
   router_len_policy: "short_first"
 
-  # Disable AIBrix exposure for router experiments
   aibrix_enabled: false
   aibrix_model_name: "served-model"
   aibrix_port: 8200

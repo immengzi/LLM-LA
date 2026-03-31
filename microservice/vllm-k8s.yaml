@@ -31,7 +31,7 @@ spec:
   #   path: /saeid/models/qwen3-8b
   nfs:
     server: "nfs.local"
-    path: "/saeid/models/qwen3-8b"
+    path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
 ---
 # Source: vllm-kv-stack/templates/02-model-pvc.yaml
 apiVersion: v1
@@ -173,7 +173,7 @@ spec:
                   - key: "kubernetes.io/hostname"
                     operator: In
                     values:
-                      - "node2"
+                      - "node4"
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
@@ -237,7 +237,7 @@ spec:
                   - key: "kubernetes.io/hostname"
                     operator: In
                     values:
-                      - "node2"
+                      - "node4"
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
@@ -313,7 +313,7 @@ spec:
                   - key: "kubernetes.io/hostname"
                     operator: In
                     values:
-                      - "node2"
+                      - "node4"
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
@@ -454,7 +454,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: vllm-qwen
@@ -478,7 +478,7 @@ spec:
 
       containers:
         - name: vllm
-          image: reg.local:32000/ascend/vllm-ascend:v0.11.0rc0
+          image: reg.local:32000/ascend/vllm-ascend:glm5-openeuler
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -497,11 +497,16 @@ spec:
                 --tokenizer /model \
                 --port 8200 \
                 --served-model-name served-model \
-                --tensor-parallel-size 2 \
-                --dtype float16 \
+                --tensor-parallel-size 8 \
+                --dtype auto \
                 --kv-cache-dtype auto \
                 --max-num-seqs 8 \
                 --prefix-caching-hash-algo sha256_cbor \
+                --gpu-memory-utilization 0.95 \
+                --quantization ascend \
+                --enable-expert-parallel \
+                --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+                --max-model-len 80000 \
                 --host 0.0.0.0 \
                 --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
                 &
@@ -574,7 +579,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: ASCEND_RT_VISIBLE_DEVICES
-              value: "0,1"
+              value: "0,1,2,3,4,5,6,7"
           ports:
             - containerPort: 8200
               name: http
@@ -610,7 +615,7 @@ spec:
               port: 8200
             initialDelaySeconds: 60
             periodSeconds: 10
-            failureThreshold: 360
+            failureThreshold: 1080
             timeoutSeconds: 2
 
           readinessProbe:
@@ -628,15 +633,15 @@ spec:
               port: 8200
             initialDelaySeconds: 120
             periodSeconds: 20
-            failureThreshold: 6
+            failureThreshold: 540
             timeoutSeconds: 2
 
           resources:
             requests:
-              huawei.com/Ascend910: 2
+              huawei.com/Ascend910: 8
               ephemeral-storage: "2Gi"
             limits:
-              huawei.com/Ascend910: 2
+              huawei.com/Ascend910: 8
               ephemeral-storage: "4Gi"
         - name: kv-sidecar
           image: reg.local:32000/kv-sidecar:latest
@@ -710,7 +715,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 32Gi
+            sizeLimit: 128Gi
         - name: dcmi-volume
           hostPath:
             path: /usr/local/dcmi

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # config.py
 
 from __future__ import annotations
@@ -182,6 +183,7 @@ class HelmConfig:
       - sidecar batch size
       - router KV-aware and LEN-aware toggles + policy
       - whether the deployed vLLM pods expose AIBrix discovery labels
+      - vLLM runtime flags (gpu memory, quantization, expert parallel, etc.)
     """
     # initial replicas for vLLM deployment (even when autoscaling is enabled)
     replicas: int = 4
@@ -224,6 +226,18 @@ class HelmConfig:
     #   images.cpuHash -> kv-prefixhash-go:latest
     # All endpoints, env vars, and behavior remain identical.
     service_impl: str = "python"  # python | go
+    # --------------------------------------------------------------------
+
+    # ---- vLLM runtime flags (maps to Helm chart values.vllm.*) ----
+    vllm_gpu_memory_utilization: Optional[float] = 0.95
+    vllm_quantization: Optional[str] = "ascend"
+    vllm_enable_expert_parallel: bool = True
+    vllm_compilation_config: Optional[str] = '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    vllm_trust_remote_code: bool = False
+    vllm_max_num_batched_tokens: Optional[int] = None
+    vllm_seed: Optional[int] = None
+    vllm_additional_config: Optional[str] = None
+    vllm_speculative_config: Optional[str] = None
     # --------------------------------------------------------------------
 
 
