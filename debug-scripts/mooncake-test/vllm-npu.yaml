@@ -1,0 +1,306 @@
+---
+# ============================================================
+# ConfigMap: mooncake.json - 从节点配置
+# 从节点的 master_server_address 指向主节点 Service
+# ============================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mooncake-config-worker
+  namespace: vllm
+data:
+  mooncake.json: |
+    {
+      "metadata_server": "P2PHANDSHAKE",
+      "protocol": "ascend",
+      "device_name": "",
+      "master_server_address": "mooncake-master-svc.vllm.svc.cluster.local:50088",
+      "global_segment_size": 140000000000
+    }
+
+---
+# ============================================================
+# vLLM Worker - Headless Service
+# Each Pod DNS: vllm-{0..3}.vllm-headless.vllm.svc.cluster.local
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-headless
+  namespace: vllm
+  labels:
+    app: vllm
+spec:
+  clusterIP: None
+  selector:
+    app: vllm
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: kv-rpc
+      port: 10010
+      targetPort: 10010
+
+---
+# ============================================================
+# vLLM Worker - ClusterIP Service
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-svc
+  namespace: vllm
+  labels:
+    app: vllm
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+
+---
+# ============================================================
+# vLLM Worker - StatefulSet
+# 4 replicas, TP=8
+# ============================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vllm
+  namespace: vllm
+  labels:
+    app: vllm
+spec:
+  serviceName: vllm-headless
+  replicas: 4
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: vllm
+              topologyKey: kubernetes.io/hostname
+
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Gi
+        - name: model-storage
+          hostPath:
+            path: /workspace/glm5          # 替换为你实际的模型路径
+            type: Directory
+        - name: vllm-workspace
+          hostPath:
+            path: /vllm-workspace          # vllm 源码路径
+            type: Directory
+        - name: mooncake-config
+          configMap:
+            name: mooncake-config-worker
+        - name: vllm-logs
+          hostPath:
+            path: /workspace/glm5/vllm_logs
+            type: DirectoryOrCreate
+        # Ascend NPU 驱动挂载
+        - name: ascend-driver
+          hostPath:
+            path: /usr/local/Ascend
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+
+      containers:
+        - name: vllm
+          image: your-registry/vllm-ascend:latest   # 替换为实际镜像
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+
+              # ---- NIC and IP Address Configuration ----
+              nic_name="enp67s0f5"                          # replace with real nic name
+              local_ip=$(hostname -I | awk '{print $1}')    
+
+              # ---- HCCL / NPU network ----
+              export HCCL_OP_EXPANSION_MODE="AIV"
+              export HCCL_IF_IP=${local_ip}
+              export GLOO_SOCKET_IFNAME=${nic_name}
+              export TP_SOCKET_IFNAME=${nic_name}
+              export HCCL_SOCKET_IFNAME=${nic_name}
+              export HCCL_BUFFSIZE=200
+
+              # ---- Python / thread ----
+              export OMP_PROC_BIND=false
+              export OMP_NUM_THREADS=16
+              export PYTHONHASHSEED=0
+              export PYTHONPATH=${PYTHONPATH}:/vllm-workspace/vllm
+
+              # ---- vLLM ----
+              export VLLM_USE_V1=1
+              # export VLLM_LOGGING_LEVEL=DEBUG
+              # export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+              # ---- PyTorch NPU ----
+              export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+              # ---- Mooncake ----
+              export MOONCAKE_CONFIG_PATH="/workspace/glm5/mooncake.json"
+              export ASCEND_BUFFER_POOL=4:8
+
+              export LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}
+
+              mkdir -p /workspace/glm5/vllm_logs
+              timestamp=$(date "+%Y%m%d%H%M%S")
+
+              echo "[vllm-worker] timestamp: ${timestamp}"
+              echo "[vllm-worker] pod: ${POD_NAME}, local_ip: ${local_ip}"
+              echo "[vllm-worker] nic_name: ${nic_name}"
+              echo "[vllm-worker] MOONCAKE_CONFIG_PATH: ${MOONCAKE_CONFIG_PATH}"
+              echo "[vllm-worker] Starting vLLM server..."
+
+              python -m vllm.entrypoints.openai.api_server \
+                --model /workspace/glm5/your-model-name \
+                --host 0.0.0.0 \
+                --port 8000 \
+                --tensor-parallel-size 8 \
+                --enable-expert-parallel \
+                --trust-remote-code \
+                --dtype auto \
+                --max-model-len 32768 \
+                --gpu-memory-utilization 0.90 \
+                --kv-transfer-config \
+                '{
+                  "kv_connector": "AscendStoreConnector",
+                  "kv_role": "kv_both",
+                  "kv_connector_extra_config": {
+                    "master_server_address": "mooncake-master-svc.vllm.svc.cluster.local:50088",
+                    "lookup_rpc_port": "10010",
+                    "backend": "mooncake"
+                  }
+                }' \
+                2>&1 | split -b 5M -d -a 5 - /workspace/glm5/vllm_logs/logs_${POD_NAME}_${timestamp}_
+
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+            - name: kv-rpc
+              containerPort: 10010
+              protocol: TCP
+
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            # ---- HCCL / NPU ----
+            - name: HCCL_OP_EXPANSION_MODE
+              value: "AIV"
+            - name: HCCL_BUFFSIZE
+              value: "200"
+            - name: ASCEND_VISIBLE_DEVICES
+              value: "0,1,2,3,4,5,6,7"
+            - name: ASCEND_RT_VISIBLE_DEVICES
+              value: "0,1,2,3,4,5,6,7"
+            # ---- Python / thread ----
+            - name: OMP_PROC_BIND
+              value: "false"
+            - name: OMP_NUM_THREADS
+              value: "16"
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: PYTHONPATH
+              value: "/vllm-workspace/vllm"
+            # ---- vLLM ----
+            - name: VLLM_USE_V1
+              value: "1"
+            # - name: VLLM_LOGGING_LEVEL
+            #   value: "DEBUG"
+            # - name: VLLM_ASCEND_ENABLE_FLASHCOMM1
+            #   value: "1"
+            # ---- PyTorch NPU ----
+            - name: PYTORCH_NPU_ALLOC_CONF
+              value: "expandable_segments:True"
+            # ---- Mooncake ----
+            - name: MOONCAKE_CONFIG_PATH
+              value: "/workspace/glm5/mooncake.json"
+            - name: ASCEND_BUFFER_POOL
+              value: "4:8"
+            # ---- 库路径 ----
+            - name: LD_LIBRARY_PATH
+              value: "/usr/local/lib"
+
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: model-storage
+              mountPath: /workspace/glm5
+            - name: vllm-workspace
+              mountPath: /vllm-workspace
+            - name: mooncake-config
+              mountPath: /workspace/glm5/mooncake.json
+              subPath: mooncake.json
+              readOnly: true
+            - name: vllm-logs
+              mountPath: /workspace/glm5/vllm_logs
+            - name: ascend-driver
+              mountPath: /usr/local/Ascend
+            - name: dev
+              mountPath: /dev
+
+          resources:
+            requests:
+              cpu: "32"
+              memory: "256Gi"
+              huawei.com/Ascend910B: "8"     # 替换为你集群的 NPU resource name
+            limits:
+              cpu: "64"
+              memory: "512Gi"
+              huawei.com/Ascend910B: "8"
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 5
+
+      terminationGracePeriodSeconds: 60
