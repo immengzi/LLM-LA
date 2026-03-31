@@ -48,3 +48,5 @@ zibC6vzD
 operator-go-bundle.tar.gz
 *.gz
 HQ-production/monitor/vllm_logs/
+debug-scripts/mooncake-test/Mooncake/
+debug-scripts/mooncake-test/Mooncake/
