@@ -9,8 +9,8 @@ os.environ["HF_HUB_ENABLE_XET"] = "0"  # some builds check enable flag
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"  # disable Rust accelerator
 os.environ.pop("HF_ENDPOINT", None)  # avoid custom mirrors
 
-model_id = "Qwen/Qwen3-8B"
-local_dir = "/mnt/nvme1/saeid/models/qwen3-8b"
+model_id = "Qwen/Qwen3-32B"
+local_dir = "/mnt/nvme1/haiting_jd/models/qwen3-32b"
 
 print(f"Checking if Hugging Face is reachable for model: {model_id}")
 api = HfApi()

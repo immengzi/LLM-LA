@@ -1,0 +1,41 @@
+---
+# ============================================================
+# PersistentVolume: 模型存储（NFS，只读）
+# 对应 243 上导出的 /mnt/nvme1/haiting_jd/models
+# ============================================================
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: model-pv
+  labels:
+    app: vllm
+    type: model-storage
+spec:
+  capacity:
+    storage: 500Gi                 # 按实际模型大小调整
+  accessModes:
+    - ReadOnlyMany                 # 多个节点同时只读
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 7.242.102.243            # 替换为 243 的实际 IP
+    path: /mnt/nvme1/haiting_jd/models
+    readOnly: true
+
+---
+# ============================================================
+# PersistentVolumeClaim: 模型存储
+# ============================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-pvc
+  namespace: vllm
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 500Gi
+  selector:
+    matchLabels:
+      type: model-storage          # 精确绑定到上面的 PV

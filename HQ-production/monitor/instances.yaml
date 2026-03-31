@@ -3,6 +3,11 @@ interval: 5
 timeout: 10
 
 instances:
+
+  - name: GLM-4.7-direct112
+    host: http://7.216.57.112:8078
+    model: GLM-4.7
+
   - name: GLM-5-direct15
     host: http://7.216.57.15:8077
     model: GLM-5

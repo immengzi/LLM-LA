@@ -1,7 +1,7 @@
 from transformers import AutoTokenizer
 
 # Hardcode the tokenizer name
-TOKENIZER_NAME = "Qwen/Qwen3-8B"
+TOKENIZER_NAME = "Qwen/Qwen3-32B"
 
 # Load the tokenizer using the default cache location
 tokenizer = AutoTokenizer.from_pretrained(
