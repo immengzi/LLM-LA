@@ -18,14 +18,14 @@ images:
   redis: redis:7-alpine
   router: kv-router:latest
   sidecar: kv-sidecar:latest
-  vllm: quay.io/ascend/vllm-ascend:v0.11.0rc0
+  vllm: quay.io/ascend/vllm-ascend:glm5-openeuler
 modelVolume:
   create: true
-  nfsPath: /saeid/models/qwen3-8b
+  nfsPath: /saeid/models/GLM-5-w4a8-mtp-QuaRot
   nfsServer: nfs.local
 pin:
   enabled: true
-  nodeName: node2
+  nodeName: node4
   tolerations:
   - effect: NoSchedule
     key: node-role.kubernetes.io/control-plane
@@ -35,10 +35,18 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 2
+  vllm: 1
 router:
   kvAware: true
   lenAware: true
   lenPolicy: short_first
   mode: pull
-tensorParallelSize: 2
+tensorParallelSize: 8
+vllm:
+  compilationConfig:
+    cudagraphMode: FULL_DECODE_ONLY
+  enableExpertParallel: true
+  gpuMemoryUtilization: "0.95"
+  maxModelLen: 80000
+  quantization: ascend
+  trustRemoteCode: false

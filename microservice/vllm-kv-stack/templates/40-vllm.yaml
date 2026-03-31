@@ -54,12 +54,40 @@ spec:
                 --port 8200 \
                 --served-model-name served-model \
                 --tensor-parallel-size {{ .Values.tensorParallelSize }} \
-                --dtype float16 \
-                --quantization ascend \
-                --enable-expert-parallel \
+                --dtype auto \
                 --kv-cache-dtype auto \
                 --max-num-seqs {{ .Values.batchSize }} \
                 --prefix-caching-hash-algo sha256_cbor \
+                {{- if .Values.vllm.gpuMemoryUtilization }}
+                --gpu-memory-utilization {{ .Values.vllm.gpuMemoryUtilization }} \
+                {{- end }}
+                {{- if .Values.vllm.quantization }}
+                --quantization {{ .Values.vllm.quantization }} \
+                {{- end }}
+                {{- if .Values.vllm.enableExpertParallel }}
+                --enable-expert-parallel \
+                {{- end }}
+                {{- if .Values.vllm.compilationConfig }}
+                --compilation-config '{"cudagraph_mode": "{{ .Values.vllm.compilationConfig.cudagraphMode }}"}' \
+                {{- end }}
+                {{- if .Values.vllm.trustRemoteCode }}
+                --trust-remote-code \
+                {{- end }}
+                {{- if .Values.vllm.maxNumBatchedTokens }}
+                --max-num-batched-tokens {{ .Values.vllm.maxNumBatchedTokens }} \
+                {{- end }}
+                {{- if .Values.vllm.seed }}
+                --seed {{ .Values.vllm.seed }} \
+                {{- end }}
+                {{- if .Values.vllm.maxModelLen }}
+                --max-model-len {{ .Values.vllm.maxModelLen }} \
+                {{- end }}
+                {{- if .Values.vllm.additionalConfig }}
+                --additional-config '{"multistream_overlap_shared_expert": {{ .Values.vllm.additionalConfig.multistreamOverlapSharedExpert }}}' \
+                {{- end }}
+                {{- if .Values.vllm.speculativeConfig }}
+                --speculative-config '{"num_speculative_tokens": {{ .Values.vllm.speculativeConfig.numSpeculativeTokens }}, "method": "{{ .Values.vllm.speculativeConfig.method }}"}' \
+                {{- end }}
                 --host 0.0.0.0 \
                 {{- if eq (lower .Values.backend) "router" }}
                 --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
@@ -173,7 +201,7 @@ spec:
               port: 8200
             initialDelaySeconds: 60
             periodSeconds: 10
-            failureThreshold: 360
+            failureThreshold: 1080
             timeoutSeconds: 2
 
           readinessProbe:
@@ -191,7 +219,7 @@ spec:
               port: 8200
             initialDelaySeconds: 120
             periodSeconds: 20
-            failureThreshold: 6
+            failureThreshold: 540
             timeoutSeconds: 2
 
           resources:
