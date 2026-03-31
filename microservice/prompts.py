@@ -41,7 +41,7 @@ def _iter_lmsys_pairs(
     """
     try:
         from datasets import load_dataset, load_from_disk  # type: ignore
-        from transformers import AutoTokenizer  # type: ignore
+        from transformers import AutoTokenizer, PreTrainedTokenizerFast  # type: ignore
     except Exception as e:
         raise RuntimeError(
             "hf-lmsys prompt_source requires 'datasets' and 'transformers' packages. "
@@ -53,10 +53,17 @@ def _iter_lmsys_pairs(
     if isinstance(tokenizer_name, str) and tokenizer_name and tokenizer_name.strip():
         if os.path.isdir(tokenizer_name):
             print(f"[LMSYS] Using local tokenizer path: {tokenizer_name}")
-            tok = AutoTokenizer.from_pretrained(tokenizer_name, local_files_only=True)
+            tok = PreTrainedTokenizerFast.from_pretrained(
+                tokenizer_name,
+                local_files_only=True,
+                extra_special_tokens={},
+            )
         else:
             print(f"[LMSYS] Loading tokenizer from HF Hub: {tokenizer_name}")
-            tok = AutoTokenizer.from_pretrained(tokenizer_name)
+            tok = PreTrainedTokenizerFast.from_pretrained(
+                tokenizer_name,
+                extra_special_tokens={},
+            )
     else:
         raise ValueError("hf_lmsys.tokenizer_name must be provided for hf-lmsys mode")
 

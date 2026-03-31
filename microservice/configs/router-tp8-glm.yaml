@@ -5,7 +5,7 @@ backend: "router"
 
 router_url: "http://7.216.57.215:30080"
 total_requests: 128
-prompt_source: "hf_lmsys"
+prompt_source: "hf-lmsys"
 
 file_prompts:
   path: "prompts.json"
