@@ -1,14 +1,9 @@
 ---
-# ============================================================
-# ConfigMap: mooncake.json
-# 主节点 master_server_address 填 mooncake-master Pod 所在
-# 节点（node1/215）的真实宿主机 IP
-# ============================================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mooncake-config
-  namespace: vllm-mooncake
+  namespace: vllm-test
 data:
   mooncake.json: |
     {
@@ -20,16 +15,11 @@ data:
     }
 
 ---
-# ============================================================
-# Mooncake Master Server - Deployment
-# 固定调度到 node1（215），不占用 NPU
-# 215 无 taint，无需 toleration
-# ============================================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mooncake-master
-  namespace: vllm-mooncake
+  namespace: vllm-test
   labels:
     app: mooncake-master
 spec:
@@ -42,32 +32,56 @@ spec:
       labels:
         app: mooncake-master
     spec:
-      # 固定调度到 215 节点
       nodeSelector:
         kubernetes.io/hostname: node3
-
-      # mooncake master 需要监听宿主机真实 IP 的 50088 端口
-      # 开启 hostNetwork 使 Pod 直接使用宿主机网络栈
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
 
       volumes:
+        # NFS 挂载根路径 /mnt/nvme1（fsid=0，必须挂 /）
+        # 容器内 /workspace/glm5 对应宿主机 /mnt/nvme1
         - name: model-storage
           persistentVolumeClaim:
             claimName: model-pvc
             readOnly: true
+
+        # mooncake.json 挂载到 NFS 只读区域之外
+        # 容器内路径：/etc/mooncake/mooncake.json
         - name: mooncake-config
           configMap:
             name: mooncake-config
+
+        # 日志目录：hostPath，可写，在 NFS 挂载之外
+        # 容器内路径：/workspace/mooncake_logs
         - name: mooncake-logs
           hostPath:
             path: /mnt/nvme1/haiting_jd/mooncake_logs
             type: DirectoryOrCreate
 
+        - name: dcmi-volume
+          hostPath:
+            path: /usr/local/dcmi
+            type: Directory
+        - name: npu-smi-volume
+          hostPath:
+            path: /usr/local/bin/npu-smi
+            type: File
+        - name: ascend-driver-lib64-volume
+          hostPath:
+            path: /usr/local/Ascend/driver/lib64/
+            type: Directory
+        - name: version-info-volume
+          hostPath:
+            path: /usr/local/Ascend/driver/version.info
+            type: File
+        - name: ascend-install-info-volume
+          hostPath:
+            path: /etc/ascend_install.info
+            type: File
+
       containers:
         - name: mooncake-master
-          # 与 vLLM worker 使用同一镜像，mooncake_master 已内置
-          image: your-registry/vllm-ascend:latest
+          image: quay.io/ascend/vllm-ascend:glm5-openeuler
           imagePullPolicy: IfNotPresent
 
           command:
@@ -76,7 +90,10 @@ spec:
             - |
               set -e
 
-              # 自动检测本节点物理网卡名和 IP
+              echo "--- ASCEND_TOOLKIT_HOME before sourcing: [$ASCEND_TOOLKIT_HOME]"
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
+
               nic_name=$(ip addr show | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $NF}')
               local_ip="${NODE_IP}"
               echo "[mooncake-master] auto-detected nic=${nic_name} ip=${local_ip}"
@@ -92,25 +109,27 @@ spec:
               export OMP_NUM_THREADS=16
               export PYTHONHASHSEED=0
               export PYTHONPATH=${PYTHONPATH}:/vllm-workspace/vllm
-
               export VLLM_USE_V1=1
               export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-              export MOONCAKE_CONFIG_PATH="/workspace/glm5/mooncake.json"
+
+              # mooncake.json 挂载在 NFS 只读区域之外
+              export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
               export ASCEND_BUFFER_POOL=4:8
               export LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}
 
-              mkdir -p /workspace/glm5/mooncake_logs
+              mkdir -p /workspace/mooncake_logs
               timestamp=$(date "+%Y%m%d%H%M%S")
 
               echo "[mooncake-master] timestamp: ${timestamp}"
               echo "[mooncake-master] local_ip: ${local_ip}, nic: ${nic_name}"
-              echo "[mooncake-master] Starting on port 50088..."
+              echo "[mooncake-master] MOONCAKE_CONFIG_PATH: ${MOONCAKE_CONFIG_PATH}"
+              echo "[mooncake-master] ASCEND_BUFFER_POOL: ${ASCEND_BUFFER_POOL}"
+              echo "[mooncake-master] Starting mooncake_master on port 50088..."
 
               mooncake_master \
                 --port 50088 \
                 --eviction_high_watermark_ratio 0.9 \
-                --eviction_ratio 0.1 \
-                2>&1 | split -b 5M -d -a 5 - /workspace/glm5/mooncake_logs/logs_${timestamp}_
+                --eviction_ratio 0.1
 
           ports:
             - name: grpc
@@ -124,36 +143,59 @@ spec:
                   fieldPath: status.hostIP
             - name: HCCL_OP_EXPANSION_MODE
               value: "AIV"
-            - name: HCCL_BUFFSIZE
-              value: "200"
             - name: OMP_PROC_BIND
               value: "false"
             - name: OMP_NUM_THREADS
               value: "16"
+            - name: VLLM_USE_V1
+              value: "1"
+            - name: HCCL_BUFFSIZE
+              value: "200"
+            - name: PYTORCH_NPU_ALLOC_CONF
+              value: "expandable_segments:True"
             - name: PYTHONHASHSEED
               value: "0"
             - name: PYTHONPATH
               value: "/vllm-workspace/vllm"
-            - name: VLLM_USE_V1
-              value: "1"
-            - name: PYTORCH_NPU_ALLOC_CONF
-              value: "expandable_segments:True"
             - name: MOONCAKE_CONFIG_PATH
-              value: "/workspace/glm5/mooncake.json"
+              value: "/etc/mooncake/mooncake.json"
             - name: ASCEND_BUFFER_POOL
               value: "4:8"
             - name: LD_LIBRARY_PATH
               value: "/usr/local/lib"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: HF_HUB_DISABLE_TELEMETRY
+              value: "1"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
 
           volumeMounts:
+            # NFS 只读，挂到 /workspace/glm5
+            # 模型在 /workspace/glm5/haiting_jd/models/qwen3-32b
             - name: model-storage
               mountPath: /workspace/glm5
+              readOnly: true
+            # mooncake.json 挂到 NFS 只读区域之外
             - name: mooncake-config
-              mountPath: /workspace/glm5/mooncake.json
+              mountPath: /etc/mooncake/mooncake.json
               subPath: mooncake.json
               readOnly: true
+            # 日志目录，可写，在 NFS 之外
             - name: mooncake-logs
-              mountPath: /workspace/glm5/mooncake_logs
+              mountPath: /workspace/mooncake_logs
+            - name: dcmi-volume
+              mountPath: /usr/local/dcmi
+            - name: npu-smi-volume
+              mountPath: /usr/local/bin/npu-smi
+            - name: ascend-driver-lib64-volume
+              mountPath: /usr/local/Ascend/driver/lib64/
+            - name: version-info-volume
+              mountPath: /usr/local/Ascend/driver/version.info
+            - name: ascend-install-info-volume
+              mountPath: /etc/ascend_install.info
 
           livenessProbe:
             tcpSocket:
@@ -177,7 +219,3 @@ spec:
               memory: "8Gi"
 
       restartPolicy: Always
-
-# hostNetwork: true 模式下 mooncake-master 直接绑定宿主机网络，
-# 所有 vLLM Pod 通过 mooncake.json 里的宿主机 IP 直接访问，
-# 不需要 ClusterIP Service。
