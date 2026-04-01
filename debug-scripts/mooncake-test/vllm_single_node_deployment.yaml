@@ -1,3 +1,32 @@
+# vLLM Single Node Deployment Guide
+
+## Environment
+
+| Node | IP | Role |
+|------|----|------|
+| node2 | 7.216.57.161 | vLLM test node (8x Ascend910 NPU) |
+| node3 | 10.50.156.65 | mooncake-master |
+| 243 | 7.242.102.243 | NFS server |
+
+- **Model**: Qwen3-32B at `/mnt/nvme1/haiting_jd/models/qwen3-32b`
+- **Image**: `quay.io/ascend/vllm-ascend:glm5-openeuler`
+- **NPU resource name**: `huawei.com/Ascend910` (NOT `Ascend910B`)
+- **NIC**: `enp67s0f5` on node2
+
+---
+
+## Prerequisites
+
+Mooncake-master must already be running and reachable on port 50088:
+```bash
+ssh node2 "bash -c 'echo > /dev/tcp/10.50.156.65/50088 && echo OK'"
+```
+
+---
+
+## Final vllm_test.yaml
+
+```yaml
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -16,10 +45,10 @@ spec:
       labels:
         app: vllm-test
     spec:
-      hostNetwork: true
+      hostNetwork: true                        # Required: gloo needs host NIC visibility
       dnsPolicy: ClusterFirstWithHostNet
       nodeSelector:
-        kubernetes.io/hostname: node3
+        kubernetes.io/hostname: node2
 
       volumes:
         - name: model-storage
@@ -66,7 +95,6 @@ spec:
         - name: vllm
           image: quay.io/ascend/vllm-ascend:glm5-openeuler
           imagePullPolicy: IfNotPresent
-
           command:
             - /bin/bash
             - -c
@@ -78,7 +106,6 @@ spec:
               source /usr/local/Ascend/ascend-toolkit/set_env.sh
               export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64:/usr/local/Ascend/nnal/atb/8.5.0/atb/cxx_abi_1/lib
 
-              # Auto-detect NIC and IP
               local_ip="${NODE_IP}"
               nic_name=$(ip addr show 2>/dev/null | grep "inet ${local_ip}" | awk '{print $NF}' || echo "enp67s0f5")
               echo "[vllm] local_ip=${local_ip} nic=${nic_name}"
@@ -247,3 +274,78 @@ spec:
       port: 8000
       targetPort: 8000
       nodePort: 30800
+```
+
+---
+
+## Deployment Steps
+
+```bash
+# 1. Apply
+kubectl apply -f vllm_test.yaml
+
+# 2. Watch pod
+kubectl get pods -n vllm-test -w
+
+# 3. Follow logs
+kubectl logs -n vllm-test deployment/vllm-test -f
+
+# 4. Verify once Ready
+curl http://node2:30800/health
+curl http://node2:30800/v1/models
+```
+
+---
+
+## Pitfalls and Solutions
+
+### 1. Wrong NPU resource name
+The resource name is `huawei.com/Ascend910`, NOT `huawei.com/Ascend910B`.
+- ❌ `huawei.com/Ascend910B` → Pod stays Pending with `Insufficient` error
+- ✅ `huawei.com/Ascend910`
+- Check with: `kubectl describe node node2 | grep -E "huawei|Ascend"`
+
+### 2. `--enable-expert-parallel` on non-MoE model
+Qwen3-32B is a dense model, not MoE. This flag is only valid for MoE models (e.g. GLM5).
+- ❌ `--enable-expert-parallel` → `Number of experts must be greater than 0`
+- ✅ Remove the flag entirely
+
+### 3. Gloo cannot find NIC: `Unable to find address for: enp67s0f5`
+PyTorch's Gloo distributed backend needs to see the physical NIC inside the container.
+By default, containers have their own virtual network and cannot see host NICs.
+- ❌ Default container networking → `Unable to find address for: enp67s0f5`
+- ✅ Add `hostNetwork: true` and `dnsPolicy: ClusterFirstWithHostNet` to pod spec
+
+### 4. `libatb.so: cannot open shared object file`
+The ATB (Ascend Transformer Boost) library is inside the image at
+`/usr/local/Ascend/nnal/atb/8.5.0/atb/cxx_abi_1/lib/libatb.so`.
+It is NOT on the host — do not mount it from hostPath.
+Fix: add the path to `LD_LIBRARY_PATH` after `source set_env.sh`:
+```bash
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:...:/usr/local/Ascend/nnal/atb/8.5.0/atb/cxx_abi_1/lib
+```
+- Use `cxx_abi_1` (confirmed via `torch.compiled_with_cxx11_abi()` → `True`)
+
+### 5. NIC auto-detection with `ip` command missing
+The image does not have the `ip` command. Use a fallback:
+```bash
+nic_name=$(ip addr show 2>/dev/null | grep "inet ${local_ip}" | awk '{print $NF}' || echo "enp67s0f5")
+```
+
+---
+
+## Successful Startup Indicators
+
+```
+# Mooncake KV layer initialized — all 8 workers connected to mooncake-master
+AscendDirectTransport register mem addr:..., length:140000000000   ← global_segment_size mounted
+Mounting segment: 140000000000 bytes                               ← 140GB KV segment ready
+Registering local memory: 1073741824 bytes                         ← 1GB per worker buffer
+
+# Model loading
+Loading safetensors checkpoint shards: 100% Completed | 17/17
+
+# Server ready
+INFO: Application startup complete.
+INFO: Uvicorn running on http://0.0.0.0:8000
+```
