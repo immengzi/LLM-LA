@@ -56,6 +56,23 @@ except Exception:  # pragma: no cover
 # Async pubsub publisher (added later as router/pubsub.py)
 from .pubsub import ResultPublisher  # type: ignore
 
+# ============================================================
+# Pydantic models for OpenAI-compatible /v1/chat/completions
+# ============================================================
+from pydantic import BaseModel
+
+class _ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class _ChatCompletionRequest(BaseModel):
+    model: str = "served-model"
+    messages: List[_ChatMessage]
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    stream: Optional[bool] = False
+# ============================================================
+
 _cfg = get_config()
 app = FastAPI(title="KV-aware Router Service")
 
@@ -976,3 +993,138 @@ async def pull(req: PullRequest):
         )
 
     return PullResponse(items=items)
+
+
+# ============================================================
+# OpenAI-compatible /v1/chat/completions (LiteLLM gateway shim)
+#
+# Accepts standard OpenAI chat format from LiteLLM proxy.
+# Internally reuses the exact same enqueue → wait → result path
+# as /enqueue. All existing endpoints (/enqueue, /submit, /pull,
+# /result) are completely untouched — fully backward compatible.
+# ============================================================
+
+def _messages_to_prompt(messages: List[_ChatMessage]) -> str:
+    """
+    Flatten OpenAI messages list into a single prompt string.
+    Preserves role context so the model sees the conversation structure.
+    """
+    parts = []
+    for msg in messages:
+        role = msg.role.strip().lower()
+        content = msg.content.strip()
+        if role == "system":
+            parts.append(f"System: {content}")
+        elif role == "user":
+            parts.append(f"User: {content}")
+        elif role == "assistant":
+            parts.append(f"Assistant: {content}")
+        else:
+            parts.append(content)
+    return "\n".join(parts)
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(req: _ChatCompletionRequest):
+    """
+    OpenAI-compatible chat completions endpoint.
+
+    Intended for use by the LiteLLM proxy (production auth/spend layer).
+    Translates OpenAI chat format into the internal enqueue flow and
+    wraps the result back into a standard OpenAI ChatCompletion response.
+
+    This endpoint is NOT used by mu-load-test benchmarks — those continue
+    to use /enqueue or /submit directly for zero-overhead measurement.
+    """
+    t_start = time.time()
+    inc_admission()
+
+    # 1. Flatten messages → prompt
+    prompt = _messages_to_prompt(req.messages)
+
+    # 2. Enqueue via existing router_state (identical to /enqueue)
+    meta: Dict[str, Any] = {"__source__": "litellm"}
+    if _is_push_mode():
+        rid = router_state.next_req_id()
+        is_pull_mode = False
+    else:
+        rid = router_state.enqueue(prompt, t_start, meta)
+        is_pull_mode = True
+
+    _log_api_req(
+        f"chat_completions rid={rid} model={req.model} "
+        f"messages={len(req.messages)} prompt_len={len(prompt)}",
+        level="summary",
+    )
+
+    router_state.register_waiter(rid)
+
+    # 3. KV hashing + push dispatch (identical to /enqueue)
+    if _is_push_mode() and _push_dispatcher is not None:
+        ok = _push_dispatcher.try_submit(rid, prompt, meta)
+        if not ok:
+            _store_and_maybe_publish_local_result(
+                req_id=rid,
+                result={"error": "push_dispatch_queue_full"},
+            )
+    else:
+        meta = await _maybe_register_kv_blocks(
+            rid,
+            prompt,
+            meta=meta,
+            is_pull_mode=is_pull_mode,
+        )
+        if _is_push_mode():
+            if _push_router is None:
+                raise HTTPException(500, "PushRouter not initialized")
+            try:
+                await _push_router.route_and_push(rid, prompt, meta)
+            except Exception as e:
+                raise HTTPException(503, f"push failed: {e}")
+
+    # 4. Wait for result (identical to /enqueue)
+    result = await router_state.wait_for_result_async(rid, _cfg.RESULT_TIMEOUT_S)
+
+    router_latency = time.time() - t_start
+
+    if result is None:
+        _log_api_req(
+            f"chat_completions timeout rid={rid} after {router_latency:.3f}s",
+            level="summary",
+        )
+        raise HTTPException(504, "timeout waiting for vLLM result")
+
+    if not isinstance(result, dict):
+        result = {"output": result}
+
+    output_text = result.get("output", "")
+    finish_reason = result.get("finish_reason", "stop") or "stop"
+    usage = result.get("usage") or {}
+
+    _log_api_req(
+        f"chat_completions complete rid={rid} latency={router_latency:.3f}s",
+        level="summary",
+    )
+
+    # 5. Return OpenAI-format response so LiteLLM proxy can parse it normally
+    return {
+        "id": f"chatcmpl-{rid}",
+        "object": "chat.completion",
+        "created": int(t_start),
+        "model": req.model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": output_text,
+                },
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        },
+    }
