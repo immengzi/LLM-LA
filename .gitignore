@@ -50,3 +50,5 @@ operator-go-bundle.tar.gz
 HQ-production/monitor/vllm_logs/
 debug-scripts/mooncake-test/Mooncake/
 debug-scripts/mooncake-test/Mooncake/
+debug-scripts/mooncake-test/prompt/
+debug-scripts/mooncake-test/test/
