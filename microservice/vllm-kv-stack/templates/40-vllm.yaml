@@ -1,4 +1,7 @@
 {{- if .Values.deploy.vllm }}
+{{- if not .Values.modelVolume.modelSubPath }}
+{{- fail "modelVolume.modelSubPath must be set — deploy PV/PVC once on the parent dir and pass the model subfolder name per deployment" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,6 +25,14 @@ spec:
     spec:
       restartPolicy: Always
       shareProcessNamespace: true
+
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
 
       affinity:
         nodeAffinity:
@@ -181,6 +192,7 @@ spec:
             - name: model
               mountPath: /model
               readOnly: true
+              subPath: {{ .Values.modelVolume.modelSubPath }}
             - name: dshm
               mountPath: /dev/shm
             - name: dcmi-volume
@@ -195,6 +207,10 @@ spec:
               mountPath: /etc/ascend_install.info
             - name: cache-volume
               mountPath: /root/.cache
+            - name: hisi-hdc-volume
+              mountPath: /dev/hisi_hdc
+            - name: devmm-svm-volume
+              mountPath: /dev/devmm_svm
 
           startupProbe:
             httpGet:
@@ -301,7 +317,7 @@ spec:
       volumes:
         - name: model
           persistentVolumeClaim:
-            claimName: qwen-local-pvc
+            claimName: models-nfs-pvc
         - name: dshm
           emptyDir:
             medium: Memory
@@ -330,6 +346,14 @@ spec:
           hostPath:
             path: /root/.cache
             type: DirectoryOrCreate
+        - name: hisi-hdc-volume
+          hostPath:
+            path: /dev/hisi_hdc
+            type: CharDevice
+        - name: devmm-svm-volume
+          hostPath:
+            path: /dev/devmm_svm
+            type: CharDevice
 
 ---
 apiVersion: v1

@@ -1,5 +1,5 @@
-# router.yaml
-# Router-based experiment config — Qwen3-8B, dense model, no quantization
+# router-tp8.yaml
+# Router-based experiment config with Tensor Parallelism = 8
 
 backend: "router"
 
@@ -15,6 +15,7 @@ hf_lmsys:
   dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
   split: "train"
   tokenizer_name: "/mnt/nvme1/saeid/models/qwen3-8b"
+  # tokenizer_name: "/mnt/nvme1/saeid/models/GLM-5-w4a8-mtp-QuaRot"
   streaming: false
   min_input_tokens: 256
   max_input_tokens: 10000000
@@ -56,7 +57,7 @@ metrics:
   scrape_interval_s: 1.0
   window_s: 2.0
   include_debug_metrics: false
-  model_name: null
+  model_name: "served-model"
   max_instances: null
 
 transport:
@@ -69,9 +70,9 @@ transport:
   idle_zero_running_s: 10.0
 
 helm:
-  replicas: 8
+  replicas: 2
   batch_size: 8
-  tensor_parallel_size: 1
+  tensor_parallel_size: 8
 
   autoscaling_enabled: false
   autoscaling_min: 16
@@ -87,12 +88,7 @@ helm:
   # Model config
   model_name: "served-model"
   nfs_path: "/saeid/models/qwen3-8b"
-  vllm_quantization: null             # Qwen3 is dense, not quantized
-  vllm_enable_expert_parallel: false  # Qwen3 is not MoE
-  vllm_gpu_memory_utilization: null   # use vLLM default
-  # vllm_max_model_len not set — uses model's default (null)
 
-  # Disable AIBrix exposure for router experiments
   aibrix_enabled: false
   aibrix_model_name: "served-model"
   aibrix_port: 8200

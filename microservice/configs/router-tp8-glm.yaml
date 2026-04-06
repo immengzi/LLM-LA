@@ -85,6 +85,10 @@ helm:
   router_len_aware: true
   router_len_policy: "short_first"
 
+  # Model config
+  model_name: "served-model"
+  nfs_path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+
   aibrix_enabled: false
   aibrix_model_name: "served-model"
   aibrix_port: 8200

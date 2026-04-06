@@ -25,8 +25,9 @@ images:
   sidecar: kv-sidecar:latest
   vllm: quay.io/ascend/vllm-ascend:glm5-openeuler
 modelVolume:
-  create: true
-  nfsPath: /saeid/models/GLM-5-w4a8-mtp-QuaRot
+  create: false
+  modelSubPath: qwen3-8b
+  nfsPath: /saeid/models/
   nfsServer: nfs.local
 pin:
   enabled: true
@@ -40,18 +41,17 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 1
+  vllm: 4
 router:
   kvAware: true
   lenAware: true
   lenPolicy: short_first
   mode: pull
-tensorParallelSize: 8
+tensorParallelSize: 1
 vllm:
   compilationConfig:
     cudagraphMode: FULL_DECODE_ONLY
-  enableExpertParallel: true
-  gpuMemoryUtilization: "0.95"
-  maxModelLen: 80000
-  quantization: ascend
+  enableExpertParallel: false
+  gpuMemoryUtilization: 0.95
+  maxModelLen: 40960
   trustRemoteCode: false

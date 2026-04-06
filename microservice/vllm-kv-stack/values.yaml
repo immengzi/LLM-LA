@@ -64,13 +64,19 @@ pin:
       operator: "Exists"
       effect: "NoSchedule"
 
+# PV and PVC are deployed ONCE manually on the parent NFS directory (e.g. /saeid/models/).
+# The sweep runner always overrides modelVolume.create=false and sets modelSubPath per experiment.
+# To deploy PV/PVC for the first time, run helm with:
+#   --set modelVolume.create=true --set modelVolume.modelSubPath=<model-folder-name>
 # modelVolume:
 #   create: false
 modelVolume:
-  create: true
+  create: false                   # never recreated by sweep — deploy once externally
   nfsServer: nfs.local
-  # nfsPath: /saeid/models/qwen3-8b
-  nfsPath: /saeid/models/GLM-5-w4a8-mtp-QuaRot
+  nfsPath: /saeid/models/         # parent directory containing all models
+  # nfsPath: /saeid/models/qwen3-8b  # (old style — specific model path, no longer used)
+  modelSubPath: ""                # set per-experiment by sweep (e.g. qwen3-8b, GLM-5-w4a8-mtp-QuaRot)
+                                  # must be set explicitly on first deploy via --set modelVolume.modelSubPath=<name>
 
 # AIBrix integration.
 # In backend=aibrix, vLLM pods expose labels so AIBrix gateway can discover them.
@@ -86,10 +92,10 @@ aibrix:
 # vLLM runtime flags — all optional, set null to disable
 vllm:
   # Memory / performance
-  gpuMemoryUtilization: 0.95       # null = use vLLM default
-  quantization: "ascend"           # null = no quantization
-  enableExpertParallel: true       # false = disable
-  maxModelLen: 80000               # null = use model's default; set lower to save KV cache memory
+  gpuMemoryUtilization: null       # null = use vLLM default
+  quantization: null           # null = no quantization
+  enableExpertParallel: false       # false = disable
+  maxModelLen: null               # null = use model's default; set lower to save KV cache memory
   compilationConfig:
     cudagraphMode: "FULL_DECODE_ONLY"   # null = disable compilation config entirely
 

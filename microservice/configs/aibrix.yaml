@@ -81,6 +81,7 @@ aibrix:
 helm:
   replicas: 16
   batch_size: 8
+  tensor_parallel_size: 8          # added — was missing, defaulted to 1 in HelmConfig
   autoscaling_enabled: false
   autoscaling_min: 1
   autoscaling_max: 16
@@ -90,6 +91,10 @@ helm:
   router_kv_aware: false
   router_len_aware: true
   router_len_policy: "short_first"
+
+  # Model config
+  model_name: "served-model"
+  nfs_path: "/saeid/models/qwen3-8b"
 
   # Expose AIBrix discovery labels on the deployed vLLM pods
   aibrix_enabled: true

@@ -243,12 +243,17 @@ def cli(client_config: str, reinstall: bool, timeout_s: int) -> None:
         "aibrix.port": int(getattr(h, "aibrix_port", 8200)),
     }
 
+    # vLLM model config (nfs path)
+    nfs_path = str(getattr(h, "nfs_path", "")).strip()
+    if nfs_path:
+        set_values["modelVolume.nfsPath"] = nfs_path
+
     # vLLM runtime flags — same logic as sweep_methods.py
     if getattr(h, "vllm_gpu_memory_utilization", None) is not None:
         set_values["vllm.gpuMemoryUtilization"] = float(h.vllm_gpu_memory_utilization)
     if getattr(h, "vllm_quantization", None) is not None:
         set_values["vllm.quantization"] = str(h.vllm_quantization)
-    set_values["vllm.enableExpertParallel"] = bool(getattr(h, "vllm_enable_expert_parallel", True))
+    set_values["vllm.enableExpertParallel"] = bool(getattr(h, "vllm_enable_expert_parallel", False))
     if getattr(h, "vllm_compilation_config", None) is not None:
         try:
             cc = json.loads(h.vllm_compilation_config)
