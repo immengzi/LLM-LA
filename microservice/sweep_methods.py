@@ -19,6 +19,14 @@
 #   (prevents Helm from deleting them during upgrade)
 # - Only redeploys router + redis + cpu-hash
 # - vLLM must already be running (deployed via deploy_vllm.py)
+#
+# PV/PVC lifecycle:
+# - PV and PVC are deployed ONCE externally (via deploy_vllm.py or manually) on the
+#   parent NFS directory (e.g. /saeid/models/).
+# - The sweep never touches modelVolume.create — it always sets it to False so Helm
+#   never attempts to create or reconcile the PV/PVC.
+# - Per-experiment model selection is done via modelVolume.modelSubPath, derived from
+#   the last path component of cfg.helm.nfs_path (e.g. /saeid/models/glm5 -> "glm5").
 
 from __future__ import annotations
 
@@ -29,7 +37,7 @@ import sys
 import time
 import tempfile
 from dataclasses import asdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Tuple
 
 import click
@@ -515,6 +523,12 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             "aibrix.port": int(getattr(h, "aibrix_port", 8200)),
         }
 
+        # ---- PV/PVC: always disabled — deployed once externally on parent NFS dir ----
+        # The chart's fail guard in 40-vllm.yaml and 20-cpu-hash.yaml will catch
+        # any missing modelSubPath at helm-template time before anything is deployed.
+        set_values["modelVolume.create"] = False
+        # -----------------------------------------------------------------------------
+
         # ---- deploy component flags ----
         if skip_vllm:
             # Check if vLLM pods exist — if so keep deploy.vllm=true so Helm
@@ -555,6 +569,26 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             q = str(h.autoscaling_prometheus_query or "").strip()
             q = " ".join(q.split())
             set_values["autoscaling.prometheusQuery"] = q
+
+        # ---- vLLM model config: derive modelSubPath from nfs_path ----
+        # PV/PVC are deployed once on the parent dir (e.g. /saeid/models/).
+        # Per-experiment we only pass the subfolder name as modelSubPath.
+        # Example: nfs_path=/saeid/models/glm5 -> modelSubPath=glm5
+        nfs_path = str(getattr(h, "nfs_path", "")).strip()
+        if not nfs_path:
+            raise click.ClickException(
+                f"helm.nfs_path must be set in {cfg_path} "
+                f"(e.g. /saeid/models/glm5) — used to derive modelVolume.modelSubPath"
+            )
+        model_sub_path = PurePosixPath(nfs_path.rstrip("/")).name
+        if not model_sub_path:
+            raise click.ClickException(
+                f"Could not derive model subfolder from helm.nfs_path={nfs_path!r}. "
+                f"Expected a path like /saeid/models/<model-name>."
+            )
+        set_values["modelVolume.modelSubPath"] = model_sub_path
+        click.echo(f"[sweep] model subPath={model_sub_path!r} (derived from nfs_path={nfs_path!r})")
+        # --------------------------------------------------------------
 
         # ---- vLLM runtime flags ----
         if getattr(h, "vllm_gpu_memory_utilization", None) is not None:
@@ -698,6 +732,8 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 "aibrix_model_name": str(getattr(h, "aibrix_model_name", "served-model")),
                 "aibrix_port": int(getattr(h, "aibrix_port", 8200)),
                 "service_impl": str(getattr(h, "service_impl", "python")),
+                "nfs_path": nfs_path,
+                "model_sub_path": model_sub_path,
                 "vllm_gpu_memory_utilization": getattr(h, "vllm_gpu_memory_utilization", None),
                 "vllm_quantization": getattr(h, "vllm_quantization", None),
                 "vllm_enable_expert_parallel": bool(getattr(h, "vllm_enable_expert_parallel", True)),

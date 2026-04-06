@@ -184,6 +184,12 @@ class HelmConfig:
       - router KV-aware and LEN-aware toggles + policy
       - whether the deployed vLLM pods expose AIBrix discovery labels
       - vLLM runtime flags (gpu memory, quantization, expert parallel, etc.)
+
+    vLLM flag defaults are intentionally conservative (no quantization, no expert
+    parallel) so that configs that don't explicitly set these fields are safe for
+    dense non-quantized models like Qwen3. MoE/quantized models (e.g. GLM-5 W4A8)
+    must explicitly set vllm_quantization and vllm_enable_expert_parallel in their
+    client config YAML.
     """
     # initial replicas for vLLM deployment (even when autoscaling is enabled)
     replicas: int = 4
@@ -228,10 +234,18 @@ class HelmConfig:
     service_impl: str = "python"  # python | go
     # --------------------------------------------------------------------
 
+    # ---- vLLM model config (maps to Helm chart values.modelVolume.*) ----
+    model_name: str = "served-model"  # vLLM served model name (--served-model-name)
+    nfs_path: str = ""  # NFS path to model (e.g., /saeid/models/GLM-5-w4a8-mtp-QuaRot)
+    # --------------------------------------------------------------------
+
     # ---- vLLM runtime flags (maps to Helm chart values.vllm.*) ----
+    # Defaults are conservative — safe for dense, non-quantized models (e.g. Qwen3).
+    # MoE models (e.g. GLM-5): set vllm_enable_expert_parallel=true in client config.
+    # Quantized models (e.g. GLM-5 W4A8): set vllm_quantization="ascend" in client config.
     vllm_gpu_memory_utilization: Optional[float] = 0.95
-    vllm_quantization: Optional[str] = "ascend"
-    vllm_enable_expert_parallel: bool = True
+    vllm_quantization: Optional[str] = None          # null = no quantization (override for W4A8 models)
+    vllm_enable_expert_parallel: bool = False         # false = disabled (override for MoE models)
     vllm_compilation_config: Optional[str] = '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     vllm_trust_remote_code: bool = False
     vllm_max_num_batched_tokens: Optional[int] = None

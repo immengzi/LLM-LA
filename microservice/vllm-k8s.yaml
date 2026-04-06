@@ -6,50 +6,6 @@ metadata:
   name: kv-router-sa
   namespace: vllm
 ---
-# Source: vllm-kv-stack/templates/01-model-pv.yaml
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: qwen-local-pv
-  annotations:
-    "helm.sh/resource-policy": keep
-spec:
-  capacity:
-    storage: 20Gi
-  accessModes:
-    - ReadOnlyMany
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: ""
-  mountOptions:
-    - ro
-    - nfsvers=4.1
-  # nfs:
-  #   server: 7.242.102.243
-  #   path: /saeid/models/qwen3-8b
-  # nfs:
-  #   server: nfs.local
-  #   path: /saeid/models/qwen3-8b
-  nfs:
-    server: "nfs.local"
-    path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
----
-# Source: vllm-kv-stack/templates/02-model-pvc.yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: qwen-local-pvc
-  namespace: vllm
-  annotations:
-    "helm.sh/resource-policy": keep
-spec:
-  accessModes:
-    - ReadOnlyMany
-  resources:
-    requests:
-      storage: 20Gi
-  storageClassName: ""
-  volumeName: qwen-local-pv
----
 # Source: vllm-kv-stack/templates/30-router-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -276,6 +232,7 @@ spec:
             - name: model
               mountPath: /model
               readOnly: true
+              subPath: qwen3-8b
           resources:
             requests:
               cpu: "1000m"
@@ -286,7 +243,7 @@ spec:
       volumes:
         - name: model
           persistentVolumeClaim:
-            claimName: qwen-local-pvc
+            claimName: models-nfs-pvc
 ---
 # Source: vllm-kv-stack/templates/31-router.yaml
 apiVersion: apps/v1
@@ -454,7 +411,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 1
+  replicas: 4
   selector:
     matchLabels:
       app: vllm-qwen
@@ -497,16 +454,14 @@ spec:
                 --tokenizer /model \
                 --port 8200 \
                 --served-model-name served-model \
-                --tensor-parallel-size 8 \
+                --tensor-parallel-size 1 \
                 --dtype auto \
                 --kv-cache-dtype auto \
                 --max-num-seqs 8 \
                 --prefix-caching-hash-algo sha256_cbor \
                 --gpu-memory-utilization 0.95 \
-                --quantization ascend \
-                --enable-expert-parallel \
                 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-                --max-model-len 80000 \
+                --max-model-len 40960 \
                 --host 0.0.0.0 \
                 --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
                 &
@@ -579,7 +534,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: ASCEND_RT_VISIBLE_DEVICES
-              value: "0,1,2,3,4,5,6,7"
+              value: "0"
           ports:
             - containerPort: 8200
               name: http
@@ -594,6 +549,7 @@ spec:
             - name: model
               mountPath: /model
               readOnly: true
+              subPath: qwen3-8b
             - name: dshm
               mountPath: /dev/shm
             - name: dcmi-volume
@@ -638,10 +594,10 @@ spec:
 
           resources:
             requests:
-              huawei.com/Ascend910: 8
+              huawei.com/Ascend910: 1
               ephemeral-storage: "2Gi"
             limits:
-              huawei.com/Ascend910: 8
+              huawei.com/Ascend910: 1
               ephemeral-storage: "4Gi"
         - name: kv-sidecar
           image: reg.local:32000/kv-sidecar:latest
@@ -711,11 +667,11 @@ spec:
       volumes:
         - name: model
           persistentVolumeClaim:
-            claimName: qwen-local-pvc
+            claimName: models-nfs-pvc
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 128Gi
+            sizeLimit: 16Gi
         - name: dcmi-volume
           hostPath:
             path: /usr/local/dcmi

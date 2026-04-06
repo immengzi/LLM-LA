@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: qwen-local-pv
+  name: models-nfs-pv
   annotations:
     "helm.sh/resource-policy": keep
 spec:
@@ -23,6 +23,6 @@ spec:
   #   path: /saeid/models/qwen3-8b
   nfs:
     server: {{ .Values.modelVolume.nfsServer | quote }}
-    path: {{ .Values.modelVolume.nfsPath | quote }}
+    path: {{ .Values.modelVolume.nfsPath | quote }}  # Parent directory, e.g., /saeid/models/
 
 {{- end }}

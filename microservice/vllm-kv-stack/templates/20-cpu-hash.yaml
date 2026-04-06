@@ -1,5 +1,8 @@
 {{- if eq (lower .Values.backend) "router" }}
 {{- if .Values.deploy.cpuHash }}
+{{- if not .Values.modelVolume.modelSubPath }}
+{{- fail "modelVolume.modelSubPath must be set — deploy PV/PVC once on the parent dir and pass the model subfolder name per deployment" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -59,6 +62,7 @@ spec:
             - name: model
               mountPath: /model
               readOnly: true
+              subPath: {{ .Values.modelVolume.modelSubPath }}
           resources:
             requests:
               cpu: "1000m"
@@ -69,7 +73,7 @@ spec:
       volumes:
         - name: model
           persistentVolumeClaim:
-            claimName: qwen-local-pvc
+            claimName: models-nfs-pvc
 
 ---
 apiVersion: v1
