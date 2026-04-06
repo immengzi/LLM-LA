@@ -19,7 +19,7 @@ spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       nodeSelector:
-        kubernetes.io/hostname: node3
+        kubernetes.io/hostname: node4
 
       volumes:
         - name: model-storage
@@ -78,9 +78,28 @@ spec:
               source /usr/local/Ascend/ascend-toolkit/set_env.sh
               export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64:/usr/local/Ascend/nnal/atb/8.5.0/atb/cxx_abi_1/lib
 
-              # Auto-detect NIC and IP
+              # Auto-detect NIC name using python3 (no 'ip' command needed in container)
+              # Works on both node1/2 (enp67s0f5) and node3/4 (enp189s0f0)
               local_ip="${NODE_IP}"
-              nic_name=$(ip addr show 2>/dev/null | grep "inet ${local_ip}" | awk '{print $NF}' || echo "enp67s0f5")
+              nic_name=$(python3 -c "
+              import os, socket, struct, fcntl
+              local_ip = '${local_ip}'
+              SIOCGIFADDR = 0x8915
+              for iface in os.listdir('/sys/class/net/'):
+                  if iface == 'lo':
+                      continue
+                  try:
+                      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                      ifreq = struct.pack('16sH14s', iface.encode(), socket.AF_INET, b'')
+                      res = fcntl.ioctl(sock.fileno(), SIOCGIFADDR, ifreq)
+                      ip = socket.inet_ntoa(res[20:24])
+                      sock.close()
+                      if ip == local_ip:
+                          print(iface)
+                          break
+                  except:
+                      pass
+              ")
               echo "[vllm] local_ip=${local_ip} nic=${nic_name}"
 
               export HCCL_OP_EXPANSION_MODE="AIV"
@@ -98,7 +117,6 @@ spec:
               export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
               export ASCEND_BUFFER_POOL=4:8
               export LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}
-
               mkdir -p /workspace/vllm_logs
               timestamp=$(date "+%Y%m%d%H%M%S")
 
@@ -116,7 +134,8 @@ spec:
                 --dtype float16 \
                 --trust-remote-code \
                 --max-model-len 32768 \
-                --gpu-memory-utilization 0.90 \
+                --gpu-memory-utilization 0.2 \
+                --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:'${ZMQ_PORT}'", "topic": "kv@'${POD_NAME}'@served-model"}' \
                 --kv-transfer-config \
                 '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"master_server_address":"10.50.156.65:50088","lookup_rpc_port":"10010","backend":"mooncake"}}'
 
@@ -141,6 +160,8 @@ spec:
               value: "1"
             - name: TRANSFORMERS_OFFLINE
               value: "1"
+            - name: ZMQ_PORT
+              value: "5557"
             - name: HF_HUB_DISABLE_TELEMETRY
               value: "1"
             - name: PYTHONHASHSEED
