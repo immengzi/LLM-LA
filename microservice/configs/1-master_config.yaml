@@ -1,5 +1,5 @@
-router:
-  - pull
+# router:
+  # - pull
   # - push-rr
 #   - push-random
   # - push-least-queue
@@ -11,8 +11,8 @@ router:
   # - push-least-queue
 
 
-# router-tp8-glm:
-#   - pull
+router-tp8-glm:
+  - pull
   # - push-rr
 #   - push-random
   # - push-least-queue
@@ -36,3 +36,9 @@ router:
   # - vtc-basic
   # - pd
   # - session-affinity
+
+litellm:
+  - pull
+  # - push-rr
+  # - push-random
+  # - push-least-queue

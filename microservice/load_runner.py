@@ -6,6 +6,9 @@
 #     - async_pubsub: single submit scheduler + single ZMQ SUB listener
 # - AIBrix backend:
 #     - threaded_http: thread-per-request, OpenAI-compatible HTTP calls to AIBrix gateway
+# - LiteLLM backend:
+#     - threaded_http: thread-per-request, OpenAI-compatible HTTP calls to LiteLLM proxy
+#       (production auth/spend validation only — NOT for benchmarking)
 #
 # Termination policy for router async_pubsub (preferred + backstop):
 #   1) Preferred: Prometheus fleet-idle detection:
@@ -25,8 +28,8 @@ import json
 
 import requests
 
-from http_client import send_one, submit_one, send_one_aibrix
-from config import GenerationConfig, AIBrixConfig
+from http_client import send_one, submit_one, send_one_aibrix, send_one_litellm
+from config import GenerationConfig, AIBrixConfig, LiteLLMConfig
 from trace_utils import print_trace_block, compute_trace_metrics
 from experiment_io import ExperimentLogger
 
@@ -414,12 +417,7 @@ def _request_thread_aibrix_http(
     The connection stays open until the AIBrix/vLLM response completes.
     """
     session = requests.Session()
-    # Disable keep-alive: each thread makes exactly one request so connection
-    # pooling buys nothing here. Without this, urllib3 returns the socket to
-    # the pool after the response; if Envoy has since closed its end, the next
-    # thread that gets that socket will hit ECONNRESET 104.
     session.headers.update({"Connection": "close"})
-    # OLD: session = requests.Session()
     try:
         now = time.monotonic()
         delay = task.ts_mono - now
@@ -434,6 +432,138 @@ def _request_thread_aibrix_http(
         t0 = time.time()
         try:
             rid, result = send_one_aibrix(session, aibrix_cfg, task.prompt, gen_cfg)
+            t1 = time.time()
+            end_to_end_s = t1 - t0
+
+            (
+                latency_s,
+                finish_reason,
+                output_preview,
+                output_full,
+                usage_prompt_tokens,
+                usage_completion_tokens,
+                usage_total_tokens,
+                trace_dict,
+                trace_metrics,
+            ) = _extract_result_fields(result)
+
+            if latency_s is not None:
+                print(
+                    f"[client][RECV][T{task.idx}] idx={task.idx} req_id={rid} "
+                    f"wait_wall={end_to_end_s:.3f}s model_latency={latency_s:.3f}s"
+                )
+            else:
+                print(
+                    f"[client][RECV][T{task.idx}] idx={task.idx} req_id={rid} "
+                    f"wait_wall={end_to_end_s:.3f}s"
+                )
+
+            if finish_reason is not None:
+                print(f"[client][T{task.idx}]   finish_reason={finish_reason}")
+
+            if print_trace and output_preview is not None:
+                print(f"[client][T{task.idx}]   output_preview={output_preview!r}")
+
+            if isinstance(result, dict):
+                trace = result.get("trace")
+                if isinstance(trace, dict) and print_trace:
+                    print_trace_block(task.idx, {"req_id": rid, "result": result})
+
+            if logger is not None:
+                record: Dict[str, Any] = {
+                    "idx": task.idx,
+                    "req_id": rid,
+                    "prompt": task.prompt,
+                    "planned_ts_mono": task.ts_mono,
+                    "actual_send_ts_mono": now_send,
+                    "t0_wall": t0,
+                    "t1_wall": t1,
+                    "end_to_end_s": end_to_end_s,
+                    "model_latency_s": latency_s,
+                    "finish_reason": finish_reason,
+                }
+
+                if usage_prompt_tokens is not None:
+                    record["prompt_tokens"] = usage_prompt_tokens
+                if usage_completion_tokens is not None:
+                    record["completion_tokens"] = usage_completion_tokens
+                if usage_total_tokens is not None:
+                    record["total_tokens"] = usage_total_tokens
+
+                log_output = _choose_log_output(
+                    output_log_mode=output_log_mode,
+                    output_full=output_full,
+                    output_preview=output_preview,
+                )
+                if log_output is not None:
+                    record["output"] = log_output
+
+                if trace_dict is not None:
+                    record["trace"] = trace_dict
+                if trace_metrics is not None:
+                    record["trace_metrics"] = trace_metrics
+
+                logger.log_request(record)
+
+        except Exception as e:
+            print(f"[client][RECV][T{task.idx}] ✗ ERROR idx={task.idx}: {e}")
+            if logger is not None:
+                err_record: Dict[str, Any] = {
+                    "idx": task.idx,
+                    "error": str(e),
+                    "prompt": task.prompt,
+                    "planned_ts_mono": task.ts_mono,
+                    "send_failed": True,
+                }
+                logger.log_request(err_record)
+    finally:
+        session.close()
+
+
+# ============================================================
+# NEW: LiteLLM worker thread
+#
+# Mirrors _request_thread_aibrix_http exactly — same threading
+# model, same logging schema, same result parsing. The only
+# differences are:
+#   - calls send_one_litellm() instead of send_one_aibrix()
+#   - takes LiteLLMConfig instead of AIBrixConfig
+#   - log prefix says "litellm" not "aibrix"
+#
+# Connection: "close" per thread — same rationale as AIBrix
+# (single request per thread, no benefit from keep-alive).
+# ============================================================
+
+def _request_thread_litellm_http(
+    task: RequestTask,
+    litellm_cfg: LiteLLMConfig,
+    gen_cfg: GenerationConfig,
+    t0_mono: float,
+    logger: Optional[ExperimentLogger] = None,
+    output_log_mode: str = "preview",
+    print_trace: bool = True,
+):
+    """
+    LiteLLM proxy worker: one open HTTP request per thread.
+    Routes through LiteLLM proxy for auth/spend tracking validation.
+    NOT for benchmarking — use backend=router for clean measurements.
+    """
+    session = requests.Session()
+    session.headers.update({"Connection": "close"})
+    try:
+        now = time.monotonic()
+        delay = task.ts_mono - now
+        if delay > 0:
+            time.sleep(delay)
+
+        now_send = time.monotonic()
+        _log_send_tick(now_send, t0_mono)
+
+        print(f"[client][SEND][T{task.idx}] idx={task.idx} planned_ts={task.ts_mono:.6f}")
+
+        t0 = time.time()
+        try:
+            rid, result = send_one_litellm(session, litellm_cfg, task.prompt, gen_cfg)
             t1 = time.time()
             end_to_end_s = t1 - t0
 
@@ -718,6 +848,7 @@ def run_open_loop_load(
     transport: Any = None,
     backend: str = "router",
     aibrix: Optional[AIBrixConfig] = None,
+    litellm: Optional[LiteLLMConfig] = None,
 ):
     """
     Execute a precomputed schedule.
@@ -729,7 +860,10 @@ def run_open_loop_load(
       - "aibrix":
           - concurrent threaded HTTP requests to AIBrix gateway
           - no ZMQ
-          - each request keeps its HTTP connection open until completion
+      - "litellm":
+          - concurrent threaded HTTP requests to LiteLLM proxy
+          - identical threading model to aibrix
+          - for production/demo validation only, NOT benchmarking
     """
     if len(prompts) != len(plan_times):
         raise ValueError("prompts and plan_times length mismatch")
@@ -740,7 +874,7 @@ def run_open_loop_load(
         return
 
     backend = str(backend or "router").strip().lower()
-    if backend not in ("router", "aibrix"):
+    if backend not in ("router", "aibrix", "litellm"):
         raise ValueError(f"Invalid backend '{backend}'")
 
     mode = "sync"
@@ -806,6 +940,10 @@ def run_open_loop_load(
                     if aibrix is None:
                         raise RuntimeError("backend='aibrix' requires aibrix config")
                     rid, _result = send_one_aibrix(session, aibrix, warm_prompt, gen_cfg)
+                elif backend == "litellm":
+                    if litellm is None:
+                        raise RuntimeError("backend='litellm' requires litellm config")
+                    rid, _result = send_one_litellm(session, litellm, warm_prompt, gen_cfg)
                 else:
                     rid, _result = send_one(session, router_url, warm_prompt, meta)
                 print(f"[client][warmup] i={i} req_id={rid}")
@@ -825,7 +963,9 @@ def run_open_loop_load(
     t0_plan = plan_times[0]
     adj_plan_times = [t0_mono + (ts - t0_plan) for ts in plan_times]
 
-    # AIBrix backend: threaded open-loop HTTP requests.
+    # -------------------------------------------------------
+    # AIBrix backend: threaded open-loop HTTP requests
+    # -------------------------------------------------------
     if backend == "aibrix":
         if aibrix is None:
             raise RuntimeError("backend='aibrix' requires aibrix config")
@@ -833,27 +973,9 @@ def run_open_loop_load(
         threads: List[threading.Thread] = []
         t0_wall = time.time()
 
-        # OLD: all threads started upfront in a tight loop, causing every thread
-        # to exist simultaneously (sleeping) even if its send time is far in the
-        # future. With large total_requests this exhausts the OS thread limit.
-        #
-        # for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
-        #     task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
-        #     t = threading.Thread(
-        #         target=_request_thread_aibrix_http,
-        #         args=(task, aibrix, gen_cfg, t0_mono, logger, output_log_mode, print_trace),
-        #         daemon=True,
-        #     )
-        #     t.start()
-        #     threads.append(t)
-        #
-        # FIX: sleep in the main loop until just before each request is due,
-        # then start the thread. Peak live threads = rate_rps * avg_latency_s,
-        # which is constant regardless of total_requests. Schedule timing is
-        # preserved — the thread still has ts_mono and sleeps the remaining few ms.
         for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
             now = time.monotonic()
-            sleep_until = ts_mono - 0.005  # wake 5ms early to absorb scheduling jitter
+            sleep_until = ts_mono - 0.005
             if sleep_until > now:
                 time.sleep(sleep_until - now)
 
@@ -873,7 +995,50 @@ def run_open_loop_load(
         print(f"[load_runner] Done. Sent {total} requests in {elapsed:.3f}s")
         return
 
+    # -------------------------------------------------------
+    # NEW: LiteLLM backend — identical threading model to AIBrix
+    # -------------------------------------------------------
+    if backend == "litellm":
+        if litellm is None:
+            raise RuntimeError("backend='litellm' requires litellm config")
+
+        print(
+            f"[load_runner] LiteLLM proxy: {litellm.base_url}{litellm.chat_path} "
+            f"model={litellm.model}"
+        )
+        print(
+            "[load_runner] NOTE: backend=litellm routes through the LiteLLM proxy "
+            "for production auth/spend validation. Use backend=router for benchmarking."
+        )
+
+        threads: List[threading.Thread] = []
+        t0_wall = time.time()
+
+        for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
+            now = time.monotonic()
+            sleep_until = ts_mono - 0.005
+            if sleep_until > now:
+                time.sleep(sleep_until - now)
+
+            task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
+            t = threading.Thread(
+                target=_request_thread_litellm_http,
+                args=(task, litellm, gen_cfg, t0_mono, logger, output_log_mode, print_trace),
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
+
+        elapsed = time.time() - t0_wall
+        print(f"[load_runner] Done. Sent {total} requests in {elapsed:.3f}s")
+        return
+
+    # -------------------------------------------------------
     # Router sync path: thread-per-request /enqueue
+    # -------------------------------------------------------
     if mode != "async_pubsub":
         threads: List[threading.Thread] = []
         t0_wall = time.time()
@@ -895,7 +1060,9 @@ def run_open_loop_load(
         print(f"[load_runner] Done. Sent {total} requests in {elapsed:.3f}s")
         return
 
+    # -------------------------------------------------------
     # Router async_pubsub path
+    # -------------------------------------------------------
     if not results_zmq:
         raise RuntimeError("transport.mode=async_pubsub requires transport.results_zmq to be set")
 

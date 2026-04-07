@@ -3,6 +3,7 @@
 #   - POST /enqueue (sync router backend)
 #   - POST /submit (async_pubsub router backend)
 #   - POST /v1/chat/completions (AIBrix backend)
+#   - POST /v1/chat/completions (LiteLLM proxy backend)
 
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ import uuid
 import requests
 from requests.exceptions import RequestException
 
-from config import AIBrixConfig, GenerationConfig
+from config import AIBrixConfig, GenerationConfig, LiteLLMConfig
 
 
 def _build_aibrix_extra_generation_fields(gen_cfg: GenerationConfig) -> Dict[str, Any]:
@@ -279,6 +280,148 @@ def send_one_aibrix(
             if isinstance(content, str):
                 output = content
 
+        fr = c0.get("finish_reason")
+        if isinstance(fr, str):
+            finish_reason = fr
+
+    if isinstance(data.get("usage"), dict):
+        usage = data["usage"]
+
+    result: Dict[str, Any] = {
+        "output": output,
+        "finish_reason": finish_reason,
+        "latency_s": float(t_recv - t_send),
+        "trace": {
+            "trace_mode": "client_only",
+            "t_send_client": t_send,
+            "t_recv_client": t_recv,
+            "client_roundtrip_s": float(t_recv - t_send),
+        },
+        "raw": data,
+    }
+
+    if usage is not None:
+        result["usage"] = usage
+
+    return rid, result
+
+
+# ============================================================
+# LiteLLM proxy backend
+#
+# Sends OpenAI-format requests to the LiteLLM proxy pod, which
+# enforces virtual key auth + spend tracking before forwarding
+# to the router's /v1/chat/completions shim.
+#
+# Intentionally kept separate from send_one_aibrix() so:
+#   - LiteLLM-specific headers (Authorization: Bearer) are clean
+#   - AIBrix-specific headers (routing-strategy, model) are not sent
+#   - Logging clearly identifies the LiteLLM path
+#   - Future LiteLLM-specific features (streaming, tool calls) can
+#     be added here without touching the AIBrix path
+#
+# Not used in benchmarking sweeps — only for production/demo validation.
+# ============================================================
+
+def send_one_litellm(
+    session: requests.Session,
+    litellm_cfg: LiteLLMConfig,
+    prompt: str,
+    gen_cfg: GenerationConfig,
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """
+    Send one request to the LiteLLM proxy using the OpenAI chat completions API.
+
+    LiteLLM proxy enforces virtual key auth, spend tracking, and rate limits,
+    then forwards to the router's /v1/chat/completions shim.
+
+    Returns:
+        (req_id, result_dict)
+    """
+
+    if bool(litellm_cfg.stream):
+        raise RuntimeError(
+            "LiteLLM streaming responses are not supported by send_one_litellm()"
+        )
+
+    t_send = time.time()
+
+    url = f"{str(litellm_cfg.base_url).rstrip('/')}{str(litellm_cfg.chat_path)}"
+
+    payload: Dict[str, Any] = {
+        "model": str(litellm_cfg.model),
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "max_tokens": int(gen_cfg.max_tokens),
+        "temperature": float(gen_cfg.temperature),
+    }
+
+    # Standard OpenAI auth header — LiteLLM validates the virtual key here
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {litellm_cfg.api_key}",
+    }
+
+    try:
+        resp = session.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=(10, float(litellm_cfg.timeout_s)),
+            stream=False,
+        )
+    except RequestException as e:
+        print(f"[client] ✗ HTTP error talking to LiteLLM proxy: {e}")
+        raise
+
+    t_recv = time.time()
+
+    if not resp.ok:
+        print("[client] ✗ LiteLLM request failed")
+        print(f"[client] status_code = {resp.status_code}")
+        print(f"[client] reason      = {resp.reason}")
+        print(f"[client] url         = {resp.url}")
+        print(f"[client] elapsed_s   = {resp.elapsed.total_seconds():.3f}")
+
+        print("[client] response_headers:")
+        for k, v in resp.headers.items():
+            print(f"    {k}: {v}")
+
+        body_preview = resp.text
+        if len(body_preview) > 2000:
+            body_preview = body_preview[:2000] + "...<truncated>"
+
+        print("[client] response_body:")
+        print(body_preview)
+
+        raise RuntimeError(
+            f"LiteLLM request failed: {resp.status_code} {resp.reason}"
+        )
+
+    try:
+        data = resp.json()
+    except Exception:
+        raise RuntimeError(f"LiteLLM returned non-JSON body: {resp.text!r}")
+
+    # Parse OpenAI-format response (identical structure to AIBrix / router shim)
+    rid_raw = data.get("id")
+    if isinstance(rid_raw, str) and rid_raw.strip():
+        rid = rid_raw.strip()
+    else:
+        rid = f"litellm-{uuid.uuid4().hex}"
+
+    output: Optional[str] = None
+    finish_reason: Optional[str] = None
+    usage: Optional[Dict[str, Any]] = None
+
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        c0 = choices[0]
+        msg = c0.get("message")
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, str):
+                output = content
         fr = c0.get("finish_reason")
         if isinstance(fr, str):
             finish_reason = fr

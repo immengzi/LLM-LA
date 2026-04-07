@@ -9,6 +9,8 @@
 # - Interprets "method" based on backend:
 #     backend=router  -> router.mode = method
 #     backend=aibrix -> aibrix.routing_strategy = method
+#     backend=litellm -> no method override (litellm has no routing strategy knob;
+#                        method is stored in sweep_meta.json for labelling only)
 # - Waits for readiness
 # - Writes repo_root/vllm-k8s.yaml = helm template output so experiment snapshot stays identical
 # - Runs main.py using a temporary per-job config and snapshots sweep_meta.json
@@ -158,8 +160,11 @@ def _write_temp_job_config(cfg, method: str) -> Path:
     """
     Write a per-job temporary config so main.py sees the correct method for the chosen backend.
 
-    backend=router  -> keep router config; method is applied only through Helm router.mode
-    backend=aibrix -> override cfg.aibrix.routing_strategy = method
+    backend=router  -> method applied only through Helm router.mode (no config override needed)
+    backend=aibrix  -> override cfg.aibrix.routing_strategy = method
+    backend=litellm -> no method override; method is a label only (stored in sweep_meta.json)
+                       litellm has no routing strategy knob — routing decisions happen inside
+                       the router, which is already configured via Helm router.mode separately.
     """
     cfg_dict = asdict(cfg)
     backend = str(cfg_dict.get("backend", "router") or "router").strip().lower()
@@ -167,6 +172,8 @@ def _write_temp_job_config(cfg, method: str) -> Path:
     if backend == "aibrix":
         cfg_dict.setdefault("aibrix", {})
         cfg_dict["aibrix"]["routing_strategy"] = method
+
+    # backend=litellm: no config mutation needed — method is informational only
 
     tmp = tempfile.NamedTemporaryFile(
         mode="w",
@@ -497,7 +504,9 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             raise click.ClickException(f"Config has no 'helm' section: {cfg_path}")
 
         backend = str(getattr(cfg, "backend", "router") or "router").strip().lower()
-        if backend not in ("router", "aibrix"):
+
+        # NEW: litellm added to allowlist alongside router and aibrix
+        if backend not in ("router", "aibrix", "litellm"):
             raise click.ClickException(f"Invalid backend '{backend}' in {cfg_path}")
 
         deploy_mode = str(getattr(h, "deploy_mode", "helm")).strip().lower()
@@ -506,7 +515,6 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         if deploy_mode == "operator":
             _operator_delete(cr_name=cr_name, namespace=namespace)
         else:
-            # In --skip-vllm mode we upgrade (not uninstall) to preserve vLLM pods
             if not skip_vllm:
                 _helm_uninstall(release=release, namespace=namespace)
 
@@ -524,15 +532,10 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         }
 
         # ---- PV/PVC: always disabled — deployed once externally on parent NFS dir ----
-        # The chart's fail guard in 40-vllm.yaml and 20-cpu-hash.yaml will catch
-        # any missing modelSubPath at helm-template time before anything is deployed.
         set_values["modelVolume.create"] = False
-        # -----------------------------------------------------------------------------
 
         # ---- deploy component flags ----
         if skip_vllm:
-            # Check if vLLM pods exist — if so keep deploy.vllm=true so Helm
-            # doesn't delete them. If not, warn but still proceed with stack only.
             vllm_running = _vllm_pods_exist(namespace)
             set_values["deploy.vllm"] = vllm_running
             set_values["deploy.router"] = True
@@ -547,11 +550,38 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             set_values["deploy.router"] = True
             set_values["deploy.redis"] = True
             set_values["deploy.cpuHash"] = True
-        # --------------------------------
 
-        # Interpret method family from backend.
+        # ---- method interpretation per backend ----
         if backend == "router":
+            # method is the router mode (pull, push-rr, push-random, push-leastq)
             set_values["router.mode"] = method
+        elif backend == "aibrix":
+            # method is the AIBrix routing strategy — applied via temp config, not Helm
+            pass
+        elif backend == "litellm":
+            # method is a label only (e.g. "litellm-pull", "litellm-v1")
+            # actual routing is controlled by the router running behind LiteLLM,
+            # which is configured separately via router.mode in Helm.
+            # No Helm knob to set here.
+            click.echo(
+                f"[sweep] backend=litellm: method={method!r} is a label only; "
+                f"routing is handled inside the router pod."
+            )
+
+        # ---- LiteLLM pod deployment toggle ----
+        # For backend=litellm, enable the LiteLLM proxy pod in the Helm chart.
+        # For other backends, leave it disabled (default in values.yaml).
+        if backend == "litellm":
+            litellm_cfg = getattr(cfg, "litellm", None)
+            set_values["litellm.enabled"] = True
+            set_values["litellm.masterKey"] = str(
+                getattr(litellm_cfg, "api_key", "sk-litellm-master") if litellm_cfg else "sk-litellm-master"
+            )
+            click.echo(
+                f"[sweep] litellm.enabled=true masterKey={set_values['litellm.masterKey']!r}"
+            )
+        else:
+            set_values["litellm.enabled"] = False
 
         service_impl = str(getattr(h, "service_impl", "python")).strip().lower()
         if service_impl == "go":
@@ -571,9 +601,6 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             set_values["autoscaling.prometheusQuery"] = q
 
         # ---- vLLM model config: derive modelSubPath from nfs_path ----
-        # PV/PVC are deployed once on the parent dir (e.g. /saeid/models/).
-        # Per-experiment we only pass the subfolder name as modelSubPath.
-        # Example: nfs_path=/saeid/models/glm5 -> modelSubPath=glm5
         nfs_path = str(getattr(h, "nfs_path", "")).strip()
         if not nfs_path:
             raise click.ClickException(
@@ -588,14 +615,15 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             )
         set_values["modelVolume.modelSubPath"] = model_sub_path
         click.echo(f"[sweep] model subPath={model_sub_path!r} (derived from nfs_path={nfs_path!r})")
-        # --------------------------------------------------------------
 
         # ---- vLLM runtime flags ----
         if getattr(h, "vllm_gpu_memory_utilization", None) is not None:
             set_values["vllm.gpuMemoryUtilization"] = float(h.vllm_gpu_memory_utilization)
         if getattr(h, "vllm_quantization", None) is not None:
             set_values["vllm.quantization"] = str(h.vllm_quantization)
-        set_values["vllm.enableExpertParallel"] = bool(getattr(h, "vllm_enable_expert_parallel", True))
+        set_values["vllm.enableExpertParallel"] = bool(getattr(h, "vllm_enable_expert_parallel", False))
+        if getattr(h, "vllm_max_model_len", None) is not None:
+            set_values["vllm.maxModelLen"] = int(h.vllm_max_model_len)
         if getattr(h, "vllm_compilation_config", None) is not None:
             try:
                 cc = json.loads(h.vllm_compilation_config)
@@ -611,7 +639,6 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             set_values["vllm.additionalConfig"] = str(h.vllm_additional_config)
         if getattr(h, "vllm_speculative_config", None) is not None:
             set_values["vllm.speculativeConfig"] = str(h.vllm_speculative_config)
-        # ----------------------------
 
         click.echo(f"[sweep] backend={backend}  deploy_mode={deploy_mode}  skip_vllm={skip_vllm}")
         click.echo("[sweep] set values:")
@@ -638,7 +665,6 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 )
 
             try:
-                # In --skip-vllm mode only wait for stack pods, not vLLM pods
                 if skip_vllm:
                     _wait_ready(
                         namespace,
@@ -736,13 +762,18 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 "model_sub_path": model_sub_path,
                 "vllm_gpu_memory_utilization": getattr(h, "vllm_gpu_memory_utilization", None),
                 "vllm_quantization": getattr(h, "vllm_quantization", None),
-                "vllm_enable_expert_parallel": bool(getattr(h, "vllm_enable_expert_parallel", True)),
+                "vllm_enable_expert_parallel": bool(getattr(h, "vllm_enable_expert_parallel", False)),
+                "vllm_max_model_len": getattr(h, "vllm_max_model_len", None),
                 "vllm_compilation_config": getattr(h, "vllm_compilation_config", None),
                 "vllm_trust_remote_code": bool(getattr(h, "vllm_trust_remote_code", False)),
                 "vllm_max_num_batched_tokens": getattr(h, "vllm_max_num_batched_tokens", None),
                 "vllm_seed": getattr(h, "vllm_seed", None),
                 "vllm_additional_config": getattr(h, "vllm_additional_config", None),
                 "vllm_speculative_config": getattr(h, "vllm_speculative_config", None),
+                # litellm knobs captured in experiment metadata
+                "litellm_enabled": backend == "litellm",
+                "litellm_base_url": getattr(getattr(cfg, "litellm", None), "base_url", None),
+                "litellm_model": getattr(getattr(cfg, "litellm", None), "model", None),
             },
         }
         (exp_dir / "sweep_meta.json").write_text(

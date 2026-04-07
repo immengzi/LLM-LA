@@ -21,7 +21,7 @@ import json
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional
 
 import click
@@ -243,10 +243,17 @@ def cli(client_config: str, reinstall: bool, timeout_s: int) -> None:
         "aibrix.port": int(getattr(h, "aibrix_port", 8200)),
     }
 
-    # vLLM model config (nfs path)
+    # vLLM model volume — derive modelSubPath from nfs_path
     nfs_path = str(getattr(h, "nfs_path", "")).strip()
     if nfs_path:
-        set_values["modelVolume.nfsPath"] = nfs_path
+        model_subpath = PurePosixPath(nfs_path).name
+        set_values["modelVolume.modelSubPath"] = model_subpath
+        click.echo(f"[deploy-vllm] modelVolume.modelSubPath={model_subpath} (derived from nfs_path)")
+    else:
+        raise click.ClickException(
+            "helm.nfs_path must be set in the client config to derive modelVolume.modelSubPath. "
+            "Example: nfs_path: /saeid/models/GLM-5-w4a8-mtp-QuaRot"
+        )
 
     # vLLM runtime flags — same logic as sweep_methods.py
     if getattr(h, "vllm_gpu_memory_utilization", None) is not None:
@@ -254,6 +261,8 @@ def cli(client_config: str, reinstall: bool, timeout_s: int) -> None:
     if getattr(h, "vllm_quantization", None) is not None:
         set_values["vllm.quantization"] = str(h.vllm_quantization)
     set_values["vllm.enableExpertParallel"] = bool(getattr(h, "vllm_enable_expert_parallel", False))
+    if getattr(h, "vllm_max_model_len", None) is not None:
+        set_values["vllm.maxModelLen"] = int(h.vllm_max_model_len)
     if getattr(h, "vllm_compilation_config", None) is not None:
         try:
             cc = json.loads(h.vllm_compilation_config)

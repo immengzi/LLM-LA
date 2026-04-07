@@ -117,6 +117,19 @@ def main():
             f"stream={bool(cfg.aibrix.stream)}"
         )
 
+    # NEW: LiteLLM backend summary
+    if backend == "litellm":
+        print(
+            f"[client] litellm: base_url={cfg.litellm.base_url} "
+            f"chat_path={cfg.litellm.chat_path} "
+            f"model={cfg.litellm.model!r} "
+            f"stream={bool(cfg.litellm.stream)}"
+        )
+        print(
+            "[client] NOTE: backend=litellm routes through LiteLLM proxy "
+            "(production auth/spend validation). Use backend=router for benchmarking."
+        )
+
     # Initialize experiment directory + logger
     exp_dir, exp_logger = init_experiment(
         cfg,
@@ -201,6 +214,7 @@ def main():
             transport=getattr(cfg, "transport", None),
             backend=backend,
             aibrix=getattr(cfg, "aibrix", None),
+            litellm=getattr(cfg, "litellm", None),  # NEW: pass LiteLLM config
         )
     finally:
         t_end_load = time.time()
@@ -226,7 +240,8 @@ def main():
     dt_wall = time.time() - t_start_wall
     dt_load = (t_end_load - t_start_load) if t_end_load is not None else None
 
-    # Persist a small, machine-readable run summary for reproducibility
+    # Persist a small, machine-readable run summary for reproducibility.
+    # NEW: litellm fields added alongside existing aibrix fields.
     run_summary = {
         "total_requests": int(total),
         "backend": backend,
@@ -237,11 +252,17 @@ def main():
         "results_zmq": results_zmq,
         "topic": str(topic),
         "run_id": run_id,
+        # aibrix fields
         "aibrix_base_url": getattr(getattr(cfg, "aibrix", None), "base_url", None),
         "aibrix_chat_path": getattr(getattr(cfg, "aibrix", None), "chat_path", None),
         "aibrix_model": getattr(getattr(cfg, "aibrix", None), "model", None),
         "aibrix_routing_strategy": getattr(getattr(cfg, "aibrix", None), "routing_strategy", None),
         "aibrix_stream": getattr(getattr(cfg, "aibrix", None), "stream", None),
+        # litellm fields
+        "litellm_base_url": getattr(getattr(cfg, "litellm", None), "base_url", None),
+        "litellm_chat_path": getattr(getattr(cfg, "litellm", None), "chat_path", None),
+        "litellm_model": getattr(getattr(cfg, "litellm", None), "model", None),
+        "litellm_stream": getattr(getattr(cfg, "litellm", None), "stream", None),
     }
     try:
         with (Path(exp_dir) / "run_summary.json").open("w", encoding="utf-8") as f:

@@ -113,7 +113,6 @@ kubectl describe pod <pod-name> -n <namespace> | sed -n '/Events:/,$p'
 
 kubectl label node <node-name> avoid=vllm-qwen
 
-
 # ------------------------------------------------------------
 # 8) REMOVE TAINT ONLY VLLM PODS
 # ------------------------------------------------------------

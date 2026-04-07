@@ -24,9 +24,22 @@ images:
   router: kv-router:latest
   sidecar: kv-sidecar:latest
   vllm: quay.io/ascend/vllm-ascend:glm5-openeuler
+litellm:
+  databaseUrl: ""
+  enabled: false
+  image: ghcr.io/berriai/litellm:main-stable
+  masterKey: sk-litellm-master
+  nodePort: 30400
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
 modelVolume:
   create: false
-  modelSubPath: qwen3-8b
+  modelSubPath: GLM-5-w4a8-mtp-QuaRot
   nfsPath: /saeid/models/
   nfsServer: nfs.local
 pin:
@@ -41,17 +54,18 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 4
+  vllm: 2
 router:
   kvAware: true
   lenAware: true
   lenPolicy: short_first
   mode: pull
-tensorParallelSize: 1
+tensorParallelSize: 8
 vllm:
   compilationConfig:
     cudagraphMode: FULL_DECODE_ONLY
-  enableExpertParallel: false
-  gpuMemoryUtilization: 0.95
-  maxModelLen: 40960
+  enableExpertParallel: true
+  gpuMemoryUtilization: "0.95"
+  maxModelLen: 80000
+  quantization: ascend
   trustRemoteCode: false

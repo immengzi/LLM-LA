@@ -168,6 +168,34 @@ class AIBrixConfig:
 
 
 # =========================
+# NEW: LiteLLM backend
+# =========================
+
+@dataclass
+class LiteLLMConfig:
+    """
+    Runtime config for LiteLLM proxy requests.
+
+    LiteLLM proxy speaks OpenAI /v1/chat/completions format, identical to
+    AIBrix. This config is used when backend="litellm" in the client YAML.
+
+    The LiteLLM proxy sits in front of the router and handles:
+      - Virtual key auth (Bearer sk-...)
+      - Per-key/team spend tracking
+      - Rate limiting
+
+    For benchmarking, always use backend="router" to bypass LiteLLM entirely.
+    Use backend="litellm" only for production/demo validation runs.
+    """
+    base_url: str = "http://127.0.0.1:30400"   # NodePort exposed by litellm-proxy Service
+    chat_path: str = "/v1/chat/completions"
+    model: str = "served-model"                  # must match model_name in litellm_config.yaml
+    api_key: str = "sk-litellm-master"           # virtual key or master key
+    timeout_s: float = 1000.0
+    stream: bool = False
+
+
+# =========================
 # Helm knobs for sweeps
 # =========================
 
@@ -226,11 +254,6 @@ class HelmConfig:
     # --------------------------------------------------------------------
 
     # ---- Service implementation: "python" (default) or "go" (operator-go images) ----
-    # When "go", sweep_methods overrides Helm image values to use Go binaries:
-    #   images.router  -> kv-router-go:latest
-    #   images.sidecar -> kv-sidecar-go:latest
-    #   images.cpuHash -> kv-prefixhash-go:latest
-    # All endpoints, env vars, and behavior remain identical.
     service_impl: str = "python"  # python | go
     # --------------------------------------------------------------------
 
@@ -240,12 +263,10 @@ class HelmConfig:
     # --------------------------------------------------------------------
 
     # ---- vLLM runtime flags (maps to Helm chart values.vllm.*) ----
-    # Defaults are conservative — safe for dense, non-quantized models (e.g. Qwen3).
-    # MoE models (e.g. GLM-5): set vllm_enable_expert_parallel=true in client config.
-    # Quantized models (e.g. GLM-5 W4A8): set vllm_quantization="ascend" in client config.
     vllm_gpu_memory_utilization: Optional[float] = 0.95
-    vllm_quantization: Optional[str] = None          # null = no quantization (override for W4A8 models)
-    vllm_enable_expert_parallel: bool = False         # false = disabled (override for MoE models)
+    vllm_quantization: Optional[str] = None
+    vllm_enable_expert_parallel: bool = False
+    vllm_max_model_len: Optional[int] = None
     vllm_compilation_config: Optional[str] = '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     vllm_trust_remote_code: bool = False
     vllm_max_num_batched_tokens: Optional[int] = None
@@ -266,9 +287,11 @@ class ClientConfig:
     prompt_source: str = "file"
 
     # Chooses how requests are executed and how methods are interpreted in sweeps:
-    # - router  -> methods are router modes (pull, push-rr, ...)
-    # - aibrix -> methods are AIBrix routing strategies (least-request, prefix-cache, ...)
-    backend: str = "router"  # router | aibrix
+    # - router   -> methods are router modes (pull, push-rr, ...)
+    # - aibrix   -> methods are AIBrix routing strategies (least-request, prefix-cache, ...)
+    # - litellm  -> routes through LiteLLM proxy (production auth/spend validation only,
+    #               NOT for benchmarking — use router directly for clean measurements)
+    backend: str = "router"  # router | aibrix | litellm
 
     file_prompts: FilePromptsConfig = field(default_factory=FilePromptsConfig)
     hf_lmsys: HFLmsysConfig = field(default_factory=HFLmsysConfig)
@@ -287,6 +310,9 @@ class ClientConfig:
 
     # AIBrix runtime config
     aibrix: AIBrixConfig = field(default_factory=AIBrixConfig)
+
+    # LiteLLM runtime config
+    litellm: LiteLLMConfig = field(default_factory=LiteLLMConfig)
 
     # Helm knobs
     helm: HelmConfig = field(default_factory=HelmConfig)
@@ -335,8 +361,8 @@ def load_config(path: str) -> ClientConfig:
     prompt_source = raw.get("prompt_source", ClientConfig.prompt_source)
 
     backend = str(raw.get("backend", ClientConfig.backend) or ClientConfig.backend).strip().lower()
-    if backend not in ("router", "aibrix"):
-        raise ValueError(f"Invalid backend '{backend}'. Expected 'router' or 'aibrix'.")
+    if backend not in ("router", "aibrix", "litellm"):
+        raise ValueError(f"Invalid backend '{backend}'. Expected 'router', 'aibrix', or 'litellm'.")
 
     file_prompts = _merge_dataclass(FilePromptsConfig, raw.get("file_prompts", {}))
     hf_lmsys = _merge_dataclass(HFLmsysConfig, raw.get("hf_lmsys", {}))
@@ -347,6 +373,7 @@ def load_config(path: str) -> ClientConfig:
     # backend-specific config
     transport = _merge_dataclass(TransportConfig, raw.get("transport", {}))
     aibrix = _merge_dataclass(AIBrixConfig, raw.get("aibrix", {}))
+    litellm = _merge_dataclass(LiteLLMConfig, raw.get("litellm", {}))
 
     # helm config
     helm = _merge_dataclass(HelmConfig, raw.get("helm", {}))
@@ -413,17 +440,29 @@ def load_config(path: str) -> ClientConfig:
             getattr(aibrix, "forward_extra_generation_fields", True)
         )
 
-        # The chart exposes labels for the vLLM service port, not the gateway port.
-        # In the current chart, vLLM serves on 8200.
         chart_vllm_port = 8200
 
-        # Align Helm labels with runtime config unless user explicitly overrides in helm block.
         if "helm" not in raw or "aibrix_enabled" not in raw.get("helm", {}):
             helm.aibrix_enabled = True
         if "helm" not in raw or "aibrix_model_name" not in raw.get("helm", {}):
             helm.aibrix_model_name = str(aibrix.model)
         if "helm" not in raw or "aibrix_port" not in raw.get("helm", {}):
             helm.aibrix_port = chart_vllm_port
+
+    # -----------------------------
+    # Normalize LiteLLM config
+    # -----------------------------
+    if backend == "litellm":
+        litellm.base_url = str(litellm.base_url or LiteLLMConfig.base_url).rstrip("/")
+        litellm.chat_path = str(litellm.chat_path or LiteLLMConfig.chat_path)
+        if not litellm.chat_path.startswith("/"):
+            litellm.chat_path = "/" + litellm.chat_path
+
+        try:
+            litellm.timeout_s = float(litellm.timeout_s)
+        except Exception:
+            litellm.timeout_s = 1000.0
+        litellm.timeout_s = max(1.0, litellm.timeout_s)
 
     return ClientConfig(
         router_url=router_url,
@@ -439,5 +478,6 @@ def load_config(path: str) -> ClientConfig:
         metrics=metrics,
         transport=transport,
         aibrix=aibrix,
+        litellm=litellm,
         helm=helm,
     )
