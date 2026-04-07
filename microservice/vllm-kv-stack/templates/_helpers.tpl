@@ -72,3 +72,46 @@ Examples:
 {{- end -}}
 {{- $devices -}}
 {{- end -}}
+
+{{/*
+Ascend NPU driver host volumes — shared by all pods that need NPU access.
+Centralised here to avoid repeating 5 hostPath entries in every Deployment.
+*/}}
+{{- define "vllmkv.ascendDriverVolumes" -}}
+- name: dcmi-volume
+  hostPath:
+    path: /usr/local/dcmi
+    type: Directory
+- name: npu-smi-volume
+  hostPath:
+    path: /usr/local/bin/npu-smi
+    type: File
+- name: ascend-driver-lib64-volume
+  hostPath:
+    path: /usr/local/Ascend/driver/lib64/
+    type: Directory
+- name: version-info-volume
+  hostPath:
+    path: /usr/local/Ascend/driver/version.info
+    type: File
+- name: ascend-install-info-volume
+  hostPath:
+    path: /etc/ascend_install.info
+    type: File
+{{- end -}}
+
+{{/*
+Ascend NPU driver volumeMounts — pairs with ascendDriverVolumes above.
+*/}}
+{{- define "vllmkv.ascendDriverMounts" -}}
+- name: dcmi-volume
+  mountPath: /usr/local/dcmi
+- name: npu-smi-volume
+  mountPath: /usr/local/bin/npu-smi
+- name: ascend-driver-lib64-volume
+  mountPath: /usr/local/Ascend/driver/lib64/
+- name: version-info-volume
+  mountPath: /usr/local/Ascend/driver/version.info
+- name: ascend-install-info-volume
+  mountPath: /etc/ascend_install.info
+{{- end -}}

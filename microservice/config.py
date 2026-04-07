@@ -317,6 +317,7 @@ class HelmConfig:
     aibrix_port: int = 8200
     # --------------------------------------------------------------------
 
+<<<<<<< HEAD
     # ---- SLO-aware routing knobs (maps to Helm chart values.router.slo*) ----
     router_slo_aware: bool = False
     router_slo_with_kv: bool = True
@@ -331,6 +332,16 @@ class HelmConfig:
     router_queue_wait_model: str = "none"
     router_chunked_prefill_aware: bool = False
     router_max_num_batched_tokens: int = 0
+=======
+    # ---- Mooncake KV cache transfer knobs (maps to Helm chart values.mooncake.*) ----
+    mooncake_enabled: bool = False
+    mooncake_host_network: bool = True
+    mooncake_master_server_address: Optional[str] = None
+    mooncake_master_port: Optional[int] = None
+    mooncake_global_segment_size: Optional[int] = None
+    mooncake_ascend_buffer_pool: Optional[str] = None
+    mooncake_lookup_rpc_port: Optional[str] = None
+>>>>>>> 557a338 (add mooncake related config to vllm-kv-stack, config.py and helm chart template)
     # --------------------------------------------------------------------
 
     # ---- Deploy mode: "helm" (direct Helm CLI) or "operator" (VllmKvStack CR) ----
@@ -357,6 +368,7 @@ class HelmConfig:
     vllm_max_num_batched_tokens: Optional[int] = None
     vllm_seed: Optional[int] = None
     vllm_additional_config: Optional[str] = None
+    vllm_node_selector: Optional[str] = None           # JSON string, e.g. '{"kubernetes.io/hostname": "node4"}'
     vllm_speculative_config: Optional[str] = None
     # --------------------------------------------------------------------
 

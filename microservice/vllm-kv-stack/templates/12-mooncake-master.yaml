@@ -1,0 +1,165 @@
+{{- if and (eq (lower .Values.backend) "router") .Values.mooncake.enabled }}
+{{- if .Values.deploy.mooncakeMaster }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mooncake-master
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: mooncake-master
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mooncake-master
+  template:
+    metadata:
+      labels:
+        app: mooncake-master
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      restartPolicy: Always
+
+      {{- if .Values.pin.enabled }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - {{ .Values.pin.nodeName | quote }}
+      tolerations:
+{{- toYaml .Values.pin.tolerations | nindent 8 }}
+      {{- end }}
+
+      containers:
+        - name: mooncake-master
+          image: {{ include "vllmkv.image" (list . .Values.images.mooncakeMaster) }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
+
+              local_ip="${NODE_IP}"
+              nic_name=$(python3 -c "
+              import os, socket, struct, fcntl
+              local_ip = '${local_ip}'
+              SIOCGIFADDR = 0x8915
+              for iface in os.listdir('/sys/class/net/'):
+                  if iface == 'lo': continue
+                  try:
+                      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                      ifreq = struct.pack('16sH14s', iface.encode(), socket.AF_INET, b'')
+                      res = fcntl.ioctl(sock.fileno(), SIOCGIFADDR, ifreq)
+                      ip = socket.inet_ntoa(res[20:24])
+                      sock.close()
+                      if ip == local_ip:
+                          print(iface)
+                          break
+                  except: pass
+              ")
+              echo "[mooncake-master] nic=${nic_name} ip=${local_ip}"
+
+              export HCCL_IF_IP=${local_ip}
+              export GLOO_SOCKET_IFNAME=${nic_name}
+              export TP_SOCKET_IFNAME=${nic_name}
+              export HCCL_SOCKET_IFNAME=${nic_name}
+
+              mooncake_master \
+                --port {{ .Values.mooncake.masterPort }} \
+                --eviction_high_watermark_ratio {{ .Values.mooncake.evictionHighWatermark }} \
+                --eviction_ratio {{ .Values.mooncake.evictionRatio }}
+
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: HCCL_OP_EXPANSION_MODE
+              value: "AIV"
+            - name: OMP_PROC_BIND
+              value: "false"
+            - name: OMP_NUM_THREADS
+              value: "16"
+            - name: VLLM_USE_V1
+              value: "1"
+            - name: HCCL_BUFFSIZE
+              value: "200"
+            - name: PYTORCH_NPU_ALLOC_CONF
+              value: "expandable_segments:True"
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: MOONCAKE_CONFIG_PATH
+              value: "/etc/mooncake/mooncake.json"
+            - name: ASCEND_BUFFER_POOL
+              value: {{ .Values.mooncake.ascendBufferPool | quote }}
+            - name: LD_LIBRARY_PATH
+              value: "/usr/local/lib"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: HF_HUB_DISABLE_TELEMETRY
+              value: "1"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.mooncake.masterPort }}
+              protocol: TCP
+
+          volumeMounts:
+            - name: model
+              mountPath: /workspace/models
+              readOnly: true
+            - name: mooncake-config
+              mountPath: /etc/mooncake/mooncake.json
+              subPath: mooncake.json
+              readOnly: true
+            - name: mooncake-logs
+              mountPath: /workspace/mooncake_logs
+            {{- include "vllmkv.ascendDriverMounts" . | nindent 12 }}
+
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.mooncake.masterPort }}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.mooncake.masterPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 5
+
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+
+      volumes:
+        - name: model
+          persistentVolumeClaim:
+            claimName: models-nfs-pvc
+        - name: mooncake-config
+          configMap:
+            name: mooncake-config
+        - name: mooncake-logs
+          hostPath:
+            path: /tmp/mooncake_logs
+            type: DirectoryOrCreate
+        {{- include "vllmkv.ascendDriverVolumes" . | nindent 8 }}
+{{- end }}
+{{- end }}

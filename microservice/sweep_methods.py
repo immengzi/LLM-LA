@@ -201,6 +201,9 @@ def _coerce_set_value(v):
         return "true" if v else "false"
     if v is None:
         return None
+    if isinstance(v, dict):
+        # Dicts should be flattened before calling --set, this should not happen
+        return str(v)
     return str(v)
 
 
@@ -257,10 +260,14 @@ def _helm_install_or_upgrade(
         cmd.extend(["-f", str(values_file)])
 
     for k in sorted(set_values.keys()):
-        vs = _coerce_set_value(set_values[k])
+        vs = set_values[k]
         if vs is None:
             continue
-        cmd.extend(["--set", f"{k}={vs}"])
+        # Use --set-json for dict/list, --set for primitives
+        if isinstance(vs, (dict, list)):
+            cmd.extend(["--set-json", f"{k}={json.dumps(vs)}"])
+        else:
+            cmd.extend(["--set", f"{k}={_coerce_set_value(vs)}"])
 
     _helm(cmd, check=True, capture=False)
 
@@ -669,8 +676,34 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             set_values["vllm.seed"] = int(h.vllm_seed)
         if getattr(h, "vllm_additional_config", None) is not None:
             set_values["vllm.additionalConfig"] = str(h.vllm_additional_config)
+        if getattr(h, "vllm_node_selector", None) is not None:
+            try:
+                ns = json.loads(h.vllm_node_selector)
+                if isinstance(ns, dict):
+                    set_values["vllm.nodeSelector"] = ns
+            except Exception:
+                pass
         if getattr(h, "vllm_speculative_config", None) is not None:
             set_values["vllm.speculativeConfig"] = str(h.vllm_speculative_config)
+
+        # ---- Mooncake KV cache transfer ----
+        if getattr(h, "mooncake_enabled", False):
+            set_values["mooncake.enabled"] = True
+            set_values["vllm.hostNetwork"] = bool(getattr(h, "mooncake_host_network", True))
+            set_values["deploy.mooncakeMaster"] = True
+            if getattr(h, "mooncake_master_server_address", None) is not None:
+                set_values["mooncake.masterServerAddress"] = str(h.mooncake_master_server_address)
+            if getattr(h, "mooncake_master_port", None) is not None:
+                set_values["mooncake.masterPort"] = int(h.mooncake_master_port)
+            if getattr(h, "mooncake_global_segment_size", None) is not None:
+                set_values["mooncake.globalSegmentSize"] = int(h.mooncake_global_segment_size)
+            if getattr(h, "mooncake_ascend_buffer_pool", None) is not None:
+                set_values["mooncake.ascendBufferPool"] = str(h.mooncake_ascend_buffer_pool)
+            if getattr(h, "mooncake_lookup_rpc_port", None) is not None:
+                set_values["mooncake.lookupRpcPort"] = str(h.mooncake_lookup_rpc_port)
+        else:
+            set_values["mooncake.enabled"] = False
+        # ------------------------------------
 
         click.echo(f"[sweep] backend={backend}  deploy_mode={deploy_mode}  skip_vllm={skip_vllm}")
         click.echo("[sweep] set values:")
@@ -808,6 +841,7 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 "vllm_max_num_batched_tokens": getattr(h, "vllm_max_num_batched_tokens", None),
                 "vllm_seed": getattr(h, "vllm_seed", None),
                 "vllm_additional_config": getattr(h, "vllm_additional_config", None),
+                "vllm_node_selector": getattr(h, "vllm_node_selector", None),
                 "vllm_speculative_config": getattr(h, "vllm_speculative_config", None),
                 # litellm knobs
                 "litellm_enabled": backend == "litellm",
@@ -825,6 +859,13 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 "router_latency_predictor": str(getattr(h, "router_latency_predictor", "linear")),
                 # SLO client config
                 "slo_enabled": bool(getattr(getattr(cfg, "slo", None), "enabled", False)),
+                "mooncake_enabled": bool(getattr(h, "mooncake_enabled", False)),
+                "mooncake_host_network": bool(getattr(h, "mooncake_host_network", True)),
+                "mooncake_master_server_address": getattr(h, "mooncake_master_server_address", None),
+                "mooncake_master_port": getattr(h, "mooncake_master_port", None),
+                "mooncake_global_segment_size": getattr(h, "mooncake_global_segment_size", None),
+                "mooncake_ascend_buffer_pool": getattr(h, "mooncake_ascend_buffer_pool", None),
+                "mooncake_lookup_rpc_port": getattr(h, "mooncake_lookup_rpc_port", None),
             },
         }
         (exp_dir / "sweep_meta.json").write_text(
