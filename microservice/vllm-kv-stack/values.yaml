@@ -93,9 +93,9 @@ aibrix:
 vllm:
   # Memory / performance
   gpuMemoryUtilization: null       # null = use vLLM default
-  quantization: null           # null = no quantization
-  enableExpertParallel: false       # false = disable
-  maxModelLen: null               # null = use model's default; set lower to save KV cache memory
+  quantization: null               # null = no quantization
+  enableExpertParallel: false      # false = disable
+  maxModelLen: null                # null = use model's default; set lower to save KV cache memory
   compilationConfig:
     cudagraphMode: "FULL_DECODE_ONLY"   # null = disable compilation config entirely
 
@@ -113,3 +113,51 @@ deploy:
   router: true    # set false in vllm-only deploys (deploy_vllm.py)
   redis: true     # set false in vllm-only deploys (deploy_vllm.py)
   cpuHash: true   # set false in vllm-only deploys (deploy_vllm.py)
+
+# -----------------------------------------------------------------------
+# LiteLLM proxy — production auth/spend gateway in front of the router.
+#
+# When enabled, deploys a LiteLLM proxy pod that:
+#   - Accepts OpenAI-compatible requests from any external client
+#   - Enforces virtual key auth, per-key/team spend limits, rate limits
+#   - Forwards to router-service:8080/v1/chat/completions (the new shim)
+#   - Optionally persists spend data to a Postgres DB
+#
+# Disabled by default — zero impact on benchmarking or existing paths.
+# mu-load-test continues to hit the router directly for all experiments.
+#
+# To enable for production/demo:
+#   helm upgrade vllm ./vllm-kv-stack \
+#     --set litellm.enabled=true \
+#     --set litellm.masterKey=sk-your-secret \
+#     --set litellm.databaseUrl=postgresql://user:pass@host:5432/litellm
+# -----------------------------------------------------------------------
+litellm:
+  enabled: false
+
+  # LiteLLM proxy image — pulled from public ghcr.io or your private registry.
+  # The global.imageRegistry rewrite applies here too if set.
+  image: ghcr.io/berriai/litellm:main-stable
+
+  # Admin master key — used to generate virtual keys and access the admin UI.
+  # Override this in production; never commit real keys here.
+  masterKey: "sk-litellm-master"
+
+  # NodePort for external cluster access (e.g. from a laptop or CI machine).
+  # Access via http://<any-node-ip>:30400
+  nodePort: 30400
+
+  # Optional Postgres URL for spend tracking persistence.
+  # Leave empty ("") to run in stateless mode — virtual keys still work but
+  # spend history is lost on pod restart.
+  # Example: "postgresql://litellm:password@postgres-host:5432/litellm"
+  databaseUrl: ""
+
+  # Resource requests/limits for the LiteLLM proxy container.
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2000m"
+      memory: "2Gi"

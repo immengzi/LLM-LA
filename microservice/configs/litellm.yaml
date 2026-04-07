@@ -1,9 +1,11 @@
-# router-tp8-glm.yaml
-# Router-based experiment config with Tensor Parallelism = 8 for GLM-5-w4a8-mtp-QuaRot
+# litellm.yaml
+# LiteLLM proxy experiment config — Qwen3-8B, production auth/spend validation
+# NOTE: use backend=router for benchmarking. This config is for validating
+# the LiteLLM production path (virtual keys, spend tracking, auth).
 
-backend: "router"
+backend: "litellm"
 
-router_url: "http://7.216.57.215:30080"
+router_url: "http://7.216.57.215:30080"   # kept for warmup fallback; not used in litellm path
 total_requests: 128
 prompt_source: "hf-lmsys"
 
@@ -14,8 +16,7 @@ file_prompts:
 hf_lmsys:
   dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
   split: "train"
-  # tokenizer_name: "/mnt/nvme1/saeid/models/qwen3-8b"
-  tokenizer_name: "/mnt/nvme1/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  tokenizer_name: "/mnt/nvme1/saeid/models/qwen3-8b"
   streaming: false
   min_input_tokens: 256
   max_input_tokens: 10000000
@@ -41,7 +42,6 @@ load_pattern:
 
 generation:
   max_tokens: 5
-  # max_tokens: 8192
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null
@@ -57,22 +57,33 @@ metrics:
   scrape_interval_s: 1.0
   window_s: 2.0
   include_debug_metrics: false
-  model_name: "served-model"
+  model_name: null
   max_instances: null
 
+# transport is unused for backend=litellm (no ZMQ, no /submit)
+# kept here so sweep_methods.py doesn't error if it reads the field
 transport:
-  mode: "async_pubsub"
+  mode: "sync"
   submit_path: "/submit"
-  results_zmq: "tcp://7.216.57.215:30559"
+  results_zmq: ""
   topic: "results"
   run_id: null
   idle_timeout_s: 1000.0
   idle_zero_running_s: 10.0
 
+# LiteLLM proxy connection — points at the NodePort exposed by 70-litellm.yaml
+litellm:
+  base_url: "http://7.216.57.215:30400"   # litellm.nodePort from values.yaml
+  chat_path: "/v1/chat/completions"
+  model: "served-model"                   # must match model_name in litellm_config.yaml
+  api_key: "sk-litellm-master"            # master key or a generated virtual key
+  timeout_s: 1000.0
+  stream: false
+
 helm:
-  replicas: 2
+  replicas: 8
   batch_size: 8
-  tensor_parallel_size: 8
+  tensor_parallel_size: 1
 
   autoscaling_enabled: false
   autoscaling_min: 16
@@ -87,20 +98,15 @@ helm:
 
   # Model config
   model_name: "served-model"
-  nfs_path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  nfs_path: "/saeid/models/qwen3-8b"
+  vllm_quantization: null
+  vllm_enable_expert_parallel: false
+  vllm_gpu_memory_utilization: null
 
+  # LiteLLM deployment toggle — must be true for this config to work
+  # deploy via: helm upgrade vllm ./vllm-kv-stack --set litellm.enabled=true ...
+
+  # Disable AIBrix exposure
   aibrix_enabled: false
   aibrix_model_name: "served-model"
   aibrix_port: 8200
-
-  # vLLM runtime flags — required for GLM-5 W4A8 MoE
-  vllm_gpu_memory_utilization: 0.95
-  vllm_quantization: "ascend"
-  vllm_enable_expert_parallel: true
-  vllm_compilation_config: '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-  vllm_trust_remote_code: false
-  vllm_max_model_len: 80000    # model default 202752 needs 20.74 GiB KV, only 8.67 GiB available
-  vllm_max_num_batched_tokens: null
-  vllm_seed: null
-  vllm_additional_config: null
-  vllm_speculative_config: null

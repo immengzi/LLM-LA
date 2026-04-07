@@ -232,7 +232,7 @@ spec:
             - name: model
               mountPath: /model
               readOnly: true
-              subPath: qwen3-8b
+              subPath: GLM-5-w4a8-mtp-QuaRot
           resources:
             requests:
               cpu: "1000m"
@@ -411,7 +411,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 4
+  replicas: 2
   selector:
     matchLabels:
       app: vllm-qwen
@@ -422,6 +422,14 @@ spec:
     spec:
       restartPolicy: Always
       shareProcessNamespace: true
+
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
 
       affinity:
         nodeAffinity:
@@ -454,14 +462,16 @@ spec:
                 --tokenizer /model \
                 --port 8200 \
                 --served-model-name served-model \
-                --tensor-parallel-size 1 \
+                --tensor-parallel-size 8 \
                 --dtype auto \
                 --kv-cache-dtype auto \
                 --max-num-seqs 8 \
                 --prefix-caching-hash-algo sha256_cbor \
                 --gpu-memory-utilization 0.95 \
+                --quantization ascend \
+                --enable-expert-parallel \
                 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-                --max-model-len 40960 \
+                --max-model-len 80000 \
                 --host 0.0.0.0 \
                 --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
                 &
@@ -534,7 +544,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: ASCEND_RT_VISIBLE_DEVICES
-              value: "0"
+              value: "0,1,2,3,4,5,6,7"
           ports:
             - containerPort: 8200
               name: http
@@ -549,7 +559,7 @@ spec:
             - name: model
               mountPath: /model
               readOnly: true
-              subPath: qwen3-8b
+              subPath: GLM-5-w4a8-mtp-QuaRot
             - name: dshm
               mountPath: /dev/shm
             - name: dcmi-volume
@@ -564,6 +574,10 @@ spec:
               mountPath: /etc/ascend_install.info
             - name: cache-volume
               mountPath: /root/.cache
+            - name: hisi-hdc-volume
+              mountPath: /dev/hisi_hdc
+            - name: devmm-svm-volume
+              mountPath: /dev/devmm_svm
 
           startupProbe:
             httpGet:
@@ -594,10 +608,10 @@ spec:
 
           resources:
             requests:
-              huawei.com/Ascend910: 1
+              huawei.com/Ascend910: 8
               ephemeral-storage: "2Gi"
             limits:
-              huawei.com/Ascend910: 1
+              huawei.com/Ascend910: 8
               ephemeral-storage: "4Gi"
         - name: kv-sidecar
           image: reg.local:32000/kv-sidecar:latest
@@ -671,7 +685,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 16Gi
+            sizeLimit: 128Gi
         - name: dcmi-volume
           hostPath:
             path: /usr/local/dcmi
@@ -696,6 +710,14 @@ spec:
           hostPath:
             path: /root/.cache
             type: DirectoryOrCreate
+        - name: hisi-hdc-volume
+          hostPath:
+            path: /dev/hisi_hdc
+            type: CharDevice
+        - name: devmm-svm-volume
+          hostPath:
+            path: /dev/devmm_svm
+            type: CharDevice
 ---
 # Source: vllm-kv-stack/templates/50-podmonitors.yaml
 apiVersion: monitoring.coreos.com/v1
