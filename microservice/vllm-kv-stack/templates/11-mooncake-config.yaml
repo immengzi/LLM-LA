@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mooncake-config
-  namespace: {{ .Release.Namespace }}
+  namespace: vllm
 data:
   mooncake.json: |
     {
