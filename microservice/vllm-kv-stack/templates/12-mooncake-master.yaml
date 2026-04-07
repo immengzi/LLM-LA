@@ -4,7 +4,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mooncake-master
-  namespace: {{ .Release.Namespace }}
+  namespace: vllm
   labels:
     app: mooncake-master
 spec:

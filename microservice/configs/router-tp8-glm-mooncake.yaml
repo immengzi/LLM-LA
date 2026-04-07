@@ -102,3 +102,14 @@ helm:
   mooncake_global_segment_size: 140000000000
   mooncake_ascend_buffer_pool: "4:8"
   mooncake_lookup_rpc_port: "10010"
+
+  vllm_gpu_memory_utilization: 0.95
+  vllm_quantization: "ascend"
+  vllm_enable_expert_parallel: true
+  vllm_compilation_config: '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  vllm_trust_remote_code: false
+  vllm_max_model_len: 80000    # model default 202752 needs 20.74 GiB KV, only 8.67 GiB available
+  vllm_max_num_batched_tokens: null
+  vllm_seed: null
+  vllm_additional_config: null
+  vllm_speculative_config: null
