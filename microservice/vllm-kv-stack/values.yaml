@@ -137,7 +137,8 @@ litellm:
 
   # LiteLLM proxy image — pulled from public ghcr.io or your private registry.
   # The global.imageRegistry rewrite applies here too if set.
-  image: ghcr.io/berriai/litellm:main-stable
+  # image: ghcr.io/berriai/litellm:main-stable
+  image: litellm:main-stable
 
   # Admin master key — used to generate virtual keys and access the admin UI.
   # Override this in production; never commit real keys here.

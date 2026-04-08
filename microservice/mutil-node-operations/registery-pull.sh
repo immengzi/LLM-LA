@@ -23,3 +23,12 @@ docker pull ${REGISTRY}/kv-sidecar:latest
 
 # vllm-cpu-hash
 docker pull ${REGISTRY}/vllm-cpu-hash:latest
+
+
+# containerd part
+ctr -n k8s.io images pull --plain-http ${REGISTRY}/redis:7-alpine
+ctr -n k8s.io images pull --plain-http ${REGISTRY}/ascend/vllm-ascend:v0.11.0rc0
+ctr -n k8s.io images pull --plain-http ${REGISTRY}/ascend/quay.io/ascend/vllm-ascend:glm5-openeuler
+ctr -n k8s.io images pull --plain-http ${REGISTRY}/kv-router:latest
+ctr -n k8s.io images pull --plain-http ${REGISTRY}/kv-sidecar:latest
+ctr -n k8s.io images pull --plain-http ${REGISTRY}/vllm-cpu-hash:latest

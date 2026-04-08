@@ -37,11 +37,22 @@ data:
     model_list:
       - model_name: served-model
         litellm_params:
-          # Routes to the router's new /v1/chat/completions shim.
-          # router-service is the ClusterIP service defined in 31-router.yaml.
+          # Routes to the router's /v1/chat/completions shim.
+          # api_base must end at /v1 — LiteLLM appends /chat/completions
+          # automatically for openai/ provider, giving the full path:
+          #   http://router-service:8080/v1/chat/completions
           model: openai/served-model
-          api_base: http://router-service:8080
+          api_base: http://router-service:8080/v1
           api_key: dummy   # required by litellm but not checked by our router
+
+    router_settings:
+      # Disable cooldown — our router is a local always-on service, not a
+      # cloud API with rate limits. Cooldown causes cascading 429s under load
+      # when the backend has transient errors (e.g. during infrastructure fixes).
+      cooldown_time: 0          # no cooldown period after failures
+      num_retries: 0            # don't retry at LiteLLM level; client handles retries
+      allowed_fails: 1000       # very high threshold before cooling down a deployment
+      retry_after: 0            # no retry delay
 
     general_settings:
       master_key: {{ .Values.litellm.masterKey | quote }}
@@ -52,7 +63,9 @@ data:
       # Allow all origins for the admin UI (tighten in production if needed)
       allow_requests_on_db_unavailable: true
 
-    # Expose litellm's own prometheus metrics at /metrics
+      # Enable Prometheus metrics endpoint at /metrics/
+      enable_prometheus_system_metrics: true
+
     litellm_settings:
       success_callback: []
       failure_callback: []
@@ -120,11 +133,13 @@ spec:
               subPath: litellm_config.yaml
 
           # Liveness: proxy is up
+          # initialDelaySeconds=60 — LiteLLM takes ~17s to initialize;
+          # 60s gives ample margin to avoid premature kill on cold start.
           livenessProbe:
             httpGet:
               path: /health/liveliness
               port: 4000
-            initialDelaySeconds: 20
+            initialDelaySeconds: 60
             periodSeconds: 15
             failureThreshold: 4
 
@@ -133,7 +148,7 @@ spec:
             httpGet:
               path: /health/readiness
               port: 4000
-            initialDelaySeconds: 20
+            initialDelaySeconds: 60
             periodSeconds: 10
             failureThreshold: 6
 

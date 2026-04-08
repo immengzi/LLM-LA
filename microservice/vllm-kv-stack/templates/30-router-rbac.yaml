@@ -1,4 +1,4 @@
-{{- if eq (lower .Values.backend) "router" }}
+{{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:

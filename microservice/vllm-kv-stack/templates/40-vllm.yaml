@@ -101,7 +101,7 @@ spec:
                 --speculative-config '{"num_speculative_tokens": {{ .Values.vllm.speculativeConfig.numSpeculativeTokens }}, "method": "{{ .Values.vllm.speculativeConfig.method }}"}' \
                 {{- end }}
                 --host 0.0.0.0 \
-                {{- if eq (lower .Values.backend) "router" }}
+                {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") }}
                 --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
                 {{- end }}
                 &
@@ -180,7 +180,7 @@ spec:
             - containerPort: 8200
               name: http
               protocol: TCP
-            {{- if eq (lower .Values.backend) "router" }}
+            {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") }}
             - containerPort: 5557
               name: kvpub
               protocol: TCP
@@ -247,7 +247,7 @@ spec:
               huawei.com/Ascend: {{ .Values.tensorParallelSize }}
               ephemeral-storage: "4Gi"
 
-        {{- if eq (lower .Values.backend) "router" }}
+        {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") }}
         - name: kv-sidecar
           image: {{ include "vllmkv.image" (list . .Values.images.sidecar) }}
           imagePullPolicy: IfNotPresent
