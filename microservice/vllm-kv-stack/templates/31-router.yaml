@@ -1,4 +1,4 @@
-{{- if eq (lower .Values.backend) "router" }}
+{{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") }}
 {{- if .Values.deploy.router }}
 apiVersion: apps/v1
 kind: Deployment
@@ -34,7 +34,8 @@ spec:
       containers:
         - name: router
           image: {{ include "vllmkv.image" (list . .Values.images.router) }}
-          imagePullPolicy: IfNotPresent
+          # imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           env:
             - name: HOST
               value: "0.0.0.0"

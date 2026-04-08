@@ -663,9 +663,16 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                     values_file=values_file if values_file.is_file() else None,
                     set_values=set_values,
                 )
+                # Give Kubernetes time to schedule and create new pods before kubectl wait
+                # runs. Without this sleep, pods are still terminating/pending when wait
+                # fires and returns "no matching resources found" immediately.
+                click.echo("[deploy] waiting 15s for pods to be scheduled...")
+                time.sleep(15)
 
             try:
                 if skip_vllm:
+                    # Use app in (a,b,c) selector — quoted as separate -l arg, which
+                    # is correctly parsed by kubectl on all versions.
                     _wait_ready(
                         namespace,
                         label_selector="app in (router-service,redis,vllm-cpu-hash)",

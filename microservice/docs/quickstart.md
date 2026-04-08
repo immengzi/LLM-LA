@@ -126,7 +126,9 @@ router-tp8-glm.yaml:
 ```
 
 Each entry produces one experiment. Methods for `backend: router` set
-`router.mode`; methods for `backend: aibrix` set `aibrix.routing_strategy`.
+`router.mode`; methods for `backend: aibrix` set `aibrix.routing_strategy`;
+methods for `backend: litellm` are labels only (no Helm knob — routing is
+controlled by the router behind LiteLLM).
 
 ---
 
@@ -163,6 +165,104 @@ experiments/
 
 ---
 
+## §8 — LiteLLM backend (production auth/spend validation)
+
+The `backend: litellm` path routes requests through a LiteLLM proxy pod that
+sits in front of the router. Use this to validate production auth, virtual key
+management, and spend tracking. **Do not use for benchmarking** — use
+`backend: router` for that.
+
+### Architecture
+
+```
+Client → LiteLLM proxy (port 30400)
+       → router /v1/chat/completions (port 30080)
+       → sidecars → vLLM pods
+```
+
+### One-time node setup
+
+kube-proxy requires `libxtables.so.12` to program ClusterIP iptables rules.
+If missing on any node, ClusterIP traffic from pods on that node will time out.
+Check and fix once per node:
+
+```bash
+# Check all nodes for kube-proxy errors
+for pod in $(kubectl get pods -n kube-system -l k8s-app=kube-proxy -o name); do
+  echo "=== $pod ==="
+  kubectl logs -n kube-system $pod --tail=5 | grep -i "libxtables\|iptables\|error" || echo "OK"
+done
+
+# Fix any broken node (replace <node-ip> with actual IP)
+ssh <node-ip> "sudo yum install -y iptables iptables-libs"
+
+# Restart kube-proxy cluster-wide after fixing all nodes
+kubectl rollout restart daemonset/kube-proxy -n kube-system
+kubectl rollout status daemonset/kube-proxy -n kube-system --timeout=120s
+```
+
+### Router image
+
+The router must be built from source (includes the `/v1/chat/completions` shim):
+
+```bash
+cd /home/saeid/llm-lb/microservice/services/router_service
+bash build.sh
+```
+
+The router deployment uses `imagePullPolicy: Always` so new builds are picked
+up automatically on pod restart. If the old image is cached on the node, delete
+it first:
+
+```bash
+ssh <node-ip> "sudo crictl rmi reg.local:32000/kv-router:latest || true"
+```
+
+### LiteLLM image
+
+Pull and push to private registry once:
+
+```bash
+bash services/vllm-image-litellm.sh
+```
+
+### Running a LiteLLM sweep
+
+```bash
+# Deploy vLLM first (if not already running)
+python deploy_vllm.py --config configs/litellm.yaml
+
+# Run the sweep (--skip-vllm preserves running vLLM pods)
+python sweep_methods.py --config litellm_master --skip-vllm
+```
+
+Master config `configs/litellm_master.yaml`:
+```yaml
+configs/litellm.yaml:
+  - litellm-pull
+```
+
+### Key config differences (litellm.yaml vs router.yaml)
+
+| Field | router.yaml | litellm.yaml |
+|---|---|---|
+| `backend` | `router` | `litellm` |
+| `transport.mode` | `async_pubsub` | `sync` |
+| `transport.results_zmq` | `tcp://...` | `""` |
+| `litellm.base_url` | not set | `http://<node>:30400` |
+| `litellm.model` | not set | `served-model` |
+| `litellm.api_key` | not set | `sk-litellm-master` |
+
+### LiteLLM config notes
+
+- `api_base` in `litellm_config.yaml` must be `http://router-service:8080/v1`
+  (LiteLLM appends `/chat/completions` automatically for `openai/` provider)
+- `router_settings.cooldown_time: 0` prevents cascading 429s if the router
+  has transient errors
+- The LiteLLM pod is pinned to `pin.nodeName` (node4) alongside the router
+
+---
+
 ## Common issues
 
 | Symptom | Fix |
@@ -173,3 +273,8 @@ experiments/
 | `glm_moe_dsa model type` tokenizer error | `prompts.py` must use `PreTrainedTokenizerFast` not `AutoTokenizer` |
 | RBAC ownership conflict | All operations use release name `vllm` — never use a different release name |
 | vLLM pods deleted by sweep | Run with `--skip-vllm` to preserve running pods across Helm upgrades |
+| LiteLLM 429 `No deployments available` | Restart litellm-proxy pod to clear in-memory cooldown state |
+| LiteLLM 404 `Not Found` | Check `api_base` in ConfigMap ends with `/v1` not bare hostname |
+| LiteLLM `Connection error` | kube-proxy iptables broken on node — install `iptables-libs` and restart kube-proxy |
+| Router image stale (old code running) | `imagePullPolicy: Always` on router; delete cached image on node with `crictl rmi` |
+| `kubectl wait` finds no pods after helm upgrade | Normal — `time.sleep(15)` in sweep_methods.py handles this; if persisting, check chart backend guards |

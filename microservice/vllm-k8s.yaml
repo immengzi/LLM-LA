@@ -6,6 +6,54 @@ metadata:
   name: kv-router-sa
   namespace: vllm
 ---
+# Source: vllm-kv-stack/templates/70-litellm.yaml
+# -----------------------------------------------------------------------
+# ConfigMap: litellm proxy config
+# Mounted as /app/litellm_config.yaml inside the container.
+# -----------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: vllm
+  labels:
+    app: litellm-proxy
+    release: vllm
+data:
+  litellm_config.yaml: |
+    model_list:
+      - model_name: served-model
+        litellm_params:
+          # Routes to the router's /v1/chat/completions shim.
+          # api_base must end at /v1 — LiteLLM appends /chat/completions
+          # automatically for openai/ provider, giving the full path:
+          #   http://router-service:8080/v1/chat/completions
+          model: openai/served-model
+          api_base: http://router-service:8080/v1
+          api_key: dummy   # required by litellm but not checked by our router
+
+    router_settings:
+      # Disable cooldown — our router is a local always-on service, not a
+      # cloud API with rate limits. Cooldown causes cascading 429s under load
+      # when the backend has transient errors (e.g. during infrastructure fixes).
+      cooldown_time: 0          # no cooldown period after failures
+      num_retries: 0            # don't retry at LiteLLM level; client handles retries
+      allowed_fails: 1000       # very high threshold before cooling down a deployment
+      retry_after: 0            # no retry delay
+
+    general_settings:
+      master_key: "sk-litellm-master"
+
+      # Allow all origins for the admin UI (tighten in production if needed)
+      allow_requests_on_db_unavailable: true
+
+      # Enable Prometheus metrics endpoint at /metrics/
+      enable_prometheus_system_metrics: true
+
+    litellm_settings:
+      success_callback: []
+      failure_callback: []
+---
 # Source: vllm-kv-stack/templates/30-router-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -104,6 +152,30 @@ spec:
       port: 8200
       targetPort: 8200
       nodePort: 30034
+---
+# Source: vllm-kv-stack/templates/70-litellm.yaml
+# -----------------------------------------------------------------------
+# Service: litellm-proxy
+# ClusterIP on port 4000 for in-cluster access.
+# NodePort on litellm.nodePort for external access from dev machines / CI.
+# -----------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-proxy
+  namespace: vllm
+  labels:
+    app: litellm-proxy
+    release: vllm
+spec:
+  type: NodePort
+  selector:
+    app: litellm-proxy
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000
+      nodePort: 30400
 ---
 # Source: vllm-kv-stack/templates/10-redis.yaml
 apiVersion: apps/v1
@@ -232,7 +304,7 @@ spec:
             - name: model
               mountPath: /model
               readOnly: true
-              subPath: GLM-5-w4a8-mtp-QuaRot
+              subPath: qwen3-8b
           resources:
             requests:
               cpu: "1000m"
@@ -282,7 +354,8 @@ spec:
       containers:
         - name: router
           image: reg.local:32000/kv-router:latest
-          imagePullPolicy: IfNotPresent
+          # imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           env:
             - name: HOST
               value: "0.0.0.0"
@@ -411,7 +484,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 2
+  replicas: 16
   selector:
     matchLabels:
       app: vllm-qwen
@@ -462,16 +535,12 @@ spec:
                 --tokenizer /model \
                 --port 8200 \
                 --served-model-name served-model \
-                --tensor-parallel-size 8 \
+                --tensor-parallel-size 1 \
                 --dtype auto \
                 --kv-cache-dtype auto \
                 --max-num-seqs 8 \
                 --prefix-caching-hash-algo sha256_cbor \
-                --gpu-memory-utilization 0.95 \
-                --quantization ascend \
-                --enable-expert-parallel \
                 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-                --max-model-len 80000 \
                 --host 0.0.0.0 \
                 --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
                 &
@@ -544,7 +613,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: ASCEND_RT_VISIBLE_DEVICES
-              value: "0,1,2,3,4,5,6,7"
+              value: "0"
           ports:
             - containerPort: 8200
               name: http
@@ -559,7 +628,7 @@ spec:
             - name: model
               mountPath: /model
               readOnly: true
-              subPath: GLM-5-w4a8-mtp-QuaRot
+              subPath: qwen3-8b
             - name: dshm
               mountPath: /dev/shm
             - name: dcmi-volume
@@ -608,10 +677,10 @@ spec:
 
           resources:
             requests:
-              huawei.com/Ascend910: 8
+              huawei.com/Ascend910: 1
               ephemeral-storage: "2Gi"
             limits:
-              huawei.com/Ascend910: 8
+              huawei.com/Ascend910: 1
               ephemeral-storage: "4Gi"
         - name: kv-sidecar
           image: reg.local:32000/kv-sidecar:latest
@@ -685,7 +754,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 128Gi
+            sizeLimit: 16Gi
         - name: dcmi-volume
           hostPath:
             path: /usr/local/dcmi
@@ -719,6 +788,110 @@ spec:
             path: /dev/devmm_svm
             type: CharDevice
 ---
+# Source: vllm-kv-stack/templates/70-litellm.yaml
+# -----------------------------------------------------------------------
+# Deployment: litellm-proxy
+# Single replica. Pinned to same node as router (pin.nodeName) when
+# pin.enabled=true, so it stays co-located with the control plane.
+# -----------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-proxy
+  namespace: vllm
+  labels:
+    app: litellm-proxy
+    release: vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm-proxy
+  template:
+    metadata:
+      labels:
+        app: litellm-proxy
+        release: vllm
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - "node4"
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/control-plane
+          operator: Exists
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/master
+          operator: Exists
+
+      containers:
+        - name: litellm
+          # Reuses the global imageRegistry rewrite helper from _helpers.tpl
+          image: reg.local:32000/litellm:main-stable
+          imagePullPolicy: IfNotPresent
+
+          args:
+            - --config
+            - /app/litellm_config.yaml
+            - --port
+            - "4000"
+            - --detailed_debug
+
+          ports:
+            - name: http
+              containerPort: 4000
+              protocol: TCP
+
+          volumeMounts:
+            - name: litellm-config
+              mountPath: /app/litellm_config.yaml
+              subPath: litellm_config.yaml
+
+          # Liveness: proxy is up
+          # initialDelaySeconds=60 — LiteLLM takes ~17s to initialize;
+          # 60s gives ample margin to avoid premature kill on cold start.
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 4
+
+          # Readiness: proxy can serve requests
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 4000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 6
+
+          resources:
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+            requests:
+              cpu: 500m
+              memory: 512Mi
+
+          env:
+            # Suppress telemetry back to litellm.ai
+            - name: LITELLM_TELEMETRY
+              value: "False"
+            # If databaseUrl is set, also expose it as env var (litellm reads both)
+
+      volumes:
+        - name: litellm-config
+          configMap:
+            name: litellm-config
+---
 # Source: vllm-kv-stack/templates/50-podmonitors.yaml
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
@@ -745,39 +918,23 @@ spec:
       interval: 1s
 ---
 # Source: vllm-kv-stack/templates/50-podmonitors.yaml
+---
+
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
-  name: kv-router
+  name: litellm-proxy
   namespace: vllm
   labels:
+    app: litellm-proxy
     release: prometheus
 spec:
   selector:
     matchLabels:
-      app: router-service
+      app: litellm-proxy
   podMetricsEndpoints:
-    - path: /metrics
+    - path: /metrics/
       port: http
       scheme: http
       honorLabels: true
-      interval: 1s
----
-# Source: vllm-kv-stack/templates/50-podmonitors.yaml
-apiVersion: monitoring.coreos.com/v1
-kind: PodMonitor
-metadata:
-  name: kv-sidecar
-  namespace: vllm
-  labels:
-    release: prometheus
-spec:
-  selector:
-    matchLabels:
-      app: vllm-qwen
-  podMetricsEndpoints:
-    - path: /metrics
-      port: sidecar-http
-      scheme: http
-      honorLabels: true
-      interval: 1s
+      interval: 5s

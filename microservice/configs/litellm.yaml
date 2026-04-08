@@ -42,6 +42,7 @@ load_pattern:
 
 generation:
   max_tokens: 5
+  # max_tokens: 8192
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null
@@ -81,7 +82,7 @@ litellm:
   stream: false
 
 helm:
-  replicas: 8
+  replicas: 16
   batch_size: 8
   tensor_parallel_size: 1
 
@@ -99,12 +100,10 @@ helm:
   # Model config
   model_name: "served-model"
   nfs_path: "/saeid/models/qwen3-8b"
-  vllm_quantization: null
-  vllm_enable_expert_parallel: false
-  vllm_gpu_memory_utilization: null
-
-  # LiteLLM deployment toggle — must be true for this config to work
-  # deploy via: helm upgrade vllm ./vllm-kv-stack --set litellm.enabled=true ...
+  vllm_quantization: null             # Qwen3 is dense, not quantized
+  vllm_enable_expert_parallel: false  # Qwen3 is not MoE
+  vllm_gpu_memory_utilization: null   # use vLLM default
+  # vllm_max_model_len not set — uses model's default (null)
 
   # Disable AIBrix exposure
   aibrix_enabled: false

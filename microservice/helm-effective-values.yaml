@@ -9,7 +9,7 @@ autoscaling:
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
   threshold: "16"
-backend: router
+backend: litellm
 batchSize: 8
 deploy:
   cpuHash: true
@@ -26,8 +26,8 @@ images:
   vllm: quay.io/ascend/vllm-ascend:glm5-openeuler
 litellm:
   databaseUrl: ""
-  enabled: false
-  image: ghcr.io/berriai/litellm:main-stable
+  enabled: true
+  image: litellm:main-stable
   masterKey: sk-litellm-master
   nodePort: 30400
   resources:
@@ -39,7 +39,7 @@ litellm:
       memory: 512Mi
 modelVolume:
   create: false
-  modelSubPath: GLM-5-w4a8-mtp-QuaRot
+  modelSubPath: qwen3-8b
   nfsPath: /saeid/models/
   nfsServer: nfs.local
 pin:
@@ -54,18 +54,15 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 2
+  vllm: 16
 router:
   kvAware: true
   lenAware: true
   lenPolicy: short_first
   mode: pull
-tensorParallelSize: 8
+tensorParallelSize: 1
 vllm:
   compilationConfig:
     cudagraphMode: FULL_DECODE_ONLY
-  enableExpertParallel: true
-  gpuMemoryUtilization: "0.95"
-  maxModelLen: 80000
-  quantization: ascend
+  enableExpertParallel: false
   trustRemoteCode: false
