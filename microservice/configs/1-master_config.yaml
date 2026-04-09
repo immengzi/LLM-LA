@@ -1,6 +1,12 @@
 # router:
+<<<<<<< HEAD
 #   - pull
 #   - push-rr
+=======
+  # - pull
+#   - pull
+  # - push-rr
+>>>>>>> 710b12e (clean the templates,add mooncake_integration_summary.md to docs)
 #   - push-random
 #   - push-least-queue
 
@@ -21,6 +27,12 @@
 #   - pull
   # - push-rr
 #   - push-random
+  # - push-least-queue
+
+router-tp8-glm-mooncake:
+  - pull
+  # - push-rr
+  # - push-random
   # - push-least-queue
 
 # aibrix:
