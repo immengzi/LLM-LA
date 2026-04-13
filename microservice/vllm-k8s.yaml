@@ -484,7 +484,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 16
+  replicas: 8
   selector:
     matchLabels:
       app: vllm-qwen
