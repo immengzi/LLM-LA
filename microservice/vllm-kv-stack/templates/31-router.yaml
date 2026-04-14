@@ -86,6 +86,37 @@ spec:
               value: {{ quote .Values.router.lenPolicy }}
             # --------------------------------------
 
+            # ---- SLO-aware routing knobs ----
+            - name: SLO_AWARE
+              value: {{ ternary "true" "false" .Values.router.sloAware | quote }}
+            - name: SLO_WITH_KV
+              value: {{ ternary "true" "false" .Values.router.sloWithKv | quote }}
+            - name: ADMISSION_THROTTLE
+              value: {{ ternary "true" "false" .Values.router.admissionThrottle | quote }}
+            - name: FIXED_BATCH_SIZE
+              value: {{ quote (toString .Values.router.fixedBatchSize) }}
+            - name: OUTPUT_LEN_PREDICTOR
+              value: {{ quote .Values.router.outputLenPredictor }}
+            - name: BATCH_SIZE_ESTIMATE
+              value: {{ quote .Values.router.batchSizeEstimate }}
+            - name: FIXED_BATCH_ESTIMATE
+              value: {{ quote (toString .Values.router.fixedBatchEstimate) }}
+            - name: LATENCY_PREDICTOR
+              value: {{ quote .Values.router.latencyPredictor }}
+            - name: LATENCY_ONLINE_UPDATE
+              value: {{ ternary "true" "false" .Values.router.latencyOnlineUpdate | quote }}
+            {{- if .Values.router.latencyProfilePath }}
+            - name: LATENCY_PROFILE_PATH
+              value: {{ quote .Values.router.latencyProfilePath }}
+            {{- end }}
+            - name: QUEUE_WAIT_MODEL
+              value: {{ quote .Values.router.queueWaitModel }}
+            - name: CHUNKED_PREFILL_AWARE
+              value: {{ ternary "true" "false" .Values.router.chunkedPrefillAware | quote }}
+            - name: MAX_NUM_BATCHED_TOKENS
+              value: {{ quote (toString .Values.router.maxNumBatchedTokens) }}
+            # ---------------------------------
+
             - name: POOL_FACTOR
               value: "4"
             - name: DEFAULT_MAX_TOKENS

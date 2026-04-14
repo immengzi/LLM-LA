@@ -196,6 +196,46 @@ class LiteLLMConfig:
 
 
 # =========================
+# SLO annotations (client → router)
+# =========================
+
+@dataclass
+class SLOConfig:
+    """
+    Controls SLO annotations injected into each request by the load client.
+
+    When enabled=true, the client attaches per-request SLO fields to the
+    /enqueue or /submit payload so the router can do slack-based scheduling.
+
+    The `mix` section defines the traffic composition: each entry maps a
+    task_type to its SLO targets and the fraction of requests that receive
+    those targets.  Fractions must sum to <= 1.0; the remainder gets no SLO.
+
+    Example YAML:
+        slo:
+          enabled: false
+          default_slo_type: "ttft+tpot"
+          mix:
+            - task_type: "chat"
+              fraction: 0.5
+              slo_type: "ttft+tpot"
+              slo_ttft_ms: 500.0
+              slo_tpot_ms: 50.0
+            - task_type: "summarize"
+              fraction: 0.3
+              slo_type: "e2e"
+              slo_e2e_ms: 10000.0
+            - task_type: "code"
+              fraction: 0.2
+              slo_type: "tpot"
+              slo_tpot_ms: 30.0
+    """
+    enabled: bool = False
+    default_slo_type: str = "ttft+tpot"
+    mix: Optional[list] = None
+
+
+# =========================
 # Helm knobs for sweeps
 # =========================
 
@@ -246,6 +286,22 @@ class HelmConfig:
     aibrix_enabled: bool = False
     aibrix_model_name: str = "served-model"
     aibrix_port: int = 8200
+    # --------------------------------------------------------------------
+
+    # ---- SLO-aware routing knobs (maps to Helm chart values.router.slo*) ----
+    router_slo_aware: bool = False
+    router_slo_with_kv: bool = True
+    router_admission_throttle: bool = False
+    router_fixed_batch_size: int = 0
+    router_output_len_predictor: str = "simple"
+    router_batch_size_estimate: str = "fixed"
+    router_fixed_batch_estimate: int = 8
+    router_latency_predictor: str = "linear"
+    router_latency_online_update: bool = False
+    router_latency_profile_path: str = ""
+    router_queue_wait_model: str = "none"
+    router_chunked_prefill_aware: bool = False
+    router_max_num_batched_tokens: int = 0
     # --------------------------------------------------------------------
 
     # ---- Deploy mode: "helm" (direct Helm CLI) or "operator" (VllmKvStack CR) ----
@@ -314,6 +370,9 @@ class ClientConfig:
     # LiteLLM runtime config
     litellm: LiteLLMConfig = field(default_factory=LiteLLMConfig)
 
+    # SLO annotation config
+    slo: SLOConfig = field(default_factory=SLOConfig)
+
     # Helm knobs
     helm: HelmConfig = field(default_factory=HelmConfig)
 
@@ -374,6 +433,9 @@ def load_config(path: str) -> ClientConfig:
     transport = _merge_dataclass(TransportConfig, raw.get("transport", {}))
     aibrix = _merge_dataclass(AIBrixConfig, raw.get("aibrix", {}))
     litellm = _merge_dataclass(LiteLLMConfig, raw.get("litellm", {}))
+
+    # SLO config
+    slo = _merge_dataclass(SLOConfig, raw.get("slo", {}))
 
     # helm config
     helm = _merge_dataclass(HelmConfig, raw.get("helm", {}))
@@ -479,5 +541,6 @@ def load_config(path: str) -> ClientConfig:
         transport=transport,
         aibrix=aibrix,
         litellm=litellm,
+        slo=slo,
         helm=helm,
     )

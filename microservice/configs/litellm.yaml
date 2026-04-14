@@ -82,7 +82,7 @@ litellm:
   stream: false
 
 helm:
-  replicas: 8
+  replicas: 2
   batch_size: 8
   tensor_parallel_size: 1
 

@@ -1,7 +1,7 @@
 # router/metrics.py
 # -*- coding: utf-8 -*-
 
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 
 # ----------------------------
 # Router metrics (minimal set)
@@ -50,6 +50,55 @@ ROUTER_PUSH_DISPATCH_FAILED_TOTAL = Counter(
 ROUTER_PUSH_DISPATCH_DROPPED_TOTAL = Counter(
     "router_push_dispatch_dropped_total",
     "Total number of push-dispatch tasks dropped due to full dispatch queue",
+)
+
+
+# -------------------------------------------------
+# SLO-aware routing metrics
+# -------------------------------------------------
+
+ROUTER_SLO_SLACK_HISTOGRAM = Histogram(
+    "router_slo_slack_seconds",
+    "Slack (deadline - predicted_completion) at dispatch time",
+    buckets=[-5.0, -2.0, -1.0, -0.5, -0.1, 0.0, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, float("inf")],
+)
+
+ROUTER_SLO_PREDICTED_MISS_TOTAL = Counter(
+    "router_slo_predicted_miss_total",
+    "Requests predicted to miss SLO at dispatch (slack < 0)",
+)
+
+ROUTER_SLO_ACTUAL_MISS_TOTAL = Counter(
+    "router_slo_actual_miss_total",
+    "Requests that actually missed SLO (measured on /result)",
+)
+
+ROUTER_SLO_ACTUAL_MET_TOTAL = Counter(
+    "router_slo_actual_met_total",
+    "Requests that met SLO (measured on /result)",
+)
+
+ROUTER_OUTPUT_LEN_ERROR_RATIO = Histogram(
+    "router_output_len_error_ratio",
+    "Output length prediction error: (predicted - actual) / actual",
+    buckets=[-2.0, -1.0, -0.5, -0.2, -0.1, 0.0, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0],
+)
+
+ROUTER_TTFT_PREDICTION_ERROR = Histogram(
+    "router_ttft_prediction_error_seconds",
+    "TTFT prediction error: predicted - actual (seconds)",
+    buckets=[-2.0, -1.0, -0.5, -0.1, 0.0, 0.1, 0.5, 1.0, 2.0, 5.0],
+)
+
+ROUTER_E2E_PREDICTION_ERROR = Histogram(
+    "router_e2e_prediction_error_seconds",
+    "E2E prediction error: predicted - actual (seconds)",
+    buckets=[-5.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 5.0, 10.0],
+)
+
+ROUTER_SLO_REGISTRY_SIZE = Gauge(
+    "router_slo_registry_size",
+    "Current number of entries in the SLO registry",
 )
 
 
@@ -113,5 +162,65 @@ def inc_push_dispatch_failed() -> None:
 def inc_push_dispatch_dropped() -> None:
     try:
         ROUTER_PUSH_DISPATCH_DROPPED_TOTAL.inc()
+    except Exception:
+        pass
+
+
+# -------------------------------------------------
+# SLO helpers
+# -------------------------------------------------
+
+def observe_slo_slack(slack_s: float) -> None:
+    try:
+        ROUTER_SLO_SLACK_HISTOGRAM.observe(float(slack_s))
+    except Exception:
+        pass
+
+
+def inc_slo_predicted_miss() -> None:
+    try:
+        ROUTER_SLO_PREDICTED_MISS_TOTAL.inc()
+    except Exception:
+        pass
+
+
+def inc_slo_actual_miss() -> None:
+    try:
+        ROUTER_SLO_ACTUAL_MISS_TOTAL.inc()
+    except Exception:
+        pass
+
+
+def inc_slo_actual_met() -> None:
+    try:
+        ROUTER_SLO_ACTUAL_MET_TOTAL.inc()
+    except Exception:
+        pass
+
+
+def observe_output_len_error(ratio: float) -> None:
+    try:
+        ROUTER_OUTPUT_LEN_ERROR_RATIO.observe(float(ratio))
+    except Exception:
+        pass
+
+
+def observe_ttft_prediction_error(error_s: float) -> None:
+    try:
+        ROUTER_TTFT_PREDICTION_ERROR.observe(float(error_s))
+    except Exception:
+        pass
+
+
+def observe_e2e_prediction_error(error_s: float) -> None:
+    try:
+        ROUTER_E2E_PREDICTION_ERROR.observe(float(error_s))
+    except Exception:
+        pass
+
+
+def set_slo_registry_size(n: int) -> None:
+    try:
+        ROUTER_SLO_REGISTRY_SIZE.set(int(n))
     except Exception:
         pass

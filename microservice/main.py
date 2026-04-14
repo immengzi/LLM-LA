@@ -214,7 +214,8 @@ def main():
             transport=getattr(cfg, "transport", None),
             backend=backend,
             aibrix=getattr(cfg, "aibrix", None),
-            litellm=getattr(cfg, "litellm", None),  # NEW: pass LiteLLM config
+            litellm=getattr(cfg, "litellm", None),
+            slo=getattr(cfg, "slo", None),
         )
     finally:
         t_end_load = time.time()
