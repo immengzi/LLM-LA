@@ -116,6 +116,31 @@ class RouterConfig:
     TRACE_ENABLED: bool = False
     TRACE_SAMPLING_RATE: float = 1.0
 
+    # --------------------------------------------------------------------
+    # SLO-AWARE ROUTING
+    # --------------------------------------------------------------------
+    SLO_AWARE: bool = False
+    SLO_WITH_KV: bool = True
+    ADMISSION_THROTTLE: bool = False
+    FIXED_BATCH_SIZE: int = 0               # 0 = no cap
+
+    # Output length predictor
+    OUTPUT_LEN_PREDICTOR: str = "simple"    # simple | distribution | regression | hint_only
+    # Batch size estimation
+    BATCH_SIZE_ESTIMATE: str = "fixed"      # fixed | inflight | reported
+    FIXED_BATCH_ESTIMATE: int = 8
+
+    # Latency predictor
+    LATENCY_PREDICTOR: str = "linear"       # linear | piecewise | bayesian | hybrid
+    LATENCY_ONLINE_UPDATE: bool = False
+    LATENCY_PROFILE_PATH: str = ""          # path to latency_profile.json
+
+    # Queue wait model
+    QUEUE_WAIT_MODEL: str = "none"          # none | simple | drain_rate
+    # Chunked prefill correction
+    CHUNKED_PREFILL_AWARE: bool = False
+    MAX_NUM_BATCHED_TOKENS: int = 0
+
 
 def _norm_mode(s: str) -> str:
     return str(s or "").strip().lower()
@@ -304,6 +329,42 @@ def get_config() -> RouterConfig:
 
     # Logging verbosity (normalize to avoid surprising behavior)
     cfg.REQ_LOG_MODE = _norm_log_mode(os.getenv("REQ_LOG_MODE", cfg.REQ_LOG_MODE))
+
+    # SLO-aware routing knobs
+    cfg.SLO_AWARE = os.getenv("SLO_AWARE", str(cfg.SLO_AWARE)).lower() == "true"
+    cfg.SLO_WITH_KV = os.getenv("SLO_WITH_KV", str(cfg.SLO_WITH_KV)).lower() == "true"
+    cfg.ADMISSION_THROTTLE = os.getenv("ADMISSION_THROTTLE", str(cfg.ADMISSION_THROTTLE)).lower() == "true"
+    cfg.FIXED_BATCH_SIZE = int(os.getenv("FIXED_BATCH_SIZE", cfg.FIXED_BATCH_SIZE))
+    cfg.FIXED_BATCH_SIZE = max(0, cfg.FIXED_BATCH_SIZE)
+
+    cfg.OUTPUT_LEN_PREDICTOR = os.getenv("OUTPUT_LEN_PREDICTOR", cfg.OUTPUT_LEN_PREDICTOR)
+    olp = _norm_mode(cfg.OUTPUT_LEN_PREDICTOR)
+    if olp not in ("simple", "distribution", "regression", "hint_only"):
+        olp = "simple"
+    cfg.OUTPUT_LEN_PREDICTOR = olp
+
+    cfg.BATCH_SIZE_ESTIMATE = os.getenv("BATCH_SIZE_ESTIMATE", cfg.BATCH_SIZE_ESTIMATE)
+    bse = _norm_mode(cfg.BATCH_SIZE_ESTIMATE)
+    if bse not in ("fixed", "inflight", "reported"):
+        bse = "fixed"
+    cfg.BATCH_SIZE_ESTIMATE = bse
+    cfg.FIXED_BATCH_ESTIMATE = max(1, int(os.getenv("FIXED_BATCH_ESTIMATE", cfg.FIXED_BATCH_ESTIMATE)))
+
+    cfg.LATENCY_PREDICTOR = os.getenv("LATENCY_PREDICTOR", cfg.LATENCY_PREDICTOR)
+    ltp = _norm_mode(cfg.LATENCY_PREDICTOR)
+    if ltp not in ("linear", "piecewise", "bayesian", "hybrid"):
+        ltp = "linear"
+    cfg.LATENCY_PREDICTOR = ltp
+    cfg.LATENCY_ONLINE_UPDATE = os.getenv("LATENCY_ONLINE_UPDATE", str(cfg.LATENCY_ONLINE_UPDATE)).lower() == "true"
+    cfg.LATENCY_PROFILE_PATH = os.getenv("LATENCY_PROFILE_PATH", cfg.LATENCY_PROFILE_PATH)
+
+    cfg.QUEUE_WAIT_MODEL = os.getenv("QUEUE_WAIT_MODEL", cfg.QUEUE_WAIT_MODEL)
+    qwm = _norm_mode(cfg.QUEUE_WAIT_MODEL)
+    if qwm not in ("none", "simple", "drain_rate"):
+        qwm = "none"
+    cfg.QUEUE_WAIT_MODEL = qwm
+    cfg.CHUNKED_PREFILL_AWARE = os.getenv("CHUNKED_PREFILL_AWARE", str(cfg.CHUNKED_PREFILL_AWARE)).lower() == "true"
+    cfg.MAX_NUM_BATCHED_TOKENS = max(0, int(os.getenv("MAX_NUM_BATCHED_TOKENS", cfg.MAX_NUM_BATCHED_TOKENS)))
 
     # TRACE overrides
     if "TRACE_ENABLED" in os.environ:

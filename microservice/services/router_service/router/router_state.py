@@ -40,6 +40,55 @@ def _log_req(msg: str, *, level: str = "summary") -> None:
         sys.stdout.flush()
 
 
+# -------------------------------------------------------
+# Lazy SLO-aware imports (only resolved when SLO_AWARE=true)
+# -------------------------------------------------------
+_slo_deps_loaded = False
+_slo_registry = None
+_latency_predictor = None
+_batch_estimator = None
+_queue_wait_estimator = None
+
+
+def _ensure_slo_deps():
+    """Lazy-load SLO dependencies on first use."""
+    global _slo_deps_loaded, _slo_registry, _latency_predictor, _batch_estimator, _queue_wait_estimator
+    if _slo_deps_loaded:
+        return
+    _slo_deps_loaded = True
+
+    try:
+        from .latency_predictor import get_latency_predictor
+        from .slo_scoring import BatchSizeEstimator, QueueWaitEstimator
+
+        _latency_predictor = get_latency_predictor()
+
+        _batch_estimator = BatchSizeEstimator(
+            mode=str(getattr(_cfg, "BATCH_SIZE_ESTIMATE", "fixed")),
+            fixed_value=int(getattr(_cfg, "FIXED_BATCH_ESTIMATE", 8)),
+        )
+
+        _queue_wait_estimator = QueueWaitEstimator(
+            mode=str(getattr(_cfg, "QUEUE_WAIT_MODEL", "none")),
+        )
+    except Exception as e:
+        print(f"[PullRouter] WARNING: failed to load SLO deps: {e}")
+        sys.stdout.flush()
+
+
+def _get_slo_registry():
+    """Get the SLO registry from api module (avoids circular import at module level)."""
+    global _slo_registry
+    if _slo_registry is not None:
+        return _slo_registry
+    try:
+        from . import api as _api_mod
+        _slo_registry = getattr(_api_mod, "_slo_registry", None)
+    except Exception:
+        pass
+    return _slo_registry
+
+
 class RouterState:
     """
     Central queue of pending jobs + KV + length-aware selection.
@@ -155,88 +204,41 @@ class RouterState:
                 level="full",
             )
 
-            kv_enabled = bool(_cfg.KV_AWARE)
-            len_enabled = bool(_cfg.LEN_AWARE)
-            len_policy = str(_cfg.LEN_POLICY or "")
+            # ===================================================
+            # Branch: SLO-aware vs legacy path
+            # ===================================================
+            slo_aware = bool(getattr(_cfg, "SLO_AWARE", False))
 
-            # ---------------------------------------------------
-            # KV-first ordering, then length refinement ONLY
-            # within equal KV-hit tiers (no KV overwrite).
-            # ---------------------------------------------------
-
-            # 2) Compute KV hits for the pool (or 0s if KV disabled)
-            kv_pairs: List[Tuple[str, int]] = []
-            pool_with_kv: List[Tuple[str, str, float, dict, int]] = []
-
-            if kv_enabled:
-                for rid, prompt, ts, meta in pool:
-                    kv_hits = prefix_len(endpoint, rid)
-                    kv_pairs.append((rid, kv_hits))
-                    pool_with_kv.append((rid, prompt, ts, meta, kv_hits))
-
-                _log_req(
-                    f"KV raw endpoint={endpoint}: {kv_pairs}",
-                    level="full",
-                )
+            if slo_aware and _cfg.SLO_AWARE:
+                ordered, kv_hits_map = self._slo_aware_sort(pool, endpoint, want)
             else:
-                for rid, prompt, ts, meta in pool:
-                    pool_with_kv.append((rid, prompt, ts, meta, 0))
+                ordered, kv_hits_map = self._legacy_sort(pool, endpoint)
 
-            kv_hits_map: Dict[str, int] = {}
-            if kv_enabled:
-                for rid, _prompt, _ts, _meta, kv_hits in pool_with_kv:
-                    kv_hits_map[rid] = int(kv_hits)
+            # ===================================================
+            # Effective want: apply admission controls
+            # ===================================================
+            effective_want = want
 
-            # 3) Group by kv_hits, descending (KV is always primary)
-            kv_to_items: Dict[int, List[Tuple[str, str, float, dict]]] = {}
-            for rid, prompt, ts, meta, kv_hits in pool_with_kv:
-                kv_to_items.setdefault(int(kv_hits), []).append((rid, prompt, ts, meta))
+            # Step 6: Fixed batch size cap
+            fixed_cap = int(getattr(_cfg, "FIXED_BATCH_SIZE", 0))
+            if fixed_cap > 0:
+                effective_want = min(effective_want, fixed_cap)
 
-            kv_levels = sorted(kv_to_items.keys(), reverse=True)
-
-            # Log KV tiering deterministically
-            if kv_enabled:
-                _log_req(
-                    f"KV tiers endpoint={endpoint}: "
-                    f"{[(k, [r for (r, _p, _t, _m) in kv_to_items[k]]) for k in kv_levels]}",
-                    level="full",
-                )
-
-            # 4) Build final ordered list: concatenate KV tiers, and (optionally)
-            #    apply length-aware ordering ONLY within each tier.
-            ordered: List[Tuple[str, str, float, dict]] = []
-            for kv_hits in kv_levels:
-                tier = kv_to_items[kv_hits]
-
-                # Stable deterministic baseline inside tier: req_id
-                tier.sort(key=lambda x: x[0])
-
-                if len_enabled and len_policy:
-                    tier_refined = select_len_aware(tier, _pred, len_policy)
-                    tier = tier_refined
-
-                    _log_req(
-                        f"Len refine within KV={kv_hits} policy='{len_policy}': "
-                        f"{[r for (r, _p, _t, _m) in tier]}",
-                        level="full",
-                    )
-
-                ordered.extend(tier)
-
-            if kv_enabled:
-                _log_req(
-                    f"KV-first final order endpoint={endpoint}: "
-                    f"{[(r, prefix_len(endpoint, r)) for (r, _p, _t, _m) in ordered]}",
-                    level="full",
+            # Step 7: Dynamic admission throttling
+            if slo_aware and bool(getattr(_cfg, "ADMISSION_THROTTLE", False)):
+                effective_want = self._apply_admission_throttle(
+                    effective_want, endpoint,
                 )
 
             # 5) Choose
-            chosen_raw = ordered[:want]
+            kv_enabled = bool(_cfg.KV_AWARE)
+            chosen_raw = ordered[:effective_want]
             chosen_ids = [rid for (rid, _p, _t, _m) in chosen_raw]
             chosen_kv_hits = [(rid, prefix_len(endpoint, rid)) for rid in chosen_ids] if kv_enabled else []
 
             _log_req(
-                f"chosen endpoint={endpoint}: {chosen_ids} kv_hits={chosen_kv_hits}",
+                f"chosen endpoint={endpoint}: {chosen_ids} kv_hits={chosen_kv_hits}"
+                + (f" effective_want={effective_want}" if effective_want != want else ""),
                 level="summary",
             )
 
@@ -259,17 +261,64 @@ class RouterState:
                     if kv_enabled:
                         tr["kv_hits_len"] = int(kv_hits_map.get(rid, 0))
 
+                    # SLO trace enrichment
+                    if slo_aware:
+                        slo_reg = _get_slo_registry()
+                        if slo_reg:
+                            slo_entry = slo_reg.get(rid)
+                            if slo_entry:
+                                tr["slo_type"] = slo_entry.slo_type
+                                tr["slo_slack"] = slo_entry.slack
+                                tr["slo_binding"] = slo_entry.binding_constraint
+                                tr["slo_predicted_output_len"] = slo_entry.predicted_output_len
+
                     m["__trace__"] = tr
                     chosen.append((rid, prompt, ts, m))
             else:
                 chosen = chosen_raw
 
+            # SLO dispatch tracking: update SLO registry with dispatch info
+            if slo_aware:
+                slo_reg = _get_slo_registry()
+                if slo_reg:
+                    for rid, _p, _t, _m in chosen:
+                        slo_entry = slo_reg.get(rid)
+                        if slo_entry:
+                            slo_reg.update_dispatch(
+                                rid,
+                                endpoint=endpoint,
+                                predicted_ttft=slo_entry.predicted_ttft,
+                                predicted_tpot=slo_entry.predicted_tpot,
+                                predicted_e2e=slo_entry.predicted_e2e,
+                                slack=slo_entry.slack,
+                                binding_constraint=slo_entry.binding_constraint,
+                            )
+
+                # Step 7: increment inflight for admission tracking
+                if _batch_estimator is not None:
+                    _batch_estimator.increment_inflight(endpoint, len(chosen))
+
             # Prom: outgoing dispatch (router -> sidecar) for each assigned item
             for _rid, _prompt, _ts, _meta in chosen:
                 inc_dispatch(endpoint)
 
+            # SLO metrics: observe slack at dispatch
+            if slo_aware:
+                try:
+                    from .metrics import observe_slo_slack, inc_slo_predicted_miss
+                    slo_reg = _get_slo_registry()
+                    if slo_reg:
+                        for rid, _p, _t, _m in chosen:
+                            slo_entry = slo_reg.get(rid)
+                            if slo_entry and slo_entry.slack is not None:
+                                observe_slo_slack(slo_entry.slack)
+                                if slo_entry.slack < 0:
+                                    inc_slo_predicted_miss()
+                except Exception:
+                    pass
+
             # 6) Requeue leftovers
-            leftovers = ordered[want:]
+            leftovers = ordered[effective_want:]
             for rid, prompt, ts, meta in leftovers:
                 self._queue.appendleft((rid, prompt, ts, meta))
 
@@ -289,6 +338,243 @@ class RouterState:
                 for (rid, prompt, ts, meta) in chosen
             ]
             return items
+
+    # -------------------------------------------------------
+    # Legacy sort (existing KV-first + length-aware path)
+    # MUST remain byte-for-byte identical when SLO_AWARE=false
+    # -------------------------------------------------------
+
+    def _legacy_sort(
+        self,
+        pool: List[Tuple[str, str, float, dict]],
+        endpoint: str,
+    ) -> Tuple[List[Tuple[str, str, float, dict]], Dict[str, int]]:
+        """Returns (ordered_list, kv_hits_map)."""
+        kv_enabled = bool(_cfg.KV_AWARE)
+        len_enabled = bool(_cfg.LEN_AWARE)
+        len_policy = str(_cfg.LEN_POLICY or "")
+
+        kv_pairs: List[Tuple[str, int]] = []
+        pool_with_kv: List[Tuple[str, str, float, dict, int]] = []
+
+        if kv_enabled:
+            for rid, prompt, ts, meta in pool:
+                kv_hits = prefix_len(endpoint, rid)
+                kv_pairs.append((rid, kv_hits))
+                pool_with_kv.append((rid, prompt, ts, meta, kv_hits))
+
+            _log_req(
+                f"KV raw endpoint={endpoint}: {kv_pairs}",
+                level="full",
+            )
+        else:
+            for rid, prompt, ts, meta in pool:
+                pool_with_kv.append((rid, prompt, ts, meta, 0))
+
+        kv_hits_map: Dict[str, int] = {}
+        if kv_enabled:
+            for rid, _prompt, _ts, _meta, kv_hits in pool_with_kv:
+                kv_hits_map[rid] = int(kv_hits)
+
+        kv_to_items: Dict[int, List[Tuple[str, str, float, dict]]] = {}
+        for rid, prompt, ts, meta, kv_hits in pool_with_kv:
+            kv_to_items.setdefault(int(kv_hits), []).append((rid, prompt, ts, meta))
+
+        kv_levels = sorted(kv_to_items.keys(), reverse=True)
+
+        if kv_enabled:
+            _log_req(
+                f"KV tiers endpoint={endpoint}: "
+                f"{[(k, [r for (r, _p, _t, _m) in kv_to_items[k]]) for k in kv_levels]}",
+                level="full",
+            )
+
+        ordered: List[Tuple[str, str, float, dict]] = []
+        for kv_hits in kv_levels:
+            tier = kv_to_items[kv_hits]
+            tier.sort(key=lambda x: x[0])
+
+            if len_enabled and len_policy:
+                tier_refined = select_len_aware(tier, _pred, len_policy)
+                tier = tier_refined
+
+                _log_req(
+                    f"Len refine within KV={kv_hits} policy='{len_policy}': "
+                    f"{[r for (r, _p, _t, _m) in tier]}",
+                    level="full",
+                )
+
+            ordered.extend(tier)
+
+        if kv_enabled:
+            _log_req(
+                f"KV-first final order endpoint={endpoint}: "
+                f"{[(r, prefix_len(endpoint, r)) for (r, _p, _t, _m) in ordered]}",
+                level="full",
+            )
+
+        return ordered, kv_hits_map
+
+    # -------------------------------------------------------
+    # SLO-aware sort (slack-ascending with secondary KV/load sort)
+    # -------------------------------------------------------
+
+    def _slo_aware_sort(
+        self,
+        pool: List[Tuple[str, str, float, dict]],
+        endpoint: str,
+        want: int,
+    ) -> Tuple[List[Tuple[str, str, float, dict]], Dict[str, int]]:
+        """
+        Slack-based ordering (Steps 4-5-8).
+
+        1. Compute slack for each pool item.
+        2. Sort ascending by slack (most urgent first).
+        3. Within equal-slack bands (quantized to 100ms):
+           - TTFT-bound + SLO_WITH_KV: prefer highest cache hit ratio.
+           - TPOT-bound + SLO_WITH_KV: prefer least-loaded endpoint.
+           - SLO_WITH_KV=false: pure slack order.
+        4. Negative-slack bypass: skip KV scoring for predicted misses (Step 8).
+
+        Returns (ordered_list, kv_hits_map).
+        """
+        _ensure_slo_deps()
+
+        slo_reg = _get_slo_registry()
+        kv_enabled = bool(_cfg.KV_AWARE)
+        slo_with_kv = bool(getattr(_cfg, "SLO_WITH_KV", True))
+
+        kv_hits_map: Dict[str, int] = {}
+
+        # Compute KV hits
+        if kv_enabled:
+            for rid, _p, _t, _m in pool:
+                kv_hits_map[rid] = prefix_len(endpoint, rid)
+
+        # Compute slack for each item
+        scored: List[Tuple[str, str, float, dict, float, Optional[str], int]] = []
+
+        for rid, prompt, ts, meta in pool:
+            slack = float("inf")
+            binding: Optional[str] = None
+            cached_blocks = kv_hits_map.get(rid, 0)
+
+            if slo_reg and _latency_predictor:
+                entry = slo_reg.get(rid)
+                if entry and entry.slo_type:
+                    from .slo_scoring import compute_slack as _compute_slack
+
+                    batch_size = _batch_estimator.estimate(endpoint) if _batch_estimator else 8
+                    queue_wait = _queue_wait_estimator.estimate(endpoint) if _queue_wait_estimator else 0.0
+
+                    slack, binding = _compute_slack(
+                        entry,
+                        endpoint,
+                        latency_predictor=_latency_predictor,
+                        batch_size=batch_size,
+                        cached_tokens=cached_blocks,
+                        queue_wait_s=queue_wait,
+                    )
+
+                    # Store back into SLO entry for trace/metrics
+                    entry.slack = slack
+                    entry.binding_constraint = binding
+                    if _latency_predictor:
+                        entry.predicted_ttft = _latency_predictor.predict_ttft(
+                            entry.input_tokens,
+                            cached_blocks * 16,
+                            batch_size,
+                        )
+
+            scored.append((rid, prompt, ts, meta, slack, binding, cached_blocks))
+
+        # Sort: primary = slack ascending (most urgent first)
+        # Secondary sort within 100ms bands:
+        SLACK_BAND_MS = 100.0
+
+        def _sort_key(item):
+            rid, _p, _t, _m, slack, binding, cached = item
+            # Quantize slack to 100ms bands for equal-slack grouping
+            if slack == float("inf"):
+                band = float("inf")
+            elif slack == float("-inf"):
+                band = float("-inf")
+            else:
+                band = round(slack * 1000 / SLACK_BAND_MS) * SLACK_BAND_MS
+
+            # Step 8: negative-slack bypass -- don't reward KV, prefer least-loaded
+            if slack < 0:
+                secondary = 0
+            elif slo_with_kv and kv_enabled:
+                if binding == "tpot":
+                    secondary = 0
+                else:
+                    secondary = -cached
+            else:
+                secondary = 0
+
+            # Tertiary: req_id for determinism
+            return (band, secondary, rid)
+
+        scored.sort(key=_sort_key)
+
+        _log_req(
+            f"SLO-aware sort endpoint={endpoint}: "
+            f"{[(r, f'slack={s:.3f}' if s != float('inf') else 'no-slo', b) for r, _p, _t, _m, s, b, _c in scored[:10]]}",
+            level="full",
+        )
+
+        ordered = [(rid, prompt, ts, meta) for rid, prompt, ts, meta, _s, _b, _c in scored]
+        return ordered, kv_hits_map
+
+    # -------------------------------------------------------
+    # Admission throttle (Step 7)
+    # -------------------------------------------------------
+
+    def _apply_admission_throttle(self, current_want: int, endpoint: str) -> int:
+        """Dynamic admission throttling via binary search on predicted TPOT."""
+        if _latency_predictor is None or _batch_estimator is None:
+            return current_want
+
+        slo_reg = _get_slo_registry()
+        if not slo_reg:
+            return current_want
+
+        # Find the tightest TPOT budget among queued requests
+        tpot_budget = None
+        avg_accum = 2048  # reasonable default for accumulated length
+
+        # Use entries from the SLO registry to find budget
+        # (simplified: use FIXED_BATCH_ESTIMATE as proxy)
+        try:
+            from .admission import compute_max_safe_admit
+            inflight = _batch_estimator.get_inflight(endpoint)
+
+            # Find a TPOT budget from pending SLO entries (use first available)
+            # In practice this should look at the pool's entries, but we simplify
+            # to a global budget here.
+            tpot_budget_s = None
+            # Check recent entries for TPOT budget
+            # For now, use a conservative approach: if any entry has a TPOT SLO,
+            # use it; otherwise skip throttling.
+            for rid, _p, _t, _m in list(self._queue)[:50]:
+                entry = slo_reg.get(rid)
+                if entry and entry.deadline_tpot_s is not None:
+                    if tpot_budget_s is None or entry.deadline_tpot_s < tpot_budget_s:
+                        tpot_budget_s = entry.deadline_tpot_s
+
+            if tpot_budget_s is None:
+                return current_want
+
+            max_admit = compute_max_safe_admit(
+                _latency_predictor,
+                inflight,
+                tpot_budget_s,
+                avg_accum,
+            )
+            return min(current_want, max_admit)
+        except Exception:
+            return current_want
 
     # -------------------------------------------------------
     # Result wait/notify (ASYNC) + TTL retention

@@ -25,7 +25,16 @@ from .router_state import router_state
 from .kv_watcher import KVWatcher
 from .kv_aware import register_request_blocks
 from .push_router import PushRouter
-from .metrics import inc_admission
+from .metrics import (
+    inc_admission,
+    observe_output_len_error,
+    observe_ttft_prediction_error,
+    observe_e2e_prediction_error,
+    inc_slo_actual_miss,
+    inc_slo_actual_met,
+    set_slo_registry_size,
+)
+from .slo_state import SLORegistry, SLOEntry
 
 # Push-dispatch metrics (present in router/metrics.py per prior changes)
 try:
@@ -95,6 +104,9 @@ _hash_client: Optional[httpx.AsyncClient] = None
 # Map req_id -> run_id (so results publish can include run_id filtering)
 _rid_runid_lock = RLock()
 _rid_to_run_id: Dict[str, str] = {}
+
+# SLO registry (in-memory, thread-safe)
+_slo_registry = SLORegistry(ttl_s=float(getattr(_cfg, "POLL_RESULT_TTL_S", 300.0)))
 
 
 # ============================================================
@@ -491,6 +503,39 @@ async def _maybe_register_kv_blocks(
     return m
 
 
+def _register_slo(rid: str, req: EnqueueRequest, arrival_ts: float) -> None:
+    """Register SLO state for a request if annotations are present."""
+    if not (req.slo_type or req.task_type or req.output_len_hint is not None):
+        if not _cfg.SLO_AWARE:
+            return
+    input_tokens = max(1, len(req.prompt) // 4)
+    entry = _slo_registry.register(
+        rid,
+        slo_type=req.slo_type,
+        slo_ttft_ms=req.slo_ttft_ms,
+        slo_tpot_ms=req.slo_tpot_ms,
+        slo_e2e_ms=req.slo_e2e_ms,
+        task_type=req.task_type,
+        output_len_hint=req.output_len_hint,
+        input_tokens=input_tokens,
+        arrival_ts=arrival_ts,
+    )
+
+    # Predict output length
+    from .predictors import get_output_length_predictor
+    pred = get_output_length_predictor()
+    if req.output_len_hint is not None and req.output_len_hint > 0:
+        predicted_len = req.output_len_hint
+    else:
+        predicted_len = pred.predict(
+            req.prompt,
+            input_tokens=input_tokens,
+            task_type=req.task_type or "",
+            req_id=rid,
+        )
+    _slo_registry.set_predicted_output_len(rid, predicted_len)
+
+
 def _install_submit_route() -> None:
     """
     Install the /submit endpoint at the configured SUBMIT_PATH.
@@ -540,6 +585,83 @@ def _install_result_submit_route() -> None:
     sys.stdout.flush()
 
 
+def _ingest_slo_actuals(rid: str, result: Any) -> None:
+    """Extract actual latency / token counts from the result and update SLO registry + predictors."""
+    if not isinstance(result, dict):
+        return
+
+    trace = result.get("trace") or result.get("__trace__") or {}
+    usage = result.get("usage") or {}
+
+    actual_ttft: Optional[float] = None
+    actual_e2e: Optional[float] = None
+    actual_output_len: Optional[int] = None
+
+    if isinstance(trace, dict):
+        if "ttft_s" in trace:
+            actual_ttft = float(trace["ttft_s"])
+        elif "t_first_token" in trace and "t_prefill_start" in trace:
+            actual_ttft = float(trace["t_first_token"]) - float(trace["t_prefill_start"])
+        if "e2e_s" in trace:
+            actual_e2e = float(trace["e2e_s"])
+
+    if isinstance(usage, dict):
+        ct = usage.get("completion_tokens")
+        if ct is not None:
+            actual_output_len = int(ct)
+
+    # Update output length predictor with actuals
+    if actual_output_len is not None and actual_output_len > 0:
+        from .predictors import get_output_length_predictor
+        pred = get_output_length_predictor()
+        entry = _slo_registry.get(rid)
+        task_type = entry.task_type if entry else ""
+        input_tokens = entry.input_tokens if entry else 0
+        pred.update(rid, actual_output_len, task_type=task_type or "", input_tokens=input_tokens)
+
+    entry = _slo_registry.ingest_result(
+        rid,
+        actual_ttft=actual_ttft,
+        actual_output_len=actual_output_len,
+        actual_e2e=actual_e2e,
+    )
+
+    if entry is None:
+        return
+
+    # Prediction error logging
+    if entry.predicted_output_len and entry.actual_output_len and entry.actual_output_len > 0:
+        ratio = (entry.predicted_output_len - entry.actual_output_len) / entry.actual_output_len
+        observe_output_len_error(ratio)
+
+    if entry.predicted_ttft is not None and entry.actual_ttft is not None:
+        observe_ttft_prediction_error(entry.predicted_ttft - entry.actual_ttft)
+
+    if entry.predicted_e2e is not None and entry.actual_e2e is not None:
+        observe_e2e_prediction_error(entry.predicted_e2e - entry.actual_e2e)
+
+    # SLO attainment check
+    if entry.slo_type:
+        met = True
+        if entry.slo_type == "ttft" and entry.deadline_ttft and entry.actual_ttft is not None:
+            if entry.arrival_ts + entry.actual_ttft > entry.deadline_ttft:
+                met = False
+        elif entry.slo_type == "e2e" and entry.deadline_e2e and entry.actual_e2e is not None:
+            if entry.arrival_ts + entry.actual_e2e > entry.deadline_e2e:
+                met = False
+        elif entry.slo_type == "ttft+tpot":
+            if entry.deadline_ttft and entry.actual_ttft is not None:
+                if entry.arrival_ts + entry.actual_ttft > entry.deadline_ttft:
+                    met = False
+
+        if met:
+            inc_slo_actual_met()
+        else:
+            inc_slo_actual_miss()
+
+    set_slo_registry_size(_slo_registry.size())
+
+
 def _ingest_result_payload(payload: dict) -> None:
     """
     Shared ingestion logic for /result and submit-ack result endpoint.
@@ -579,6 +701,43 @@ def _ingest_result_payload(payload: dict) -> None:
         result.pop("__trace__", None)
 
     router_state.store_result(rid, result)
+
+    # Feed actuals to SLO registry + prediction error logging
+    try:
+        _ingest_slo_actuals(rid, result)
+    except Exception:
+        pass
+
+    # SLO inflight tracking: decrement on result arrival (Step 7)
+    if endpoint and _cfg.SLO_AWARE:
+        try:
+            from .router_state import _batch_estimator, _queue_wait_estimator
+            if _batch_estimator is not None:
+                _batch_estimator.decrement_inflight(str(endpoint))
+            if _queue_wait_estimator is not None:
+                _queue_wait_estimator.record_completion(str(endpoint))
+        except Exception:
+            pass
+
+    # Update latency predictor with observation (Step 3)
+    if _cfg.SLO_AWARE:
+        try:
+            from .latency_predictor import get_latency_predictor, LatencyObservation
+            lp = get_latency_predictor()
+            if lp is not None and bool(getattr(_cfg, "LATENCY_ONLINE_UPDATE", False)):
+                entry = _slo_registry.get(rid)
+                if entry and entry.actual_ttft is not None:
+                    obs = LatencyObservation(
+                        input_tokens=entry.input_tokens,
+                        cached_tokens=0,
+                        output_tokens=entry.actual_output_len or 0,
+                        batch_size=int(getattr(_cfg, "FIXED_BATCH_ESTIMATE", 8)),
+                        actual_ttft_s=entry.actual_ttft or 0.0,
+                        actual_e2e_s=entry.actual_e2e or 0.0,
+                    )
+                    lp.update(obs)
+        except Exception:
+            pass
 
     # Publish for async_pubsub (best-effort)
     if _publisher is not None:
@@ -740,6 +899,23 @@ async def health():
 
 
 # ============================================================
+# SLO Debug
+# ============================================================
+
+@app.get("/debug/slo/{req_id}")
+async def debug_slo(req_id: str):
+    entry = _slo_registry.debug_entry(req_id)
+    if entry is None:
+        raise HTTPException(404, f"No SLO entry for req_id={req_id}")
+    return entry
+
+
+@app.get("/debug/slo")
+async def debug_slo_summary():
+    return _slo_registry.debug_summary()
+
+
+# ============================================================
 # Prometheus
 # ============================================================
 
@@ -785,6 +961,7 @@ async def submit(req: EnqueueRequest):
         is_pull_mode = True
 
     _remember_run_id(rid, meta or {})
+    _register_slo(rid, req, t_start)
 
     if trace is not None:
         meta = dict(meta)
@@ -861,6 +1038,7 @@ async def enqueue(req: EnqueueRequest):
         is_pull_mode = True
 
     _remember_run_id(rid, meta or {})
+    _register_slo(rid, req, t_start)
 
     if trace is not None:
         meta = dict(meta)

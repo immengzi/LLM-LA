@@ -1,6 +1,6 @@
-# router:
-#   - pull
-#   - push-rr
+router:
+  # - pull
+  - push-rr
 #   - push-random
 #   - push-least-queue
 
@@ -37,8 +37,11 @@
   # - pd
   # - session-affinity
 
-litellm:
-  - pull
+# litellm:
+#   - pull
   # - push-rr
   # - push-random
   # - push-least-queue
+
+# router-slo:
+#   - pull

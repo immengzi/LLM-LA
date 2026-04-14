@@ -92,6 +92,10 @@ class KVWatcher:
         self._stop_evt = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
+        # Per-endpoint: timestamp of last successful KV scan (for staleness discount)
+        self._last_scan_ts: Dict[str, float] = {}
+        self._scan_lock = threading.Lock()
+
     def start(self):
         if self._thread is not None:
             return
@@ -114,6 +118,15 @@ class KVWatcher:
             self._thread.join(timeout=2.0)
             self._thread = None
         _log("Stopped", level="always")
+
+    def get_last_scan_ts(self, endpoint: str) -> Optional[float]:
+        """Return the timestamp of the last successful KV scan for an endpoint."""
+        with self._scan_lock:
+            return self._last_scan_ts.get(endpoint)
+
+    def get_all_last_scan_ts(self) -> Dict[str, float]:
+        with self._scan_lock:
+            return dict(self._last_scan_ts)
 
     def _thread_main(self):
         try:
@@ -170,6 +183,11 @@ class KVWatcher:
 
                 if ep_owners:
                     register_block_owners(block_hash, ep_owners)
+                    # Record scan timestamp per endpoint
+                    scan_now = time.time()
+                    with self._scan_lock:
+                        for ep in ep_owners:
+                            self._last_scan_ts[ep] = scan_now
 
                 _log(f"key={key} pods={pod_owners} eps={ep_owners}", level="full")
 

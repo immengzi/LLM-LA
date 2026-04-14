@@ -9,7 +9,7 @@ autoscaling:
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
   threshold: "16"
-backend: litellm
+backend: router
 batchSize: 8
 deploy:
   cpuHash: true
@@ -26,7 +26,7 @@ images:
   vllm: quay.io/ascend/vllm-ascend:glm5-openeuler
 litellm:
   databaseUrl: ""
-  enabled: true
+  enabled: false
   image: litellm:main-stable
   masterKey: sk-litellm-master
   nodePort: 30400
@@ -54,12 +54,25 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 8
+  vllm: 2
 router:
+  admissionThrottle: false
+  batchSizeEstimate: fixed
+  chunkedPrefillAware: false
+  fixedBatchEstimate: 8
+  fixedBatchSize: 0
   kvAware: true
+  latencyOnlineUpdate: false
+  latencyPredictor: linear
+  latencyProfilePath: ""
   lenAware: true
   lenPolicy: short_first
-  mode: pull
+  maxNumBatchedTokens: 0
+  mode: push-rr
+  outputLenPredictor: simple
+  queueWaitModel: none
+  sloAware: false
+  sloWithKv: true
 tensorParallelSize: 1
 vllm:
   compilationConfig:

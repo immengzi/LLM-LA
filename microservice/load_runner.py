@@ -29,7 +29,7 @@ import json
 import requests
 
 from http_client import send_one, submit_one, send_one_aibrix, send_one_litellm
-from config import GenerationConfig, AIBrixConfig, LiteLLMConfig
+from config import GenerationConfig, AIBrixConfig, LiteLLMConfig, SLOConfig
 from trace_utils import print_trace_block, compute_trace_metrics
 from experiment_io import ExperimentLogger
 
@@ -277,6 +277,47 @@ def _build_generation_meta(gen_cfg: GenerationConfig) -> Dict[str, Any]:
     return meta
 
 
+import random as _random
+
+_slo_rng = _random.Random(42)
+
+
+def _build_slo_fields(slo_cfg: Optional[SLOConfig], idx: int) -> Optional[Dict[str, Any]]:
+    """
+    Resolve per-request SLO annotations based on the mix distribution.
+    Returns None when SLO is disabled or the request falls in the no-SLO remainder.
+    """
+    if slo_cfg is None or not slo_cfg.enabled:
+        return None
+    mix = slo_cfg.mix
+    if not mix:
+        return None
+
+    roll = _slo_rng.random()
+    cumulative = 0.0
+    for entry in mix:
+        if not isinstance(entry, dict):
+            continue
+        frac = float(entry.get("fraction", 0))
+        cumulative += frac
+        if roll < cumulative:
+            fields: Dict[str, Any] = {}
+            slo_type = entry.get("slo_type", slo_cfg.default_slo_type)
+            fields["slo_type"] = slo_type
+            if entry.get("slo_ttft_ms") is not None:
+                fields["slo_ttft_ms"] = float(entry["slo_ttft_ms"])
+            if entry.get("slo_tpot_ms") is not None:
+                fields["slo_tpot_ms"] = float(entry["slo_tpot_ms"])
+            if entry.get("slo_e2e_ms") is not None:
+                fields["slo_e2e_ms"] = float(entry["slo_e2e_ms"])
+            if entry.get("task_type") is not None:
+                fields["task_type"] = str(entry["task_type"])
+            if entry.get("output_len_hint") is not None:
+                fields["output_len_hint"] = int(entry["output_len_hint"])
+            return fields
+    return None
+
+
 def _log_send_tick(now_send: float, t0_mono: float) -> None:
     rel = now_send - t0_mono
     sec = int(rel)
@@ -294,6 +335,7 @@ def _request_thread_router_sync(
     logger: Optional[ExperimentLogger] = None,
     output_log_mode: str = "preview",
     print_trace: bool = True,
+    slo_cfg: Optional[SLOConfig] = None,
 ):
     """
     Router sync worker: blocks on /enqueue.
@@ -309,12 +351,13 @@ def _request_thread_router_sync(
         _log_send_tick(now_send, t0_mono)
 
         meta = _build_generation_meta(gen_cfg)
+        slo_fields = _build_slo_fields(slo_cfg, task.idx)
 
         print(f"[client][SEND][T{task.idx}] idx={task.idx} planned_ts={task.ts_mono:.6f}")
 
         t0 = time.time()
         try:
-            rid, result = send_one(session, router_url, task.prompt, meta)
+            rid, result = send_one(session, router_url, task.prompt, meta, slo_fields=slo_fields)
             t1 = time.time()
             end_to_end_s = t1 - t0
 
@@ -849,6 +892,7 @@ def run_open_loop_load(
     backend: str = "router",
     aibrix: Optional[AIBrixConfig] = None,
     litellm: Optional[LiteLLMConfig] = None,
+    slo: Optional[SLOConfig] = None,
 ):
     """
     Execute a precomputed schedule.
@@ -1047,7 +1091,7 @@ def run_open_loop_load(
             task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
             t = threading.Thread(
                 target=_request_thread_router_sync,
-                args=(task, router_url, gen_cfg, t0_mono, logger, output_log_mode, print_trace),
+                args=(task, router_url, gen_cfg, t0_mono, logger, output_log_mode, print_trace, slo),
                 daemon=True,
             )
             t.start()
@@ -1124,12 +1168,13 @@ def run_open_loop_load(
             _log_send_tick(now_send, t0_mono)
 
             meta = _build_generation_meta(gen_cfg)
+            slo_fields = _build_slo_fields(slo, idx)
 
             print(f"[client][SEND][T{idx}] idx={idx} planned_ts={ts_mono:.6f}")
 
             t0 = time.time()
             try:
-                rid = submit_one(session, router_url, submit_path, prompt, meta, run_id=run_id)
+                rid = submit_one(session, router_url, submit_path, prompt, meta, run_id=run_id, slo_fields=slo_fields)
             except Exception as e:
                 print(f"[client][RECV][T{idx}] ✗ ERROR idx={idx}: {e}")
                 if logger is not None:

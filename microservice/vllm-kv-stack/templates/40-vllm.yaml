@@ -51,6 +51,8 @@ spec:
           command:
             - /bin/bash
             - -c
+          # securityContext:
+          #   privileged: true
           args:
             - |
               set -euo pipefail

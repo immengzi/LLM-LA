@@ -1,5 +1,9 @@
-# router.yaml
-# Router-based experiment config — Qwen3-8B, dense model, no quantization
+# router-slo.yaml
+# Router-based experiment config with SLO-aware scheduling enabled.
+# Multi-SLO traffic mix: chat (TTFT+TPOT), summarize (E2E), code (TPOT).
+#
+# This config activates SLO-aware routing on the router pod AND
+# injects per-request SLO annotations from the load client.
 
 backend: "router"
 
@@ -56,7 +60,7 @@ metrics:
   scrape_interval_s: 1.0
   window_s: 2.0
   include_debug_metrics: false
-  model_name: null
+  model_name: "served-model"
   max_instances: null
 
 transport:
@@ -68,10 +72,31 @@ transport:
   idle_timeout_s: 1000.0
   idle_zero_running_s: 10.0
 
+# ---- SLO annotation config (client-side) ----
+# The load client injects per-request SLO fields based on this mix.
+# Fractions sum to 1.0 — every request gets an SLO annotation.
+slo:
+  enabled: true
+  default_slo_type: "ttft+tpot"
+  mix:
+    - task_type: "chat"
+      fraction: 0.5
+      slo_type: "ttft+tpot"
+      slo_ttft_ms: 500.0
+      slo_tpot_ms: 50.0
+    - task_type: "summarize"
+      fraction: 0.3
+      slo_type: "e2e"
+      slo_e2e_ms: 10000.0
+    - task_type: "code"
+      fraction: 0.2
+      slo_type: "tpot"
+      slo_tpot_ms: 30.0
+
 helm:
   replicas: 2
   batch_size: 8
-  tensor_parallel_size: 1
+  tensor_parallel_size: 8
 
   autoscaling_enabled: false
   autoscaling_min: 16
@@ -84,15 +109,25 @@ helm:
   router_len_aware: true
   router_len_policy: "short_first"
 
+  # ---- SLO-aware routing (router-side) ----
+  router_slo_aware: true
+  router_slo_with_kv: true
+  router_admission_throttle: true
+  router_fixed_batch_size: 8
+  router_output_len_predictor: "distribution"
+  router_batch_size_estimate: "inflight"
+  router_fixed_batch_estimate: 8
+  router_latency_predictor: "linear"
+  router_latency_online_update: true
+  router_latency_profile_path: ""
+  router_queue_wait_model: "simple"
+  router_chunked_prefill_aware: false
+  router_max_num_batched_tokens: 0
+
   # Model config
   model_name: "served-model"
   nfs_path: "/saeid/models/qwen3-8b"
-  vllm_quantization: null             # Qwen3 is dense, not quantized
-  vllm_enable_expert_parallel: false  # Qwen3 is not MoE
-  vllm_gpu_memory_utilization: null   # use vLLM default
-  # vllm_max_model_len not set — uses model's default (null)
 
-  # Disable AIBrix exposure for router experiments
   aibrix_enabled: false
   aibrix_model_name: "served-model"
   aibrix_port: 8200

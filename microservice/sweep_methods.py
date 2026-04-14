@@ -529,6 +529,21 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             "aibrix.enabled": bool(getattr(h, "aibrix_enabled", False)),
             "aibrix.modelName": str(getattr(h, "aibrix_model_name", "served-model")),
             "aibrix.port": int(getattr(h, "aibrix_port", 8200)),
+
+            # SLO-aware routing knobs
+            "router.sloAware": bool(getattr(h, "router_slo_aware", False)),
+            "router.sloWithKv": bool(getattr(h, "router_slo_with_kv", True)),
+            "router.admissionThrottle": bool(getattr(h, "router_admission_throttle", False)),
+            "router.fixedBatchSize": int(getattr(h, "router_fixed_batch_size", 0)),
+            "router.outputLenPredictor": str(getattr(h, "router_output_len_predictor", "simple")),
+            "router.batchSizeEstimate": str(getattr(h, "router_batch_size_estimate", "fixed")),
+            "router.fixedBatchEstimate": int(getattr(h, "router_fixed_batch_estimate", 8)),
+            "router.latencyPredictor": str(getattr(h, "router_latency_predictor", "linear")),
+            "router.latencyOnlineUpdate": bool(getattr(h, "router_latency_online_update", False)),
+            "router.latencyProfilePath": str(getattr(h, "router_latency_profile_path", "")),
+            "router.queueWaitModel": str(getattr(h, "router_queue_wait_model", "none")),
+            "router.chunkedPrefillAware": bool(getattr(h, "router_chunked_prefill_aware", False)),
+            "router.maxNumBatchedTokens": int(getattr(h, "router_max_num_batched_tokens", 0)),
         }
 
         # ---- PV/PVC: always disabled — deployed once externally on parent NFS dir ----
@@ -777,10 +792,18 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 "vllm_seed": getattr(h, "vllm_seed", None),
                 "vllm_additional_config": getattr(h, "vllm_additional_config", None),
                 "vllm_speculative_config": getattr(h, "vllm_speculative_config", None),
-                # litellm knobs captured in experiment metadata
+                # litellm knobs
                 "litellm_enabled": backend == "litellm",
                 "litellm_base_url": getattr(getattr(cfg, "litellm", None), "base_url", None),
                 "litellm_model": getattr(getattr(cfg, "litellm", None), "model", None),
+                # SLO-aware knobs
+                "router_slo_aware": bool(getattr(h, "router_slo_aware", False)),
+                "router_admission_throttle": bool(getattr(h, "router_admission_throttle", False)),
+                "router_fixed_batch_size": int(getattr(h, "router_fixed_batch_size", 0)),
+                "router_output_len_predictor": str(getattr(h, "router_output_len_predictor", "simple")),
+                "router_latency_predictor": str(getattr(h, "router_latency_predictor", "linear")),
+                # SLO client config
+                "slo_enabled": bool(getattr(getattr(cfg, "slo", None), "enabled", False)),
             },
         }
         (exp_dir / "sweep_meta.json").write_text(

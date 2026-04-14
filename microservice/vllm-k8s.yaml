@@ -6,54 +6,6 @@ metadata:
   name: kv-router-sa
   namespace: vllm
 ---
-# Source: vllm-kv-stack/templates/70-litellm.yaml
-# -----------------------------------------------------------------------
-# ConfigMap: litellm proxy config
-# Mounted as /app/litellm_config.yaml inside the container.
-# -----------------------------------------------------------------------
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: litellm-config
-  namespace: vllm
-  labels:
-    app: litellm-proxy
-    release: vllm
-data:
-  litellm_config.yaml: |
-    model_list:
-      - model_name: served-model
-        litellm_params:
-          # Routes to the router's /v1/chat/completions shim.
-          # api_base must end at /v1 — LiteLLM appends /chat/completions
-          # automatically for openai/ provider, giving the full path:
-          #   http://router-service:8080/v1/chat/completions
-          model: openai/served-model
-          api_base: http://router-service:8080/v1
-          api_key: dummy   # required by litellm but not checked by our router
-
-    router_settings:
-      # Disable cooldown — our router is a local always-on service, not a
-      # cloud API with rate limits. Cooldown causes cascading 429s under load
-      # when the backend has transient errors (e.g. during infrastructure fixes).
-      cooldown_time: 0          # no cooldown period after failures
-      num_retries: 0            # don't retry at LiteLLM level; client handles retries
-      allowed_fails: 1000       # very high threshold before cooling down a deployment
-      retry_after: 0            # no retry delay
-
-    general_settings:
-      master_key: "sk-litellm-master"
-
-      # Allow all origins for the admin UI (tighten in production if needed)
-      allow_requests_on_db_unavailable: true
-
-      # Enable Prometheus metrics endpoint at /metrics/
-      enable_prometheus_system_metrics: true
-
-    litellm_settings:
-      success_callback: []
-      failure_callback: []
----
 # Source: vllm-kv-stack/templates/30-router-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -152,30 +104,6 @@ spec:
       port: 8200
       targetPort: 8200
       nodePort: 30034
----
-# Source: vllm-kv-stack/templates/70-litellm.yaml
-# -----------------------------------------------------------------------
-# Service: litellm-proxy
-# ClusterIP on port 4000 for in-cluster access.
-# NodePort on litellm.nodePort for external access from dev machines / CI.
-# -----------------------------------------------------------------------
-apiVersion: v1
-kind: Service
-metadata:
-  name: litellm-proxy
-  namespace: vllm
-  labels:
-    app: litellm-proxy
-    release: vllm
-spec:
-  type: NodePort
-  selector:
-    app: litellm-proxy
-  ports:
-    - name: http
-      port: 4000
-      targetPort: 4000
-      nodePort: 30400
 ---
 # Source: vllm-kv-stack/templates/10-redis.yaml
 apiVersion: apps/v1
@@ -406,13 +334,40 @@ spec:
               value: "short_first"
             # --------------------------------------
 
+            # ---- SLO-aware routing knobs ----
+            - name: SLO_AWARE
+              value: "false"
+            - name: SLO_WITH_KV
+              value: "true"
+            - name: ADMISSION_THROTTLE
+              value: "false"
+            - name: FIXED_BATCH_SIZE
+              value: "0"
+            - name: OUTPUT_LEN_PREDICTOR
+              value: "simple"
+            - name: BATCH_SIZE_ESTIMATE
+              value: "fixed"
+            - name: FIXED_BATCH_ESTIMATE
+              value: "8"
+            - name: LATENCY_PREDICTOR
+              value: "linear"
+            - name: LATENCY_ONLINE_UPDATE
+              value: "false"
+            - name: QUEUE_WAIT_MODEL
+              value: "none"
+            - name: CHUNKED_PREFILL_AWARE
+              value: "false"
+            - name: MAX_NUM_BATCHED_TOKENS
+              value: "0"
+            # ---------------------------------
+
             - name: POOL_FACTOR
               value: "4"
             - name: DEFAULT_MAX_TOKENS
               value: "1024"
 
             - name: ROUTER_MODE
-              value: "pull"
+              value: "push-rr"
 
             - name: SIDECAR_PORT
               value: "9000"
@@ -484,7 +439,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 8
+  replicas: 2
   selector:
     matchLabels:
       app: vllm-qwen
@@ -521,6 +476,8 @@ spec:
           command:
             - /bin/bash
             - -c
+          # securityContext:
+          #   privileged: true
           args:
             - |
               set -euo pipefail
@@ -700,7 +657,7 @@ spec:
               value: "8"
 
             - name: SIDECAR_MODE
-              value: "pull"
+              value: "push"
 
             - name: PULL_INTERVAL_S
               value: "0.05"
@@ -788,110 +745,6 @@ spec:
             path: /dev/devmm_svm
             type: CharDevice
 ---
-# Source: vllm-kv-stack/templates/70-litellm.yaml
-# -----------------------------------------------------------------------
-# Deployment: litellm-proxy
-# Single replica. Pinned to same node as router (pin.nodeName) when
-# pin.enabled=true, so it stays co-located with the control plane.
-# -----------------------------------------------------------------------
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: litellm-proxy
-  namespace: vllm
-  labels:
-    app: litellm-proxy
-    release: vllm
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: litellm-proxy
-  template:
-    metadata:
-      labels:
-        app: litellm-proxy
-        release: vllm
-    spec:
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: "kubernetes.io/hostname"
-                    operator: In
-                    values:
-                      - "node4"
-      tolerations:
-        - effect: NoSchedule
-          key: node-role.kubernetes.io/control-plane
-          operator: Exists
-        - effect: NoSchedule
-          key: node-role.kubernetes.io/master
-          operator: Exists
-
-      containers:
-        - name: litellm
-          # Reuses the global imageRegistry rewrite helper from _helpers.tpl
-          image: reg.local:32000/litellm:main-stable
-          imagePullPolicy: IfNotPresent
-
-          args:
-            - --config
-            - /app/litellm_config.yaml
-            - --port
-            - "4000"
-            - --detailed_debug
-
-          ports:
-            - name: http
-              containerPort: 4000
-              protocol: TCP
-
-          volumeMounts:
-            - name: litellm-config
-              mountPath: /app/litellm_config.yaml
-              subPath: litellm_config.yaml
-
-          # Liveness: proxy is up
-          # initialDelaySeconds=60 — LiteLLM takes ~17s to initialize;
-          # 60s gives ample margin to avoid premature kill on cold start.
-          livenessProbe:
-            httpGet:
-              path: /health/liveliness
-              port: 4000
-            initialDelaySeconds: 60
-            periodSeconds: 15
-            failureThreshold: 4
-
-          # Readiness: proxy can serve requests
-          readinessProbe:
-            httpGet:
-              path: /health/readiness
-              port: 4000
-            initialDelaySeconds: 60
-            periodSeconds: 10
-            failureThreshold: 6
-
-          resources:
-            limits:
-              cpu: 2000m
-              memory: 2Gi
-            requests:
-              cpu: 500m
-              memory: 512Mi
-
-          env:
-            # Suppress telemetry back to litellm.ai
-            - name: LITELLM_TELEMETRY
-              value: "False"
-            # If databaseUrl is set, also expose it as env var (litellm reads both)
-
-      volumes:
-        - name: litellm-config
-          configMap:
-            name: litellm-config
----
 # Source: vllm-kv-stack/templates/50-podmonitors.yaml
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
@@ -918,23 +771,39 @@ spec:
       interval: 1s
 ---
 # Source: vllm-kv-stack/templates/50-podmonitors.yaml
----
-
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
-  name: litellm-proxy
+  name: kv-router
   namespace: vllm
   labels:
-    app: litellm-proxy
     release: prometheus
 spec:
   selector:
     matchLabels:
-      app: litellm-proxy
+      app: router-service
   podMetricsEndpoints:
-    - path: /metrics/
+    - path: /metrics
       port: http
       scheme: http
       honorLabels: true
-      interval: 5s
+      interval: 1s
+---
+# Source: vllm-kv-stack/templates/50-podmonitors.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kv-sidecar
+  namespace: vllm
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  podMetricsEndpoints:
+    - path: /metrics
+      port: sidecar-http
+      scheme: http
+      honorLabels: true
+      interval: 1s

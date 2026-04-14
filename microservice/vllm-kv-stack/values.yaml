@@ -34,6 +34,21 @@ router:
   # short_first | long_first | even_short_long
   lenPolicy: short_first
 
+  # SLO-aware routing (disabled by default — zero impact on legacy path)
+  sloAware: false
+  sloWithKv: true
+  admissionThrottle: false
+  fixedBatchSize: 0
+  outputLenPredictor: simple
+  batchSizeEstimate: fixed
+  fixedBatchEstimate: 8
+  latencyPredictor: linear
+  latencyOnlineUpdate: false
+  latencyProfilePath: ""
+  queueWaitModel: none
+  chunkedPrefillAware: false
+  maxNumBatchedTokens: 0
+
 batchSize: 8
 
 # Tensor parallelism size for vLLM (1 = no TP, 2 = 2-way, 4 = 4-way, etc.)

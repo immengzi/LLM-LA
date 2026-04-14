@@ -51,6 +51,7 @@ def send_one(
     router_url: str,
     prompt: str,
     meta: Dict[str, Any] | None = None,
+    slo_fields: Dict[str, Any] | None = None,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
     Send one synchronous /enqueue request.
@@ -67,6 +68,8 @@ def send_one(
         "t_enq_client": t_enq,
         "meta": meta or {},
     }
+    if slo_fields:
+        payload.update(slo_fields)
 
     url = f"{router_url}/enqueue"
 
@@ -107,6 +110,7 @@ def submit_one(
     prompt: str,
     meta: Dict[str, Any] | None = None,
     run_id: Optional[str] = None,
+    slo_fields: Dict[str, Any] | None = None,
 ) -> str:
     """
     Send one async submit request (submit+ack).
@@ -131,6 +135,8 @@ def submit_one(
         "t_enq_client": t_enq,
         "meta": m,
     }
+    if slo_fields:
+        payload.update(slo_fields)
 
     sp = submit_path or "/submit"
     if not sp.startswith("/"):

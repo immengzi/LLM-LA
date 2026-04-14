@@ -13,6 +13,14 @@ class EnqueueRequest(BaseModel):
     t_enq_client: Optional[float] = None
     meta: Dict[str, Any] = {}
 
+    # SLO annotations (all optional; existing clients unaffected)
+    slo_type: Optional[str] = None          # "ttft" | "tpot" | "ttft+tpot" | "e2e"
+    slo_ttft_ms: Optional[float] = None     # TTFT budget in milliseconds
+    slo_tpot_ms: Optional[float] = None     # per-token decode budget in milliseconds
+    slo_e2e_ms: Optional[float] = None      # end-to-end budget in milliseconds
+    task_type: Optional[str] = None         # e.g. "chat", "summarize", "code"
+    output_len_hint: Optional[int] = None   # client-supplied expected output length
+
 
 class EnqueueResponse(BaseModel):
     """
