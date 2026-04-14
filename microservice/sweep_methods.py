@@ -165,6 +165,7 @@ def _write_temp_job_config(cfg, method: str) -> Path:
     backend=litellm -> no method override; method is a label only (stored in sweep_meta.json)
                        litellm has no routing strategy knob — routing decisions happen inside
                        the router, which is already configured via Helm router.mode separately.
+    backend=boom    -> same as litellm (label only)
     """
     cfg_dict = asdict(cfg)
     backend = str(cfg_dict.get("backend", "router") or "router").strip().lower()
@@ -173,7 +174,7 @@ def _write_temp_job_config(cfg, method: str) -> Path:
         cfg_dict.setdefault("aibrix", {})
         cfg_dict["aibrix"]["routing_strategy"] = method
 
-    # backend=litellm: no config mutation needed — method is informational only
+    # backend=litellm/boom: no config mutation needed — method is informational only
 
     tmp = tempfile.NamedTemporaryFile(
         mode="w",
@@ -505,8 +506,7 @@ def cli(master_config: str, skip_vllm: bool) -> None:
 
         backend = str(getattr(cfg, "backend", "router") or "router").strip().lower()
 
-        # NEW: litellm added to allowlist alongside router and aibrix
-        if backend not in ("router", "aibrix", "litellm"):
+        if backend not in ("router", "aibrix", "litellm", "boom"):
             raise click.ClickException(f"Invalid backend '{backend}' in {cfg_path}")
 
         deploy_mode = str(getattr(h, "deploy_mode", "helm")).strip().lower()
@@ -582,10 +582,13 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 f"[sweep] backend=litellm: method={method!r} is a label only; "
                 f"routing is handled inside the router pod."
             )
+        elif backend == "boom":
+            click.echo(
+                f"[sweep] backend=boom: method={method!r} is a label only; "
+                f"routing is handled inside the router pod."
+            )
 
         # ---- LiteLLM pod deployment toggle ----
-        # For backend=litellm, enable the LiteLLM proxy pod in the Helm chart.
-        # For other backends, leave it disabled (default in values.yaml).
         if backend == "litellm":
             litellm_cfg = getattr(cfg, "litellm", None)
             set_values["litellm.enabled"] = True
@@ -597,6 +600,19 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             )
         else:
             set_values["litellm.enabled"] = False
+
+        # ---- BooM Gateway pod deployment toggle ----
+        if backend == "boom":
+            boom_cfg = getattr(cfg, "boom", None)
+            set_values["boom.enabled"] = True
+            set_values["boom.masterKey"] = str(
+                getattr(boom_cfg, "api_key", "sk-boom-master") if boom_cfg else "sk-boom-master"
+            )
+            click.echo(
+                f"[sweep] boom.enabled=true masterKey={set_values['boom.masterKey']!r}"
+            )
+        else:
+            set_values["boom.enabled"] = False
 
         service_impl = str(getattr(h, "service_impl", "python")).strip().lower()
         if service_impl == "go":
@@ -796,6 +812,10 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 "litellm_enabled": backend == "litellm",
                 "litellm_base_url": getattr(getattr(cfg, "litellm", None), "base_url", None),
                 "litellm_model": getattr(getattr(cfg, "litellm", None), "model", None),
+                # boom knobs
+                "boom_enabled": backend == "boom",
+                "boom_base_url": getattr(getattr(cfg, "boom", None), "base_url", None),
+                "boom_model": getattr(getattr(cfg, "boom", None), "model", None),
                 # SLO-aware knobs
                 "router_slo_aware": bool(getattr(h, "router_slo_aware", False)),
                 "router_admission_throttle": bool(getattr(h, "router_admission_throttle", False)),

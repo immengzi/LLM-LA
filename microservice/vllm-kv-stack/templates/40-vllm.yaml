@@ -51,8 +51,6 @@ spec:
           command:
             - /bin/bash
             - -c
-          # securityContext:
-          #   privileged: true
           args:
             - |
               set -euo pipefail
@@ -103,7 +101,7 @@ spec:
                 --speculative-config '{"num_speculative_tokens": {{ .Values.vllm.speculativeConfig.numSpeculativeTokens }}, "method": "{{ .Values.vllm.speculativeConfig.method }}"}' \
                 {{- end }}
                 --host 0.0.0.0 \
-                {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") }}
+                {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
                 --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
                 {{- end }}
                 &
@@ -182,7 +180,7 @@ spec:
             - containerPort: 8200
               name: http
               protocol: TCP
-            {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") }}
+            {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
             - containerPort: 5557
               name: kvpub
               protocol: TCP
@@ -249,7 +247,7 @@ spec:
               huawei.com/Ascend: {{ .Values.tensorParallelSize }}
               ephemeral-storage: "4Gi"
 
-        {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") }}
+        {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
         - name: kv-sidecar
           image: {{ include "vllmkv.image" (list . .Values.images.sidecar) }}
           imagePullPolicy: IfNotPresent

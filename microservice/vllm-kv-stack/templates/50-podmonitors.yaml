@@ -23,7 +23,7 @@ spec:
       interval: 1s
 
 ---
-{{- if eq (lower .Values.backend) "router" }}
+{{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:

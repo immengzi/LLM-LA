@@ -1,4 +1,4 @@
-{{- if and .Values.autoscaling.enabled (eq (lower .Values.backend) "router") }}
+{{- if and .Values.autoscaling.enabled (or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom")) }}
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:

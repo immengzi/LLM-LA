@@ -196,6 +196,35 @@ class LiteLLMConfig:
 
 
 # =========================
+# BooM Gateway backend
+# =========================
+
+@dataclass
+class BooMConfig:
+    """
+    Runtime config for BooM Gateway requests.
+
+    BooM Gateway speaks the same OpenAI /v1/chat/completions protocol as
+    LiteLLM. This config is used when backend="boom" in the client YAML.
+
+    BooM Gateway is a Rust replacement for LiteLLM that provides:
+      - Virtual key auth (Bearer sk-...)
+      - Per-key/team spend tracking
+      - Rate limiting / plans
+      - Multi-provider routing
+
+    For benchmarking, always use backend="router" to bypass BooM entirely.
+    Use backend="boom" only for production/demo validation runs.
+    """
+    base_url: str = "http://127.0.0.1:30401"   # NodePort exposed by boom-proxy Service
+    chat_path: str = "/v1/chat/completions"
+    model: str = "served-model"                  # must match model_name in boom config
+    api_key: str = "sk-boom-master"              # virtual key or master key
+    timeout_s: float = 1000.0
+    stream: bool = False
+
+
+# =========================
 # SLO annotations (client → router)
 # =========================
 
@@ -347,7 +376,8 @@ class ClientConfig:
     # - aibrix   -> methods are AIBrix routing strategies (least-request, prefix-cache, ...)
     # - litellm  -> routes through LiteLLM proxy (production auth/spend validation only,
     #               NOT for benchmarking — use router directly for clean measurements)
-    backend: str = "router"  # router | aibrix | litellm
+    # - boom     -> routes through BooM Gateway (Rust LiteLLM replacement, same protocol)
+    backend: str = "router"  # router | aibrix | litellm | boom
 
     file_prompts: FilePromptsConfig = field(default_factory=FilePromptsConfig)
     hf_lmsys: HFLmsysConfig = field(default_factory=HFLmsysConfig)
@@ -369,6 +399,9 @@ class ClientConfig:
 
     # LiteLLM runtime config
     litellm: LiteLLMConfig = field(default_factory=LiteLLMConfig)
+
+    # BooM Gateway runtime config
+    boom: BooMConfig = field(default_factory=BooMConfig)
 
     # SLO annotation config
     slo: SLOConfig = field(default_factory=SLOConfig)
@@ -420,8 +453,8 @@ def load_config(path: str) -> ClientConfig:
     prompt_source = raw.get("prompt_source", ClientConfig.prompt_source)
 
     backend = str(raw.get("backend", ClientConfig.backend) or ClientConfig.backend).strip().lower()
-    if backend not in ("router", "aibrix", "litellm"):
-        raise ValueError(f"Invalid backend '{backend}'. Expected 'router', 'aibrix', or 'litellm'.")
+    if backend not in ("router", "aibrix", "litellm", "boom"):
+        raise ValueError(f"Invalid backend '{backend}'. Expected 'router', 'aibrix', 'litellm', or 'boom'.")
 
     file_prompts = _merge_dataclass(FilePromptsConfig, raw.get("file_prompts", {}))
     hf_lmsys = _merge_dataclass(HFLmsysConfig, raw.get("hf_lmsys", {}))
@@ -433,6 +466,7 @@ def load_config(path: str) -> ClientConfig:
     transport = _merge_dataclass(TransportConfig, raw.get("transport", {}))
     aibrix = _merge_dataclass(AIBrixConfig, raw.get("aibrix", {}))
     litellm = _merge_dataclass(LiteLLMConfig, raw.get("litellm", {}))
+    boom = _merge_dataclass(BooMConfig, raw.get("boom", {}))
 
     # SLO config
     slo = _merge_dataclass(SLOConfig, raw.get("slo", {}))
@@ -526,6 +560,21 @@ def load_config(path: str) -> ClientConfig:
             litellm.timeout_s = 1000.0
         litellm.timeout_s = max(1.0, litellm.timeout_s)
 
+    # -----------------------------
+    # Normalize BooM Gateway config
+    # -----------------------------
+    if backend == "boom":
+        boom.base_url = str(boom.base_url or BooMConfig.base_url).rstrip("/")
+        boom.chat_path = str(boom.chat_path or BooMConfig.chat_path)
+        if not boom.chat_path.startswith("/"):
+            boom.chat_path = "/" + boom.chat_path
+
+        try:
+            boom.timeout_s = float(boom.timeout_s)
+        except Exception:
+            boom.timeout_s = 1000.0
+        boom.timeout_s = max(1.0, boom.timeout_s)
+
     return ClientConfig(
         router_url=router_url,
         total_requests=total_requests,
@@ -541,6 +590,7 @@ def load_config(path: str) -> ClientConfig:
         transport=transport,
         aibrix=aibrix,
         litellm=litellm,
+        boom=boom,
         slo=slo,
         helm=helm,
     )

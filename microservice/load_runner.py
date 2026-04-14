@@ -9,6 +9,8 @@
 # - LiteLLM backend:
 #     - threaded_http: thread-per-request, OpenAI-compatible HTTP calls to LiteLLM proxy
 #       (production auth/spend validation only — NOT for benchmarking)
+# - BooM Gateway backend:
+#     - identical to LiteLLM (same protocol), reuses LiteLLM worker with label="BooM"
 #
 # Termination policy for router async_pubsub (preferred + backstop):
 #   1) Preferred: Prometheus fleet-idle detection:
@@ -29,7 +31,7 @@ import json
 import requests
 
 from http_client import send_one, submit_one, send_one_aibrix, send_one_litellm
-from config import GenerationConfig, AIBrixConfig, LiteLLMConfig, SLOConfig
+from config import GenerationConfig, AIBrixConfig, LiteLLMConfig, BooMConfig, SLOConfig
 from trace_utils import print_trace_block, compute_trace_metrics
 from experiment_io import ExperimentLogger
 
@@ -564,14 +566,11 @@ def _request_thread_aibrix_http(
 
 
 # ============================================================
-# NEW: LiteLLM worker thread
+# OpenAI-compatible proxy worker thread (LiteLLM / BooM Gateway)
 #
 # Mirrors _request_thread_aibrix_http exactly — same threading
-# model, same logging schema, same result parsing. The only
-# differences are:
-#   - calls send_one_litellm() instead of send_one_aibrix()
-#   - takes LiteLLMConfig instead of AIBrixConfig
-#   - log prefix says "litellm" not "aibrix"
+# model, same logging schema, same result parsing. Shared by
+# both backend="litellm" and backend="boom" via the label param.
 #
 # Connection: "close" per thread — same rationale as AIBrix
 # (single request per thread, no benefit from keep-alive).
@@ -585,10 +584,11 @@ def _request_thread_litellm_http(
     logger: Optional[ExperimentLogger] = None,
     output_log_mode: str = "preview",
     print_trace: bool = True,
+    label: str = "LiteLLM",
 ):
     """
-    LiteLLM proxy worker: one open HTTP request per thread.
-    Routes through LiteLLM proxy for auth/spend tracking validation.
+    OpenAI-compatible proxy worker: one open HTTP request per thread.
+    Used by both LiteLLM and BooM Gateway backends (same wire protocol).
     NOT for benchmarking — use backend=router for clean measurements.
     """
     session = requests.Session()
@@ -606,7 +606,7 @@ def _request_thread_litellm_http(
 
         t0 = time.time()
         try:
-            rid, result = send_one_litellm(session, litellm_cfg, task.prompt, gen_cfg)
+            rid, result = send_one_litellm(session, litellm_cfg, task.prompt, gen_cfg, label=label)
             t1 = time.time()
             end_to_end_s = t1 - t0
 
@@ -892,6 +892,7 @@ def run_open_loop_load(
     backend: str = "router",
     aibrix: Optional[AIBrixConfig] = None,
     litellm: Optional[LiteLLMConfig] = None,
+    boom: Optional[BooMConfig] = None,
     slo: Optional[SLOConfig] = None,
 ):
     """
@@ -908,6 +909,10 @@ def run_open_loop_load(
           - concurrent threaded HTTP requests to LiteLLM proxy
           - identical threading model to aibrix
           - for production/demo validation only, NOT benchmarking
+      - "boom":
+          - concurrent threaded HTTP requests to BooM Gateway
+          - identical wire protocol to litellm (reuses same worker)
+          - for production/demo validation only, NOT benchmarking
     """
     if len(prompts) != len(plan_times):
         raise ValueError("prompts and plan_times length mismatch")
@@ -918,7 +923,7 @@ def run_open_loop_load(
         return
 
     backend = str(backend or "router").strip().lower()
-    if backend not in ("router", "aibrix", "litellm"):
+    if backend not in ("router", "aibrix", "litellm", "boom"):
         raise ValueError(f"Invalid backend '{backend}'")
 
     mode = "sync"
@@ -988,6 +993,10 @@ def run_open_loop_load(
                     if litellm is None:
                         raise RuntimeError("backend='litellm' requires litellm config")
                     rid, _result = send_one_litellm(session, litellm, warm_prompt, gen_cfg)
+                elif backend == "boom":
+                    if boom is None:
+                        raise RuntimeError("backend='boom' requires boom config")
+                    rid, _result = send_one_litellm(session, boom, warm_prompt, gen_cfg, label="BooM")
                 else:
                     rid, _result = send_one(session, router_url, warm_prompt, meta)
                 print(f"[client][warmup] i={i} req_id={rid}")
@@ -1068,6 +1077,47 @@ def run_open_loop_load(
             t = threading.Thread(
                 target=_request_thread_litellm_http,
                 args=(task, litellm, gen_cfg, t0_mono, logger, output_log_mode, print_trace),
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
+
+        elapsed = time.time() - t0_wall
+        print(f"[load_runner] Done. Sent {total} requests in {elapsed:.3f}s")
+        return
+
+    # -------------------------------------------------------
+    # BooM Gateway backend — reuses LiteLLM worker (same protocol)
+    # -------------------------------------------------------
+    if backend == "boom":
+        if boom is None:
+            raise RuntimeError("backend='boom' requires boom config")
+
+        print(
+            f"[load_runner] BooM Gateway: {boom.base_url}{boom.chat_path} "
+            f"model={boom.model}"
+        )
+        print(
+            "[load_runner] NOTE: backend=boom routes through BooM Gateway "
+            "for production auth/spend validation. Use backend=router for benchmarking."
+        )
+
+        threads: List[threading.Thread] = []
+        t0_wall = time.time()
+
+        for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
+            now = time.monotonic()
+            sleep_until = ts_mono - 0.005
+            if sleep_until > now:
+                time.sleep(sleep_until - now)
+
+            task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
+            t = threading.Thread(
+                target=_request_thread_litellm_http,
+                args=(task, boom, gen_cfg, t0_mono, logger, output_log_mode, print_trace, "BooM"),
                 daemon=True,
             )
             t.start()

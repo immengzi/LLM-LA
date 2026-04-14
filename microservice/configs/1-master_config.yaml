@@ -1,6 +1,6 @@
-router:
-  # - pull
-  - push-rr
+# router:
+#   - pull
+#   - push-rr
 #   - push-random
 #   - push-least-queue
 
@@ -39,6 +39,12 @@ router:
 
 # litellm:
 #   - pull
+  # - push-rr
+  # - push-random
+  # - push-least-queue
+
+boom:
+  - pull
   # - push-rr
   # - push-random
   # - push-least-queue

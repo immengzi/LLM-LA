@@ -9,8 +9,21 @@ autoscaling:
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
   threshold: "16"
-backend: router
+backend: boom
 batchSize: 8
+boom:
+  databaseUrl: ""
+  enabled: true
+  image: boom-gateway:latest
+  masterKey: sk-boom-master
+  nodePort: 30401
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 128Mi
 deploy:
   cpuHash: true
   redis: true
@@ -68,7 +81,7 @@ router:
   lenAware: true
   lenPolicy: short_first
   maxNumBatchedTokens: 0
-  mode: push-rr
+  mode: pull
   outputLenPredictor: simple
   queueWaitModel: none
   sloAware: false
