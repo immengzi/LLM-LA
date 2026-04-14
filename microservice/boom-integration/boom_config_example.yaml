@@ -1,0 +1,20 @@
+# Example BooM Gateway runtime config (boom_config.yaml)
+#
+# This is what gets mounted into the BooM Gateway pod via the Helm ConfigMap
+# (vllm-kv-stack/templates/75-boom.yaml). You don't need to manage this file
+# manually — the Helm template generates it from values.yaml.
+#
+# Included here for reference so you understand what BooM Gateway sees.
+
+model_list:
+  - model_name: served-model
+    litellm_params:
+      # BooM Gateway uses litellm-compatible config shape.
+      # api_base must end at /v1 — BooM appends /chat/completions automatically.
+      model: openai/served-model
+      api_base: http://router-service:8080/v1
+      api_key: dummy   # required by config but not checked by our router
+
+general_settings:
+  master_key: "sk-boom-master"
+  # database_url: "postgresql://boom:password@postgres-host:5432/boom"  # optional

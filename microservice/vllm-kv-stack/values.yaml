@@ -177,3 +177,52 @@ litellm:
     limits:
       cpu: "2000m"
       memory: "2Gi"
+
+# -----------------------------------------------------------------------
+# BooM Gateway — Rust LLM API gateway in front of the router.
+#
+# When enabled, deploys a BooM Gateway pod that:
+#   - Accepts OpenAI-compatible requests from any external client
+#   - Enforces virtual key auth, per-key/team spend limits, rate limits
+#   - Forwards to router-service:8080/v1/chat/completions (the router shim)
+#   - Optionally persists spend data to a Postgres DB
+#
+# Same role as litellm but implemented in Rust for lower overhead.
+# Disabled by default — zero impact on benchmarking or existing paths.
+#
+# To enable for production/demo:
+#   helm upgrade vllm ./vllm-kv-stack \
+#     --set boom.enabled=true \
+#     --set boom.masterKey=sk-your-secret \
+#     --set boom.databaseUrl=postgresql://user:pass@host:5432/boom
+# -----------------------------------------------------------------------
+boom:
+  enabled: false
+
+  # BooM Gateway image — built from BooMGateway-main/ and pushed to your registry.
+  # The global.imageRegistry rewrite applies here too if set.
+  image: boom-gateway:latest
+
+  # Admin master key — used to generate virtual keys and access the admin UI.
+  # Override this in production; never commit real keys here.
+  masterKey: "sk-boom-master"
+
+  # NodePort for external cluster access (e.g. from a laptop or CI machine).
+  # Access via http://<any-node-ip>:30401
+  nodePort: 30401
+
+  # Optional Postgres URL for spend tracking persistence.
+  # Leave empty ("") to run in stateless mode — virtual keys still work but
+  # spend history is lost on pod restart.
+  # Example: "postgresql://boom:password@postgres-host:5432/boom"
+  databaseUrl: ""
+
+  # Resource requests/limits for the BooM Gateway container.
+  # Lower than LiteLLM — Rust binary has much smaller memory footprint.
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "128Mi"
+    limits:
+      cpu: "2000m"
+      memory: "512Mi"

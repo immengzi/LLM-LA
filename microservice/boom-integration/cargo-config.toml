@@ -1,0 +1,16 @@
+# ~/.cargo/config.toml
+#
+# Cargo configuration for building BooM Gateway on Huawei Cloud.
+# Copy this to ~/.cargo/config.toml on the build machine.
+#
+# - Uses rsproxy.cn mirror (faster than crates.io from China)
+# - Routes through corporate proxy (required — no direct internet)
+
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[http]
+proxy = "http://peulerosweb:EulerOS_123@172.18.100.92:8080"

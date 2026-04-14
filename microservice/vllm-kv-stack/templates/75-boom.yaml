@@ -1,0 +1,164 @@
+{{/*
+  75-boom.yaml — BooM Gateway pod for production auth/spend tracking.
+
+  Only rendered when boom.enabled=true.
+  Disabled by default — zero impact on benchmarking or existing paths.
+
+  Deploys:
+    - ConfigMap:  boom-config  (boom_config.yaml mounted into pod)
+    - Deployment: boom-proxy   (single replica, pinned to same node as router)
+    - Service:    boom-proxy   (ClusterIP internal + NodePort for external access)
+
+  BooM Gateway receives OpenAI-format requests from external clients,
+  enforces virtual key auth + spend limits, then forwards to:
+    http://router-service:8080/v1/chat/completions
+  which is the shim added to services/router_service/router/api.py.
+
+  mu-load-test benchmarks bypass this entirely and hit the router directly.
+*/}}
+
+{{- if .Values.boom.enabled }}
+
+---
+# -----------------------------------------------------------------------
+# ConfigMap: BooM Gateway config
+# Mounted as /app/boom_config.yaml inside the container.
+# -----------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: boom-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: boom-proxy
+    release: {{ .Release.Name }}
+data:
+  boom_config.yaml: |
+    model_list:
+      - model_name: served-model
+        litellm_params:
+          model: openai/served-model
+          api_base: http://router-service:8080/v1
+          api_key: dummy
+
+    general_settings:
+      master_key: {{ .Values.boom.masterKey | quote }}
+      {{- if .Values.boom.databaseUrl }}
+      database_url: {{ .Values.boom.databaseUrl | quote }}
+      {{- end }}
+
+---
+# -----------------------------------------------------------------------
+# Deployment: boom-proxy
+# Single replica. Pinned to same node as router (pin.nodeName) when
+# pin.enabled=true, so it stays co-located with the control plane.
+# -----------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: boom-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: boom-proxy
+    release: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: boom-proxy
+  template:
+    metadata:
+      labels:
+        app: boom-proxy
+        release: {{ .Release.Name }}
+    spec:
+      {{- if .Values.pin.enabled }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - {{ .Values.pin.nodeName | quote }}
+      tolerations:
+{{- toYaml .Values.pin.tolerations | nindent 8 }}
+      {{- end }}
+
+      containers:
+        - name: boom
+          image: {{ include "vllmkv.image" (list . .Values.boom.image) }}
+          imagePullPolicy: IfNotPresent
+
+          args:
+            - --config
+            - /app/boom_config.yaml
+            - --port
+            - "4000"
+
+          ports:
+            - name: http
+              containerPort: 4000
+              protocol: TCP
+
+          volumeMounts:
+            - name: boom-config
+              mountPath: /app/boom_config.yaml
+              subPath: boom_config.yaml
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 4
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+
+          resources:
+{{ toYaml .Values.boom.resources | indent 12 }}
+
+          env:
+            {{- if .Values.boom.databaseUrl }}
+            - name: DATABASE_URL
+              value: {{ .Values.boom.databaseUrl | quote }}
+            {{- end }}
+
+      volumes:
+        - name: boom-config
+          configMap:
+            name: boom-config
+
+---
+# -----------------------------------------------------------------------
+# Service: boom-proxy
+# ClusterIP on port 4000 for in-cluster access.
+# NodePort on boom.nodePort for external access from dev machines / CI.
+# -----------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: boom-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: boom-proxy
+    release: {{ .Release.Name }}
+spec:
+  type: NodePort
+  selector:
+    app: boom-proxy
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000
+      nodePort: {{ .Values.boom.nodePort }}
+
+{{- end }}

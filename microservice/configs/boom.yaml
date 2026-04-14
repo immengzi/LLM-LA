@@ -1,0 +1,109 @@
+# boom.yaml
+# BooM Gateway experiment config — Qwen3-8B, production auth/spend validation
+# NOTE: use backend=router for benchmarking. This config is for validating
+# the BooM Gateway production path (virtual keys, spend tracking, auth).
+
+backend: "boom"
+
+router_url: "http://7.216.57.215:30080"   # kept for warmup fallback; not used in boom path
+total_requests: 128
+prompt_source: "hf-lmsys"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
+  split: "train"
+  tokenizer_name: "/mnt/nvme1/saeid/models/qwen3-8b"
+  streaming: false
+  min_input_tokens: 256
+  max_input_tokens: 10000000
+  repeat_each: 8
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 5
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  max_tokens: 5
+  # max_tokens: 8192
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+
+output_log_mode: "summary"
+print_trace: false
+
+metrics:
+  enabled: true
+  prometheus_base_url: "http://7.216.57.215:31190"
+  scrape_interval_s: 1.0
+  window_s: 2.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+# transport is unused for backend=boom (no ZMQ, no /submit)
+transport:
+  mode: "sync"
+  submit_path: "/submit"
+  results_zmq: ""
+  topic: "results"
+  run_id: null
+  idle_timeout_s: 1000.0
+  idle_zero_running_s: 10.0
+
+# BooM Gateway connection — points at the NodePort exposed by 75-boom.yaml
+boom:
+  base_url: "http://7.216.57.215:30401"   # boom.nodePort from values.yaml
+  chat_path: "/v1/chat/completions"
+  model: "served-model"                   # must match model_name in boom config
+  api_key: "sk-boom-master"              # master key or a generated virtual key
+  timeout_s: 1000.0
+  stream: false
+
+helm:
+  replicas: 2
+  batch_size: 8
+  tensor_parallel_size: 1
+
+  autoscaling_enabled: false
+  autoscaling_min: 16
+  autoscaling_max: 16
+  autoscaling_threshold: "16"
+  autoscaling_prometheus_query: |
+    max(router_central_queue_length{namespace="vllm"})
+
+  router_kv_aware: true
+  router_len_aware: true
+  router_len_policy: "short_first"
+
+  # Model config
+  model_name: "served-model"
+  nfs_path: "/saeid/models/qwen3-8b"
+  vllm_quantization: null             # Qwen3 is dense, not quantized
+  vllm_enable_expert_parallel: false  # Qwen3 is not MoE
+  vllm_gpu_memory_utilization: null   # use vLLM default
+
+  # Disable AIBrix exposure
+  aibrix_enabled: false
+  aibrix_model_name: "served-model"
+  aibrix_port: 8200

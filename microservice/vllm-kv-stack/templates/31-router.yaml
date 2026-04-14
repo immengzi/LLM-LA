@@ -1,4 +1,4 @@
-{{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") }}
+{{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
 {{- if .Values.deploy.router }}
 apiVersion: apps/v1
 kind: Deployment

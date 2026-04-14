@@ -117,7 +117,6 @@ def main():
             f"stream={bool(cfg.aibrix.stream)}"
         )
 
-    # NEW: LiteLLM backend summary
     if backend == "litellm":
         print(
             f"[client] litellm: base_url={cfg.litellm.base_url} "
@@ -127,6 +126,18 @@ def main():
         )
         print(
             "[client] NOTE: backend=litellm routes through LiteLLM proxy "
+            "(production auth/spend validation). Use backend=router for benchmarking."
+        )
+
+    if backend == "boom":
+        print(
+            f"[client] boom: base_url={cfg.boom.base_url} "
+            f"chat_path={cfg.boom.chat_path} "
+            f"model={cfg.boom.model!r} "
+            f"stream={bool(cfg.boom.stream)}"
+        )
+        print(
+            "[client] NOTE: backend=boom routes through BooM Gateway "
             "(production auth/spend validation). Use backend=router for benchmarking."
         )
 
@@ -215,6 +226,7 @@ def main():
             backend=backend,
             aibrix=getattr(cfg, "aibrix", None),
             litellm=getattr(cfg, "litellm", None),
+            boom=getattr(cfg, "boom", None),
             slo=getattr(cfg, "slo", None),
         )
     finally:
@@ -264,6 +276,11 @@ def main():
         "litellm_chat_path": getattr(getattr(cfg, "litellm", None), "chat_path", None),
         "litellm_model": getattr(getattr(cfg, "litellm", None), "model", None),
         "litellm_stream": getattr(getattr(cfg, "litellm", None), "stream", None),
+        # boom fields
+        "boom_base_url": getattr(getattr(cfg, "boom", None), "base_url", None),
+        "boom_chat_path": getattr(getattr(cfg, "boom", None), "chat_path", None),
+        "boom_model": getattr(getattr(cfg, "boom", None), "model", None),
+        "boom_stream": getattr(getattr(cfg, "boom", None), "stream", None),
     }
     try:
         with (Path(exp_dir) / "run_summary.json").open("w", encoding="utf-8") as f:

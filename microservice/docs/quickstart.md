@@ -128,7 +128,8 @@ router-tp8-glm.yaml:
 Each entry produces one experiment. Methods for `backend: router` set
 `router.mode`; methods for `backend: aibrix` set `aibrix.routing_strategy`;
 methods for `backend: litellm` are labels only (no Helm knob — routing is
-controlled by the router behind LiteLLM).
+controlled by the router behind LiteLLM); methods for `backend: boom` work
+the same way (label only — routing handled by the router behind BooM Gateway).
 
 ---
 
@@ -263,6 +264,69 @@ configs/litellm.yaml:
 
 ---
 
+## §9 — BooM Gateway backend (Rust replacement for LiteLLM)
+
+The `backend: boom` path routes requests through a BooM Gateway pod — a Rust
+reimplementation of LiteLLM that provides the same virtual key auth, spend
+tracking, and rate limiting with lower overhead. **Do not use for benchmarking**
+— use `backend: router` for that.
+
+### Architecture
+
+```
+Client → BooM Gateway (port 30401)
+       → router /v1/chat/completions (port 30080)
+       → sidecars → vLLM pods
+```
+
+### BooM Gateway image
+
+Build from `BooMGateway-main/` and push to private registry:
+
+```bash
+cd /home/saeid/llm-lb/microservice/BooMGateway-main
+cargo build --release -p boom-main
+docker build -t reg.local:32000/boom-gateway:latest .
+docker push reg.local:32000/boom-gateway:latest
+```
+
+### Running a BooM sweep
+
+```bash
+# Deploy vLLM first (if not already running)
+python deploy_vllm.py --config configs/boom.yaml
+
+# Run the sweep (--skip-vllm preserves running vLLM pods)
+python sweep_methods.py --config boom_master --skip-vllm
+```
+
+Master config `configs/boom_master.yaml`:
+```yaml
+configs/boom.yaml:
+  - boom-pull
+```
+
+### Key config differences (boom.yaml vs litellm.yaml)
+
+| Field | litellm.yaml | boom.yaml |
+|---|---|---|
+| `backend` | `litellm` | `boom` |
+| `litellm.base_url` | `http://<node>:30400` | not used |
+| `boom.base_url` | not used | `http://<node>:30401` |
+| `boom.api_key` | not used | `sk-boom-master` |
+
+### BooM config notes
+
+- `model_list` in `boom_config.yaml` uses the same litellm-compatible YAML
+  shape (`litellm_params.api_base` must be `http://router-service:8080/v1`)
+- BooM Gateway starts in ~1s (vs ~17s for LiteLLM) — probes use
+  `initialDelaySeconds: 10` instead of 60
+- The BooM pod is pinned to `pin.nodeName` (node4) alongside the router
+
+For full details, see [docs/boom_gateway.md](boom_gateway.md).
+
+---
+
 ## Common issues
 
 | Symptom | Fix |
@@ -278,3 +342,7 @@ configs/litellm.yaml:
 | LiteLLM `Connection error` | kube-proxy iptables broken on node — install `iptables-libs` and restart kube-proxy |
 | Router image stale (old code running) | `imagePullPolicy: Always` on router; delete cached image on node with `crictl rmi` |
 | `kubectl wait` finds no pods after helm upgrade | Normal — `time.sleep(15)` in sweep_methods.py handles this; if persisting, check chart backend guards |
+| BooM pod `CrashLoopBackOff` | Check `boom_config.yaml` ConfigMap mount — YAML must be valid |
+| BooM `Connection refused` on 30401 | Pod not ready — check readiness probe; Rust binary starts in ~1s so this clears quickly |
+| BooM `401 Unauthorized` | API key mismatch between `boom.masterKey` (Helm) and `boom.api_key` (client config) |
+| BooM image pull error | Build and push `boom-gateway:latest` to `reg.local:32000` from `BooMGateway-main/` |

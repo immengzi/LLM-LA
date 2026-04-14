@@ -1,4 +1,4 @@
-{{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") }}
+{{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
 {{- if .Values.deploy.cpuHash }}
 {{- if not .Values.modelVolume.modelSubPath }}
 {{- fail "modelVolume.modelSubPath must be set — deploy PV/PVC once on the parent dir and pass the model subfolder name per deployment" }}

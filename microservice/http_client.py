@@ -14,7 +14,7 @@ import uuid
 import requests
 from requests.exceptions import RequestException
 
-from config import AIBrixConfig, GenerationConfig, LiteLLMConfig
+from config import AIBrixConfig, GenerationConfig, LiteLLMConfig, BooMConfig
 
 
 def _build_aibrix_extra_generation_fields(gen_cfg: GenerationConfig) -> Dict[str, Any]:
@@ -334,20 +334,25 @@ def send_one_litellm(
     litellm_cfg: LiteLLMConfig,
     prompt: str,
     gen_cfg: GenerationConfig,
+    label: str = "LiteLLM",
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
-    Send one request to the LiteLLM proxy using the OpenAI chat completions API.
+    Send one request to an OpenAI-compatible proxy (LiteLLM or BooM Gateway).
 
-    LiteLLM proxy enforces virtual key auth, spend tracking, and rate limits,
+    The proxy enforces virtual key auth, spend tracking, and rate limits,
     then forwards to the router's /v1/chat/completions shim.
+
+    Args:
+        label: Human-readable name for log messages (e.g. "LiteLLM", "BooM").
 
     Returns:
         (req_id, result_dict)
     """
+    label_lower = label.lower()
 
     if bool(litellm_cfg.stream):
         raise RuntimeError(
-            "LiteLLM streaming responses are not supported by send_one_litellm()"
+            f"{label} streaming responses are not supported by send_one_litellm()"
         )
 
     t_send = time.time()
@@ -377,13 +382,13 @@ def send_one_litellm(
             stream=False,
         )
     except RequestException as e:
-        print(f"[client] ✗ HTTP error talking to LiteLLM proxy: {e}")
+        print(f"[client] ✗ HTTP error talking to {label} proxy: {e}")
         raise
 
     t_recv = time.time()
 
     if not resp.ok:
-        print("[client] ✗ LiteLLM request failed")
+        print(f"[client] ✗ {label} request failed")
         print(f"[client] status_code = {resp.status_code}")
         print(f"[client] reason      = {resp.reason}")
         print(f"[client] url         = {resp.url}")
@@ -401,20 +406,20 @@ def send_one_litellm(
         print(body_preview)
 
         raise RuntimeError(
-            f"LiteLLM request failed: {resp.status_code} {resp.reason}"
+            f"{label} request failed: {resp.status_code} {resp.reason}"
         )
 
     try:
         data = resp.json()
     except Exception:
-        raise RuntimeError(f"LiteLLM returned non-JSON body: {resp.text!r}")
+        raise RuntimeError(f"{label} returned non-JSON body: {resp.text!r}")
 
     # Parse OpenAI-format response (identical structure to AIBrix / router shim)
     rid_raw = data.get("id")
     if isinstance(rid_raw, str) and rid_raw.strip():
         rid = rid_raw.strip()
     else:
-        rid = f"litellm-{uuid.uuid4().hex}"
+        rid = f"{label_lower}-{uuid.uuid4().hex}"
 
     output: Optional[str] = None
     finish_reason: Optional[str] = None
