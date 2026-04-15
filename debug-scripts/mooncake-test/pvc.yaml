@@ -1,0 +1,23 @@
+---
+# ============================================================
+# PersistentVolumeClaim: 模型存储
+# 与 helm template 对齐：
+#   - storageClassName: "" 静态绑定
+#   - volumeName 精确绑定到 model-pv
+#   - annotation: helm.sh/resource-policy: keep
+# ============================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-pvc
+  namespace: vllm-test
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: ""
+  volumeName: model-pv

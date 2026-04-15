@@ -6,7 +6,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: vllm-qwen
-  namespace: {{ .Release.Namespace }}
+  namespace: vllm
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicas.vllm }}
@@ -26,6 +26,11 @@ spec:
       restartPolicy: Always
       shareProcessNamespace: true
 
+      {{- if and .Values.mooncake.enabled .Values.vllm.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+
       tolerations:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
@@ -34,6 +39,11 @@ spec:
           operator: "Exists"
           effect: "NoSchedule"
 
+      {{- $ns := .Values.vllm.nodeSelector | default (dict) }}
+      {{- if $ns }}
+      nodeSelector:
+        {{- toYaml $ns | nindent 8 }}
+      {{- end }}
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -57,7 +67,37 @@ spec:
 
               echo "--- ASCEND_TOOLKIT_HOME before sourcing: [$ASCEND_TOOLKIT_HOME]"
               source /usr/local/Ascend/ascend-toolkit/set_env.sh
-              export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
+              export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
+
+              {{- if .Values.mooncake.enabled }}
+              # Mooncake: auto-detect NIC for HCCL/RoCE
+              local_ip="${NODE_IP}"
+              nic_name=$(python3 -c "
+              import os, socket, struct, fcntl
+              local_ip = '${local_ip}'
+              SIOCGIFADDR = 0x8915
+              for iface in os.listdir('/sys/class/net/'):
+                  if iface == 'lo': continue
+                  try:
+                      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                      ifreq = struct.pack('16sH14s', iface.encode(), socket.AF_INET, b'')
+                      res = fcntl.ioctl(sock.fileno(), SIOCGIFADDR, ifreq)
+                      ip = socket.inet_ntoa(res[20:24])
+                      sock.close()
+                      if ip == local_ip:
+                          print(iface)
+                          break
+                  except: pass
+              ")
+              echo "[vllm] local_ip=${local_ip} nic=${nic_name}"
+              export HCCL_IF_IP=${local_ip}
+              export GLOO_SOCKET_IFNAME=${nic_name}
+              export TP_SOCKET_IFNAME=${nic_name}
+              export HCCL_SOCKET_IFNAME=${nic_name}
+              export HCCL_BUFFSIZE=200
+              export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
+              export ASCEND_BUFFER_POOL={{ .Values.mooncake.ascendBufferPool }}
+              {{- end }}
 
               # --- start vLLM in background so we can launch a tiny exporter too
               python -m vllm.entrypoints.openai.api_server \
@@ -103,6 +143,9 @@ spec:
                 --host 0.0.0.0 \
                 {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
                 --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
+                {{- end }}
+                {{- if .Values.mooncake.enabled }}
+                --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"master_server_address":"{{ .Values.mooncake.masterServerAddress }}","lookup_rpc_port":"{{ .Values.mooncake.lookupRpcPort }}","backend":"mooncake"}}' \
                 {{- end }}
                 &
               VLLM_PID=$!
@@ -176,6 +219,22 @@ spec:
             {{- $tp := .Values.tensorParallelSize }}
             - name: ASCEND_RT_VISIBLE_DEVICES
               value: {{ include "vllmkv.tpDevices" (dict "tp" $tp) | quote }}
+            {{- if .Values.mooncake.enabled }}
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: HCCL_OP_EXPANSION_MODE
+              value: "AIV"
+            - name: VLLM_USE_V1
+              value: "1"
+            - name: PYTORCH_NPU_ALLOC_CONF
+              value: "expandable_segments:True"
+            - name: MOONCAKE_CONFIG_PATH
+              value: "/etc/mooncake/mooncake.json"
+            - name: ASCEND_BUFFER_POOL
+              value: {{ .Values.mooncake.ascendBufferPool | quote }}
+            {{- end }}
           ports:
             - containerPort: 8200
               name: http
@@ -183,6 +242,11 @@ spec:
             {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
             - containerPort: 5557
               name: kvpub
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.mooncake.enabled }}
+            - containerPort: {{ .Values.mooncake.lookupRpcPort }}
+              name: kv-rpc
               protocol: TCP
             {{- end }}
             - containerPort: 9101
@@ -211,6 +275,12 @@ spec:
               mountPath: /dev/hisi_hdc
             - name: devmm-svm-volume
               mountPath: /dev/devmm_svm
+            {{- if .Values.mooncake.enabled }}
+            - name: mooncake-config
+              mountPath: /etc/mooncake/mooncake.json
+              subPath: mooncake.json
+              readOnly: true
+            {{- end }}
 
           startupProbe:
             httpGet:
@@ -354,13 +424,18 @@ spec:
           hostPath:
             path: /dev/devmm_svm
             type: CharDevice
+        {{- if .Values.mooncake.enabled }}
+        - name: mooncake-config
+          configMap:
+            name: mooncake-config
+        {{- end }}
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: vllm-qwen
-  namespace: {{ .Release.Namespace }}
+  namespace: vllm
 spec:
   type: NodePort
   selector:

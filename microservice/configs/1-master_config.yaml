@@ -23,6 +23,12 @@
 #   - push-random
   # - push-least-queue
 
+router-tp8-glm-mooncake:
+  - pull
+  # - push-rr
+  # - push-random
+  # - push-least-queue
+
 # aibrix:
   # - random
   # - prefix-cache
