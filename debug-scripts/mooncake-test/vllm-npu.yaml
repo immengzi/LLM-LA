@@ -1,0 +1,270 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-test
+  namespace: vllm-test
+  labels:
+    app: vllm-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-test
+  template:
+    metadata:
+      labels:
+        app: vllm-test
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/hostname: node4
+
+      volumes:
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: model-pvc
+            readOnly: true
+        - name: mooncake-config
+          configMap:
+            name: mooncake-config
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Gi
+        - name: vllm-logs
+          hostPath:
+            path: /mnt/nvme1/haiting_jd/vllm_logs
+            type: DirectoryOrCreate
+        - name: dcmi-volume
+          hostPath:
+            path: /usr/local/dcmi
+            type: Directory
+        - name: npu-smi-volume
+          hostPath:
+            path: /usr/local/bin/npu-smi
+            type: File
+        - name: ascend-driver-lib64-volume
+          hostPath:
+            path: /usr/local/Ascend/driver/lib64/
+            type: Directory
+        - name: version-info-volume
+          hostPath:
+            path: /usr/local/Ascend/driver/version.info
+            type: File
+        - name: ascend-install-info-volume
+          hostPath:
+            path: /etc/ascend_install.info
+            type: File
+        - name: cache-volume
+          hostPath:
+            path: /root/.cache
+            type: DirectoryOrCreate
+
+      containers:
+        - name: vllm
+          image: quay.io/ascend/vllm-ascend:glm5-openeuler
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - /bin/bash
+            - -c
+          args:
+            - |
+              set -euo pipefail
+
+              echo "--- ASCEND_TOOLKIT_HOME before sourcing: [$ASCEND_TOOLKIT_HOME]"
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64:/usr/local/Ascend/nnal/atb/8.5.0/atb/cxx_abi_1/lib
+
+              # Auto-detect NIC name using python3 (no 'ip' command needed in container)
+              # Works on both node1/2 (enp67s0f5) and node3/4 (enp189s0f0)
+              local_ip="${NODE_IP}"
+              nic_name=$(python3 -c "
+              import os, socket, struct, fcntl
+              local_ip = '${local_ip}'
+              SIOCGIFADDR = 0x8915
+              for iface in os.listdir('/sys/class/net/'):
+                  if iface == 'lo':
+                      continue
+                  try:
+                      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                      ifreq = struct.pack('16sH14s', iface.encode(), socket.AF_INET, b'')
+                      res = fcntl.ioctl(sock.fileno(), SIOCGIFADDR, ifreq)
+                      ip = socket.inet_ntoa(res[20:24])
+                      sock.close()
+                      if ip == local_ip:
+                          print(iface)
+                          break
+                  except:
+                      pass
+              ")
+              echo "[vllm] local_ip=${local_ip} nic=${nic_name}"
+
+              export HCCL_OP_EXPANSION_MODE="AIV"
+              export HCCL_IF_IP=${local_ip}
+              export GLOO_SOCKET_IFNAME=${nic_name}
+              export TP_SOCKET_IFNAME=${nic_name}
+              export HCCL_SOCKET_IFNAME=${nic_name}
+              export HCCL_BUFFSIZE=200
+              export OMP_PROC_BIND=false
+              export OMP_NUM_THREADS=16
+              export PYTHONHASHSEED=0
+              export PYTHONPATH=${PYTHONPATH}:/vllm-workspace/vllm
+              export VLLM_USE_V1=1
+              export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+              export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
+              export ASCEND_BUFFER_POOL=4:8
+              export LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}
+              mkdir -p /workspace/vllm_logs
+              timestamp=$(date "+%Y%m%d%H%M%S")
+
+              echo "[vllm] pod=${POD_NAME} timestamp=${timestamp}"
+              echo "[vllm] MOONCAKE_CONFIG_PATH=${MOONCAKE_CONFIG_PATH}"
+              echo "[vllm] Starting vLLM server..."
+
+              python -m vllm.entrypoints.openai.api_server \
+                --model /workspace/glm5/haiting_jd/models/qwen3-32b \
+                --tokenizer /workspace/glm5/haiting_jd/models/qwen3-32b \
+                --host 0.0.0.0 \
+                --port 8000 \
+                --served-model-name served-model \
+                --tensor-parallel-size 8 \
+                --dtype float16 \
+                --trust-remote-code \
+                --max-model-len 32768 \
+                --gpu-memory-utilization 0.2 \
+                --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:'${ZMQ_PORT}'", "topic": "kv@'${POD_NAME}'@served-model"}' \
+                --kv-transfer-config \
+                '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"master_server_address":"10.50.156.65:50088","lookup_rpc_port":"10010","backend":"mooncake"}}'
+
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+            - name: kv-rpc
+              containerPort: 10010
+              protocol: TCP
+
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: ZMQ_PORT
+              value: "5557"
+            - name: HF_HUB_DISABLE_TELEMETRY
+              value: "1"
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+            - name: ASCEND_RT_VISIBLE_DEVICES
+              value: "0,1,2,3,4,5,6,7"
+            - name: HCCL_OP_EXPANSION_MODE
+              value: "AIV"
+            - name: HCCL_BUFFSIZE
+              value: "200"
+            - name: OMP_PROC_BIND
+              value: "false"
+            - name: OMP_NUM_THREADS
+              value: "16"
+            - name: VLLM_USE_V1
+              value: "1"
+            - name: PYTORCH_NPU_ALLOC_CONF
+              value: "expandable_segments:True"
+            - name: MOONCAKE_CONFIG_PATH
+              value: "/etc/mooncake/mooncake.json"
+            - name: ASCEND_BUFFER_POOL
+              value: "4:8"
+            - name: LD_LIBRARY_PATH
+              value: "/usr/local/lib:/usr/local/Ascend/nnal/atb/8.5.0/atb/cxx_abi_1/lib"
+
+          volumeMounts:
+            - name: model-storage
+              mountPath: /workspace/glm5
+              readOnly: true
+            - name: mooncake-config
+              mountPath: /etc/mooncake/mooncake.json
+              subPath: mooncake.json
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
+            - name: vllm-logs
+              mountPath: /workspace/vllm_logs
+            - name: dcmi-volume
+              mountPath: /usr/local/dcmi
+            - name: npu-smi-volume
+              mountPath: /usr/local/bin/npu-smi
+            - name: ascend-driver-lib64-volume
+              mountPath: /usr/local/Ascend/driver/lib64/
+            - name: version-info-volume
+              mountPath: /usr/local/Ascend/driver/version.info
+            - name: ascend-install-info-volume
+              mountPath: /etc/ascend_install.info
+            - name: cache-volume
+              mountPath: /root/.cache
+
+          resources:
+            requests:
+              huawei.com/Ascend: "8"
+              cpu: "32"
+              memory: "256Gi"
+            limits:
+              huawei.com/Ascend: "8"
+              cpu: "64"
+              memory: "512Gi"
+
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 360
+            timeoutSeconds: 2
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 12
+            timeoutSeconds: 2
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 20
+            failureThreshold: 6
+            timeoutSeconds: 2
+
+      terminationGracePeriodSeconds: 60
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-test-svc
+  namespace: vllm-test
+spec:
+  type: NodePort
+  selector:
+    app: vllm-test
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      nodePort: 30800

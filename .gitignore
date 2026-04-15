@@ -27,6 +27,7 @@ pd-test/LMCache-Ascend/
 /pd-test/native_cpu_offload/test_script
 /pd-test/vllm
 /pd-test/vllm-ascend
+/debug-scripts/offload-test/native_cpu_offload/test_script
 profiling
 prompts
 prompts1_haiting
@@ -46,3 +47,9 @@ microservice.zip
 zibC6vzD
 operator-go-bundle.tar.gz
 *.gz
+HQ-production/monitor/vllm_logs/
+debug-scripts/mooncake-test/Mooncake/
+debug-scripts/mooncake-test/Mooncake/
+debug-scripts/mooncake-test/prompt/
+debug-scripts/mooncake-test/test/
+HQ-production/

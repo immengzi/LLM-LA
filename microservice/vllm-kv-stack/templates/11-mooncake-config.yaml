@@ -1,0 +1,16 @@
+{{- if and (eq (lower .Values.backend) "router") .Values.mooncake.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mooncake-config
+  namespace: vllm
+data:
+  mooncake.json: |
+    {
+      "metadata_server": "P2PHANDSHAKE",
+      "protocol": "ascend",
+      "device_name": "",
+      "master_server_address": {{ .Values.mooncake.masterServerAddress | quote }},
+      "global_segment_size": {{ .Values.mooncake.globalSegmentSize }}
+    }
+{{- end }}

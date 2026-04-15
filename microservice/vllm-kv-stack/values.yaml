@@ -19,6 +19,7 @@ images:
   vllm: quay.io/ascend/vllm-ascend:glm5-openeuler
   cpuHash: vllm-cpu-hash:latest
   redis: redis:7-alpine
+  mooncakeMaster: quay.io/ascend/vllm-ascend:glm5-openeuler
 
 router:
   # pull | push-rr | push-random | push-leastq
@@ -92,7 +93,7 @@ modelVolume:
   # nfsPath: /saeid/models/qwen3-8b  # (old style — specific model path, no longer used)
   modelSubPath: ""                # set per-experiment by sweep (e.g. qwen3-8b, GLM-5-w4a8-mtp-QuaRot)
                                   # must be set explicitly on first deploy via --set modelVolume.modelSubPath=<name>
-
+  storageSize: "20Gi"   
 # AIBrix integration.
 # In backend=aibrix, vLLM pods expose labels so AIBrix gateway can discover them.
 aibrix:
@@ -120,6 +121,32 @@ vllm:
   seed: null                       # null = use vLLM default
   additionalConfig: null           # set to {multistreamOverlapSharedExpert: true} to enable
   speculativeConfig: null          # set to {numSpeculativeTokens: 3, method: "deepseek_mtp"} to enable
+  hostNetwork: false
+
+
+# Mooncake KV cache transfer
+# --------------------------------------------------------------------------
+# Mooncake manages cross-node KV cache sharing via AscendStoreConnector.
+# It is an optional enhancement WITHIN the router stack — it does NOT work
+# independently. When enabled, it adds:
+#   1. A mooncake-master Deployment (metadata coordination service)
+#   2. A ConfigMap with mooncake.json
+#   3. --kv-transfer-config on each vLLM worker
+#   4. hostNetwork + HCCL NIC detection on vLLM pods
+#
+# Requires backend=router. Helm will fail if mooncake.enabled=true without it.
+mooncake:
+  enabled: false
+  masterPort: 50088
+  # Must be the host IP of the pin.nodeName node (hostNetwork mode).
+  # mooncake-master scheduling follows pin.nodeName, so this IP must match that node.
+  masterServerAddress: "10.50.156.65:50088" # Must be the host IP of the pin.nodeName node (hostNetwork mode).
+  globalSegmentSize: 140000000000
+  evictionHighWatermark: 0.9
+  evictionRatio: 0.1
+  ascendBufferPool: "4:8"
+  lookupRpcPort: "10010"
+
 
 # Component deployment control
 # Set to false to skip deploying a component (used for decoupled vLLM/stack deploys)
@@ -226,3 +253,4 @@ boom:
     limits:
       cpu: "2000m"
       memory: "512Mi"
+  mooncakeMaster: true    # set false to skip mooncake-master 
