@@ -43,11 +43,17 @@
   # - push-random
   # - push-least-queue
 
-boom:
-  - pull
+# boom:
+#   - pull
   # - push-rr
   # - push-random
   # - push-least-queue
 
 # router-slo:
 #   - pull
+
+router-go:
+  - pull
+  # - push-rr
+  # - push-random
+  # - push-least-queue
