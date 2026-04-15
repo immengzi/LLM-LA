@@ -21,6 +21,12 @@ boom-integration/
 └── boom_config_example.yaml     # Example BooM Gateway runtime config (for reference)
 ```
 
+## Model documentation
+
+For a full guide on how to define, name, and route models through the BooM
+Gateway integration (single model, multi-model, aliases, cloud providers,
+load balancing), see [`docs/boom_models.md`](../docs/boom_models.md).
+
 ## Quick start
 
 1. Copy `Dockerfile` into the BooM Gateway repo root
