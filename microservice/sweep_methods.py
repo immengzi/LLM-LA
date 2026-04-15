@@ -618,7 +618,8 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         if service_impl == "go":
             set_values["images.router"] = "kv-router-go:latest"
             set_values["images.sidecar"] = "kv-sidecar-go:latest"
-            set_values["images.cpuHash"] = "kv-prefixhash-go:latest"
+            # prefix hash stays Python (Option C): HuggingFace tokenizers + vLLM block hashing
+            # are too heavy to port to Go for v0.1. cpuHash image is NOT overridden.
 
         set_values["autoscaling.enabled"] = bool(h.autoscaling_enabled)
 

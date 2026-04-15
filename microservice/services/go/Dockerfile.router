@@ -1,0 +1,4 @@
+FROM openeuler/openeuler:24.03
+COPY gateway /usr/bin/gateway
+EXPOSE 8080
+ENTRYPOINT ["gateway"]

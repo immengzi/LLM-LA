@@ -9,11 +9,11 @@ autoscaling:
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
   threshold: "16"
-backend: boom
+backend: router
 batchSize: 8
 boom:
   databaseUrl: ""
-  enabled: true
+  enabled: false
   image: boom-gateway:latest
   masterKey: sk-boom-master
   nodePort: 30401
@@ -34,8 +34,8 @@ global:
 images:
   cpuHash: vllm-cpu-hash:latest
   redis: redis:7-alpine
-  router: kv-router:latest
-  sidecar: kv-sidecar:latest
+  router: kv-router-go:latest
+  sidecar: kv-sidecar-go:latest
   vllm: quay.io/ascend/vllm-ascend:glm5-openeuler
 litellm:
   databaseUrl: ""
