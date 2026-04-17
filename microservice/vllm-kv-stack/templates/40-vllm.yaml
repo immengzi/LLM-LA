@@ -327,7 +327,7 @@ spec:
         {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
         - name: kv-sidecar
           image: {{ include "vllmkv.image" (list . .Values.images.sidecar) }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           env:
             - name: ROUTER_URL
               value: "http://router-service:8080"

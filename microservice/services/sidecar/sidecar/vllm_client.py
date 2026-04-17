@@ -161,19 +161,25 @@ class VLLMWorker:
                     # ----------------------------------------------------
                     # Build vLLM request
                     # ----------------------------------------------------
-                    max_tokens = meta.get("max_tokens", 128)
-                    temperature = meta.get("temperature", 0.0)
-                    enable_thinking = bool(meta.get("enable_thinking", False))
+                    chat_req = meta.get("__chat_request__")
+                    if chat_req and isinstance(chat_req, dict):
+                        payload = dict(chat_req)
+                        payload["model"] = _cfg.MODEL_NAME
+                        payload["stream"] = False
+                    else:
+                        max_tokens = meta.get("max_tokens", 128)
+                        temperature = meta.get("temperature", 0.0)
+                        enable_thinking = bool(meta.get("enable_thinking", False))
 
-                    payload: Dict[str, Any] = {
-                        "model": _cfg.MODEL_NAME,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": max_tokens,
-                        "temperature": temperature,
-                        "chat_template_kwargs": {
-                            "enable_thinking": enable_thinking,
-                        },
-                    }
+                        payload: Dict[str, Any] = {
+                            "model": _cfg.MODEL_NAME,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "max_tokens": max_tokens,
+                            "temperature": temperature,
+                            "chat_template_kwargs": {
+                                "enable_thinking": enable_thinking,
+                            },
+                        }
 
                     # ----------------------------------------------------
                     # Trace: vLLM send timestamp
