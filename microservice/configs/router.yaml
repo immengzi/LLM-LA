@@ -69,7 +69,7 @@ transport:
   idle_zero_running_s: 10.0
 
 helm:
-  replicas: 2
+  replicas: 8
   batch_size: 8
   tensor_parallel_size: 1
 
@@ -87,9 +87,12 @@ helm:
   # Model config
   model_name: "served-model"
   nfs_path: "/saeid/models/qwen3-8b"
+  # model_host_path: "/home/haiting/models"  # uncomment to use local disk instead of NFS
   vllm_quantization: null             # Qwen3 is dense, not quantized
   vllm_enable_expert_parallel: false  # Qwen3 is not MoE
   vllm_gpu_memory_utilization: null   # use vLLM default
+  vllm_tool_call_parser: "qwen3_coder"
+  vllm_reasoning_parser: "qwen3"
   # vllm_max_model_len not set — uses model's default (null)
 
   # Disable AIBrix exposure for router experiments

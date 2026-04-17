@@ -13,6 +13,9 @@ class RouterConfig:
     HOST: str = "0.0.0.0"
     PORT: int = 8080
 
+    # API key for /v1/chat/completions (empty = no auth required)
+    API_KEY: str = ""
+
     # Redis (for KV watcher)
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
@@ -167,6 +170,7 @@ def get_config() -> RouterConfig:
     # Basic overrides
     cfg.HOST = os.getenv("HOST", cfg.HOST)
     cfg.PORT = int(os.getenv("PORT", cfg.PORT))
+    cfg.API_KEY = os.getenv("API_KEY", cfg.API_KEY)
 
     cfg.REDIS_HOST = os.getenv("REDIS_HOST", cfg.REDIS_HOST)
     cfg.REDIS_PORT = int(os.getenv("REDIS_PORT", cfg.REDIS_PORT))

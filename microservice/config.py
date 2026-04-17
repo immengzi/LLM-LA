@@ -310,6 +310,7 @@ class HelmConfig:
     router_kv_aware: bool = True
     router_len_aware: bool = True
     router_len_policy: str = "short_first"  # short_first | long_first | even_short_long
+    router_api_key: str = ""  # API key for /v1/chat/completions (empty = no auth)
 
     # ---- AIBrix exposure knobs (maps to Helm chart values.aibrix.*) ----
     aibrix_enabled: bool = False
@@ -317,7 +318,6 @@ class HelmConfig:
     aibrix_port: int = 8200
     # --------------------------------------------------------------------
 
-<<<<<<< HEAD
     # ---- SLO-aware routing knobs (maps to Helm chart values.router.slo*) ----
     router_slo_aware: bool = False
     router_slo_with_kv: bool = True
@@ -332,16 +332,32 @@ class HelmConfig:
     router_queue_wait_model: str = "none"
     router_chunked_prefill_aware: bool = False
     router_max_num_batched_tokens: int = 0
-=======
-    # ---- Mooncake KV cache transfer knobs (maps to Helm chart values.mooncake.*) ----
+    # --------------------------------------------------------------------
+
+    # ---- BooM Gateway: Claude Code alias toggle ----
+    # When true and backend=boom, deploy BooM with model aliases so Claude Code's
+    # default model names (claude-sonnet-4-20250514, etc.) map to served-model.
+    # This is a deployment-only knob — it does not affect the load test client.
+    boom_claude_aliases: bool = False
+    # --------------------------------------------------------------------
+
+    # ---- NFS cache warm (pre-reads model shards before vLLM starts) ----
+    cache_warm_enabled: bool = False
+    cache_warm_pvc_name: str = "models-nfs-pvc"
+    cache_warm_model_sub_path: str = "GLM-5-w4a8-mtp-QuaRot"
+    # --------------------------------------------------------------------
+
+    # ---- Mooncake KV cache transfer (requires backend=router) ----
     mooncake_enabled: bool = False
-    mooncake_host_network: bool = True
-    mooncake_master_server_address: Optional[str] = None
-    mooncake_master_port: Optional[int] = None
-    mooncake_global_segment_size: Optional[int] = None
-    mooncake_ascend_buffer_pool: Optional[str] = None
-    mooncake_lookup_rpc_port: Optional[str] = None
->>>>>>> 557a338 (add mooncake related config to vllm-kv-stack, config.py and helm chart template)
+    mooncake_master_port: int = 50088
+    mooncake_master_server_address: str = "10.50.156.65:50088"
+    mooncake_global_segment_size: int = 140000000000
+    mooncake_eviction_high_watermark: float = 0.9
+    mooncake_eviction_ratio: float = 0.1
+    mooncake_ascend_buffer_pool: str = "4:8"
+    mooncake_lookup_rpc_port: str = "10010"
+    mooncake_host_network: bool = False
+    deploy_mooncake_master: bool = True
     # --------------------------------------------------------------------
 
     # ---- Deploy mode: "helm" (direct Helm CLI) or "operator" (VllmKvStack CR) ----
@@ -356,6 +372,7 @@ class HelmConfig:
     # ---- vLLM model config (maps to Helm chart values.modelVolume.*) ----
     model_name: str = "served-model"  # vLLM served model name (--served-model-name)
     nfs_path: str = ""  # NFS path to model (e.g., /saeid/models/GLM-5-w4a8-mtp-QuaRot)
+    model_host_path: str = ""  # local path on each node (e.g. /home/haiting/models) — empty = NFS PVC
     # --------------------------------------------------------------------
 
     # ---- vLLM runtime flags (maps to Helm chart values.vllm.*) ----
@@ -368,8 +385,9 @@ class HelmConfig:
     vllm_max_num_batched_tokens: Optional[int] = None
     vllm_seed: Optional[int] = None
     vllm_additional_config: Optional[str] = None
-    vllm_node_selector: Optional[str] = None           # JSON string, e.g. '{"kubernetes.io/hostname": "node4"}'
     vllm_speculative_config: Optional[str] = None
+    vllm_tool_call_parser: Optional[str] = None      # e.g. "qwen3_coder", "glm47"
+    vllm_reasoning_parser: Optional[str] = None       # e.g. "qwen3", "glm45"
     # --------------------------------------------------------------------
 
 

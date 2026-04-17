@@ -1,0 +1,45 @@
+{{- if .Values.cacheWarm.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-cache-warm
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": hook-succeeded,before-hook-creation
+spec:
+  ttlSecondsAfterFinished: {{ .Values.cacheWarm.ttlSeconds | default 120 }}
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: warm
+          image: {{ .Values.cacheWarm.image | default "busybox" }}
+          command:
+            - sh
+            - -c
+            - |
+              echo "Starting NFS cache warm for {{ .Values.cacheWarm.modelSubPath }}..."
+              total=$(ls /model/{{ .Values.cacheWarm.modelSubPath }}/*.safetensors 2>/dev/null | wc -l)
+              if [ "$total" -eq 0 ]; then
+                echo "ERROR: No safetensors found at /model/{{ .Values.cacheWarm.modelSubPath }}/"
+                exit 1
+              fi
+              i=0
+              for f in /model/{{ .Values.cacheWarm.modelSubPath }}/*.safetensors; do
+                i=$((i+1))
+                echo "[$i/$total] Reading $(basename $f)..."
+                cat "$f" > /dev/null
+              done
+              echo "Done. All $total shards read into NFS server page cache."
+          volumeMounts:
+            - name: model
+              mountPath: /model
+              readOnly: true
+      volumes:
+        - name: model
+          persistentVolumeClaim:
+            claimName: {{ .Values.cacheWarm.pvcName | default "models-nfs-pvc" }}
+{{- end }}

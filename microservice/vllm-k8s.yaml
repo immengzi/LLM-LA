@@ -6,6 +6,37 @@ metadata:
   name: kv-router-sa
   namespace: vllm
 ---
+# Source: vllm-kv-stack/templates/75-boom.yaml
+# -----------------------------------------------------------------------
+# ConfigMap: BooM Gateway config
+# Mounted as /app/boom_config.yaml inside the container.
+# -----------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: boom-config
+  namespace: vllm
+  labels:
+    app: boom-proxy
+    release: vllm
+data:
+  boom_config.yaml: |
+    model_list:
+      - model_name: served-model
+        litellm_params:
+          model: openai/served-model
+          api_base: http://router-service:8080/v1
+          api_key: "ZhongRuanChuangXin!"
+
+    general_settings:
+      master_key: "sk-boom-master"
+    router_settings:
+      model_group_alias:
+        "claude-sonnet-4-20250514": "served-model"
+        "claude-3-5-sonnet-20241022": "served-model"
+        "claude-3-haiku-20240307": "served-model"
+        "claude-3-opus-20240229": "served-model"
+---
 # Source: vllm-kv-stack/templates/30-router-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -104,6 +135,30 @@ spec:
       port: 8200
       targetPort: 8200
       nodePort: 30034
+---
+# Source: vllm-kv-stack/templates/75-boom.yaml
+# -----------------------------------------------------------------------
+# Service: boom-proxy
+# ClusterIP on port 4000 for in-cluster access.
+# NodePort on boom.nodePort for external access from dev machines / CI.
+# -----------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: boom-proxy
+  namespace: vllm
+  labels:
+    app: boom-proxy
+    release: vllm
+spec:
+  type: NodePort
+  selector:
+    app: boom-proxy
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000
+      nodePort: 30401
 ---
 # Source: vllm-kv-stack/templates/10-redis.yaml
 apiVersion: apps/v1
@@ -232,7 +287,7 @@ spec:
             - name: model
               mountPath: /model
               readOnly: true
-              subPath: qwen3-8b
+              subPath: GLM-5-w4a8-mtp-QuaRot
           resources:
             requests:
               cpu: "1000m"
@@ -281,7 +336,7 @@ spec:
 
       containers:
         - name: router
-          image: reg.local:32000/kv-router-go:latest
+          image: reg.local:32000/kv-router:latest
           # imagePullPolicy: IfNotPresent
           imagePullPolicy: Always
           env:
@@ -403,6 +458,8 @@ spec:
               value: "submit_ack"
             - name: RESULT_SUBMIT_PATH
               value: "/result_submit"
+            - name: API_KEY
+              value: "ZhongRuanChuangXin!"
 
           ports:
             - containerPort: 8080
@@ -458,7 +515,6 @@ spec:
         - key: "node-role.kubernetes.io/master"
           operator: "Exists"
           effect: "NoSchedule"
-
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -482,7 +538,7 @@ spec:
 
               echo "--- ASCEND_TOOLKIT_HOME before sourcing: [$ASCEND_TOOLKIT_HOME]"
               source /usr/local/Ascend/ascend-toolkit/set_env.sh
-              export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
+              export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
 
               # --- start vLLM in background so we can launch a tiny exporter too
               python -m vllm.entrypoints.openai.api_server \
@@ -490,12 +546,22 @@ spec:
                 --tokenizer /model \
                 --port 8200 \
                 --served-model-name served-model \
-                --tensor-parallel-size 1 \
+                --tensor-parallel-size 8 \
                 --dtype auto \
                 --kv-cache-dtype auto \
-                --max-num-seqs 8 \
+                --max-num-seqs 32 \
                 --prefix-caching-hash-algo sha256_cbor \
+                --gpu-memory-utilization 0.95 \
+                --quantization ascend \
+                --enable-expert-parallel \
                 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+                --trust-remote-code \
+                --max-num-batched-tokens 4096 \
+                --seed 1924 \
+                --max-model-len 80000 \
+                --tool-call-parser glm47 \
+                --enable-auto-tool-choice \
+                --reasoning-parser glm45 \
                 --host 0.0.0.0 \
                 --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
                 &
@@ -568,7 +634,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: ASCEND_RT_VISIBLE_DEVICES
-              value: "0"
+              value: "0,1,2,3,4,5,6,7"
           ports:
             - containerPort: 8200
               name: http
@@ -583,7 +649,7 @@ spec:
             - name: model
               mountPath: /model
               readOnly: true
-              subPath: qwen3-8b
+              subPath: GLM-5-w4a8-mtp-QuaRot
             - name: dshm
               mountPath: /dev/shm
             - name: dcmi-volume
@@ -608,9 +674,9 @@ spec:
               path: /health
               port: 8200
             initialDelaySeconds: 60
-            periodSeconds: 10
-            failureThreshold: 1080
-            timeoutSeconds: 2
+            periodSeconds: 30
+            failureThreshold: 720
+            timeoutSeconds: 5
 
           readinessProbe:
             httpGet:
@@ -619,26 +685,26 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 12
-            timeoutSeconds: 2
+            timeoutSeconds: 5
 
           livenessProbe:
             httpGet:
               path: /health
               port: 8200
             initialDelaySeconds: 120
-            periodSeconds: 20
-            failureThreshold: 540
-            timeoutSeconds: 2
+            periodSeconds: 30
+            failureThreshold: 720
+            timeoutSeconds: 5
 
           resources:
             requests:
-              huawei.com/Ascend910: 1
+              huawei.com/Ascend910: 8
               ephemeral-storage: "2Gi"
             limits:
-              huawei.com/Ascend910: 1
+              huawei.com/Ascend910: 8
               ephemeral-storage: "4Gi"
         - name: kv-sidecar
-          image: reg.local:32000/kv-sidecar-go:latest
+          image: reg.local:32000/kv-sidecar:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: ROUTER_URL
@@ -652,7 +718,7 @@ spec:
               value: "9000"
 
             - name: BATCH_SIZE
-              value: "8"
+              value: "32"
 
             - name: SIDECAR_MODE
               value: "pull"
@@ -704,12 +770,13 @@ spec:
 
       volumes:
         - name: model
-          persistentVolumeClaim:
-            claimName: models-nfs-pvc
+          hostPath:
+            path: /home/haiting/models
+            type: Directory
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 16Gi
+            sizeLimit: 128Gi
         - name: dcmi-volume
           hostPath:
             path: /usr/local/dcmi
@@ -742,6 +809,100 @@ spec:
           hostPath:
             path: /dev/devmm_svm
             type: CharDevice
+---
+# Source: vllm-kv-stack/templates/75-boom.yaml
+# -----------------------------------------------------------------------
+# Deployment: boom-proxy
+# Single replica. Pinned to same node as router (pin.nodeName) when
+# pin.enabled=true, so it stays co-located with the control plane.
+# -----------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: boom-proxy
+  namespace: vllm
+  labels:
+    app: boom-proxy
+    release: vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: boom-proxy
+  template:
+    metadata:
+      labels:
+        app: boom-proxy
+        release: vllm
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - "node4"
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/control-plane
+          operator: Exists
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/master
+          operator: Exists
+
+      containers:
+        - name: boom
+          image: reg.local:32000/boom-gateway:latest
+          imagePullPolicy: IfNotPresent
+
+          args:
+            - --config
+            - /app/boom_config.yaml
+            - --port
+            - "4000"
+
+          ports:
+            - name: http
+              containerPort: 4000
+              protocol: TCP
+
+          volumeMounts:
+            - name: boom-config
+              mountPath: /app/boom_config.yaml
+              subPath: boom_config.yaml
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 4
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+
+          resources:
+            limits:
+              cpu: 2000m
+              memory: 512Mi
+            requests:
+              cpu: 250m
+              memory: 128Mi
+
+          env:
+
+      volumes:
+        - name: boom-config
+          configMap:
+            name: boom-config
 ---
 # Source: vllm-kv-stack/templates/50-podmonitors.yaml
 apiVersion: monitoring.coreos.com/v1

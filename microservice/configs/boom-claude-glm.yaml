@@ -1,10 +1,16 @@
-# router-tp8-glm.yaml
-# Router-based experiment config with Tensor Parallelism = 8 for GLM-5-w4a8-mtp-QuaRot
+# boom-claude-glm.yaml
+# Deploys GLM-5-w4a8-mtp-QuaRot (TP=8) with BooM Gateway for Claude Code.
+#
+# Same Claude Code integration as boom-claude.yaml but with the larger
+# GLM-5 model (W4A8 quantized MoE) instead of Qwen3-8B.
+#
+# Claude Code connects via /v1/messages (Anthropic format) on port 30401.
+# See docs/boom_claude.md for ~/.claude/settings.json setup.
 
-backend: "router"
+backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 128
+total_requests: 8
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -14,7 +20,6 @@ file_prompts:
 hf_lmsys:
   dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
   split: "train"
-  # tokenizer_name: "/mnt/nvme1/saeid/models/qwen3-8b"
   tokenizer_name: "/mnt/nvme1/saeid/models/GLM-5-w4a8-mtp-QuaRot"
   streaming: false
   min_input_tokens: 256
@@ -23,7 +28,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 5
+  rate_rps: 2
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -41,7 +46,6 @@ load_pattern:
 
 generation:
   max_tokens: 5
-  # max_tokens: 8192
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null
@@ -57,7 +61,7 @@ metrics:
   scrape_interval_s: 1.0
   window_s: 2.0
   include_debug_metrics: false
-  model_name: "served-model"
+  model_name: null
   max_instances: null
 
 transport:
@@ -69,10 +73,25 @@ transport:
   idle_timeout_s: 1000.0
   idle_zero_running_s: 10.0
 
+# BooM Gateway — load test validation uses OpenAI format;
+# Claude Code connects separately via /v1/messages (Anthropic format).
+boom:
+  base_url: "http://7.216.57.215:30401"
+  chat_path: "/v1/chat/completions"
+  model: "served-model"
+  api_key: "sk-boom-master"
+  timeout_s: 1000.0
+  stream: false
+
 helm:
   replicas: 2
   batch_size: 32
   tensor_parallel_size: 8
+
+  boom_claude_aliases: true
+
+  # API key for external /v1/chat/completions access (empty = no auth)
+  router_api_key: "ZhongRuanChuangXin!"
 
   autoscaling_enabled: false
   autoscaling_min: 16
@@ -85,7 +104,7 @@ helm:
   router_len_aware: true
   router_len_policy: "short_first"
 
-  # Model config
+  # Model config — GLM-5 W4A8 MoE (quantized)
   model_name: "served-model"
   nfs_path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
   model_host_path: "/home/haiting/models"  # local disk on each node (bypasses NFS)
@@ -106,7 +125,7 @@ helm:
   vllm_enable_expert_parallel: true
   vllm_compilation_config: '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   vllm_trust_remote_code: true
-  vllm_max_model_len: null
+  vllm_max_model_len: 80000
   vllm_max_num_batched_tokens: 4096
   vllm_seed: 1924
   vllm_tool_call_parser: "glm47"
