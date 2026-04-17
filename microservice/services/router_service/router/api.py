@@ -75,7 +75,7 @@ from typing import Union
 
 class _ChatMessage(BaseModel):
     role: str
-    content: Union[str, List[Any]]
+    content: Union[str, List[Any], None] = None
 
     class Config:
         extra = "allow"
@@ -83,6 +83,8 @@ class _ChatMessage(BaseModel):
     @validator("content", pre=True)
     def _normalise_content(cls, v):
         """Accept both plain strings and OpenAI/Anthropic content-block arrays."""
+        if v is None:
+            return None
         if isinstance(v, str):
             return v
         if isinstance(v, list):
@@ -102,6 +104,7 @@ class _ChatCompletionRequest(BaseModel):
     temperature: Optional[float] = None
     stream: Optional[bool] = False
     stream_options: Optional[Dict[str, Any]] = None
+    tools: Optional[List[Any]] = None
 
     class Config:
         extra = "allow"
@@ -1210,18 +1213,21 @@ async def pull(req: PullRequest):
 def _messages_to_prompt(messages: List[_ChatMessage]) -> str:
     """
     Flatten OpenAI messages list into a single prompt string.
-    Preserves role context so the model sees the conversation structure.
+    Used for KV-hash computation; tool-calling requests also pass the
+    full request body via meta so the sidecar can forward it to vLLM.
     """
     parts = []
     for msg in messages:
         role = msg.role.strip().lower()
-        content = msg.content.strip()
+        content = (msg.content or "").strip()
         if role == "system":
             parts.append(f"System: {content}")
         elif role == "user":
             parts.append(f"User: {content}")
         elif role == "assistant":
             parts.append(f"Assistant: {content}")
+        elif role == "tool":
+            parts.append(f"Tool: {content}")
         else:
             parts.append(content)
     return "\n".join(parts)
@@ -1231,12 +1237,15 @@ async def _enqueue_and_wait(
     prompt: str,
     model: str,
     source: str = "litellm",
+    chat_request_body: Optional[Dict[str, Any]] = None,
 ) -> tuple:
     """Shared enqueue-wait logic for both streaming and non-streaming chat completions."""
     t_start = time.time()
     inc_admission()
 
     meta: Dict[str, Any] = {"__source__": source}
+    if chat_request_body is not None:
+        meta["__chat_request__"] = chat_request_body
     if _is_push_mode():
         rid = router_state.next_req_id()
         is_pull_mode = False
@@ -1381,6 +1390,85 @@ def _check_api_key(request: Request) -> None:
     raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
+def _build_chat_request_body(req: _ChatCompletionRequest) -> Dict[str, Any]:
+    """
+    Reconstruct the full OpenAI request body from the Pydantic model.
+    extra='allow' on both _ChatCompletionRequest and _ChatMessage ensures
+    fields like tools, tool_choice, and per-message tool_calls are preserved.
+    """
+    body = req.dict(exclude_none=True)
+    body.pop("stream_options", None)
+    return body
+
+
+def _extract_tool_calls(result: Dict[str, Any]) -> Optional[List[Any]]:
+    """Extract tool_calls from the raw vLLM response if present."""
+    raw = result.get("raw")
+    if not isinstance(raw, dict):
+        return None
+    choices = raw.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return None
+    msg = choice.get("message")
+    if not isinstance(msg, dict):
+        return None
+    tc = msg.get("tool_calls")
+    if isinstance(tc, list) and tc:
+        return tc
+    return None
+
+
+def _build_sse_chunks_with_tool_calls(
+    rid: str,
+    model: str,
+    created: int,
+    tool_calls: List[Any],
+    finish_reason: str,
+    usage: Dict[str, Any],
+) -> str:
+    """Build OpenAI SSE stream for a tool_calls response."""
+    chunk_id = f"chatcmpl-{rid}"
+    lines: List[str] = []
+
+    preamble = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": None, "tool_calls": []}, "finish_reason": None}],
+    }
+    lines.append(f"data: {json.dumps(preamble)}\n\n")
+
+    for i, tc in enumerate(tool_calls):
+        chunk = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"tool_calls": [{"index": i, **tc}]}, "finish_reason": None}],
+        }
+        lines.append(f"data: {json.dumps(chunk)}\n\n")
+
+    final = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+        "usage": {
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        },
+    }
+    lines.append(f"data: {json.dumps(final)}\n\n")
+    lines.append("data: [DONE]\n\n")
+    return "".join(lines)
+
+
 @app.post("/v1/chat/completions")
 async def openai_chat_completions(req: _ChatCompletionRequest, request: Request):
     """
@@ -1389,25 +1477,51 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
     Supports both non-streaming (default) and streaming (stream=true) modes.
     Streaming returns standard OpenAI SSE format so upstream gateways (e.g.
     BooM, LiteLLM) can parse it natively.
+
+    When the request contains tools or tool-role messages, the full request
+    body is forwarded through the sidecar pipeline to vLLM so that structured
+    tool calling works end-to-end.
     """
     _check_api_key(request)
+
     prompt = _messages_to_prompt(req.messages)
-    rid, t_start, result = await _enqueue_and_wait(prompt, req.model)
+
+    has_tools = bool(req.tools)
+    has_tool_messages = any(m.role == "tool" for m in req.messages)
+
+    chat_request_body = None
+    if has_tools or has_tool_messages:
+        chat_request_body = _build_chat_request_body(req)
+
+    rid, t_start, result = await _enqueue_and_wait(
+        prompt, req.model, chat_request_body=chat_request_body,
+    )
 
     output_text = result.get("output", "")
     finish_reason = result.get("finish_reason", "stop") or "stop"
     usage = result.get("usage") or {}
+    tool_calls = _extract_tool_calls(result)
 
     # --- streaming path ---
     if req.stream:
-        sse_payload = _build_sse_chunks(
-            rid=rid,
-            model=req.model,
-            created=int(t_start),
-            output_text=output_text,
-            finish_reason=finish_reason,
-            usage=usage,
-        )
+        if tool_calls:
+            sse_payload = _build_sse_chunks_with_tool_calls(
+                rid=rid,
+                model=req.model,
+                created=int(t_start),
+                tool_calls=tool_calls,
+                finish_reason=finish_reason,
+                usage=usage,
+            )
+        else:
+            sse_payload = _build_sse_chunks(
+                rid=rid,
+                model=req.model,
+                created=int(t_start),
+                output_text=output_text,
+                finish_reason=finish_reason,
+                usage=usage,
+            )
 
         async def _event_generator():
             yield sse_payload
@@ -1422,7 +1536,14 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
             },
         )
 
-    # --- non-streaming path (unchanged) ---
+    # --- non-streaming path ---
+    message: Dict[str, Any] = {
+        "role": "assistant",
+        "content": output_text if not tool_calls else None,
+    }
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+
     return {
         "id": f"chatcmpl-{rid}",
         "object": "chat.completion",
@@ -1431,10 +1552,7 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
         "choices": [
             {
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": output_text,
-                },
+                "message": message,
                 "finish_reason": finish_reason,
             }
         ],

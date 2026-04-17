@@ -96,50 +96,14 @@ func (w *VLLMWorker) loop() {
 func (w *VLLMWorker) process(item QueueItem) {
 	start := time.Now()
 
-	maxTokens := 128
-	if v, ok := item.Meta["max_tokens"]; ok {
-		switch t := v.(type) {
-		case float64:
-			maxTokens = int(t)
-		case int:
-			maxTokens = t
-		case json.Number:
-			if n, err := t.Int64(); err == nil {
-				maxTokens = int(n)
-			}
-		}
-	}
+	var body []byte
+	var err error
 
-	temperature := 0.0
-	if v, ok := item.Meta["temperature"]; ok {
-		switch t := v.(type) {
-		case float64:
-			temperature = t
-		case json.Number:
-			if f, err := t.Float64(); err == nil {
-				temperature = f
-			}
-		}
+	if chatReq, ok := item.Meta["__chat_request__"]; ok {
+		body, err = w.buildPassthroughBody(chatReq)
+	} else {
+		body, err = w.buildLegacyBody(item)
 	}
-
-	enableThinking := false
-	if v, ok := item.Meta["enable_thinking"]; ok {
-		if b, ok2 := v.(bool); ok2 {
-			enableThinking = b
-		}
-	}
-
-	req := chatRequest{
-		Model:       w.cfg.ModelName,
-		Messages:    []chatMessage{{Role: "user", Content: item.Prompt}},
-		MaxTokens:   maxTokens,
-		Temperature: temperature,
-		ChatTemplateKwargs: map[string]any{
-			"enable_thinking": enableThinking,
-		},
-	}
-
-	body, err := json.Marshal(req)
 	if err != nil {
 		log.Printf("[worker-%d] marshal error: %v", w.id, err)
 		w.submitError(item.ReqID, err, time.Since(start), item.Meta)
@@ -203,6 +167,67 @@ func (w *VLLMWorker) process(item QueueItem) {
 	}
 
 	w.poster.Submit(result)
+}
+
+// buildPassthroughBody forwards the full OpenAI chat request body from meta
+// to vLLM. This preserves tools, tool_choice, multi-turn messages, etc.
+// The request is always sent non-streaming so the sidecar can capture the
+// complete response and post it back to the router.
+func (w *VLLMWorker) buildPassthroughBody(chatReq any) ([]byte, error) {
+	m, ok := chatReq.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("__chat_request__ is not a JSON object")
+	}
+	m["model"] = w.cfg.ModelName
+	m["stream"] = false
+	return json.Marshal(m)
+}
+
+// buildLegacyBody constructs the classic single-user-message request body.
+func (w *VLLMWorker) buildLegacyBody(item QueueItem) ([]byte, error) {
+	maxTokens := 128
+	if v, ok := item.Meta["max_tokens"]; ok {
+		switch t := v.(type) {
+		case float64:
+			maxTokens = int(t)
+		case int:
+			maxTokens = t
+		case json.Number:
+			if n, err := t.Int64(); err == nil {
+				maxTokens = int(n)
+			}
+		}
+	}
+
+	temperature := 0.0
+	if v, ok := item.Meta["temperature"]; ok {
+		switch t := v.(type) {
+		case float64:
+			temperature = t
+		case json.Number:
+			if f, err := t.Float64(); err == nil {
+				temperature = f
+			}
+		}
+	}
+
+	enableThinking := false
+	if v, ok := item.Meta["enable_thinking"]; ok {
+		if b, ok2 := v.(bool); ok2 {
+			enableThinking = b
+		}
+	}
+
+	req := chatRequest{
+		Model:       w.cfg.ModelName,
+		Messages:    []chatMessage{{Role: "user", Content: item.Prompt}},
+		MaxTokens:   maxTokens,
+		Temperature: temperature,
+		ChatTemplateKwargs: map[string]any{
+			"enable_thinking": enableThinking,
+		},
+	}
+	return json.Marshal(req)
 }
 
 func extractChatResult(raw map[string]any) (string, string, map[string]any) {

@@ -705,7 +705,7 @@ spec:
               ephemeral-storage: "4Gi"
         - name: kv-sidecar
           image: reg.local:32000/kv-sidecar:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           env:
             - name: ROUTER_URL
               value: "http://router-service:8080"
