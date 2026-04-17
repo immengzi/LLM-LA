@@ -1,15 +1,17 @@
 # router/api.py
 # -*- coding: utf-8 -*-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi import status
 from fastapi import BackgroundTasks
 
 import httpx
+import json
 import time
 import sys
 import asyncio
+import uuid
 from threading import RLock
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -68,11 +70,30 @@ from .pubsub import ResultPublisher  # type: ignore
 # ============================================================
 # Pydantic models for OpenAI-compatible /v1/chat/completions
 # ============================================================
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
+from typing import Union
 
 class _ChatMessage(BaseModel):
     role: str
-    content: str
+    content: Union[str, List[Any]]
+
+    class Config:
+        extra = "allow"
+
+    @validator("content", pre=True)
+    def _normalise_content(cls, v):
+        """Accept both plain strings and OpenAI/Anthropic content-block arrays."""
+        if isinstance(v, str):
+            return v
+        if isinstance(v, list):
+            parts = []
+            for block in v:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            return "\n".join(parts) if parts else ""
+        return str(v)
 
 class _ChatCompletionRequest(BaseModel):
     model: str = "served-model"
@@ -80,6 +101,10 @@ class _ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
     stream: Optional[bool] = False
+    stream_options: Optional[Dict[str, Any]] = None
+
+    class Config:
+        extra = "allow"
 # ============================================================
 
 _cfg = get_config()
@@ -1202,26 +1227,16 @@ def _messages_to_prompt(messages: List[_ChatMessage]) -> str:
     return "\n".join(parts)
 
 
-@app.post("/v1/chat/completions")
-async def openai_chat_completions(req: _ChatCompletionRequest):
-    """
-    OpenAI-compatible chat completions endpoint.
-
-    Intended for use by the LiteLLM proxy (production auth/spend layer).
-    Translates OpenAI chat format into the internal enqueue flow and
-    wraps the result back into a standard OpenAI ChatCompletion response.
-
-    This endpoint is NOT used by mu-load-test benchmarks — those continue
-    to use /enqueue or /submit directly for zero-overhead measurement.
-    """
+async def _enqueue_and_wait(
+    prompt: str,
+    model: str,
+    source: str = "litellm",
+) -> tuple:
+    """Shared enqueue-wait logic for both streaming and non-streaming chat completions."""
     t_start = time.time()
     inc_admission()
 
-    # 1. Flatten messages → prompt
-    prompt = _messages_to_prompt(req.messages)
-
-    # 2. Enqueue via existing router_state (identical to /enqueue)
-    meta: Dict[str, Any] = {"__source__": "litellm"}
+    meta: Dict[str, Any] = {"__source__": source}
     if _is_push_mode():
         rid = router_state.next_req_id()
         is_pull_mode = False
@@ -1230,14 +1245,12 @@ async def openai_chat_completions(req: _ChatCompletionRequest):
         is_pull_mode = True
 
     _log_api_req(
-        f"chat_completions rid={rid} model={req.model} "
-        f"messages={len(req.messages)} prompt_len={len(prompt)}",
+        f"chat_completions rid={rid} model={model} prompt_len={len(prompt)}",
         level="summary",
     )
 
     router_state.register_waiter(rid)
 
-    # 3. KV hashing + push dispatch (identical to /enqueue)
     if _is_push_mode() and _push_dispatcher is not None:
         ok = _push_dispatcher.try_submit(rid, prompt, meta)
         if not ok:
@@ -1260,7 +1273,6 @@ async def openai_chat_completions(req: _ChatCompletionRequest):
             except Exception as e:
                 raise HTTPException(503, f"push failed: {e}")
 
-    # 4. Wait for result (identical to /enqueue)
     result = await router_state.wait_for_result_async(rid, _cfg.RESULT_TIMEOUT_S)
 
     router_latency = time.time() - t_start
@@ -1275,16 +1287,142 @@ async def openai_chat_completions(req: _ChatCompletionRequest):
     if not isinstance(result, dict):
         result = {"output": result}
 
-    output_text = result.get("output", "")
-    finish_reason = result.get("finish_reason", "stop") or "stop"
-    usage = result.get("usage") or {}
-
     _log_api_req(
         f"chat_completions complete rid={rid} latency={router_latency:.3f}s",
         level="summary",
     )
 
-    # 5. Return OpenAI-format response so LiteLLM proxy can parse it normally
+    return rid, t_start, result
+
+
+def _build_sse_chunks(
+    rid: str,
+    model: str,
+    created: int,
+    output_text: str,
+    finish_reason: str,
+    usage: Dict[str, Any],
+) -> str:
+    """
+    Build OpenAI-format SSE event stream from a completed response.
+    Splits output into word-boundary chunks to simulate incremental delivery.
+    """
+    chunk_id = f"chatcmpl-{rid}"
+    lines: List[str] = []
+
+    # Role-only preamble chunk (required by the OpenAI SSE protocol)
+    preamble = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+    }
+    lines.append(f"data: {json.dumps(preamble)}\n\n")
+
+    # Split on whitespace boundaries, preserving the whitespace in front of each word
+    # so that concatenating all deltas reproduces the original text exactly.
+    tokens: List[str] = []
+    buf = ""
+    for ch in output_text:
+        if ch in (" ", "\n", "\t") and buf:
+            tokens.append(buf)
+            buf = str(ch)
+        else:
+            buf += ch
+    if buf:
+        tokens.append(buf)
+
+    if not tokens:
+        tokens = [""]
+
+    for tok in tokens:
+        chunk = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"content": tok}, "finish_reason": None}],
+        }
+        lines.append(f"data: {json.dumps(chunk)}\n\n")
+
+    # Final chunk with finish_reason + usage
+    final = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+        "usage": {
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        },
+    }
+    lines.append(f"data: {json.dumps(final)}\n\n")
+    lines.append("data: [DONE]\n\n")
+
+    return "".join(lines)
+
+
+def _check_api_key(request: Request) -> None:
+    """Validate API key if one is configured (env API_KEY)."""
+    key = _cfg.API_KEY
+    if not key:
+        return
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        if auth[7:] == key:
+            return
+    if request.headers.get("api-key", "") == key:
+        return
+    if request.headers.get("x-api-key", "") == key:
+        return
+    raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(req: _ChatCompletionRequest, request: Request):
+    """
+    OpenAI-compatible chat completions endpoint.
+
+    Supports both non-streaming (default) and streaming (stream=true) modes.
+    Streaming returns standard OpenAI SSE format so upstream gateways (e.g.
+    BooM, LiteLLM) can parse it natively.
+    """
+    _check_api_key(request)
+    prompt = _messages_to_prompt(req.messages)
+    rid, t_start, result = await _enqueue_and_wait(prompt, req.model)
+
+    output_text = result.get("output", "")
+    finish_reason = result.get("finish_reason", "stop") or "stop"
+    usage = result.get("usage") or {}
+
+    # --- streaming path ---
+    if req.stream:
+        sse_payload = _build_sse_chunks(
+            rid=rid,
+            model=req.model,
+            created=int(t_start),
+            output_text=output_text,
+            finish_reason=finish_reason,
+            usage=usage,
+        )
+
+        async def _event_generator():
+            yield sse_payload
+
+        return StreamingResponse(
+            _event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # --- non-streaming path (unchanged) ---
     return {
         "id": f"chatcmpl-{rid}",
         "object": "chat.completion",

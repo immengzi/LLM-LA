@@ -9,11 +9,13 @@ autoscaling:
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
   threshold: "16"
-backend: router
-batchSize: 8
+backend: boom
+batchSize: 32
 boom:
+  claudeCodeAliases: true
   databaseUrl: ""
-  enabled: false
+  enabled: true
+  extraModelAliases: []
   image: boom-gateway:latest
   masterKey: sk-boom-master
   nodePort: 30401
@@ -24,8 +26,15 @@ boom:
     requests:
       cpu: 250m
       memory: 128Mi
+cacheWarm:
+  enabled: false
+  image: busybox
+  modelSubPath: GLM-5-w4a8-mtp-QuaRot
+  pvcName: models-nfs-pvc
+  ttlSeconds: 120
 deploy:
   cpuHash: true
+  mooncakeMaster: true
   redis: true
   router: true
   vllm: true
@@ -33,9 +42,10 @@ global:
   imageRegistry: reg.local:32000
 images:
   cpuHash: vllm-cpu-hash:latest
+  mooncakeMaster: quay.io/ascend/vllm-ascend:glm5-openeuler
   redis: redis:7-alpine
-  router: kv-router-go:latest
-  sidecar: kv-sidecar-go:latest
+  router: kv-router:latest
+  sidecar: kv-sidecar:latest
   vllm: quay.io/ascend/vllm-ascend:glm5-openeuler
 litellm:
   databaseUrl: ""
@@ -52,9 +62,20 @@ litellm:
       memory: 512Mi
 modelVolume:
   create: false
-  modelSubPath: qwen3-8b
+  hostPath: /home/haiting/models
+  modelSubPath: GLM-5-w4a8-mtp-QuaRot
   nfsPath: /saeid/models/
   nfsServer: nfs.local
+  pvcName: models-nfs-pvc
+mooncake:
+  ascendBufferPool: "4:8"
+  enabled: false
+  evictionHighWatermark: 0.9
+  evictionRatio: 0.1
+  globalSegmentSize: 140000000000
+  lookupRpcPort: "10010"
+  masterPort: 50088
+  masterServerAddress: 10.50.156.106:50088
 pin:
   enabled: true
   nodeName: node4
@@ -70,6 +91,7 @@ replicas:
   vllm: 2
 router:
   admissionThrottle: false
+  apiKey: ZhongRuanChuangXin!
   batchSizeEstimate: fixed
   chunkedPrefillAware: false
   fixedBatchEstimate: 8
@@ -86,9 +108,19 @@ router:
   queueWaitModel: none
   sloAware: false
   sloWithKv: true
-tensorParallelSize: 1
+tensorParallelSize: 8
 vllm:
+  additionalConfig: {}
   compilationConfig:
     cudagraphMode: FULL_DECODE_ONLY
-  enableExpertParallel: false
-  trustRemoteCode: false
+  enableExpertParallel: true
+  gpuMemoryUtilization: "0.95"
+  hostNetwork: false
+  maxModelLen: 80000
+  maxNumBatchedTokens: 4096
+  quantization: ascend
+  reasoningParser: glm45
+  seed: 1924
+  speculativeConfig: {}
+  toolCallParser: glm47
+  trustRemoteCode: true

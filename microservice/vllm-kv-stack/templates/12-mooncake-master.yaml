@@ -1,10 +1,10 @@
-{{- if and (eq (lower .Values.backend) "router") .Values.mooncake.enabled }}
+{{- if .Values.mooncake.enabled }}
 {{- if .Values.deploy.mooncakeMaster }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mooncake-master
-  namespace: vllm
+  namespace: {{ .Release.Namespace }}
   labels:
     app: mooncake-master
 spec:

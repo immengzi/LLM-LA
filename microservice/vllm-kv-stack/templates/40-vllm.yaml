@@ -6,7 +6,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: vllm-qwen
-  namespace: vllm
+  namespace: {{ .Release.Namespace }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicas.vllm }}
@@ -134,11 +134,18 @@ spec:
                 {{- if .Values.vllm.maxModelLen }}
                 --max-model-len {{ .Values.vllm.maxModelLen }} \
                 {{- end }}
-                {{- if .Values.vllm.additionalConfig }}
+                {{- if .Values.vllm.additionalConfig.multistreamOverlapSharedExpert }}
                 --additional-config '{"multistream_overlap_shared_expert": {{ .Values.vllm.additionalConfig.multistreamOverlapSharedExpert }}}' \
                 {{- end }}
-                {{- if .Values.vllm.speculativeConfig }}
+                {{- if .Values.vllm.speculativeConfig.numSpeculativeTokens }}
                 --speculative-config '{"num_speculative_tokens": {{ .Values.vllm.speculativeConfig.numSpeculativeTokens }}, "method": "{{ .Values.vllm.speculativeConfig.method }}"}' \
+                {{- end }}
+                {{- if .Values.vllm.toolCallParser }}
+                --tool-call-parser {{ .Values.vllm.toolCallParser }} \
+                --enable-auto-tool-choice \
+                {{- end }}
+                {{- if .Values.vllm.reasoningParser }}
+                --reasoning-parser {{ .Values.vllm.reasoningParser }} \
                 {{- end }}
                 --host 0.0.0.0 \
                 {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
@@ -287,9 +294,9 @@ spec:
               path: /health
               port: 8200
             initialDelaySeconds: 60
-            periodSeconds: 10
-            failureThreshold: 1080
-            timeoutSeconds: 2
+            periodSeconds: 30
+            failureThreshold: 720
+            timeoutSeconds: 5
 
           readinessProbe:
             httpGet:
@@ -298,16 +305,16 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 12
-            timeoutSeconds: 2
+            timeoutSeconds: 5
 
           livenessProbe:
             httpGet:
               path: /health
               port: 8200
             initialDelaySeconds: 120
-            periodSeconds: 20
-            failureThreshold: 540
-            timeoutSeconds: 2
+            periodSeconds: 30
+            failureThreshold: 720
+            timeoutSeconds: 5
 
           resources:
             requests:
@@ -386,8 +393,14 @@ spec:
 
       volumes:
         - name: model
+          {{- if .Values.modelVolume.hostPath }}
+          hostPath:
+            path: {{ .Values.modelVolume.hostPath }}
+            type: Directory
+          {{- else }}
           persistentVolumeClaim:
-            claimName: models-nfs-pvc
+            claimName: {{ .Values.modelVolume.pvcName | default "models-nfs-pvc" }}
+          {{- end }}
         - name: dshm
           emptyDir:
             medium: Memory
@@ -435,7 +448,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: vllm-qwen
-  namespace: vllm
+  namespace: {{ .Release.Namespace }}
 spec:
   type: NodePort
   selector:

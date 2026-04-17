@@ -1,9 +1,9 @@
-{{- if and (eq (lower .Values.backend) "router") .Values.mooncake.enabled }}
+{{- if .Values.mooncake.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mooncake-config
-  namespace: vllm
+  namespace: {{ .Release.Namespace }}
 data:
   mooncake.json: |
     {

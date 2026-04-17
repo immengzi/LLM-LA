@@ -25,6 +25,9 @@ router:
   # pull | push-rr | push-random | push-leastq
   mode: pull
 
+  # API key for /v1/chat/completions (empty = no auth)
+  apiKey: ""
+
   # Enable/disable KV-aware routing
   kvAware: true
 
@@ -92,8 +95,10 @@ modelVolume:
   nfsPath: /saeid/models/         # parent directory containing all models
   # nfsPath: /saeid/models/qwen3-8b  # (old style — specific model path, no longer used)
   modelSubPath: ""                # set per-experiment by sweep (e.g. qwen3-8b, GLM-5-w4a8-mtp-QuaRot)
+  pvcName: "models-nfs-pvc"       # PVC name when using NFS (default)
+  hostPath: ""                     # set to local path (e.g. /home/haiting/models) to bypass NFS
                                   # must be set explicitly on first deploy via --set modelVolume.modelSubPath=<name>
-  storageSize: "20Gi"   
+
 # AIBrix integration.
 # In backend=aibrix, vLLM pods expose labels so AIBrix gateway can discover them.
 aibrix:
@@ -119,16 +124,32 @@ vllm:
   trustRemoteCode: false
   maxNumBatchedTokens: null        # null = use vLLM default
   seed: null                       # null = use vLLM default
-  additionalConfig: null           # set to {multistreamOverlapSharedExpert: true} to enable
-  speculativeConfig: null          # set to {numSpeculativeTokens: 3, method: "deepseek_mtp"} to enable
+  additionalConfig: {}             # set to {multistreamOverlapSharedExpert: true} to enable
+  speculativeConfig: {}            # set to {numSpeculativeTokens: 3, method: "deepseek_mtp"} to enable
+  toolCallParser: null             # e.g. "qwen3_coder", "glm47" — also enables --enable-auto-tool-choice
+  reasoningParser: null            # e.g. "qwen3", "glm45"
   hostNetwork: false
 
+# -----------------------------------------------------------------------
+# NFS page cache warm — pre-reads model shards before vLLM pods start.
+#
+# Large models (e.g. GLM-5 with 96 safetensor shards) can take hours to
+# load from cold NFS. This Helm pre-install hook reads all shards once,
+# warming the NFS server's page cache so vLLM pods load from memory.
+#
+# Runs as a Helm pre-install/pre-upgrade hook (Job) before vLLM pods start.
+# Disabled by default — enable and set modelSubPath for large NFS-backed models.
+cacheWarm:
+  enabled: false
+  pvcName: "models-nfs-pvc"
+  modelSubPath: "GLM-5-w4a8-mtp-QuaRot"
+  image: "busybox"
+  ttlSeconds: 120
 
-# Mooncake KV cache transfer
-# --------------------------------------------------------------------------
-# Mooncake manages cross-node KV cache sharing via AscendStoreConnector.
-# It is an optional enhancement WITHIN the router stack — it does NOT work
-# independently. When enabled, it adds:
+# -----------------------------------------------------------------------
+# Mooncake KV cache transfer — optional enhancement WITHIN the router stack.
+#
+# When enabled, adds:
 #   1. A mooncake-master Deployment (metadata coordination service)
 #   2. A ConfigMap with mooncake.json
 #   3. --kv-transfer-config on each vLLM worker
@@ -138,15 +159,12 @@ vllm:
 mooncake:
   enabled: false
   masterPort: 50088
-  # Must be the host IP of the pin.nodeName node (hostNetwork mode).
-  # mooncake-master scheduling follows pin.nodeName, so this IP must match that node.
-  masterServerAddress: "10.50.156.65:50088" # Must be the host IP of the pin.nodeName node (hostNetwork mode).
+  masterServerAddress: "10.50.156.106:50088"
   globalSegmentSize: 140000000000
   evictionHighWatermark: 0.9
   evictionRatio: 0.1
   ascendBufferPool: "4:8"
   lookupRpcPort: "10010"
-
 
 # Component deployment control
 # Set to false to skip deploying a component (used for decoupled vLLM/stack deploys)
@@ -155,6 +173,7 @@ deploy:
   router: true    # set false in vllm-only deploys (deploy_vllm.py)
   redis: true     # set false in vllm-only deploys (deploy_vllm.py)
   cpuHash: true   # set false in vllm-only deploys (deploy_vllm.py)
+  mooncakeMaster: true    # set false to skip mooncake-master
 
 # -----------------------------------------------------------------------
 # LiteLLM proxy — production auth/spend gateway in front of the router.
@@ -244,6 +263,17 @@ boom:
   # Example: "postgresql://boom:password@postgres-host:5432/boom"
   databaseUrl: ""
 
+  # Enable Claude Code compatibility aliases.
+  # When true, BooM config includes router_settings.model_group_alias that
+  # maps standard Claude model names (claude-sonnet-4-20250514, etc.) to
+  # "served-model", so Claude Code can connect via /v1/messages without
+  # overriding model names in ~/.claude/settings.json.
+  claudeCodeAliases: false
+
+  # Additional model aliases (only when claudeCodeAliases=true).
+  # Example: [{alias: "my-claude", target: "served-model"}]
+  extraModelAliases: []
+
   # Resource requests/limits for the BooM Gateway container.
   # Lower than LiteLLM — Rust binary has much smaller memory footprint.
   resources:
@@ -253,4 +283,3 @@ boom:
     limits:
       cpu: "2000m"
       memory: "512Mi"
-  mooncakeMaster: true    # set false to skip mooncake-master 

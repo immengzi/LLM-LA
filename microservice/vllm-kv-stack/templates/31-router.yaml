@@ -160,6 +160,11 @@ spec:
             - name: RESULT_SUBMIT_PATH
               value: "/result_submit"
 
+            {{- if .Values.router.apiKey }}
+            - name: API_KEY
+              value: {{ quote .Values.router.apiKey }}
+            {{- end }}
+
           ports:
             - containerPort: 8080
               name: http

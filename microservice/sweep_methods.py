@@ -201,9 +201,6 @@ def _coerce_set_value(v):
         return "true" if v else "false"
     if v is None:
         return None
-    if isinstance(v, dict):
-        # Dicts should be flattened before calling --set, this should not happen
-        return str(v)
     return str(v)
 
 
@@ -246,6 +243,7 @@ def _helm_install_or_upgrade(
     namespace: str,
     values_file: Optional[Path],
     set_values: Dict[str, object],
+    timeout: str = "240m",
 ) -> None:
     cmd: List[str] = [
         "upgrade",
@@ -255,19 +253,17 @@ def _helm_install_or_upgrade(
         "-n",
         namespace,
         "--create-namespace",
+        "--timeout",
+        timeout,
     ]
     if values_file is not None and values_file.is_file():
         cmd.extend(["-f", str(values_file)])
 
     for k in sorted(set_values.keys()):
-        vs = set_values[k]
+        vs = _coerce_set_value(set_values[k])
         if vs is None:
             continue
-        # Use --set-json for dict/list, --set for primitives
-        if isinstance(vs, (dict, list)):
-            cmd.extend(["--set-json", f"{k}={json.dumps(vs)}"])
-        else:
-            cmd.extend(["--set", f"{k}={_coerce_set_value(vs)}"])
+        cmd.extend(["--set", f"{k}={vs}"])
 
     _helm(cmd, check=True, capture=False)
 
@@ -533,6 +529,7 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             "router.kvAware": bool(getattr(h, "router_kv_aware", True)),
             "router.lenAware": bool(getattr(h, "router_len_aware", True)),
             "router.lenPolicy": str(getattr(h, "router_len_policy", "short_first")),
+            "router.apiKey": str(getattr(h, "router_api_key", "")),
             "aibrix.enabled": bool(getattr(h, "aibrix_enabled", False)),
             "aibrix.modelName": str(getattr(h, "aibrix_model_name", "served-model")),
             "aibrix.port": int(getattr(h, "aibrix_port", 8200)),
@@ -615,11 +612,60 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             set_values["boom.masterKey"] = str(
                 getattr(boom_cfg, "api_key", "sk-boom-master") if boom_cfg else "sk-boom-master"
             )
+            # Claude Code aliases: map Claude model names to served-model in BooM config
+            boom_claude_aliases = bool(getattr(h, "boom_claude_aliases", False))
+            set_values["boom.claudeCodeAliases"] = boom_claude_aliases
             click.echo(
-                f"[sweep] boom.enabled=true masterKey={set_values['boom.masterKey']!r}"
+                f"[sweep] boom.enabled=true masterKey={set_values['boom.masterKey']!r} "
+                f"claudeCodeAliases={boom_claude_aliases}"
             )
         else:
             set_values["boom.enabled"] = False
+
+        # ---- NFS cache warm (pre-read model shards before vLLM starts) ----
+        cache_warm = bool(getattr(h, "cache_warm_enabled", False))
+        set_values["cacheWarm.enabled"] = cache_warm
+        if cache_warm:
+            set_values["cacheWarm.pvcName"] = str(getattr(h, "cache_warm_pvc_name", "models-nfs-pvc"))
+            set_values["cacheWarm.modelSubPath"] = str(
+                getattr(h, "cache_warm_model_sub_path", "") or model_sub_path
+            )
+            click.echo(
+                f"[sweep] cacheWarm.enabled=true "
+                f"pvc={set_values['cacheWarm.pvcName']!r} "
+                f"subPath={set_values['cacheWarm.modelSubPath']!r}"
+            )
+
+        # ---- Mooncake KV cache transfer toggle ----
+        mooncake_enabled = bool(getattr(h, "mooncake_enabled", False))
+        set_values["mooncake.enabled"] = mooncake_enabled
+        if mooncake_enabled:
+            set_values["mooncake.masterPort"] = int(getattr(h, "mooncake_master_port", 50088))
+            set_values["mooncake.masterServerAddress"] = str(
+                getattr(h, "mooncake_master_server_address", "10.50.156.65:50088")
+            )
+            set_values["mooncake.globalSegmentSize"] = int(
+                getattr(h, "mooncake_global_segment_size", 140000000000)
+            )
+            set_values["mooncake.evictionHighWatermark"] = float(
+                getattr(h, "mooncake_eviction_high_watermark", 0.9)
+            )
+            set_values["mooncake.evictionRatio"] = float(
+                getattr(h, "mooncake_eviction_ratio", 0.1)
+            )
+            set_values["mooncake.ascendBufferPool"] = str(
+                getattr(h, "mooncake_ascend_buffer_pool", "4:8")
+            )
+            set_values["mooncake.lookupRpcPort"] = str(
+                getattr(h, "mooncake_lookup_rpc_port", "10010")
+            )
+            set_values["vllm.hostNetwork"] = bool(getattr(h, "mooncake_host_network", False))
+            set_values["deploy.mooncakeMaster"] = bool(getattr(h, "deploy_mooncake_master", True))
+            click.echo(
+                f"[sweep] mooncake.enabled=true "
+                f"masterAddr={set_values['mooncake.masterServerAddress']!r} "
+                f"hostNetwork={set_values['vllm.hostNetwork']}"
+            )
 
         service_impl = str(getattr(h, "service_impl", "python")).strip().lower()
         if service_impl == "go":
@@ -655,6 +701,11 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         set_values["modelVolume.modelSubPath"] = model_sub_path
         click.echo(f"[sweep] model subPath={model_sub_path!r} (derived from nfs_path={nfs_path!r})")
 
+        model_host_path = str(getattr(h, "model_host_path", "")).strip()
+        if model_host_path:
+            set_values["modelVolume.hostPath"] = model_host_path
+            click.echo(f"[sweep] using local hostPath={model_host_path!r} (bypassing NFS)")
+
         # ---- vLLM runtime flags ----
         if getattr(h, "vllm_gpu_memory_utilization", None) is not None:
             set_values["vllm.gpuMemoryUtilization"] = float(h.vllm_gpu_memory_utilization)
@@ -675,35 +726,29 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         if getattr(h, "vllm_seed", None) is not None:
             set_values["vllm.seed"] = int(h.vllm_seed)
         if getattr(h, "vllm_additional_config", None) is not None:
-            set_values["vllm.additionalConfig"] = str(h.vllm_additional_config)
-        if getattr(h, "vllm_node_selector", None) is not None:
-            try:
-                ns = json.loads(h.vllm_node_selector)
-                if isinstance(ns, dict):
-                    set_values["vllm.nodeSelector"] = ns
-            except Exception:
-                pass
+            ac = h.vllm_additional_config
+            if isinstance(ac, str):
+                try:
+                    ac = json.loads(ac)
+                except Exception:
+                    ac = None
+            if isinstance(ac, dict):
+                for ak, av in ac.items():
+                    set_values[f"vllm.additionalConfig.{ak}"] = av
+        if getattr(h, "vllm_tool_call_parser", None) is not None:
+            set_values["vllm.toolCallParser"] = str(h.vllm_tool_call_parser)
+        if getattr(h, "vllm_reasoning_parser", None) is not None:
+            set_values["vllm.reasoningParser"] = str(h.vllm_reasoning_parser)
         if getattr(h, "vllm_speculative_config", None) is not None:
-            set_values["vllm.speculativeConfig"] = str(h.vllm_speculative_config)
-
-        # ---- Mooncake KV cache transfer ----
-        if getattr(h, "mooncake_enabled", False):
-            set_values["mooncake.enabled"] = True
-            set_values["vllm.hostNetwork"] = bool(getattr(h, "mooncake_host_network", True))
-            set_values["deploy.mooncakeMaster"] = True
-            if getattr(h, "mooncake_master_server_address", None) is not None:
-                set_values["mooncake.masterServerAddress"] = str(h.mooncake_master_server_address)
-            if getattr(h, "mooncake_master_port", None) is not None:
-                set_values["mooncake.masterPort"] = int(h.mooncake_master_port)
-            if getattr(h, "mooncake_global_segment_size", None) is not None:
-                set_values["mooncake.globalSegmentSize"] = int(h.mooncake_global_segment_size)
-            if getattr(h, "mooncake_ascend_buffer_pool", None) is not None:
-                set_values["mooncake.ascendBufferPool"] = str(h.mooncake_ascend_buffer_pool)
-            if getattr(h, "mooncake_lookup_rpc_port", None) is not None:
-                set_values["mooncake.lookupRpcPort"] = str(h.mooncake_lookup_rpc_port)
-        else:
-            set_values["mooncake.enabled"] = False
-        # ------------------------------------
+            sc = h.vllm_speculative_config
+            if isinstance(sc, str):
+                try:
+                    sc = json.loads(sc)
+                except Exception:
+                    sc = None
+            if isinstance(sc, dict):
+                for sk, sv in sc.items():
+                    set_values[f"vllm.speculativeConfig.{sk}"] = sv
 
         click.echo(f"[sweep] backend={backend}  deploy_mode={deploy_mode}  skip_vllm={skip_vllm}")
         click.echo("[sweep] set values:")
@@ -841,16 +886,22 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 "vllm_max_num_batched_tokens": getattr(h, "vllm_max_num_batched_tokens", None),
                 "vllm_seed": getattr(h, "vllm_seed", None),
                 "vllm_additional_config": getattr(h, "vllm_additional_config", None),
-                "vllm_node_selector": getattr(h, "vllm_node_selector", None),
                 "vllm_speculative_config": getattr(h, "vllm_speculative_config", None),
+                "vllm_tool_call_parser": getattr(h, "vllm_tool_call_parser", None),
+                "vllm_reasoning_parser": getattr(h, "vllm_reasoning_parser", None),
                 # litellm knobs
                 "litellm_enabled": backend == "litellm",
                 "litellm_base_url": getattr(getattr(cfg, "litellm", None), "base_url", None),
                 "litellm_model": getattr(getattr(cfg, "litellm", None), "model", None),
                 # boom knobs
                 "boom_enabled": backend == "boom",
+                "boom_claude_aliases": bool(getattr(h, "boom_claude_aliases", False)),
                 "boom_base_url": getattr(getattr(cfg, "boom", None), "base_url", None),
                 "boom_model": getattr(getattr(cfg, "boom", None), "model", None),
+                # mooncake knobs
+                "mooncake_enabled": bool(getattr(h, "mooncake_enabled", False)),
+                "mooncake_master_server_address": str(getattr(h, "mooncake_master_server_address", "")),
+                "mooncake_host_network": bool(getattr(h, "mooncake_host_network", False)),
                 # SLO-aware knobs
                 "router_slo_aware": bool(getattr(h, "router_slo_aware", False)),
                 "router_admission_throttle": bool(getattr(h, "router_admission_throttle", False)),
@@ -859,13 +910,6 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 "router_latency_predictor": str(getattr(h, "router_latency_predictor", "linear")),
                 # SLO client config
                 "slo_enabled": bool(getattr(getattr(cfg, "slo", None), "enabled", False)),
-                "mooncake_enabled": bool(getattr(h, "mooncake_enabled", False)),
-                "mooncake_host_network": bool(getattr(h, "mooncake_host_network", True)),
-                "mooncake_master_server_address": getattr(h, "mooncake_master_server_address", None),
-                "mooncake_master_port": getattr(h, "mooncake_master_port", None),
-                "mooncake_global_segment_size": getattr(h, "mooncake_global_segment_size", None),
-                "mooncake_ascend_buffer_pool": getattr(h, "mooncake_ascend_buffer_pool", None),
-                "mooncake_lookup_rpc_port": getattr(h, "mooncake_lookup_rpc_port", None),
             },
         }
         (exp_dir / "sweep_meta.json").write_text(
