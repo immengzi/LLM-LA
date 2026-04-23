@@ -124,7 +124,7 @@ helm:
   vllm_enable_expert_parallel: true
   vllm_compilation_config: '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   vllm_trust_remote_code: true
-  vllm_max_model_len: 80000
+  vllm_max_model_len: 80896
   vllm_max_num_batched_tokens: 4096
   vllm_seed: 1924
   vllm_tool_call_parser: "glm47"

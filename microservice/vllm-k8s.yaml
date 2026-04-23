@@ -549,7 +549,7 @@ spec:
                 --tensor-parallel-size 8 \
                 --dtype auto \
                 --kv-cache-dtype auto \
-                --max-num-seqs 32 \
+                --max-num-seqs 8 \
                 --prefix-caching-hash-algo sha256_cbor \
                 --gpu-memory-utilization 0.95 \
                 --quantization ascend \
@@ -558,7 +558,8 @@ spec:
                 --trust-remote-code \
                 --max-num-batched-tokens 4096 \
                 --seed 1924 \
-                --max-model-len 80000 \
+                --max-model-len 64000 \
+                --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' \
                 --tool-call-parser glm47 \
                 --enable-auto-tool-choice \
                 --reasoning-parser glm45 \
@@ -718,7 +719,7 @@ spec:
               value: "9000"
 
             - name: BATCH_SIZE
-              value: "32"
+              value: "8"
 
             - name: SIDECAR_MODE
               value: "pull"

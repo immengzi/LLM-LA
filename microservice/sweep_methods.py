@@ -735,6 +735,13 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             if isinstance(ac, dict):
                 for ak, av in ac.items():
                     set_values[f"vllm.additionalConfig.{ak}"] = av
+        kv_cache_dtype = str(getattr(h, "vllm_kv_cache_dtype", "auto")).strip()
+        if kv_cache_dtype and kv_cache_dtype != "auto":
+            set_values["vllm.kvCacheDtype"] = kv_cache_dtype
+        if getattr(h, "vllm_cpu_offload_gb", None) is not None:
+            set_values["vllm.cpuOffloadGb"] = float(h.vllm_cpu_offload_gb)
+        if getattr(h, "vllm_enable_prefix_caching", False):
+            set_values["vllm.enablePrefixCaching"] = "true"
         if getattr(h, "vllm_tool_call_parser", None) is not None:
             set_values["vllm.toolCallParser"] = str(h.vllm_tool_call_parser)
         if getattr(h, "vllm_reasoning_parser", None) is not None:
