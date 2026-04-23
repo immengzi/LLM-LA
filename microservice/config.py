@@ -386,6 +386,9 @@ class HelmConfig:
     vllm_seed: Optional[int] = None
     vllm_additional_config: Optional[str] = None
     vllm_speculative_config: Optional[str] = None
+    vllm_kv_cache_dtype: str = "auto"                   # "auto", "fp8", "fp8_e4m3" — fp8 halves KV memory
+    vllm_cpu_offload_gb: Optional[float] = None         # offload N GiB of model weights to CPU for more KV cache
+    vllm_enable_prefix_caching: bool = False           # true = enable prefix caching
     vllm_tool_call_parser: Optional[str] = None      # e.g. "qwen3_coder", "glm47"
     vllm_reasoning_parser: Optional[str] = None       # e.g. "qwen3", "glm45"
     # --------------------------------------------------------------------

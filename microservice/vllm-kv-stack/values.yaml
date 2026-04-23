@@ -113,6 +113,9 @@ aibrix:
 # vLLM runtime flags — all optional, set null to disable
 vllm:
   # Memory / performance
+  kvCacheDtype: "auto"             # "auto", "fp8", "fp8_e4m3" — fp8 halves KV cache memory
+  cpuOffloadGb: null               # null = off; set to e.g. 3 to offload model weights to CPU for more KV cache
+  ascendBufferPool: "4:8"          # NPU buffer pool config (set unconditionally for Ascend hardware)
   gpuMemoryUtilization: null       # null = use vLLM default
   quantization: null               # null = no quantization
   enableExpertParallel: false      # false = disable
@@ -126,6 +129,7 @@ vllm:
   seed: null                       # null = use vLLM default
   additionalConfig: {}             # set to {multistreamOverlapSharedExpert: true} to enable
   speculativeConfig: {}            # set to {numSpeculativeTokens: 3, method: "deepseek_mtp"} to enable
+  enablePrefixCaching: false       # true = enable prefix caching (uses KV cache memory)
   toolCallParser: null             # e.g. "qwen3_coder", "glm47" — also enables --enable-auto-tool-choice
   reasoningParser: null            # e.g. "qwen3", "glm45"
   hostNetwork: false

@@ -61,6 +61,9 @@
 boom-claude-glm:
   - pull
 
+# boom-claude-glm-200k:
+#   - pull
+
 # router-slo:
 #   - pull
 # mooncake:
@@ -70,4 +73,7 @@ boom-claude-glm:
 #   - pull
 
 # boom-claude-glm-mooncake:
+#   - pull
+
+# boom-claude-glm-200k:
 #   - pull

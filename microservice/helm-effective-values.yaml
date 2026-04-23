@@ -10,7 +10,7 @@ autoscaling:
     max(router_central_queue_length{namespace="vllm"})
   threshold: "16"
 backend: boom
-batchSize: 32
+batchSize: 8
 boom:
   claudeCodeAliases: true
   databaseUrl: ""
@@ -116,11 +116,13 @@ vllm:
   enableExpertParallel: true
   gpuMemoryUtilization: "0.95"
   hostNetwork: false
-  maxModelLen: 80000
+  maxModelLen: 64000
   maxNumBatchedTokens: 4096
   quantization: ascend
   reasoningParser: glm45
   seed: 1924
-  speculativeConfig: {}
+  speculativeConfig:
+    method: deepseek_mtp
+    numSpeculativeTokens: 3
   toolCallParser: glm47
   trustRemoteCode: true

@@ -123,9 +123,9 @@ helm:
   vllm_gpu_memory_utilization: 0.95
   vllm_quantization: "ascend"
   vllm_enable_expert_parallel: true
-  vllm_compilation_config: '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  vllm_compilation_config: '{"cudagraph_mode": "FULL_DECODE_ONLY"}' # TODO might help
   vllm_trust_remote_code: true
-  vllm_max_model_len: 80000
+  vllm_max_model_len: null  # max that fits in 8.29 GiB KV cache with prefix caching off
   vllm_max_num_batched_tokens: 4096
   vllm_seed: 1924
   vllm_tool_call_parser: "glm47"

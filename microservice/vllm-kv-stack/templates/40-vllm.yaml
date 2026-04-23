@@ -95,8 +95,8 @@ spec:
               export TP_SOCKET_IFNAME=${nic_name}
               export HCCL_SOCKET_IFNAME=${nic_name}
               export HCCL_BUFFSIZE=200
+              export ASCEND_BUFFER_POOL={{ .Values.vllm.ascendBufferPool | default "4:8" }}
               export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
-              export ASCEND_BUFFER_POOL={{ .Values.mooncake.ascendBufferPool }}
               {{- end }}
 
               # --- start vLLM in background so we can launch a tiny exporter too
@@ -107,9 +107,16 @@ spec:
                 --served-model-name served-model \
                 --tensor-parallel-size {{ .Values.tensorParallelSize }} \
                 --dtype auto \
-                --kv-cache-dtype auto \
+                --kv-cache-dtype {{ .Values.vllm.kvCacheDtype | default "auto" }} \
+                {{- if .Values.vllm.cpuOffloadGb }}
+                --cpu-offload-gb {{ .Values.vllm.cpuOffloadGb }} \
+                {{- end }}
                 --max-num-seqs {{ .Values.batchSize }} \
+                {{- if .Values.vllm.enablePrefixCaching }}
                 --prefix-caching-hash-algo sha256_cbor \
+                {{- else }}
+                --no-enable-prefix-caching \
+                {{- end }}
                 {{- if .Values.vllm.gpuMemoryUtilization }}
                 --gpu-memory-utilization {{ .Values.vllm.gpuMemoryUtilization }} \
                 {{- end }}
@@ -226,21 +233,21 @@ spec:
             {{- $tp := .Values.tensorParallelSize }}
             - name: ASCEND_RT_VISIBLE_DEVICES
               value: {{ include "vllmkv.tpDevices" (dict "tp" $tp) | quote }}
-            {{- if .Values.mooncake.enabled }}
-            - name: NODE_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.hostIP
             - name: HCCL_OP_EXPANSION_MODE
               value: "AIV"
             - name: VLLM_USE_V1
               value: "1"
             - name: PYTORCH_NPU_ALLOC_CONF
               value: "expandable_segments:True"
+            - name: ASCEND_BUFFER_POOL
+              value: {{ .Values.vllm.ascendBufferPool | default "4:8" | quote }}
+            {{- if .Values.mooncake.enabled }}
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
             - name: MOONCAKE_CONFIG_PATH
               value: "/etc/mooncake/mooncake.json"
-            - name: ASCEND_BUFFER_POOL
-              value: {{ .Values.mooncake.ascendBufferPool | quote }}
             {{- end }}
           ports:
             - containerPort: 8200
