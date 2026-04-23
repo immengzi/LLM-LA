@@ -58,14 +58,15 @@
 # router-tp8-glm-mooncake:
 #   - pull
 
-boom-claude-glm:
-  - pull
+# boom-claude-glm:
+#   - pull
 
 # boom-claude-glm-200k:
 #   - pull
 
 # router-slo:
 #   - pull
+
 # mooncake:
 #   - pull
 
@@ -77,3 +78,6 @@ boom-claude-glm:
 
 # boom-claude-glm-200k:
 #   - pull
+
+boom-claude-glm-dp:
+  - pull
