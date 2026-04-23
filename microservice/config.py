@@ -393,6 +393,19 @@ class HelmConfig:
     vllm_reasoning_parser: Optional[str] = None       # e.g. "qwen3", "glm45"
     # --------------------------------------------------------------------
 
+    # ---- Data Parallel (multi-node LWS deployment) ----
+    # When enabled, deploys a LeaderWorkerSet instead of the standard Deployment.
+    # Requires the LWS CRD/controller to be installed in the cluster.
+    data_parallel_enabled: bool = False
+    data_parallel_size: int = 2          # pods per DP group (1 leader + N-1 workers)
+    data_parallel_groups: int = 1        # number of DP groups (LWS replicas)
+    data_parallel_size_local: int = 1    # --data-parallel-size-local per pod
+    data_parallel_rpc_port: int = 13389  # --data-parallel-rpc-port
+    data_parallel_nic_name: str = ""     # GLOO/TP/HCCL_SOCKET_IFNAME (empty = auto-detect)
+    data_parallel_hccl_buff_size: int = 200   # HCCL_BUFFSIZE
+    data_parallel_omp_num_threads: int = 16   # OMP_NUM_THREADS
+    # --------------------------------------------------------------------
+
 
 # =========================
 # Top-level client config

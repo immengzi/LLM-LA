@@ -1,4 +1,4 @@
-{{- if .Values.deploy.vllm }}
+{{- if and .Values.deploy.vllm (not .Values.dataParallel.enabled) }}
 {{- if not .Values.modelVolume.modelSubPath }}
 {{- fail "modelVolume.modelSubPath must be set — deploy PV/PVC once on the parent dir and pass the model subfolder name per deployment" }}
 {{- end }}

@@ -135,6 +135,28 @@ vllm:
   hostNetwork: false
 
 # -----------------------------------------------------------------------
+# Data Parallel (multi-node) deployment via LeaderWorkerSet (LWS).
+#
+# When enabled, deploys an LWS resource instead of the standard Deployment.
+# Each LWS group contains a leader pod (API server + DP rank 0) and one or
+# more worker pods (headless DP ranks). The leader exposes :8200 and gets
+# the kv-sidecar; workers only run headless vLLM engines.
+#
+# Requires the LWS CRD and controller to be installed in the cluster:
+#   kubectl apply --server-side -f https://github.com/kubernetes-sigs/lws/releases/download/v0.8.0/manifests.yaml
+#
+# Disabled by default — zero impact on existing single-node deployments.
+dataParallel:
+  enabled: false
+  size: 2               # pods per DP group (1 leader + N-1 workers)
+  groups: 1             # number of DP groups (LWS replicas)
+  rpcPort: 13389        # --data-parallel-rpc-port
+  sizeLocal: 1          # --data-parallel-size-local per pod
+  nicName: ""           # GLOO/TP/HCCL_SOCKET_IFNAME override (empty = auto-detect from NODE_IP)
+  hcclBuffSize: 200     # HCCL_BUFFSIZE for RoCE transfers
+  ompNumThreads: 16     # OMP_NUM_THREADS
+
+# -----------------------------------------------------------------------
 # NFS page cache warm — pre-reads model shards before vLLM pods start.
 #
 # Large models (e.g. GLM-5 with 96 safetensor shards) can take hours to

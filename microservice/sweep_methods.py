@@ -302,10 +302,12 @@ def _wait_ready(namespace: str, timeout_s: float = 36000, label_selector: Option
 # ---------------------------
 
 def _vllm_pods_exist(namespace: str) -> bool:
-    """Return True if any vllm-qwen pods exist (any phase) in the namespace."""
+    """Return True if any vllm-qwen or vllm-dp pods exist (any phase) in the namespace."""
     try:
         out = _kubectl(
-            ["get", "pods", "-n", namespace, "-l", "app=vllm-qwen", "-o", "name"],
+            ["get", "pods", "-n", namespace,
+             "-l", "app in (vllm-qwen,vllm-dp-worker)",
+             "-o", "name"],
             check=False, capture=True,
         ).stdout or ""
         return bool(out.strip())
@@ -757,6 +759,26 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 for sk, sv in sc.items():
                     set_values[f"vllm.speculativeConfig.{sk}"] = sv
 
+        # ---- Data Parallel (LWS) toggle ----
+        dp_enabled = bool(getattr(h, "data_parallel_enabled", False))
+        set_values["dataParallel.enabled"] = dp_enabled
+        if dp_enabled:
+            set_values["dataParallel.size"] = int(getattr(h, "data_parallel_size", 2))
+            set_values["dataParallel.groups"] = int(getattr(h, "data_parallel_groups", 1))
+            set_values["dataParallel.sizeLocal"] = int(getattr(h, "data_parallel_size_local", 1))
+            set_values["dataParallel.rpcPort"] = int(getattr(h, "data_parallel_rpc_port", 13389))
+            dp_nic = str(getattr(h, "data_parallel_nic_name", "")).strip()
+            if dp_nic:
+                set_values["dataParallel.nicName"] = dp_nic
+            set_values["dataParallel.hcclBuffSize"] = int(getattr(h, "data_parallel_hccl_buff_size", 200))
+            set_values["dataParallel.ompNumThreads"] = int(getattr(h, "data_parallel_omp_num_threads", 16))
+            click.echo(
+                f"[sweep] dataParallel.enabled=true "
+                f"size={set_values['dataParallel.size']} "
+                f"groups={set_values['dataParallel.groups']} "
+                f"sizeLocal={set_values['dataParallel.sizeLocal']}"
+            )
+
         click.echo(f"[sweep] backend={backend}  deploy_mode={deploy_mode}  skip_vllm={skip_vllm}")
         click.echo("[sweep] set values:")
         for k in sorted(set_values):
@@ -917,6 +939,12 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 "router_latency_predictor": str(getattr(h, "router_latency_predictor", "linear")),
                 # SLO client config
                 "slo_enabled": bool(getattr(getattr(cfg, "slo", None), "enabled", False)),
+                # Data Parallel knobs
+                "data_parallel_enabled": bool(getattr(h, "data_parallel_enabled", False)),
+                "data_parallel_size": int(getattr(h, "data_parallel_size", 2)),
+                "data_parallel_groups": int(getattr(h, "data_parallel_groups", 1)),
+                "data_parallel_size_local": int(getattr(h, "data_parallel_size_local", 1)),
+                "data_parallel_nic_name": str(getattr(h, "data_parallel_nic_name", "")),
             },
         }
         (exp_dir / "sweep_meta.json").write_text(

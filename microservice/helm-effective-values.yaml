@@ -10,7 +10,7 @@ autoscaling:
     max(router_central_queue_length{namespace="vllm"})
   threshold: "16"
 backend: boom
-batchSize: 8
+batchSize: 32
 boom:
   claudeCodeAliases: true
   databaseUrl: ""
@@ -32,6 +32,15 @@ cacheWarm:
   modelSubPath: GLM-5-w4a8-mtp-QuaRot
   pvcName: models-nfs-pvc
   ttlSeconds: 120
+dataParallel:
+  enabled: true
+  groups: 1
+  hcclBuffSize: 200
+  nicName: enp189s0f0
+  ompNumThreads: 16
+  rpcPort: 13389
+  size: 2
+  sizeLocal: 1
 deploy:
   cpuHash: true
   mooncakeMaster: true
@@ -88,7 +97,7 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 2
+  vllm: 1
 router:
   admissionThrottle: false
   apiKey: ZhongRuanChuangXin!
@@ -110,19 +119,20 @@ router:
   sloWithKv: true
 tensorParallelSize: 8
 vllm:
-  additionalConfig: {}
+  additionalConfig:
+    multistream_overlap_shared_expert: true
+  ascendBufferPool: "4:8"
   compilationConfig:
     cudagraphMode: FULL_DECODE_ONLY
   enableExpertParallel: true
+  enablePrefixCaching: false
   gpuMemoryUtilization: "0.95"
   hostNetwork: false
-  maxModelLen: 64000
+  kvCacheDtype: auto
   maxNumBatchedTokens: 4096
   quantization: ascend
   reasoningParser: glm45
   seed: 1924
-  speculativeConfig:
-    method: deepseek_mtp
-    numSpeculativeTokens: 3
+  speculativeConfig: {}
   toolCallParser: glm47
   trustRemoteCode: true
