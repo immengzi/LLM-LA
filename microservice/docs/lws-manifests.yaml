@@ -18223,7 +18223,7 @@ spec:
         command:
         - /manager
         image: us-central1-docker.pkg.dev/k8s-staging-images/lws/lws:v0.8.0
-        # image: reg.local:32000/lws/lws:v0.8.0
+        imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
             path: /healthz

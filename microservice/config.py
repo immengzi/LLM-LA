@@ -393,6 +393,14 @@ class HelmConfig:
     vllm_reasoning_parser: Optional[str] = None       # e.g. "qwen3", "glm45"
     # --------------------------------------------------------------------
 
+    # ---- Multi-model support ----
+    # When non-empty, Helm generates per-model vLLM Deployments and a shared
+    # model-registry ConfigMap consumed by both the router and BooM.
+    # Each entry is a dict with keys: name, servedModelName, replicas,
+    # modelSubPath, tensorParallelSize, batchSize, vllm (nested dict).
+    models: list = field(default_factory=list)
+    # --------------------------------------------------------------------
+
     # ---- Data Parallel (multi-node LWS deployment) ----
     # When enabled, deploys a LeaderWorkerSet instead of the standard Deployment.
     # Requires the LWS CRD/controller to be installed in the cluster.

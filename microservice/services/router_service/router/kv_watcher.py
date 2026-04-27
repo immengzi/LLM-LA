@@ -21,7 +21,7 @@ import asyncio
 import redis.asyncio as aioredis
 from kubernetes import client as k8s_client, config as k8s_config
 
-from .config import get_config
+from .config import get_config, get_model_registry
 from .kv_aware import register_block_owners
 
 _cfg = get_config()
@@ -45,7 +45,7 @@ def _log(msg: str, *, level: str = "summary") -> None:
         print(f"[KVWatcher] {msg}")
 
 
-def _discover_pods() -> Dict[str, str]:
+def _discover_pods(label_selector: str = "") -> Dict[str, str]:
     running_in_cluster = os.getenv("KUBERNETES_SERVICE_HOST") is not None
 
     try:
@@ -58,11 +58,12 @@ def _discover_pods() -> Dict[str, str]:
         return {}
 
     v1 = k8s_client.CoreV1Api()
+    selector = label_selector or _cfg.LABEL_SELECTOR
 
     try:
         pods = v1.list_namespaced_pod(
             namespace=_cfg.NAMESPACE,
-            label_selector=_cfg.LABEL_SELECTOR,
+            label_selector=selector,
         ).items
     except Exception as e:
         _log(f"list_namespaced_pod failed: {e}", level="always")
@@ -139,17 +140,31 @@ class KVWatcher:
         pods: Dict[str, str] = {}
         last_discovery = 0.0
 
+        registry = get_model_registry()
+
         try:
             while not self._stop_evt.is_set():
                 now = time.time()
 
                 if now - last_discovery >= self.discovery_interval_s:
-                    pods = _discover_pods()
+                    if registry:
+                        pods = {}
+                        for mname, entry in registry.items():
+                            if entry.label_selector:
+                                model_pods = _discover_pods(label_selector=entry.label_selector)
+                                pods.update(model_pods)
+                                _log(f"discovered {len(model_pods)} pods for model={mname}", level="summary")
+                    else:
+                        pods = _discover_pods()
+                        _log(f"discovered {len(pods)} pods", level="summary")
                     last_discovery = now
-                    _log(f"discovered {len(pods)} pods", level="summary")
 
                 if pods:
-                    await self._scan_once(redis, pods)
+                    if registry:
+                        for mname in registry:
+                            await self._scan_once(redis, pods, model_name=mname)
+                    else:
+                        await self._scan_once(redis, pods)
 
                 await asyncio.sleep(self.interval_s)
 
@@ -159,8 +174,9 @@ class KVWatcher:
             except Exception:
                 pass
 
-    async def _scan_once(self, redis, pods: Dict[str, str]):
-        pattern = f"{self.model_name}:kvblock:*"
+    async def _scan_once(self, redis, pods: Dict[str, str], model_name: str = ""):
+        scan_model = model_name or self.model_name
+        pattern = f"{scan_model}:kvblock:*"
         seen = 0
 
         try:

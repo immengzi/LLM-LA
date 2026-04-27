@@ -1,0 +1,35 @@
+{{/*
+  10-model-registry.yaml — Shared model registry ConfigMap.
+
+  Only rendered when .Values.models is a non-empty list.
+
+  Generates a single "models.yaml" file consumed by BOTH:
+    - Router pod  (reads model_name + router_params)
+    - BooM pod    (reads model_name + litellm_params; ignores router_params)
+
+  This is the single source of truth for model definitions.
+*/}}
+
+{{- if .Values.models }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-registry
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: model-registry
+    release: {{ .Release.Name }}
+data:
+  models.yaml: |
+    model_list:
+    {{- range .Values.models }}
+      - model_name: {{ .name | quote }}
+        litellm_params:
+          model: {{ printf "openai/%s" (.servedModelName | default .name) | quote }}
+          api_base: "http://router-service:8080/v1"
+          api_key: {{ if $.Values.router.apiKey }}{{ $.Values.router.apiKey | quote }}{{ else }}"dummy"{{ end }}
+        router_params:
+          label_selector: {{ printf "model=%s" .name | quote }}
+          batch_size: {{ .batchSize | default 8 }}
+    {{- end }}
+{{- end }}

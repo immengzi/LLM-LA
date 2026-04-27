@@ -17,7 +17,7 @@ from typing import Optional, Dict, Any, List, Tuple
 
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
-from .config import get_config, print_config
+from .config import get_config, print_config, get_model_registry
 from .models import (
     EnqueueRequest,  # required (used by /enqueue and /submit handler type)
     PullRequest,
@@ -332,6 +332,23 @@ def _store_and_maybe_publish_local_result(*, req_id: str, result: Any, endpoint:
 def _is_push_mode() -> bool:
     """Return True if router is running a push-* mode."""
     return str(_cfg.ROUTER_MODE).startswith("push-")
+
+
+def _resolve_model(model: str) -> str:
+    """
+    Resolve the model name for queue routing.
+    In multi-model mode, validates against the registry and raises 404 for unknown models.
+    In single-model mode, always returns the default MODEL_NAME.
+    """
+    registry = get_model_registry()
+    if registry is None:
+        return _cfg.MODEL_NAME
+    m = model.strip() if model else ""
+    if not m:
+        return _cfg.MODEL_NAME
+    if m not in registry:
+        raise HTTPException(404, f"Unknown model '{m}'. Available: {sorted(registry.keys())}")
+    return m
 
 
 def _transport_async_pubsub_enabled() -> bool:
@@ -923,6 +940,9 @@ async def health():
     extra = {}
     if _push_dispatcher is not None:
         extra["push_dispatch_queue"] = _push_dispatcher.qsize()
+    registry = get_model_registry()
+    if registry is not None:
+        extra["models"] = sorted(registry.keys())
     return {"status": "ok", "queue_len": router_state.size(), **extra}
 
 
@@ -965,6 +985,7 @@ async def submit(req: EnqueueRequest):
     """
     t_start = time.time()
     inc_admission()
+    model = _resolve_model(req.model)
 
     trace = None
     if _cfg.TRACE_ENABLED:
@@ -984,7 +1005,7 @@ async def submit(req: EnqueueRequest):
     else:
         t_enq = req.t_enq_client or t_start
         meta = req.meta or {}
-        rid = router_state.enqueue(req.prompt, t_enq, meta)
+        rid = router_state.enqueue(req.prompt, t_enq, meta, model=model)
         mode_str = "pull"
         is_pull_mode = True
 
@@ -1043,6 +1064,7 @@ async def submit(req: EnqueueRequest):
 async def enqueue(req: EnqueueRequest):
     t_start = time.time()
     inc_admission()
+    model = _resolve_model(req.model)
 
     trace = None
     if _cfg.TRACE_ENABLED:
@@ -1061,7 +1083,7 @@ async def enqueue(req: EnqueueRequest):
     else:
         t_enq = req.t_enq_client or t_start
         meta = req.meta or {}
-        rid = router_state.enqueue(req.prompt, t_enq, meta)
+        rid = router_state.enqueue(req.prompt, t_enq, meta, model=model)
         mode_str = "pull"
         is_pull_mode = True
 
@@ -1175,26 +1197,29 @@ async def result_submit_ack(payload: dict, background_tasks: BackgroundTasks):
 
 @app.post("/pull", response_model=PullResponse)
 async def pull(req: PullRequest):
+    model = _resolve_model(req.model)
+
     _log_api_req(
-        f"/pull endpoint={req.endpoint} want={req.want}",
+        f"/pull endpoint={req.endpoint} want={req.want} model={model}",
         level="full",
     )
 
     items = router_state.pull_for_endpoint(
         endpoint=req.endpoint,
         want=req.want,
+        model=model,
     )
 
     if items:
         ids = [it.req_id for it in items]
         _log_api_req(
-            f"/pull ASSIGN endpoint={req.endpoint} want={req.want} "
+            f"/pull ASSIGN endpoint={req.endpoint} want={req.want} model={model} "
             f"-> {len(items)} items {ids}",
             level="summary",
         )
     else:
         _log_api_req(
-            f"/pull IDLE endpoint={req.endpoint} want={req.want} -> 0 items",
+            f"/pull IDLE endpoint={req.endpoint} want={req.want} model={model} -> 0 items",
             level="full",
         )
 
@@ -1242,6 +1267,7 @@ async def _enqueue_and_wait(
     """Shared enqueue-wait logic for both streaming and non-streaming chat completions."""
     t_start = time.time()
     inc_admission()
+    resolved_model = _resolve_model(model)
 
     meta: Dict[str, Any] = {"__source__": source}
     if chat_request_body is not None:
@@ -1250,7 +1276,7 @@ async def _enqueue_and_wait(
         rid = router_state.next_req_id()
         is_pull_mode = False
     else:
-        rid = router_state.enqueue(prompt, t_start, meta)
+        rid = router_state.enqueue(prompt, t_start, meta, model=resolved_model)
         is_pull_mode = True
 
     _log_api_req(

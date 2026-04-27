@@ -11,7 +11,7 @@ import uuid
 import asyncio
 import time
 
-from .config import get_config
+from .config import get_config, get_model_registry
 from .kv_aware import prefix_len
 from .predictors import get_length_predictor
 from .len_select import select_len_aware
@@ -20,6 +20,8 @@ from .metrics import set_central_queue_length, inc_dispatch
 
 _cfg = get_config()
 _pred = get_length_predictor()
+
+_DEFAULT_MODEL = _cfg.MODEL_NAME
 
 
 def _log_req(msg: str, *, level: str = "summary") -> None:
@@ -105,8 +107,12 @@ class RouterState:
 
     def __init__(self):
         self._lock = RLock()
+
+        # Per-model queues. Key = model name (or _DEFAULT_MODEL for legacy).
         # queue entries: (req_id, prompt, t_enq_client_or_router, meta)
-        self._queue: Deque[Tuple[str, str, float, dict]] = deque()
+        self._queues: Dict[str, Deque[Tuple[str, str, float, dict]]] = {}
+        # Legacy alias — kept so callers that read _queue still work
+        self._queue: Deque[Tuple[str, str, float, dict]] = self._get_queue(_DEFAULT_MODEL)
 
         # Result tracking (async-native)
         # req_id -> asyncio.Future that will hold the result (or None placeholder if no loop)
@@ -122,6 +128,14 @@ class RouterState:
         # initialize gauge
         set_central_queue_length(0)
 
+    def _get_queue(self, model: str) -> Deque[Tuple[str, str, float, dict]]:
+        """Get or create the queue for a model (must be called under lock or at init)."""
+        q = self._queues.get(model)
+        if q is None:
+            q = deque()
+            self._queues[model] = q
+        return q
+
     # -------------------------------------------------------
     # ID allocation
     # -------------------------------------------------------
@@ -134,18 +148,20 @@ class RouterState:
     # Enqueue
     # -------------------------------------------------------
 
-    def enqueue(self, prompt: str, t_enq_client: float | None, meta: dict) -> str:
+    def enqueue(self, prompt: str, t_enq_client: float | None, meta: dict, model: str = "") -> str:
         """
         Enqueue a new request in pull mode.
 
         t_enq_client: client-side enqueue timestamp (if provided),
         otherwise we stamp with router now().
+        model: target model queue (empty = default MODEL_NAME).
         """
         with self._lock:
             rid = self.next_req_id()
             ts = float(t_enq_client) if t_enq_client else now_s()
-            self._queue.append((rid, prompt, ts, meta or {}))
-            set_central_queue_length(len(self._queue))
+            q = self._get_queue(model or _DEFAULT_MODEL)
+            q.append((rid, prompt, ts, meta or {}))
+            set_central_queue_length(self._total_size())
             return rid
 
     def update_meta(self, req_id: str, meta: dict) -> None:
@@ -156,47 +172,49 @@ class RouterState:
         changing queue order or timestamps.
         """
         with self._lock:
-            if not self._queue:
-                return
+            for model_name, q in self._queues.items():
+                if not q:
+                    continue
+                new_q: Deque[Tuple[str, str, float, dict]] = deque()
+                updated = False
+                while q:
+                    rid, prompt, ts, old_meta = q.popleft()
+                    if not updated and rid == req_id:
+                        new_q.append((rid, prompt, ts, meta or {}))
+                        updated = True
+                    else:
+                        new_q.append((rid, prompt, ts, old_meta))
+                self._queues[model_name] = new_q
+                if updated:
+                    break
 
-            new_q: Deque[Tuple[str, str, float, dict]] = deque()
-            updated = False
-            while self._queue:
-                rid, prompt, ts, old_meta = self._queue.popleft()
-                if not updated and rid == req_id:
-                    new_q.append((rid, prompt, ts, meta or {}))
-                    updated = True
-                else:
-                    new_q.append((rid, prompt, ts, old_meta))
-            self._queue = new_q
-
-            # length unchanged, but keep gauge consistent anyway
-            set_central_queue_length(len(self._queue))
+            set_central_queue_length(self._total_size())
 
     # -------------------------------------------------------
     # Pull (KV-aware + length-aware)
     # -------------------------------------------------------
 
-    def pull_for_endpoint(self, endpoint: str, want: int) -> List[JobItem]:
+    def pull_for_endpoint(self, endpoint: str, want: int, model: str = "") -> List[JobItem]:
         if want <= 0:
             return []
 
         with self._lock:
-            if not self._queue:
-                set_central_queue_length(0)
+            q = self._get_queue(model or _DEFAULT_MODEL)
+            if not q:
+                set_central_queue_length(self._total_size())
                 return []
 
             pool_factor = max(1, int(_cfg.POOL_FACTOR))
-            max_scan = min(len(self._queue), want * pool_factor)
+            max_scan = min(len(q), want * pool_factor)
 
             # 1) Build pool
             pool: List[Tuple[str, str, float, dict]] = []
             for _ in range(max_scan):
-                rid, prompt, ts, meta = self._queue.popleft()
+                rid, prompt, ts, meta = q.popleft()
                 pool.append((rid, prompt, ts, meta))
 
             # queue length changed after draining pool
-            set_central_queue_length(len(self._queue))
+            set_central_queue_length(self._total_size())
 
             _log_req(
                 f"endpoint={endpoint} want={want} pool_size={len(pool)} "
@@ -320,10 +338,10 @@ class RouterState:
             # 6) Requeue leftovers
             leftovers = ordered[effective_want:]
             for rid, prompt, ts, meta in leftovers:
-                self._queue.appendleft((rid, prompt, ts, meta))
+                q.appendleft((rid, prompt, ts, meta))
 
             # queue length changed after requeue
-            set_central_queue_length(len(self._queue))
+            set_central_queue_length(self._total_size())
 
             if leftovers:
                 _log_req(
@@ -554,10 +572,11 @@ class RouterState:
             # In practice this should look at the pool's entries, but we simplify
             # to a global budget here.
             tpot_budget_s = None
-            # Check recent entries for TPOT budget
-            # For now, use a conservative approach: if any entry has a TPOT SLO,
-            # use it; otherwise skip throttling.
-            for rid, _p, _t, _m in list(self._queue)[:50]:
+            # Check recent entries for TPOT budget across all queues
+            all_items = []
+            for _q in self._queues.values():
+                all_items.extend(list(_q)[:50])
+            for rid, _p, _t, _m in all_items[:50]:
                 entry = slo_reg.get(rid)
                 if entry and entry.deadline_tpot_s is not None:
                     if tpot_budget_s is None or entry.deadline_tpot_s < tpot_budget_s:
@@ -741,9 +760,16 @@ class RouterState:
     # Metrics
     # -------------------------------------------------------
 
-    def size(self) -> int:
+    def _total_size(self) -> int:
+        """Total items across all model queues (must be called under lock)."""
+        return sum(len(q) for q in self._queues.values())
+
+    def size(self, model: str = "") -> int:
         with self._lock:
-            return len(self._queue)
+            if model:
+                q = self._queues.get(model)
+                return len(q) if q else 0
+            return self._total_size()
 
 
 # global instance

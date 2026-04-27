@@ -41,6 +41,7 @@ import tempfile
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import click
 import yaml
@@ -244,6 +245,7 @@ def _helm_install_or_upgrade(
     values_file: Optional[Path],
     set_values: Dict[str, object],
     timeout: str = "240m",
+    extra_values_files: Optional[List[Path]] = None,
 ) -> None:
     cmd: List[str] = [
         "upgrade",
@@ -258,6 +260,11 @@ def _helm_install_or_upgrade(
     ]
     if values_file is not None and values_file.is_file():
         cmd.extend(["-f", str(values_file)])
+
+    if extra_values_files:
+        for vf in extra_values_files:
+            if vf is not None and vf.is_file():
+                cmd.extend(["-f", str(vf)])
 
     for k in sorted(set_values.keys()):
         vs = _coerce_set_value(set_values[k])
@@ -302,7 +309,7 @@ def _wait_ready(namespace: str, timeout_s: float = 36000, label_selector: Option
 # ---------------------------
 
 def _vllm_pods_exist(namespace: str) -> bool:
-    """Return True if any vllm-qwen or vllm-dp pods exist (any phase) in the namespace."""
+    """Return True if any vllm-qwen, vllm-dp, or multi-model vllm pods exist (any phase)."""
     try:
         out = _kubectl(
             ["get", "pods", "-n", namespace,
@@ -310,7 +317,16 @@ def _vllm_pods_exist(namespace: str) -> bool:
              "-o", "name"],
             check=False, capture=True,
         ).stdout or ""
-        return bool(out.strip())
+        if out.strip():
+            return True
+        # Also check for multi-model pods (labelled with model=...)
+        out2 = _kubectl(
+            ["get", "pods", "-n", namespace,
+             "-l", "model",
+             "-o", "name"],
+            check=False, capture=True,
+        ).stdout or ""
+        return bool(out2.strip())
     except Exception:
         return False
 
@@ -443,6 +459,84 @@ def _wait_cr_phase(cr_name: str, namespace: str, timeout_s: float = 120.0) -> No
 
 def _run_client(config_path: Path) -> None:
     _run([sys.executable, str(REPO_ROOT / "main.py"), "--config", str(config_path)], check=True)
+
+
+# ---------------------------
+# BooM config printer
+# ---------------------------
+
+def _print_boom_config(cfg, helm_cfg, models_list: list, namespace: str) -> None:
+    """Print the BooM / external gateway config after deployment for sharing with maintainers."""
+    router_api_key = str(getattr(helm_cfg, "router_api_key", "")).strip() or "dummy"
+
+    # Detect node IP from router_url or boom base_url
+    node_ip = "<node-ip>"
+    for url_attr in ("router_url", ):
+        raw_url = str(getattr(cfg, url_attr, "") or "").strip()
+        if raw_url:
+            try:
+                parsed = urlparse(raw_url)
+                if parsed.hostname and not parsed.hostname.startswith("127."):
+                    node_ip = parsed.hostname
+                    break
+            except Exception:
+                pass
+
+    # Detect router NodePort
+    router_port = "30080"
+    try:
+        out = subprocess.run(
+            ["kubectl", "get", "svc", "router-service", "-n", namespace,
+             "-o", "jsonpath={.spec.ports[0].nodePort}"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        if out.isdigit():
+            router_port = out
+    except Exception:
+        pass
+
+    click.echo("")
+    click.echo("=" * 70)
+    click.echo("  BooM / External Gateway Config  (share with your BooM maintainer)")
+    click.echo("=" * 70)
+
+    if models_list:
+        click.echo("")
+        click.echo("model_list:")
+        for m in models_list:
+            name = m.get("servedModelName") or m.get("name", "unknown")
+            click.echo(f"  - model_name: {name}")
+            click.echo(f"    litellm_params:")
+            click.echo(f"      model: openai/{name}")
+            click.echo(f"      api_base: http://{node_ip}:{router_port}/v1")
+            click.echo(f'      api_key: "{router_api_key}"')
+    else:
+        model_name = str(getattr(helm_cfg, "model_name", "served-model")).strip() or "served-model"
+        click.echo("")
+        click.echo("model_list:")
+        click.echo(f"  - model_name: {model_name}")
+        click.echo(f"    litellm_params:")
+        click.echo(f"      model: openai/{model_name}")
+        click.echo(f"      api_base: http://{node_ip}:{router_port}/v1")
+        click.echo(f'      api_key: "{router_api_key}"')
+
+    click.echo("")
+    click.echo(f"Router endpoint:  http://{node_ip}:{router_port}")
+
+    # BooM NodePort
+    try:
+        out = subprocess.run(
+            ["kubectl", "get", "svc", "boom-proxy", "-n", namespace,
+             "-o", "jsonpath={.spec.ports[0].nodePort}"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        if out.isdigit():
+            click.echo(f"BooM endpoint:    http://{node_ip}:{out}")
+    except Exception:
+        pass
+
+    click.echo("=" * 70)
+    click.echo("")
 
 
 # ---------------------------
@@ -624,20 +718,6 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         else:
             set_values["boom.enabled"] = False
 
-        # ---- NFS cache warm (pre-read model shards before vLLM starts) ----
-        cache_warm = bool(getattr(h, "cache_warm_enabled", False))
-        set_values["cacheWarm.enabled"] = cache_warm
-        if cache_warm:
-            set_values["cacheWarm.pvcName"] = str(getattr(h, "cache_warm_pvc_name", "models-nfs-pvc"))
-            set_values["cacheWarm.modelSubPath"] = str(
-                getattr(h, "cache_warm_model_sub_path", "") or model_sub_path
-            )
-            click.echo(
-                f"[sweep] cacheWarm.enabled=true "
-                f"pvc={set_values['cacheWarm.pvcName']!r} "
-                f"subPath={set_values['cacheWarm.modelSubPath']!r}"
-            )
-
         # ---- Mooncake KV cache transfer toggle ----
         mooncake_enabled = bool(getattr(h, "mooncake_enabled", False))
         set_values["mooncake.enabled"] = mooncake_enabled
@@ -689,24 +769,36 @@ def cli(master_config: str, skip_vllm: bool) -> None:
 
         # ---- vLLM model config: derive modelSubPath from nfs_path ----
         nfs_path = str(getattr(h, "nfs_path", "")).strip()
-        if not nfs_path:
+        model_sub_path = ""
+        if nfs_path:
+            model_sub_path = PurePosixPath(nfs_path.rstrip("/")).name
+            set_values["modelVolume.modelSubPath"] = model_sub_path
+            click.echo(f"[sweep] model subPath={model_sub_path!r} (derived from nfs_path={nfs_path!r})")
+        elif not models_list:
             raise click.ClickException(
                 f"helm.nfs_path must be set in {cfg_path} "
-                f"(e.g. /saeid/models/glm5) — used to derive modelVolume.modelSubPath"
+                f"(e.g. /saeid/models/glm5) — used to derive modelVolume.modelSubPath. "
+                f"(Not required when helm.models[] is populated — each model defines its own modelSubPath.)"
             )
-        model_sub_path = PurePosixPath(nfs_path.rstrip("/")).name
-        if not model_sub_path:
-            raise click.ClickException(
-                f"Could not derive model subfolder from helm.nfs_path={nfs_path!r}. "
-                f"Expected a path like /saeid/models/<model-name>."
-            )
-        set_values["modelVolume.modelSubPath"] = model_sub_path
-        click.echo(f"[sweep] model subPath={model_sub_path!r} (derived from nfs_path={nfs_path!r})")
 
         model_host_path = str(getattr(h, "model_host_path", "")).strip()
         if model_host_path:
             set_values["modelVolume.hostPath"] = model_host_path
             click.echo(f"[sweep] using local hostPath={model_host_path!r} (bypassing NFS)")
+
+        # ---- NFS cache warm (pre-read model shards before vLLM starts) ----
+        cache_warm = bool(getattr(h, "cache_warm_enabled", False))
+        set_values["cacheWarm.enabled"] = cache_warm
+        if cache_warm:
+            set_values["cacheWarm.pvcName"] = str(getattr(h, "cache_warm_pvc_name", "models-nfs-pvc"))
+            set_values["cacheWarm.modelSubPath"] = str(
+                getattr(h, "cache_warm_model_sub_path", "") or model_sub_path
+            )
+            click.echo(
+                f"[sweep] cacheWarm.enabled=true "
+                f"pvc={set_values['cacheWarm.pvcName']!r} "
+                f"subPath={set_values['cacheWarm.modelSubPath']!r}"
+            )
 
         # ---- vLLM runtime flags ----
         if getattr(h, "vllm_gpu_memory_utilization", None) is not None:
@@ -779,6 +871,21 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 f"sizeLocal={set_values['dataParallel.sizeLocal']}"
             )
 
+        # ---- Multi-model support ----
+        models_list = list(getattr(h, "models", None) or [])
+        _models_values_file: Optional[Path] = None
+        if models_list:
+            click.echo(f"[sweep] multi-model: {len(models_list)} models")
+            for mi, mdef in enumerate(models_list):
+                click.echo(f"  [{mi}] name={mdef.get('name')} replicas={mdef.get('replicas',1)} tp={mdef.get('tensorParallelSize','?')}")
+            _models_tmp = tempfile.NamedTemporaryFile(
+                mode="w", prefix="sweep_models_", suffix=".yaml",
+                delete=False, encoding="utf-8",
+            )
+            yaml.safe_dump({"models": models_list}, _models_tmp, sort_keys=False)
+            _models_tmp.close()
+            _models_values_file = Path(_models_tmp.name)
+
         click.echo(f"[sweep] backend={backend}  deploy_mode={deploy_mode}  skip_vllm={skip_vllm}")
         click.echo("[sweep] set values:")
         for k in sorted(set_values):
@@ -795,12 +902,20 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 _operator_apply(cr_name=cr_name, namespace=namespace, set_values=set_values)
                 _wait_cr_phase(cr_name, namespace)
             else:
+                # Build extra values files list (base chart values + optional models overlay)
+                extra_values: List[str] = []
+                if values_file.is_file():
+                    extra_values.extend(["-f", str(values_file)])
+                if _models_values_file is not None:
+                    extra_values.extend(["-f", str(_models_values_file)])
+
                 _helm_install_or_upgrade(
                     release=release,
                     chart_dir=chart_dir,
                     namespace=namespace,
                     values_file=values_file if values_file.is_file() else None,
                     set_values=set_values,
+                    extra_values_files=[_models_values_file] if _models_values_file else None,
                 )
                 # Give Kubernetes time to schedule and create new pods before kubectl wait
                 # runs. Without this sleep, pods are still terminating/pending when wait
@@ -855,6 +970,9 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         )
         (REPO_ROOT / "vllm-k8s.yaml").write_text(rendered_text, encoding="utf-8")
 
+        # ---- Print BooM / external gateway config for maintainer ----
+        _print_boom_config(cfg, h, models_list, namespace)
+
         tmp_cfg_path = _write_temp_job_config(cfg, method)
 
         before = _snapshot_existing_experiments()
@@ -865,6 +983,11 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 tmp_cfg_path.unlink(missing_ok=True)
             except Exception:
                 pass
+            if _models_values_file is not None:
+                try:
+                    _models_values_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         exp_dir = _newest_experiment_dir(before)
 
@@ -945,6 +1068,8 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 "data_parallel_groups": int(getattr(h, "data_parallel_groups", 1)),
                 "data_parallel_size_local": int(getattr(h, "data_parallel_size_local", 1)),
                 "data_parallel_nic_name": str(getattr(h, "data_parallel_nic_name", "")),
+                # Multi-model
+                "models": models_list,
             },
         }
         (exp_dir / "sweep_meta.json").write_text(

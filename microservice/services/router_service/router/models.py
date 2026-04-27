@@ -12,6 +12,7 @@ class EnqueueRequest(BaseModel):
     req_id: Optional[str] = None
     t_enq_client: Optional[float] = None
     meta: Dict[str, Any] = {}
+    model: str = ""           # target model queue (empty = default MODEL_NAME)
 
     # SLO annotations (all optional; existing clients unaffected)
     slo_type: Optional[str] = None          # "ttft" | "tpot" | "ttft+tpot" | "e2e"
@@ -44,6 +45,7 @@ class PullRequest(BaseModel):
     # endpoint identity (e.g. pod name) – must match KVWatcher register_block_owners()
     endpoint: str
     want: int                 # sidecar-computed capacity
+    model: str = ""           # target model queue (empty = default MODEL_NAME)
 
 
 class JobItem(BaseModel):

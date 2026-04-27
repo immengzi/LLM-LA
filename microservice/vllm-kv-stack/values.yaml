@@ -135,6 +135,38 @@ vllm:
   hostNetwork: false
 
 # -----------------------------------------------------------------------
+# Multi-model support.
+#
+# When populated, the Helm chart generates:
+#   - A shared ConfigMap "model-registry" (models.yaml) consumed by both
+#     the router and BooM/LiteLLM.
+#   - One vLLM Deployment per model entry (template 41-vllm-multi.yaml).
+#   - Mounts the shared config into the router and BooM pods.
+#
+# When empty (default), everything works exactly as before (single model).
+# Fully backward compatible.
+#
+# Example:
+# models:
+#   - name: glm5-chat
+#     servedModelName: glm5-chat
+#     replicas: 2
+#     modelSubPath: GLM-5-w4a8-mtp-QuaRot
+#     tensorParallelSize: 8
+#     batchSize: 32
+#     vllm:
+#       gpuMemoryUtilization: 0.95
+#       quantization: ascend
+#       enableExpertParallel: true
+#   - name: qwen3-8b
+#     servedModelName: qwen3-8b
+#     replicas: 4
+#     modelSubPath: Qwen3-8B
+#     tensorParallelSize: 1
+#     batchSize: 64
+models: []
+
+# -----------------------------------------------------------------------
 # Data Parallel (multi-node) deployment via LeaderWorkerSet (LWS).
 #
 # When enabled, deploys an LWS resource instead of the standard Deployment.
