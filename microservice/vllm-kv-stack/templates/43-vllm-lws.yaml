@@ -43,6 +43,14 @@ spec:
           {{- toYaml $ns | nindent 10 }}
         {{- end }}
         affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: avoid
+                      operator: NotIn
+                      values:
+                        - vllm
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
               - labelSelector:
@@ -348,6 +356,14 @@ spec:
           {{- toYaml $ns | nindent 10 }}
         {{- end }}
         affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: avoid
+                      operator: NotIn
+                      values:
+                        - vllm
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
               - labelSelector:

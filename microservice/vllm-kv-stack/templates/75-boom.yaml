@@ -35,11 +35,21 @@ metadata:
 data:
   boom_config.yaml: |
     model_list:
+    {{- if .Values.models }}
+    {{- range .Values.models }}
+      - model_name: {{ .servedModelName | default .name | quote }}
+        litellm_params:
+          model: {{ printf "openai/%s" (.servedModelName | default .name) | quote }}
+          api_base: "http://router-service:8080/v1"
+          api_key: {{ if $.Values.router.apiKey }}{{ $.Values.router.apiKey | quote }}{{ else }}"dummy"{{ end }}
+    {{- end }}
+    {{- else }}
       - model_name: served-model
         litellm_params:
           model: openai/served-model
           api_base: http://router-service:8080/v1
           api_key: {{ if .Values.router.apiKey }}{{ .Values.router.apiKey | quote }}{{ else }}"dummy"{{ end }}
+    {{- end }}
 
     general_settings:
       master_key: {{ .Values.boom.masterKey | quote }}
@@ -50,10 +60,18 @@ data:
     {{- if .Values.boom.claudeCodeAliases }}
     router_settings:
       model_group_alias:
+        {{- if .Values.models }}
+        {{- $defaultModel := (index .Values.models 0).name }}
+        "claude-sonnet-4-20250514": {{ $defaultModel | quote }}
+        "claude-3-5-sonnet-20241022": {{ $defaultModel | quote }}
+        "claude-3-haiku-20240307": {{ $defaultModel | quote }}
+        "claude-3-opus-20240229": {{ $defaultModel | quote }}
+        {{- else }}
         "claude-sonnet-4-20250514": "served-model"
         "claude-3-5-sonnet-20241022": "served-model"
         "claude-3-haiku-20240307": "served-model"
         "claude-3-opus-20240229": "served-model"
+        {{- end }}
         {{- range .Values.boom.extraModelAliases }}
         {{ .alias | quote }}: {{ .target | quote }}
         {{- end }}

@@ -130,7 +130,7 @@ class RouterPullWorker:
                 # ---------------------
                 resp = session.post(
                     f"{_cfg.ROUTER_URL}/pull",
-                    json={"endpoint": self.endpoint_id, "want": want},
+                    json={"endpoint": self.endpoint_id, "want": want, "model": _cfg.MODEL_NAME},
                     timeout=_cfg.ROUTER_PULL_TIMEOUT_S,
                 )
 

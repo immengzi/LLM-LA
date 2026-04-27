@@ -79,18 +79,31 @@ LWS treats each leader + its workers as a **group**. Key behaviours:
 
 | | Leader | Worker |
 |---|--------|--------|
-| **vLLM mode** | API server (port 8200) | `--headless` (no HTTP) |
-| **DP rank** | 0 | Computed from hostname |
+| **vLLM entrypoint** | `python -m vllm.entrypoints.openai.api_server` | `vllm serve /model --headless` |
+| **vLLM mode** | API server (port 8200) | Headless (no HTTP API) |
+| **DP rank** | 0 | Computed from pod name via Downward API |
+| **`--data-parallel-address`** | `${NODE_IP}` (own host IP) | `${LEADER_IP}` (resolved from `LWS_LEADER_ADDRESS`) |
 | **Sidecar** | Yes (kv-sidecar :9000) | No |
-| **Health probes** | HTTP `/health` on :8200 | Process liveness check |
+| **Health probes** | HTTP `/health` on :8200 | Process liveness (`pgrep -f vllm`) |
 | **Label** | `app: vllm-qwen` (router-discoverable) | `app: vllm-dp-worker` (hidden from router) |
 | **Network** | `hostNetwork: true` | `hostNetwork: true` |
 | **Security** | `privileged: true` | `privileged: true` |
 
-The worker computes its `--data-parallel-start-rank` automatically from
-the pod hostname. LWS names worker pods as `vllm-dp-<group>-<worker-idx>`,
-so the last segment is the worker index. Start rank = worker index ×
-`sizeLocal`.
+**Important**: The leader and worker use different vLLM entrypoints. The
+leader uses `python -m vllm.entrypoints.openai.api_server` directly (a
+single API server process managing DP coordination). The worker uses
+`vllm serve /model --headless` which takes a different code path that
+avoids binding the DP RPC port locally — workers only connect *to* the
+leader's RPC port, they do not bind one themselves.
+
+The worker computes its `--data-parallel-start-rank` from the pod name
+obtained via the Kubernetes Downward API (`POD_NAME` env var). LWS names
+worker pods as `vllm-dp-<group>-<worker-idx>`, so the last segment is
+the worker index. Start rank = worker index × `sizeLocal`.
+
+**Note**: Do not use `HOSTNAME` for rank calculation — on `hostNetwork`
+pods, `HOSTNAME` contains the node's hostname (e.g. `node3`), not the
+pod name.
 
 ---
 
@@ -98,12 +111,52 @@ so the last segment is the worker index. Start rank = worker index ×
 
 ### 1. Install the LWS Operator (one-time)
 
+**Option A — Internet-connected cluster:**
+
 ```bash
 kubectl apply --server-side \
   -f https://github.com/kubernetes-sigs/lws/releases/download/v0.8.0/manifests.yaml
 ```
 
-Verify:
+**Option B — Air-gapped cluster (local registry):**
+
+The LWS manifest is included at `docs/lws-manifests.yaml` with the
+controller image already rewritten to `reg.local:32000/lws/lws:v0.8.0`
+and `runAsNonRoot` set to `false` (required because the upstream image
+runs as root).
+
+1. Push the LWS controller image to the local registry:
+
+```bash
+# On a machine with internet access, pull & export:
+sudo ctr -n k8s.io images pull \
+  --skip-verify us-central1-docker.pkg.dev/k8s-staging-images/lws/lws:v0.8.0
+sudo ctr -n k8s.io images export \
+  --platform linux/arm64 lws.tar \
+  us-central1-docker.pkg.dev/k8s-staging-images/lws/lws:v0.8.0
+
+# Load into Docker and push to local registry:
+docker load -i lws.tar
+docker tag us-central1-docker.pkg.dev/k8s-staging-images/lws/lws:v0.8.0 \
+  reg.local:32000/lws/lws:v0.8.0
+docker push reg.local:32000/lws/lws:v0.8.0
+```
+
+2. Apply the local manifest:
+
+```bash
+kubectl apply --server-side -f docs/lws-manifests.yaml
+```
+
+3. Verify the controller is running:
+
+```bash
+kubectl get pods -n lws-system
+# NAME                                      READY   STATUS    RESTARTS
+# lws-controller-manager-xxxx-xxxxx         1/1     Running   0
+```
+
+**Verify CRD (both options):**
 
 ```bash
 kubectl get crd leaderworkersets.leaderworkerset.x-k8s.io
@@ -346,7 +399,7 @@ automatically.
 Check if the worker can reach the leader:
 
 ```bash
-kubectl logs -n vllm vllm-dp-0-1 -c vllm | grep -i "error\|HCCL\|connection"
+kubectl logs -n vllm vllm-dp-0-1 -c vllm | grep -i "error\|HCCL\|connection\|zmq"
 ```
 
 Common causes:
@@ -355,6 +408,37 @@ Common causes:
 - **Wrong NIC name**: If auto-detect fails, set `data_parallel_nic_name`
   explicitly.
 - **Firewall**: Ensure RPC port (default 13389) is open between nodes.
+
+### ZMQ "Cannot assign requested address" on Worker
+
+If the worker crashes with `zmq.error.ZMQError: Cannot assign requested address`,
+it means the worker is trying to *bind* to the leader's IP instead of
+*connecting* to it. This happens when:
+- The worker uses `python -m vllm.entrypoints.openai.api_server --headless`
+  instead of `vllm serve /model --headless`
+- The `--data-parallel-address` is set to a non-local IP
+
+The correct configuration:
+- **Worker**: `vllm serve /model --headless` with `--data-parallel-address`
+  set to the *leader's* IP (resolved from `LWS_LEADER_ADDRESS`)
+- **Leader**: `python -m vllm.entrypoints.openai.api_server` with
+  `--data-parallel-address` set to its own `NODE_IP`
+
+### Leader Shows "HELLO message from remote engine, expected local"
+
+This `RuntimeError` means the leader was started with `vllm serve` instead
+of `python -m vllm.entrypoints.openai.api_server`. The `vllm serve`
+entrypoint defaults `api_server_count` to `data_parallel_size`, trying to
+spawn multiple local API server processes. Use the `python -m` entrypoint
+for the leader.
+
+### Worker start_rank=0 (Wrong Rank)
+
+If worker logs show `start_rank=0` despite being a worker, the rank
+calculation is using `HOSTNAME` instead of `POD_NAME`. On `hostNetwork`
+pods, `HOSTNAME` is the node name (e.g. `node3`), not the pod name
+(`vllm-dp-0-1`). The template uses the Downward API `POD_NAME` env var
+to extract the correct worker index.
 
 ### Leader Pod Healthy But No Inference Response
 
@@ -372,6 +456,22 @@ If the worker logs show an empty `LWS_LEADER_ADDRESS`:
 1. Verify LWS operator is running: `kubectl get pods -n lws-system`
 2. Check LWS version: the `LWS_LEADER_ADDRESS` env injection requires
    LWS v0.4.0+.
+
+### LWS Controller Pod CrashLoopBackOff / CreateContainerConfigError
+
+If the LWS controller itself fails:
+- **"container has runAsNonRoot and image will run as root"**: The upstream
+  LWS image runs as root. Set `runAsNonRoot: false` in the controller's
+  `securityContext` (already done in `docs/lws-manifests.yaml`).
+- **Image size ~1.4KB / empty logs**: The image in the registry is
+  corrupted. Re-push from a fresh pull (see air-gapped install steps).
+
+### CMAKE_PREFIX_PATH: unbound variable
+
+If the pod crashes with `set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound
+variable`, the Ascend toolkit setup script fails with `set -u`. The
+template handles this by using `set -eo pipefail` (no `-u`) and exporting
+`CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"` before sourcing `set_env.sh`.
 
 ### Group Keeps Restarting
 

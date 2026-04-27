@@ -33,10 +33,10 @@ cacheWarm:
   pvcName: models-nfs-pvc
   ttlSeconds: 120
 dataParallel:
-  enabled: true
+  enabled: false
   groups: 1
   hcclBuffSize: 200
-  nicName: enp189s0f0
+  nicName: ""
   ompNumThreads: 16
   rpcPort: 13389
   size: 2
@@ -76,6 +76,35 @@ modelVolume:
   nfsPath: /saeid/models/
   nfsServer: nfs.local
   pvcName: models-nfs-pvc
+models:
+- batchSize: 32
+  modelSubPath: GLM-5-w4a8-mtp-QuaRot
+  name: glm5-chat
+  replicas: 1
+  servedModelName: glm5-chat
+  tensorParallelSize: 8
+  vllm:
+    compilationConfig:
+      cudagraphMode: FULL_DECODE_ONLY
+    enableExpertParallel: true
+    gpuMemoryUtilization: 0.95
+    maxModelLen: 80896
+    maxNumBatchedTokens: 4096
+    quantization: ascend
+    reasoningParser: glm45
+    toolCallParser: glm47
+    trustRemoteCode: true
+- batchSize: 64
+  modelSubPath: qwen3-8b
+  name: qwen3-8b
+  replicas: 2
+  servedModelName: qwen3-8b
+  tensorParallelSize: 1
+  vllm:
+    gpuMemoryUtilization: 0.9
+    reasoningParser: qwen3
+    toolCallParser: qwen3_coder
+    trustRemoteCode: true
 mooncake:
   ascendBufferPool: "4:8"
   enabled: false
@@ -119,20 +148,14 @@ router:
   sloWithKv: true
 tensorParallelSize: 8
 vllm:
-  additionalConfig:
-    multistream_overlap_shared_expert: true
+  additionalConfig: {}
   ascendBufferPool: "4:8"
   compilationConfig:
     cudagraphMode: FULL_DECODE_ONLY
-  enableExpertParallel: true
+  enableExpertParallel: false
   enablePrefixCaching: false
   gpuMemoryUtilization: "0.95"
   hostNetwork: false
   kvCacheDtype: auto
-  maxNumBatchedTokens: 4096
-  quantization: ascend
-  reasoningParser: glm45
-  seed: 1924
   speculativeConfig: {}
-  toolCallParser: glm47
-  trustRemoteCode: true
+  trustRemoteCode: false

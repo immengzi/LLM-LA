@@ -1,10 +1,69 @@
 # router/config.py
 # -*- coding: utf-8 -*-
-from dataclasses import dataclass, asdict
+from __future__ import annotations
+
+from dataclasses import dataclass, asdict, field
+from typing import Dict, List, Optional
 import os
+import sys
 
 # Global singleton to avoid recomputing config multiple times
 _CONFIG = None
+
+
+# -----------------------------------------------------------------------
+# Multi-model registry (loaded from a shared ConfigMap-mounted YAML file)
+# -----------------------------------------------------------------------
+
+@dataclass
+class ModelEntry:
+    """One entry from model_list in the shared models.yaml."""
+    name: str
+    label_selector: str = ""
+    batch_size: int = 0
+
+
+_MODEL_REGISTRY: Optional[Dict[str, ModelEntry]] = None
+
+
+def load_model_registry(path: str) -> Dict[str, ModelEntry]:
+    """
+    Parse models.yaml (shared ConfigMap format) and build a registry
+    keyed by model_name.  Each entry's router_params is extracted;
+    litellm_params is ignored (consumed by BooM/LiteLLM only).
+    """
+    import yaml
+
+    with open(path, "r") as f:
+        data = yaml.safe_load(f) or {}
+
+    model_list = data.get("model_list") or []
+    registry: Dict[str, ModelEntry] = {}
+    for item in model_list:
+        name = item.get("model_name", "").strip()
+        if not name:
+            continue
+        rp = item.get("router_params") or {}
+        registry[name] = ModelEntry(
+            name=name,
+            label_selector=str(rp.get("label_selector", "")),
+            batch_size=int(rp.get("batch_size", 0)),
+        )
+    return registry
+
+
+def get_model_registry() -> Optional[Dict[str, ModelEntry]]:
+    """
+    Return the loaded model registry, or None if multi-model is not enabled.
+    """
+    return _MODEL_REGISTRY
+
+
+def get_known_models() -> List[str]:
+    """Return sorted list of registered model names (empty if single-model mode)."""
+    if _MODEL_REGISTRY is None:
+        return []
+    return sorted(_MODEL_REGISTRY.keys())
 
 
 @dataclass
@@ -143,6 +202,9 @@ class RouterConfig:
     # Chunked prefill correction
     CHUNKED_PREFILL_AWARE: bool = False
     MAX_NUM_BATCHED_TOKENS: int = 0
+
+    # Multi-model: path to shared models.yaml (empty = single-model legacy)
+    MODEL_CONFIG_PATH: str = ""
 
 
 def _norm_mode(s: str) -> str:
@@ -381,6 +443,24 @@ def get_config() -> RouterConfig:
                 cfg.TRACE_SAMPLING_RATE = r
         except Exception:
             pass
+
+    # Multi-model config file
+    cfg.MODEL_CONFIG_PATH = os.getenv("MODEL_CONFIG_PATH", cfg.MODEL_CONFIG_PATH)
+
+    # Load model registry if config file is provided
+    global _MODEL_REGISTRY
+    if cfg.MODEL_CONFIG_PATH and os.path.isfile(cfg.MODEL_CONFIG_PATH):
+        try:
+            _MODEL_REGISTRY = load_model_registry(cfg.MODEL_CONFIG_PATH)
+            print(
+                f"[router] Loaded model registry from {cfg.MODEL_CONFIG_PATH}: "
+                f"{sorted(_MODEL_REGISTRY.keys())}"
+            )
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"[router] WARNING: failed to load model registry: {e}")
+            sys.stdout.flush()
+            _MODEL_REGISTRY = None
 
     _CONFIG = cfg
     return cfg

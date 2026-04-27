@@ -1,4 +1,4 @@
-{{- if and .Values.deploy.vllm (not .Values.dataParallel.enabled) }}
+{{- if and .Values.deploy.vllm (not .Values.dataParallel.enabled) (not .Values.models) }}
 {{- if not .Values.modelVolume.modelSubPath }}
 {{- fail "modelVolume.modelSubPath must be set — deploy PV/PVC once on the parent dir and pass the model subfolder name per deployment" }}
 {{- end }}
@@ -52,7 +52,7 @@ spec:
                   - key: avoid
                     operator: NotIn
                     values:
-                      - vllm-qwen
+                      - vllm
 
       containers:
         - name: vllm

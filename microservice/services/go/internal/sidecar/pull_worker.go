@@ -35,6 +35,7 @@ func NewRouterPullWorker(cfg *Config, queue *LocalQueue, endpointID string) *Rou
 type pullRequest struct {
 	Endpoint string `json:"endpoint"`
 	Want     int    `json:"want"`
+	Model    string `json:"model"`
 }
 
 type pullResponseItem struct {
@@ -64,7 +65,7 @@ func (w *RouterPullWorker) doPull() {
 		return
 	}
 
-	body, err := json.Marshal(pullRequest{Endpoint: w.endpointID, Want: want})
+	body, err := json.Marshal(pullRequest{Endpoint: w.endpointID, Want: want, Model: w.cfg.ModelName})
 	if err != nil {
 		log.Printf("[pull] marshal error: %v", err)
 		return
