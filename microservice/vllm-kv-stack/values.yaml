@@ -135,21 +135,39 @@ vllm:
   hostNetwork: false
 
 # -----------------------------------------------------------------------
-# Multi-model support.
+# Unified model definitions.
 #
-# When populated, the Helm chart generates:
-#   - A shared ConfigMap "model-registry" (models.yaml) consumed by both
-#     the router and BooM/LiteLLM.
-#   - One vLLM Deployment per model entry (template 41-vllm-multi.yaml).
-#   - Mounts the shared config into the router and BooM pods.
+# ALL deployment modes (single-model, multi-model, data-parallel) use
+# this list. When populated, the chart renders one Deployment (or LWS)
+# per model entry. When empty, a single-model fallback is synthesized
+# from the top-level tensorParallelSize/batchSize/vllm values.
 #
-# When empty (default), everything works exactly as before (single model).
-# Fully backward compatible.
+# The sweep runner (sweep_methods.py) always populates this list — either
+# from the client YAML's helm.models[] or by auto-migrating legacy flat
+# vllm_*/data_parallel_* fields.
 #
-# Example:
+# Per-model fields (camelCase):
+#   name              - unique identifier (used in k8s resource names)
+#   servedModelName   - vLLM --served-model-name (defaults to name)
+#   replicas          - number of instances (Deployment pods, or LWS groups in DP mode)
+#   modelSubPath      - subfolder under the model volume
+#   tensorParallelSize - per-model TP
+#   batchSize         - per-model --max-num-seqs
+#   image             - optional per-model vLLM image override
+#   vllm:             - per-model vLLM runtime flags (overrides top-level vllm:)
+#   dataParallel:     - optional LWS config for this model
+#     enabled: true
+#     size: 2           # pods per DP group (1 leader + N-1 workers)
+#     sizeLocal: 1      # --data-parallel-size-local per pod
+#     rpcPort: 13389
+#     nicName: ""       # GLOO/TP/HCCL_SOCKET_IFNAME (empty = auto-detect)
+#     hcclBuffSize: 200
+#     ompNumThreads: 16
+#
+# Example — single model:
 # models:
 #   - name: glm5-chat
-#     servedModelName: glm5-chat
+#     servedModelName: served-model
 #     replicas: 2
 #     modelSubPath: GLM-5-w4a8-mtp-QuaRot
 #     tensorParallelSize: 8
@@ -158,35 +176,52 @@ vllm:
 #       gpuMemoryUtilization: 0.95
 #       quantization: ascend
 #       enableExpertParallel: true
+#
+# Example — data parallel (2 groups = 4 nodes total):
+# models:
+#   - name: glm5-dp
+#     servedModelName: served-model
+#     replicas: 2
+#     modelSubPath: GLM-5-w4a8-mtp-QuaRot
+#     tensorParallelSize: 8
+#     batchSize: 32
+#     dataParallel:
+#       enabled: true
+#       size: 2
+#     vllm:
+#       gpuMemoryUtilization: 0.95
+#       quantization: ascend
+#
+# Example — multi-model:
+# models:
+#   - name: glm5-chat
+#     servedModelName: glm5-chat
+#     replicas: 1
+#     modelSubPath: GLM-5-w4a8-mtp-QuaRot
+#     tensorParallelSize: 8
+#     batchSize: 32
+#     vllm:
+#       gpuMemoryUtilization: 0.95
+#       quantization: ascend
 #   - name: qwen3-8b
 #     servedModelName: qwen3-8b
 #     replicas: 4
-#     modelSubPath: Qwen3-8B
+#     modelSubPath: qwen3-8b
 #     tensorParallelSize: 1
 #     batchSize: 64
 models: []
 
-# -----------------------------------------------------------------------
-# Data Parallel (multi-node) deployment via LeaderWorkerSet (LWS).
-#
-# When enabled, deploys an LWS resource instead of the standard Deployment.
-# Each LWS group contains a leader pod (API server + DP rank 0) and one or
-# more worker pods (headless DP ranks). The leader exposes :8200 and gets
-# the kv-sidecar; workers only run headless vLLM engines.
-#
-# Requires the LWS CRD and controller to be installed in the cluster:
-#   kubectl apply --server-side -f https://github.com/kubernetes-sigs/lws/releases/download/v0.8.0/manifests.yaml
-#
-# Disabled by default — zero impact on existing single-node deployments.
+# Legacy top-level dataParallel — used as fallback when models[].dataParallel
+# is not set. Prefer defining dataParallel per-model in the models[] list.
 dataParallel:
   enabled: false
-  size: 2               # pods per DP group (1 leader + N-1 workers)
-  groups: 1             # number of DP groups (LWS replicas)
-  rpcPort: 13389        # --data-parallel-rpc-port
-  sizeLocal: 1          # --data-parallel-size-local per pod
-  nicName: ""           # GLOO/TP/HCCL_SOCKET_IFNAME override (empty = auto-detect from NODE_IP)
-  hcclBuffSize: 200     # HCCL_BUFFSIZE for RoCE transfers
-  ompNumThreads: 16     # OMP_NUM_THREADS
+  size: 2
+  groups: 1             # deprecated — use model's replicas field instead
+  rpcPort: 13389
+  sizeLocal: 1
+  nicName: ""
+  hcclBuffSize: 200
+  ompNumThreads: 16
 
 # -----------------------------------------------------------------------
 # NFS page cache warm — pre-reads model shards before vLLM pods start.

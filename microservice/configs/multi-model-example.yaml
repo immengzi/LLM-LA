@@ -1,21 +1,30 @@
-# boom-claude-glm.yaml
-# Deploys GLM-5-w4a8-mtp-QuaRot (TP=8) with BooM Gateway for Claude Code.
+# multi-model-example.yaml
+# Deploys multiple models through a single router + BooM gateway.
 #
-# Same Claude Code integration as boom-claude.yaml but with the larger
-# GLM-5 model (W4A8 quantized MoE) instead of Qwen3-8B.
+# Each model gets its own vLLM Deployment(s), its own request queue in the
+# router, and its own entry in BooM's model_list — all from a single Helm
+# release.
 #
-# Claude Code connects via /v1/messages (Anthropic format) on port 30401.
-# See docs/boom_claude.md for ~/.claude/settings.json setup.
+# The shared model-registry ConfigMap is the single source of truth:
+#   - BooM reads litellm_params (model routing)
+#   - Router reads router_params (queue + pod discovery)
+#
+# Prerequisites:
+#   - NFS PV/PVC with model weights at <model_host_path>/<modelSubPath>
+#   - All model images available in reg.local:32000
+#
+# Usage:
+#   python sweep_methods.py --master configs/multi-model-master.yaml
+#
+# Or directly with Helm:
+#   helm upgrade --install vllm ./vllm-kv-stack -n vllm -f values.yaml \
+#     --set-json 'models=[...]'
 
 backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
 total_requests: 8
 prompt_source: "hf-lmsys"
-
-file_prompts:
-  path: "prompts.json"
-  variant: "short"
 
 hf_lmsys:
   dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
@@ -32,25 +41,10 @@ load_pattern:
   duration_s: 1000000000.0
   warmup_reqs: 0
 
-  burst_on_s: 2.0
-  burst_off_s: 2.0
-  burst_rps_on: 40.0
-  burst_rps_off: 0.0
-
-  step_schedule: "0:5,30:15,60:3"
-
-  rand_rps_min: 5.0
-  rand_rps_max: 20.0
-  rand_epoch_s: 5.0
-  loadgen_seed: 12345
-
 generation:
   max_tokens: 5
   temperature: 0.0
   length_mode: "legacy"
-  target_output_tokens: null
-  target_total_tokens: null
-  think: false
 
 output_log_mode: "summary"
 print_trace: false
@@ -60,25 +54,19 @@ metrics:
   prometheus_base_url: "http://7.216.57.215:31190"
   scrape_interval_s: 1.0
   window_s: 2.0
-  include_debug_metrics: false
-  model_name: null
-  max_instances: null
 
 transport:
   mode: "async_pubsub"
   submit_path: "/submit"
   results_zmq: "tcp://7.216.57.215:30559"
   topic: "results"
-  run_id: null
   idle_timeout_s: 1000.0
   idle_zero_running_s: 10.0
 
-# BooM Gateway — load test validation uses OpenAI format;
-# Claude Code connects separately via /v1/messages (Anthropic format).
 boom:
   base_url: "http://7.216.57.215:30401"
   chat_path: "/v1/chat/completions"
-  model: "served-model"
+  model: "glm5-chat"
   api_key: "sk-boom-master"
   timeout_s: 1000.0
   stream: false
@@ -88,12 +76,6 @@ helm:
   router_api_key: "ZhongRuanChuangXin!"
 
   autoscaling_enabled: false
-  autoscaling_min: 16
-  autoscaling_max: 16
-  autoscaling_threshold: "16"
-  autoscaling_prometheus_query: |
-    max(router_central_queue_length{namespace="vllm"})
-
   router_kv_aware: true
   router_len_aware: true
   router_len_policy: "short_first"
@@ -106,8 +88,8 @@ helm:
 
   models:
     - name: glm5-chat
-      servedModelName: served-model
-      replicas: 2
+      servedModelName: glm5-chat
+      replicas: 1
       modelSubPath: GLM-5-w4a8-mtp-QuaRot
       tensorParallelSize: 8
       batchSize: 32
@@ -120,10 +102,28 @@ helm:
           cudagraphMode: "FULL_DECODE_ONLY"
         trustRemoteCode: true
         maxNumBatchedTokens: 4096
-        seed: 1924
         toolCallParser: glm47
         reasoningParser: glm45
-        # Speculative decoding (MTP) — enable after base model loads successfully.
-        # speculativeConfig:
-        #   numSpeculativeTokens: 3
-        #   method: deepseek_mtp
+
+    - name: qwen3-8b
+      servedModelName: qwen3-8b
+      replicas: 2
+      modelSubPath: qwen3-8b
+      tensorParallelSize: 1
+      batchSize: 64
+      vllm:
+        gpuMemoryUtilization: 0.90
+        trustRemoteCode: true
+        toolCallParser: qwen3_coder
+        reasoningParser: qwen3
+
+    # Uncomment to add more models:
+    # - name: deepseek-v3
+    #   servedModelName: deepseek-v3
+    #   replicas: 2
+    #   modelSubPath: DeepSeek-V3
+    #   tensorParallelSize: 8
+    #   batchSize: 16
+    #   vllm:
+    #     gpuMemoryUtilization: 0.95
+    #     enableExpertParallel: true

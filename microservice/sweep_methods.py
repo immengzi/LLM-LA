@@ -46,7 +46,7 @@ from urllib.parse import urlparse
 import click
 import yaml
 
-from config import load_config
+from config import load_config, migrate_legacy_helm_to_models
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -767,19 +767,46 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             q = " ".join(q.split())
             set_values["autoscaling.prometheusQuery"] = q
 
-        # ---- vLLM model config: derive modelSubPath from nfs_path ----
-        nfs_path = str(getattr(h, "nfs_path", "")).strip()
-        model_sub_path = ""
-        if nfs_path:
-            model_sub_path = PurePosixPath(nfs_path.rstrip("/")).name
-            set_values["modelVolume.modelSubPath"] = model_sub_path
-            click.echo(f"[sweep] model subPath={model_sub_path!r} (derived from nfs_path={nfs_path!r})")
-        elif not models_list:
+        # ---- Unified models[] — auto-migrate legacy flat config if needed ----
+        migrate_legacy_helm_to_models(h)
+        models_list = list(h.models or [])
+        if not models_list:
             raise click.ClickException(
-                f"helm.nfs_path must be set in {cfg_path} "
-                f"(e.g. /saeid/models/glm5) — used to derive modelVolume.modelSubPath. "
-                f"(Not required when helm.models[] is populated — each model defines its own modelSubPath.)"
+                f"No models defined in {cfg_path}. "
+                f"Add helm.models[] or legacy flat vllm_*/data_parallel_* fields."
             )
+
+        click.echo(f"[sweep] models: {len(models_list)} model(s)")
+        for mi, mdef in enumerate(models_list):
+            dp_info = mdef.get("dataParallel", {})
+            dp_tag = f" DP={dp_info.get('size', '-')}" if dp_info.get("enabled") else ""
+            click.echo(
+                f"  [{mi}] name={mdef.get('name')} replicas={mdef.get('replicas', 1)} "
+                f"tp={mdef.get('tensorParallelSize', '?')}{dp_tag}"
+            )
+
+        first_model = models_list[0]
+        set_values["replicas.vllm"] = int(first_model.get("replicas", h.replicas))
+        set_values["batchSize"] = int(first_model.get("batchSize", h.batch_size))
+        set_values["tensorParallelSize"] = int(first_model.get("tensorParallelSize", h.tensor_parallel_size))
+
+        # Write models YAML overlay for Helm -f
+        _models_tmp = tempfile.NamedTemporaryFile(
+            mode="w", prefix="sweep_models_", suffix=".yaml",
+            delete=False, encoding="utf-8",
+        )
+        yaml.safe_dump({"models": models_list}, _models_tmp, sort_keys=False)
+        _models_tmp.close()
+        _models_values_file: Optional[Path] = Path(_models_tmp.name)
+
+        # ---- Model volume defaults (from nfs_path / first model) ----
+        nfs_path = str(getattr(h, "nfs_path", "")).strip()
+        model_sub_path = first_model.get("modelSubPath", "")
+        if not model_sub_path and nfs_path:
+            model_sub_path = PurePosixPath(nfs_path.rstrip("/")).name
+        if model_sub_path:
+            set_values["modelVolume.modelSubPath"] = model_sub_path
+            click.echo(f"[sweep] model subPath={model_sub_path!r}")
 
         model_host_path = str(getattr(h, "model_host_path", "")).strip()
         if model_host_path:
@@ -800,92 +827,6 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 f"subPath={set_values['cacheWarm.modelSubPath']!r}"
             )
 
-        # ---- vLLM runtime flags ----
-        if getattr(h, "vllm_gpu_memory_utilization", None) is not None:
-            set_values["vllm.gpuMemoryUtilization"] = float(h.vllm_gpu_memory_utilization)
-        if getattr(h, "vllm_quantization", None) is not None:
-            set_values["vllm.quantization"] = str(h.vllm_quantization)
-        set_values["vllm.enableExpertParallel"] = bool(getattr(h, "vllm_enable_expert_parallel", False))
-        if getattr(h, "vllm_max_model_len", None) is not None:
-            set_values["vllm.maxModelLen"] = int(h.vllm_max_model_len)
-        if getattr(h, "vllm_compilation_config", None) is not None:
-            try:
-                cc = json.loads(h.vllm_compilation_config)
-                set_values["vllm.compilationConfig.cudagraphMode"] = cc.get("cudagraph_mode", "FULL_DECODE_ONLY")
-            except Exception:
-                set_values["vllm.compilationConfig.cudagraphMode"] = "FULL_DECODE_ONLY"
-        set_values["vllm.trustRemoteCode"] = bool(getattr(h, "vllm_trust_remote_code", False))
-        if getattr(h, "vllm_max_num_batched_tokens", None) is not None:
-            set_values["vllm.maxNumBatchedTokens"] = int(h.vllm_max_num_batched_tokens)
-        if getattr(h, "vllm_seed", None) is not None:
-            set_values["vllm.seed"] = int(h.vllm_seed)
-        if getattr(h, "vllm_additional_config", None) is not None:
-            ac = h.vllm_additional_config
-            if isinstance(ac, str):
-                try:
-                    ac = json.loads(ac)
-                except Exception:
-                    ac = None
-            if isinstance(ac, dict):
-                for ak, av in ac.items():
-                    set_values[f"vllm.additionalConfig.{ak}"] = av
-        kv_cache_dtype = str(getattr(h, "vllm_kv_cache_dtype", "auto")).strip()
-        if kv_cache_dtype and kv_cache_dtype != "auto":
-            set_values["vllm.kvCacheDtype"] = kv_cache_dtype
-        if getattr(h, "vllm_cpu_offload_gb", None) is not None:
-            set_values["vllm.cpuOffloadGb"] = float(h.vllm_cpu_offload_gb)
-        if getattr(h, "vllm_enable_prefix_caching", False):
-            set_values["vllm.enablePrefixCaching"] = "true"
-        if getattr(h, "vllm_tool_call_parser", None) is not None:
-            set_values["vllm.toolCallParser"] = str(h.vllm_tool_call_parser)
-        if getattr(h, "vllm_reasoning_parser", None) is not None:
-            set_values["vllm.reasoningParser"] = str(h.vllm_reasoning_parser)
-        if getattr(h, "vllm_speculative_config", None) is not None:
-            sc = h.vllm_speculative_config
-            if isinstance(sc, str):
-                try:
-                    sc = json.loads(sc)
-                except Exception:
-                    sc = None
-            if isinstance(sc, dict):
-                for sk, sv in sc.items():
-                    set_values[f"vllm.speculativeConfig.{sk}"] = sv
-
-        # ---- Data Parallel (LWS) toggle ----
-        dp_enabled = bool(getattr(h, "data_parallel_enabled", False))
-        set_values["dataParallel.enabled"] = dp_enabled
-        if dp_enabled:
-            set_values["dataParallel.size"] = int(getattr(h, "data_parallel_size", 2))
-            set_values["dataParallel.groups"] = int(getattr(h, "data_parallel_groups", 1))
-            set_values["dataParallel.sizeLocal"] = int(getattr(h, "data_parallel_size_local", 1))
-            set_values["dataParallel.rpcPort"] = int(getattr(h, "data_parallel_rpc_port", 13389))
-            dp_nic = str(getattr(h, "data_parallel_nic_name", "")).strip()
-            if dp_nic:
-                set_values["dataParallel.nicName"] = dp_nic
-            set_values["dataParallel.hcclBuffSize"] = int(getattr(h, "data_parallel_hccl_buff_size", 200))
-            set_values["dataParallel.ompNumThreads"] = int(getattr(h, "data_parallel_omp_num_threads", 16))
-            click.echo(
-                f"[sweep] dataParallel.enabled=true "
-                f"size={set_values['dataParallel.size']} "
-                f"groups={set_values['dataParallel.groups']} "
-                f"sizeLocal={set_values['dataParallel.sizeLocal']}"
-            )
-
-        # ---- Multi-model support ----
-        models_list = list(getattr(h, "models", None) or [])
-        _models_values_file: Optional[Path] = None
-        if models_list:
-            click.echo(f"[sweep] multi-model: {len(models_list)} models")
-            for mi, mdef in enumerate(models_list):
-                click.echo(f"  [{mi}] name={mdef.get('name')} replicas={mdef.get('replicas',1)} tp={mdef.get('tensorParallelSize','?')}")
-            _models_tmp = tempfile.NamedTemporaryFile(
-                mode="w", prefix="sweep_models_", suffix=".yaml",
-                delete=False, encoding="utf-8",
-            )
-            yaml.safe_dump({"models": models_list}, _models_tmp, sort_keys=False)
-            _models_tmp.close()
-            _models_values_file = Path(_models_tmp.name)
-
         click.echo(f"[sweep] backend={backend}  deploy_mode={deploy_mode}  skip_vllm={skip_vllm}")
         click.echo("[sweep] set values:")
         for k in sorted(set_values):
@@ -902,13 +843,6 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 _operator_apply(cr_name=cr_name, namespace=namespace, set_values=set_values)
                 _wait_cr_phase(cr_name, namespace)
             else:
-                # Build extra values files list (base chart values + optional models overlay)
-                extra_values: List[str] = []
-                if values_file.is_file():
-                    extra_values.extend(["-f", str(values_file)])
-                if _models_values_file is not None:
-                    extra_values.extend(["-f", str(_models_values_file)])
-
                 _helm_install_or_upgrade(
                     release=release,
                     chart_dir=chart_dir,
@@ -1013,62 +947,20 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             "helm_chart_dir": str(chart_dir),
             "helm_set_values": set_values,
             "helm_knobs_from_config": {
-                "replicas": int(h.replicas),
-                "batch_size": int(h.batch_size),
                 "autoscaling_enabled": bool(h.autoscaling_enabled),
                 "autoscaling_min": int(h.autoscaling_min),
                 "autoscaling_max": int(h.autoscaling_max),
-                "autoscaling_threshold": str(h.autoscaling_threshold),
-                "autoscaling_prometheus_query": str(h.autoscaling_prometheus_query),
                 "router_kv_aware": bool(getattr(h, "router_kv_aware", True)),
                 "router_len_aware": bool(getattr(h, "router_len_aware", True)),
                 "router_len_policy": str(getattr(h, "router_len_policy", "short_first")),
-                "aibrix_enabled": bool(getattr(h, "aibrix_enabled", False)),
-                "aibrix_model_name": str(getattr(h, "aibrix_model_name", "served-model")),
-                "aibrix_port": int(getattr(h, "aibrix_port", 8200)),
                 "service_impl": str(getattr(h, "service_impl", "python")),
                 "nfs_path": nfs_path,
                 "model_sub_path": model_sub_path,
-                "vllm_gpu_memory_utilization": getattr(h, "vllm_gpu_memory_utilization", None),
-                "vllm_quantization": getattr(h, "vllm_quantization", None),
-                "vllm_enable_expert_parallel": bool(getattr(h, "vllm_enable_expert_parallel", False)),
-                "vllm_max_model_len": getattr(h, "vllm_max_model_len", None),
-                "vllm_compilation_config": getattr(h, "vllm_compilation_config", None),
-                "vllm_trust_remote_code": bool(getattr(h, "vllm_trust_remote_code", False)),
-                "vllm_max_num_batched_tokens": getattr(h, "vllm_max_num_batched_tokens", None),
-                "vllm_seed": getattr(h, "vllm_seed", None),
-                "vllm_additional_config": getattr(h, "vllm_additional_config", None),
-                "vllm_speculative_config": getattr(h, "vllm_speculative_config", None),
-                "vllm_tool_call_parser": getattr(h, "vllm_tool_call_parser", None),
-                "vllm_reasoning_parser": getattr(h, "vllm_reasoning_parser", None),
-                # litellm knobs
-                "litellm_enabled": backend == "litellm",
-                "litellm_base_url": getattr(getattr(cfg, "litellm", None), "base_url", None),
-                "litellm_model": getattr(getattr(cfg, "litellm", None), "model", None),
-                # boom knobs
                 "boom_enabled": backend == "boom",
                 "boom_claude_aliases": bool(getattr(h, "boom_claude_aliases", False)),
-                "boom_base_url": getattr(getattr(cfg, "boom", None), "base_url", None),
-                "boom_model": getattr(getattr(cfg, "boom", None), "model", None),
-                # mooncake knobs
                 "mooncake_enabled": bool(getattr(h, "mooncake_enabled", False)),
-                "mooncake_master_server_address": str(getattr(h, "mooncake_master_server_address", "")),
-                "mooncake_host_network": bool(getattr(h, "mooncake_host_network", False)),
-                # SLO-aware knobs
                 "router_slo_aware": bool(getattr(h, "router_slo_aware", False)),
-                "router_admission_throttle": bool(getattr(h, "router_admission_throttle", False)),
-                "router_fixed_batch_size": int(getattr(h, "router_fixed_batch_size", 0)),
-                "router_output_len_predictor": str(getattr(h, "router_output_len_predictor", "simple")),
-                "router_latency_predictor": str(getattr(h, "router_latency_predictor", "linear")),
-                # SLO client config
                 "slo_enabled": bool(getattr(getattr(cfg, "slo", None), "enabled", False)),
-                # Data Parallel knobs
-                "data_parallel_enabled": bool(getattr(h, "data_parallel_enabled", False)),
-                "data_parallel_size": int(getattr(h, "data_parallel_size", 2)),
-                "data_parallel_groups": int(getattr(h, "data_parallel_groups", 1)),
-                "data_parallel_size_local": int(getattr(h, "data_parallel_size_local", 1)),
-                "data_parallel_nic_name": str(getattr(h, "data_parallel_nic_name", "")),
-                # Multi-model
                 "models": models_list,
             },
         }

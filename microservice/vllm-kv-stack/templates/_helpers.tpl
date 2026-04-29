@@ -115,3 +115,170 @@ Ascend NPU driver volumeMounts — pairs with ascendDriverVolumes above.
 - name: ascend-install-info-volume
   mountPath: /etc/ascend_install.info
 {{- end -}}
+
+{{/*
+Common vLLM CLI flags shared by all deployment modes.
+Context: dict with keys "mv" (per-model overrides), "gv" (global .Values.vllm), "batch" (batch size).
+Each flag line ends with ' \' for bash continuation.
+*/}}
+{{- define "vllmkv.vllmRuntimeFlags" -}}
+--dtype auto \
+--kv-cache-dtype {{ .mv.kvCacheDtype | default .gv.kvCacheDtype | default "auto" }} \
+{{- $cpuOff := .mv.cpuOffloadGb | default .gv.cpuOffloadGb -}}
+{{- if $cpuOff }}
+--cpu-offload-gb {{ $cpuOff }} \
+{{- end }}
+--max-num-seqs {{ .batch }} \
+{{- $epc := .mv.enablePrefixCaching | default .gv.enablePrefixCaching -}}
+{{- if $epc }}
+--prefix-caching-hash-algo sha256_cbor \
+{{- else }}
+--no-enable-prefix-caching \
+{{- end -}}
+{{- $gpuMem := .mv.gpuMemoryUtilization | default .gv.gpuMemoryUtilization -}}
+{{- if $gpuMem }}
+--gpu-memory-utilization {{ $gpuMem }} \
+{{- end -}}
+{{- $quant := .mv.quantization | default .gv.quantization -}}
+{{- if $quant }}
+--quantization {{ $quant }} \
+{{- end -}}
+{{- $eep := .mv.enableExpertParallel | default .gv.enableExpertParallel -}}
+{{- if $eep }}
+--enable-expert-parallel \
+{{- end -}}
+{{- $mvCC := .mv.compilationConfig | default nil -}}
+{{- $gvCC := .gv.compilationConfig | default nil -}}
+{{- if or $mvCC $gvCC -}}
+{{- $cc := $mvCC | default $gvCC }}
+--compilation-config '{"cudagraph_mode": "{{ $cc.cudagraphMode | default "FULL_DECODE_ONLY" }}"}' \
+{{- end -}}
+{{- if or .mv.trustRemoteCode .gv.trustRemoteCode }}
+--trust-remote-code \
+{{- end -}}
+{{- $mnbt := .mv.maxNumBatchedTokens | default .gv.maxNumBatchedTokens -}}
+{{- if $mnbt }}
+--max-num-batched-tokens {{ $mnbt }} \
+{{- end -}}
+{{- $seed := .mv.seed | default .gv.seed -}}
+{{- if $seed }}
+--seed {{ $seed }} \
+{{- end -}}
+{{- $mml := .mv.maxModelLen | default .gv.maxModelLen -}}
+{{- if $mml }}
+--max-model-len {{ $mml }} \
+{{- end -}}
+{{- $mvAC := .mv.additionalConfig | default nil -}}
+{{- $gvAC := .gv.additionalConfig | default nil -}}
+{{- if or $mvAC $gvAC -}}
+{{- $ac := $mvAC | default $gvAC -}}
+{{- if $ac.multistreamOverlapSharedExpert }}
+--additional-config '{"multistream_overlap_shared_expert": {{ $ac.multistreamOverlapSharedExpert }}}' \
+{{- end -}}
+{{- end -}}
+{{- $mvSC := .mv.speculativeConfig | default nil -}}
+{{- $gvSC := .gv.speculativeConfig | default nil -}}
+{{- if or $mvSC $gvSC -}}
+{{- $sc := $mvSC | default $gvSC -}}
+{{- if $sc.numSpeculativeTokens }}
+--speculative-config '{"num_speculative_tokens": {{ $sc.numSpeculativeTokens }}, "method": "{{ $sc.method }}"}' \
+{{- end -}}
+{{- end -}}
+{{- $tcp := .mv.toolCallParser | default .gv.toolCallParser -}}
+{{- if $tcp }}
+--tool-call-parser {{ $tcp }} \
+--enable-auto-tool-choice \
+{{- end -}}
+{{- $rp := .mv.reasoningParser | default .gv.reasoningParser -}}
+{{- if $rp }}
+--reasoning-parser {{ $rp }} \
+{{- end -}}
+{{- end -}}
+
+{{/*
+Common env vars for the vLLM container.
+Context: dict with keys "tp" (tensor parallel size), "root" (the root $ context).
+*/}}
+{{- define "vllmkv.vllmBaseEnv" -}}
+- name: HF_HUB_OFFLINE
+  value: "1"
+- name: TRANSFORMERS_OFFLINE
+  value: "1"
+- name: HF_HUB_DISABLE_TELEMETRY
+  value: "1"
+- name: PYTHONHASHSEED
+  value: "0"
+- name: TOKENIZERS_PARALLELISM
+  value: "false"
+- name: POD_NAME
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.name
+- name: ASCEND_RT_VISIBLE_DEVICES
+  value: {{ include "vllmkv.tpDevices" (dict "tp" .tp) | quote }}
+- name: HCCL_OP_EXPANSION_MODE
+  value: "AIV"
+- name: VLLM_USE_V1
+  value: "1"
+- name: PYTORCH_NPU_ALLOC_CONF
+  value: "expandable_segments:True"
+- name: ASCEND_BUFFER_POOL
+  value: {{ .root.Values.vllm.ascendBufferPool | default "4:8" | quote }}
+{{- end -}}
+
+{{/*
+NIC auto-detection script for Mooncake / HCCL.
+Caller must have NODE_IP available as a shell variable.
+*/}}
+{{- define "vllmkv.nicDetectScript" -}}
+local_ip="${NODE_IP}"
+nic_name=$(python3 -c "
+import os, socket, struct, fcntl
+local_ip = '${local_ip}'
+SIOCGIFADDR = 0x8915
+for iface in os.listdir('/sys/class/net/'):
+    if iface == 'lo': continue
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        ifreq = struct.pack('16sH14s', iface.encode(), socket.AF_INET, b'')
+        res = fcntl.ioctl(sock.fileno(), SIOCGIFADDR, ifreq)
+        ip = socket.inet_ntoa(res[20:24])
+        sock.close()
+        if ip == local_ip:
+            print(iface)
+            break
+    except: pass
+")
+{{- end -}}
+
+{{/*
+Inline Python Prometheus thread exporter for vLLM.
+Caller must set VLLM_PID and POD_NAME shell variables before including.
+*/}}
+{{- define "vllmkv.threadExporter" -}}
+VLLM_PID="$VLLM_PID" POD_NAME="$POD_NAME" python - <<'PY' &
+import os, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+PID = int(os.environ["VLLM_PID"])
+POD = os.environ.get("POD_NAME", "unknown")
+PORT = 9101
+def threads(pid):
+    try: return len(os.listdir(f"/proc/{pid}/task"))
+    except: return None
+for _ in range(120):
+    if os.path.exists(f"/proc/{PID}"): break
+    time.sleep(0.25)
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/metrics":
+            self.send_response(404); self.end_headers(); return
+        n = threads(PID)
+        body = 'vllm_threads{pod="%s"} %d\n' % (POD, n) if n else "# pid not visible\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4")
+        self.end_headers()
+        self.wfile.write(body.encode())
+    def log_message(self, *a): pass
+HTTPServer(("0.0.0.0", PORT), H).serve_forever()
+PY
+{{- end -}}

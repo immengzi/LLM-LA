@@ -88,10 +88,6 @@ boom:
   stream: false
 
 helm:
-  replicas: 1
-  batch_size: 32
-  tensor_parallel_size: 8
-
   boom_claude_aliases: true
   router_api_key: "ZhongRuanChuangXin!"
 
@@ -103,34 +99,36 @@ helm:
   router_len_aware: true
   router_len_policy: "short_first"
 
-  # Model config — GLM-5 W4A8 MoE (quantized)
-  model_name: "served-model"
   nfs_path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
   model_host_path: "/home/haiting/models"
 
   aibrix_enabled: false
   cache_warm_enabled: false
 
-  # ---- Data Parallel (LWS) ----
-  data_parallel_enabled: true
-  data_parallel_size: 2          # 2 pods per group (1 leader + 1 worker)
-  data_parallel_groups: 1        # 1 DP group (scale up when more nodes available)
-  data_parallel_size_local: 1    # 1 DP rank per pod
-  data_parallel_rpc_port: 13389
-  data_parallel_nic_name: "enp189s0f0"   # hardcoded for current cluster; set "" for auto-detect
-  data_parallel_hccl_buff_size: 200
-  data_parallel_omp_num_threads: 16
-
-  # vLLM runtime flags — matched to working GLM-5 W4A8 MoE DP deployment
-  vllm_gpu_memory_utilization: 0.95
-  vllm_quantization: "ascend"
-  vllm_enable_expert_parallel: true
-  vllm_compilation_config: '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-  vllm_trust_remote_code: true
-  vllm_max_num_batched_tokens: 4096
-  vllm_seed: 1924
-  vllm_tool_call_parser: "glm47"
-  vllm_reasoning_parser: "glm45"
-  vllm_additional_config:
-    multistream_overlap_shared_expert: true
-  vllm_speculative_config: null
+  models:
+    - name: glm5-chat
+      servedModelName: served-model
+      replicas: 1
+      modelSubPath: GLM-5-w4a8-mtp-QuaRot
+      tensorParallelSize: 8
+      batchSize: 32
+      dataParallel:
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 13389
+        hcclBuffSize: 200
+        ompNumThreads: 16
+      vllm:
+        gpuMemoryUtilization: 0.95
+        quantization: ascend
+        enableExpertParallel: true
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 4096
+        seed: 1924
+        toolCallParser: glm47
+        reasoningParser: glm45
+        additionalConfig:
+          multistream_overlap_shared_expert: true
