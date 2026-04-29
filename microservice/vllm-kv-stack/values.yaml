@@ -21,6 +21,9 @@ images:
   redis: redis:7-alpine
   mooncakeMaster: quay.io/ascend/vllm-ascend:glm5-openeuler
 
+sidecar:
+  logLevel: debug    # debug | info | warning | error
+
 router:
   # pull | push-rr | push-random | push-leastq
   mode: pull

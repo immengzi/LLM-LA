@@ -192,6 +192,9 @@ class VLLMWorker:
                     # ----------------------------------------------------
                     # Call vLLM
                     # ----------------------------------------------------
+                    if _cfg.LOG_LEVEL == "debug":
+                        print(f"[sidecar] vLLM send req_id={req_id} model={_cfg.MODEL_NAME}")
+
                     resp = session.post(
                         vllm_url,
                         json=payload,
@@ -302,6 +305,10 @@ class VLLMWorker:
 
                     # Prom: completed (sidecar produced a result payload)
                     inc_completed(_cfg.CONTAINER_NAME)
+
+                    if _cfg.LOG_LEVEL == "debug":
+                        _tok = usage.get("completion_tokens", "?") if usage else "?"
+                        print(f"[sidecar] vLLM done req_id={req_id} latency={latency_s:.2f}s tokens={_tok}")
 
                     if self._result_poster is not None:
                         # Non-blocking: avoids tying up vLLM workers on router backpressure / TCP resets

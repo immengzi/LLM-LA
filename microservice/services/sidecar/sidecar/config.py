@@ -90,6 +90,12 @@ class SidecarConfig:
     TRACE_ENABLED: bool = False
     TRACE_SAMPLE_RATE: float = 1.0
 
+    # ------------------------------------------------
+    # Logging
+    # ------------------------------------------------
+
+    LOG_LEVEL: str = "info"
+
 
 def get_config() -> SidecarConfig:
     cfg = SidecarConfig()
@@ -162,5 +168,10 @@ def get_config() -> SidecarConfig:
     # ------------------------------------------------
     cfg.TRACE_ENABLED = os.getenv("TRACE_ENABLED", "false").lower() == "true"
     cfg.TRACE_SAMPLE_RATE = float(os.getenv("TRACE_SAMPLE_RATE", cfg.TRACE_SAMPLE_RATE))
+
+    # ------------------------------------------------
+    # Logging
+    # ------------------------------------------------
+    cfg.LOG_LEVEL = os.getenv("LOG_LEVEL", cfg.LOG_LEVEL).lower()
 
     return cfg
