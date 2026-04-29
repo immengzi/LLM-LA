@@ -7,6 +7,24 @@ single `models[]` configuration surface.
 
 ---
 
+## v2.1 — RoCE Node-Pair Pinning
+
+Added `dataParallel.pairTopologyKey` — when set, Kubernetes scheduler
+pins each LWS group to nodes sharing the same label value (e.g.
+`roce-pair=pair-a`). Prevents HCCL cross-pair interference when scaling
+to 2+ DP replicas on physically pair-cabled Ascend clusters.
+
+| File | Change |
+|------|--------|
+| `vllm-kv-stack/values.yaml` | Added `pairTopologyKey` to `dataParallel` schema + example |
+| `vllm-kv-stack/templates/40-vllm-unified.yaml` | Added `podAffinity` with `matchLabelKeys` on both leader and worker templates when `pairTopologyKey` is set |
+| `configs/boom-claude-glm-dp.yaml` | Added `pairTopologyKey: roce-pair` |
+| `docs/multi_model_router.md` | New "Node-pair pinning" section with labeling instructions |
+
+Requires Kubernetes 1.29+ for `matchLabelKeys` in `podAffinityTerm`.
+
+---
+
 ## v2 — Unified Config Refactor
 
 ### Summary

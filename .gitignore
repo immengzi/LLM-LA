@@ -54,3 +54,4 @@ debug-scripts/mooncake-test/prompt/
 debug-scripts/mooncake-test/test/
 HQ-production/
 *.tar
+*.log

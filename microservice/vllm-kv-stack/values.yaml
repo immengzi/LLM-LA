@@ -163,6 +163,12 @@ vllm:
 #     nicName: ""       # GLOO/TP/HCCL_SOCKET_IFNAME (empty = auto-detect)
 #     hcclBuffSize: 200
 #     ompNumThreads: 16
+#     pairTopologyKey: "" # node label key for RoCE-pair pinning (e.g. "roce-pair")
+#                         # When set, pods in the same LWS group are forced onto
+#                         # nodes sharing the same label value. Requires K8s 1.29+.
+#                         # Label your nodes first:
+#                         #   kubectl label node n1 n2 roce-pair=pair-a
+#                         #   kubectl label node n3 n4 roce-pair=pair-b
 #
 # Example — single model:
 # models:
@@ -177,7 +183,7 @@ vllm:
 #       quantization: ascend
 #       enableExpertParallel: true
 #
-# Example — data parallel (2 groups = 4 nodes total):
+# Example — data parallel (2 groups = 4 nodes total, pinned to RoCE pairs):
 # models:
 #   - name: glm5-dp
 #     servedModelName: served-model
@@ -188,6 +194,7 @@ vllm:
 #     dataParallel:
 #       enabled: true
 #       size: 2
+#       pairTopologyKey: roce-pair   # pins each group to a node pair
 #     vllm:
 #       gpuMemoryUtilization: 0.95
 #       quantization: ascend
@@ -222,6 +229,7 @@ dataParallel:
   nicName: ""
   hcclBuffSize: 200
   ompNumThreads: 16
+  pairTopologyKey: ""   # node label for RoCE-pair pinning (K8s 1.29+)
 
 # -----------------------------------------------------------------------
 # NFS page cache warm — pre-reads model shards before vLLM pods start.

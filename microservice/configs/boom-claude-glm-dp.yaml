@@ -108,7 +108,7 @@ helm:
   models:
     - name: glm5-chat
       servedModelName: served-model
-      replicas: 1
+      replicas: 2
       modelSubPath: GLM-5-w4a8-mtp-QuaRot
       tensorParallelSize: 8
       batchSize: 32
@@ -119,6 +119,7 @@ helm:
         rpcPort: 13389
         hcclBuffSize: 200
         ompNumThreads: 16
+        pairTopologyKey: roce-pair
       vllm:
         gpuMemoryUtilization: 0.95
         quantization: ascend
