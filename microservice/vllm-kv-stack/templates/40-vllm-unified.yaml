@@ -115,6 +115,19 @@ spec:
                       operator: NotIn
                       values:
                         - vllm
+          {{- if $dp.pairTopologyKey }}
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - topologyKey: {{ $dp.pairTopologyKey }}
+                labelSelector:
+                  matchExpressions:
+                    - key: leaderworkerset.sigs.k8s.io/name
+                      operator: In
+                      values:
+                        - vllm-{{ $modelName }}
+                matchLabelKeys:
+                  - leaderworkerset.sigs.k8s.io/group-index
+          {{- end }}
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
               - labelSelector:
@@ -124,6 +137,15 @@ spec:
                       values:
                         - vllm-{{ $modelName }}
                 topologyKey: kubernetes.io/hostname
+        {{- if $dp.pairTopologyKey }}
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: {{ $dp.pairTopologyKey }}
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                app: vllm-{{ $modelName }}
+        {{- end }}
         containers:
           - name: vllm
             image: {{ include "vllmkv.image" (list $ ($m.image | default $.Values.images.vllm)) }}
@@ -342,6 +364,19 @@ spec:
                       operator: NotIn
                       values:
                         - vllm
+          {{- if $dp.pairTopologyKey }}
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - topologyKey: {{ $dp.pairTopologyKey }}
+                labelSelector:
+                  matchExpressions:
+                    - key: leaderworkerset.sigs.k8s.io/name
+                      operator: In
+                      values:
+                        - vllm-{{ $modelName }}
+                matchLabelKeys:
+                  - leaderworkerset.sigs.k8s.io/group-index
+          {{- end }}
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
               - labelSelector:
@@ -351,6 +386,15 @@ spec:
                       values:
                         - vllm-{{ $modelName }}
                 topologyKey: kubernetes.io/hostname
+        {{- if $dp.pairTopologyKey }}
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: {{ $dp.pairTopologyKey }}
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                app: vllm-{{ $modelName }}
+        {{- end }}
         containers:
           - name: vllm
             image: {{ include "vllmkv.image" (list $ ($m.image | default $.Values.images.vllm)) }}

@@ -38,6 +38,7 @@ dataParallel:
   hcclBuffSize: 200
   nicName: ""
   ompNumThreads: 16
+  pairTopologyKey: ""
   rpcPort: 13389
   size: 2
   sizeLocal: 1
@@ -82,12 +83,13 @@ models:
     enabled: true
     hcclBuffSize: 200
     ompNumThreads: 16
+    pairTopologyKey: roce-pair
     rpcPort: 13389
     size: 2
     sizeLocal: 1
   modelSubPath: GLM-5-w4a8-mtp-QuaRot
   name: glm5-chat
-  replicas: 1
+  replicas: 2
   servedModelName: served-model
   tensorParallelSize: 8
   vllm:
@@ -124,7 +126,7 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 1
+  vllm: 2
 router:
   admissionThrottle: false
   apiKey: ZhongRuanChuangXin!

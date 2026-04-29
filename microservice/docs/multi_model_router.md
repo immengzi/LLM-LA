@@ -120,6 +120,7 @@ models:
 | `nicName` | No | `""` | NIC name override (empty = auto-detect from NODE_IP) |
 | `hcclBuffSize` | No | 200 | `HCCL_BUFFSIZE` for RoCE transfers |
 | `ompNumThreads` | No | 16 | `OMP_NUM_THREADS` |
+| `pairTopologyKey` | No | `""` | Node label key for RoCE-pair pinning (K8s 1.29+). When set, pods in the same LWS group are forced onto nodes sharing the same label value, preventing HCCL cross-pair interference. See [Node-pair pinning](#node-pair-pinning). |
 
 ### Per-model vLLM flags (inside `vllm:`)
 
@@ -169,6 +170,46 @@ helm:
 
 The sweep runner writes the models list to a temporary values file and
 passes it to Helm via `-f`, keeping all existing `--set` knobs intact.
+
+### Node-pair pinning
+
+When Ascend nodes are RoCE-cabled in fixed pairs (e.g. node1↔node2,
+node3↔node4), each LWS group **must** land on a physically connected
+pair. Without pinning, the Kubernetes scheduler may mix nodes from
+different pairs, causing HCCL failures (`aclnnMoeDistributeDispatchV4`).
+
+**Step 1 — Label the nodes:**
+
+```bash
+kubectl label node node1 node2 roce-pair=pair-a
+kubectl label node node3 node4 roce-pair=pair-b
+```
+
+**Step 2 — Set `pairTopologyKey` in the model config:**
+
+```yaml
+models:
+  - name: glm5-chat
+    replicas: 2          # 2 groups → pair-a and pair-b
+    dataParallel:
+      enabled: true
+      size: 2
+      pairTopologyKey: roce-pair
+```
+
+This adds two scheduling rules to every pod in the LWS:
+
+| Rule | Effect |
+|------|--------|
+| `podAffinity` with `matchLabelKeys: [group-index]` on `roce-pair` | Pods in the **same** group land on nodes with the **same** `roce-pair` value |
+| `podAntiAffinity` on `kubernetes.io/hostname` (always present) | Leader and worker in the same group go to **different** nodes within the pair |
+
+Together, these guarantee group 0 stays on pair-a and group 1 on pair-b
+(assuming each pair has exactly `size` nodes).
+
+> **Requires Kubernetes 1.29+** for the `matchLabelKeys` field in
+> `podAffinityTerm`. On older clusters, use `nodeSelector` with manual
+> per-deployment label overrides.
 
 ---
 
