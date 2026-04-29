@@ -146,6 +146,8 @@ router:
   queueWaitModel: none
   sloAware: false
   sloWithKv: true
+sidecar:
+  logLevel: debug
 tensorParallelSize: 8
 vllm:
   additionalConfig: {}

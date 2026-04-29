@@ -154,6 +154,9 @@ class RouterPullWorker:
                     print("[sidecar] first successful /pull; normal logging enabled.")
                     self._first_success = True
 
+                if _cfg.LOG_LEVEL == "debug" and items:
+                    print(f"[sidecar] /pull want={want} got={len(items)} pending={pending} inflight={inflight}")
+
                 if not items:
                     return
 
