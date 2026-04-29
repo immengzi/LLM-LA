@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import json
+import sys
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Optional
 import yaml
 from urllib.parse import urlparse
@@ -413,6 +416,102 @@ class HelmConfig:
     data_parallel_hccl_buff_size: int = 200   # HCCL_BUFFSIZE
     data_parallel_omp_num_threads: int = 16   # OMP_NUM_THREADS
     # --------------------------------------------------------------------
+
+
+def migrate_legacy_helm_to_models(h: HelmConfig) -> None:
+    """Auto-convert legacy flat vllm_*/data_parallel_* fields into a models[] entry.
+
+    If ``h.models`` is already populated the function is a no-op.
+    Otherwise it builds a single model entry from the flat fields and assigns
+    it to ``h.models``, printing a deprecation warning to stderr.
+    """
+    if h.models:
+        return
+
+    vllm: dict = {}
+    if h.vllm_gpu_memory_utilization is not None:
+        vllm["gpuMemoryUtilization"] = h.vllm_gpu_memory_utilization
+    if h.vllm_quantization is not None:
+        vllm["quantization"] = h.vllm_quantization
+    if h.vllm_enable_expert_parallel:
+        vllm["enableExpertParallel"] = True
+    if h.vllm_max_model_len is not None:
+        vllm["maxModelLen"] = h.vllm_max_model_len
+    if h.vllm_compilation_config is not None:
+        try:
+            cc = json.loads(h.vllm_compilation_config)
+            vllm["compilationConfig"] = {"cudagraphMode": cc.get("cudagraph_mode", "FULL_DECODE_ONLY")}
+        except Exception:
+            vllm["compilationConfig"] = {"cudagraphMode": "FULL_DECODE_ONLY"}
+    if h.vllm_trust_remote_code:
+        vllm["trustRemoteCode"] = True
+    if h.vllm_max_num_batched_tokens is not None:
+        vllm["maxNumBatchedTokens"] = h.vllm_max_num_batched_tokens
+    if h.vllm_seed is not None:
+        vllm["seed"] = h.vllm_seed
+    if h.vllm_additional_config is not None:
+        ac = h.vllm_additional_config
+        if isinstance(ac, str):
+            try:
+                ac = json.loads(ac)
+            except Exception:
+                ac = None
+        if isinstance(ac, dict):
+            vllm["additionalConfig"] = ac
+    if h.vllm_speculative_config is not None:
+        sc = h.vllm_speculative_config
+        if isinstance(sc, str):
+            try:
+                sc = json.loads(sc)
+            except Exception:
+                sc = None
+        if isinstance(sc, dict):
+            vllm["speculativeConfig"] = sc
+    kv_dtype = str(h.vllm_kv_cache_dtype or "auto").strip()
+    if kv_dtype and kv_dtype != "auto":
+        vllm["kvCacheDtype"] = kv_dtype
+    if h.vllm_cpu_offload_gb is not None:
+        vllm["cpuOffloadGb"] = h.vllm_cpu_offload_gb
+    if h.vllm_enable_prefix_caching:
+        vllm["enablePrefixCaching"] = True
+    if h.vllm_tool_call_parser is not None:
+        vllm["toolCallParser"] = h.vllm_tool_call_parser
+    if h.vllm_reasoning_parser is not None:
+        vllm["reasoningParser"] = h.vllm_reasoning_parser
+
+    model_entry: dict = {
+        "name": "qwen",
+        "servedModelName": h.model_name or "served-model",
+        "replicas": h.replicas,
+        "tensorParallelSize": h.tensor_parallel_size,
+        "batchSize": h.batch_size,
+    }
+
+    nfs_path = str(h.nfs_path or "").strip()
+    if nfs_path:
+        model_entry["modelSubPath"] = PurePosixPath(nfs_path.rstrip("/")).name
+
+    if vllm:
+        model_entry["vllm"] = vllm
+
+    if h.data_parallel_enabled:
+        model_entry["replicas"] = h.data_parallel_groups
+        model_entry["dataParallel"] = {
+            "enabled": True,
+            "size": h.data_parallel_size,
+            "sizeLocal": h.data_parallel_size_local,
+            "rpcPort": h.data_parallel_rpc_port,
+            "nicName": h.data_parallel_nic_name,
+            "hcclBuffSize": h.data_parallel_hccl_buff_size,
+            "ompNumThreads": h.data_parallel_omp_num_threads,
+        }
+
+    h.models = [model_entry]
+    print(
+        "[config] Legacy flat vllm_*/data_parallel_* config auto-converted to models[] format. "
+        "Consider migrating your YAML config to the unified models[] format.",
+        file=sys.stderr,
+    )
 
 
 # =========================

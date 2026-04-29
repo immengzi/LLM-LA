@@ -1,19 +1,106 @@
 # Multi-Model Router — Changelog
 
 Track of all files added/modified to enable multi-model routing support
-where a single router serves 10+ models, each with its own queue and
-vLLM pod pool, while keeping BooM as the single entry point.
+and the subsequent unified config refactor that consolidated all three
+deployment modes (single-model, multi-model, data-parallel) into a
+single `models[]` configuration surface.
 
 ---
 
-## Files to Copy
+## v2 — Unified Config Refactor
+
+### Summary
+
+Replaced three separate Helm templates and three separate config
+variable sets with a single unified `models[]` list that handles all
+deployment modes. Each model entry can optionally include a
+`dataParallel:` block to deploy as a LeaderWorkerSet instead of a
+standard Deployment.
+
+### New Files
+
+| File | Description |
+|------|-------------|
+| `vllm-kv-stack/templates/40-vllm-unified.yaml` | Single template that handles all modes — loops `models[]`, renders Deployment or LWS per entry |
+
+### Deleted Files
+
+| File | Reason |
+|------|--------|
+| `vllm-kv-stack/templates/40-vllm.yaml` | Merged into `40-vllm-unified.yaml` |
+| `vllm-kv-stack/templates/41-vllm-multi.yaml` | Merged into `40-vllm-unified.yaml` |
+| `vllm-kv-stack/templates/43-vllm-lws.yaml` | Merged into `40-vllm-unified.yaml` |
+
+### Modified Files
+
+| File | What changed |
+|------|--------------|
+| `config.py` | +`migrate_legacy_helm_to_models()` function that auto-converts legacy flat `vllm_*/data_parallel_*` fields into a `models[]` entry with deprecation warning |
+| `sweep_methods.py` | Removed 60+ line flat `vllm.*` and `dataParallel.*` `--set` blocks; always calls `migrate_legacy_helm_to_models()` and writes `models[]` YAML overlay |
+| `deploy_vllm.py` | Removed duplicate vLLM flag mapping; uses same `migrate_legacy_helm_to_models()` + models YAML approach |
+| `vllm-kv-stack/values.yaml` | Expanded `models[]` documentation to cover all three modes including per-model `dataParallel:`; top-level `dataParallel:` kept as legacy fallback |
+| `vllm-kv-stack/templates/_helpers.tpl` | +`vllmkv.vllmRuntimeFlags` (shared vLLM CLI flags), +`vllmkv.vllmBaseEnv` (shared env vars), +`vllmkv.nicDetectScript` (NIC auto-detection), +`vllmkv.threadExporter` (Prometheus exporter) |
+| `configs/boom-claude.yaml` | Migrated to `models[]` format (single Qwen3-8B) |
+| `configs/boom-claude-glm.yaml` | Migrated to `models[]` format (single GLM-5) |
+| `configs/boom-claude-glm-dp.yaml` | Migrated to `models[]` format (GLM-5 with `dataParallel:`) |
+| `configs/multi-model-example.yaml` | Removed redundant top-level `replicas`/`batch_size`/`tensor_parallel_size` |
+
+### Config Migration
+
+**Before** (three different formats):
+
+```yaml
+# Single model — flat vllm_* fields
+helm:
+  replicas: 2
+  tensor_parallel_size: 8
+  vllm_quantization: ascend
+  vllm_gpu_memory_utilization: 0.95
+
+# Data parallel — flat data_parallel_* fields
+helm:
+  data_parallel_enabled: true
+  data_parallel_size: 2
+
+# Multi-model — models[] list
+helm:
+  models:
+    - name: glm5-chat
+      ...
+```
+
+**After** (one format for all):
+
+```yaml
+helm:
+  models:
+    - name: glm5-chat
+      servedModelName: served-model
+      replicas: 2
+      tensorParallelSize: 8
+      batchSize: 32
+      vllm:
+        quantization: ascend
+        gpuMemoryUtilization: 0.95
+      # Optional — only for DP deployments:
+      dataParallel:
+        enabled: true
+        size: 2
+```
+
+Legacy flat configs are auto-migrated at runtime with a deprecation
+warning. No immediate breakage.
+
+---
+
+## v1 — Multi-Model Router (initial)
 
 ### New Files (create these)
 
 | File | Description |
 |------|-------------|
 | `vllm-kv-stack/templates/10-model-registry.yaml` | Shared ConfigMap `model-registry` — single source of truth for model definitions consumed by both BooM and the router |
-| `vllm-kv-stack/templates/41-vllm-multi.yaml` | Per-model vLLM Deployments + Services (one Deployment per `models[]` entry, each with its own sidecar) |
+| `vllm-kv-stack/templates/41-vllm-multi.yaml` | Per-model vLLM Deployments + Services (superseded by `40-vllm-unified.yaml` in v2) |
 | `docs/multi_model_router.md` | Full documentation (architecture, config, deployment, backward compat) |
 | `docs/multi_model_router_changelog.md` | This file |
 

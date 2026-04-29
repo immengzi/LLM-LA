@@ -84,13 +84,7 @@ boom:
   stream: false
 
 helm:
-  replicas: 2
-  batch_size: 32
-  tensor_parallel_size: 8
-
   boom_claude_aliases: true
-
-  # API key for external /v1/chat/completions access (empty = no auth)
   router_api_key: "ZhongRuanChuangXin!"
 
   autoscaling_enabled: false
@@ -104,35 +98,32 @@ helm:
   router_len_aware: true
   router_len_policy: "short_first"
 
-  # Model config — GLM-5 W4A8 MoE (quantized)
-  model_name: "served-model"
   nfs_path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
-  model_host_path: "/home/haiting/models"  # local disk on each node (bypasses NFS)
-  # model_host_path: ""  # uncomment (and comment above) to fall back to NFS PVC
+  model_host_path: "/home/haiting/models"
 
   aibrix_enabled: false
-  aibrix_model_name: "served-model"
-  aibrix_port: 8200
-
-  # Pre-warm NFS page cache (only needed when using NFS, not hostPath)
-  # cache_warm_enabled: true
-  # cache_warm_pvc_name: "models-nfs-pvc"
   cache_warm_enabled: false
 
-  # vLLM runtime flags — matched to working GLM-5 W4A8 MoE deployment
-  vllm_gpu_memory_utilization: 0.95
-  vllm_quantization: "ascend"
-  vllm_enable_expert_parallel: true
-  vllm_compilation_config: '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-  vllm_trust_remote_code: true
-  vllm_max_model_len: 80896  # max that fits in 8.29 GiB KV cache with prefix caching off
-  vllm_max_num_batched_tokens: 4096
-  vllm_seed: 1924
-  vllm_tool_call_parser: "glm47"
-  vllm_reasoning_parser: "glm45"
-  vllm_additional_config: null
-  # Speculative decoding (MTP) — enable after base model loads successfully.
-  # Uses GLM-5's built-in MTP heads (no separate drafter model), but requires
-  # extra KV cache memory for 3 speculative tokens per sequence.
-  # vllm_speculative_config: '{"numSpeculativeTokens": 3, "method": "deepseek_mtp"}'
-  vllm_speculative_config: null
+  models:
+    - name: glm5-chat
+      servedModelName: served-model
+      replicas: 2
+      modelSubPath: GLM-5-w4a8-mtp-QuaRot
+      tensorParallelSize: 8
+      batchSize: 32
+      vllm:
+        gpuMemoryUtilization: 0.95
+        quantization: ascend
+        enableExpertParallel: true
+        maxModelLen: 80896
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 4096
+        seed: 1924
+        toolCallParser: glm47
+        reasoningParser: glm45
+        # Speculative decoding (MTP) — enable after base model loads successfully.
+        # speculativeConfig:
+        #   numSpeculativeTokens: 3
+        #   method: deepseek_mtp

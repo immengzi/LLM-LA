@@ -47,19 +47,21 @@ No duplicate model definitions. One place to add/remove/rename models.
 
 ## Backward Compatibility
 
-When `models: []` (the default), everything works exactly as before:
+Legacy configs with flat `vllm_*` and `data_parallel_*` fields are
+auto-migrated to a `models[]` entry at runtime by
+`migrate_legacy_helm_to_models()` in `config.py`. A deprecation
+warning is printed but the deployment works identically.
 
-| Aspect | Single-model (default) | Multi-model |
-|--------|----------------------|-------------|
-| `model-registry` ConfigMap | Not created | Created |
-| vLLM Deployments | `vllm-qwen` (from `40-vllm.yaml`) | `vllm-{name}` per model (from `41-vllm-multi.yaml`) |
-| Router queues | Single `_queue` | Per-model `_queues[model]` |
-| KV watcher | Single `LABEL_SELECTOR` | Per-model label selectors |
-| BooM config | Inline `model_list` | Merged from shared ConfigMap |
-| Sidecar `/pull` | `model: ""` (ignored) | `model: "glm5-chat"` |
+When `models: []` (the default in `values.yaml`), the unified Helm
+template synthesizes a single model from top-level values, so
+everything works as before.
 
-Existing single-model configs (`boom-claude-glm-dp.yaml`, etc.) are
-completely unaffected.
+| Aspect | Single-model | Multi-model | Data-parallel |
+|--------|-------------|-------------|---------------|
+| `model-registry` ConfigMap | Created when models[] populated | Created | Created |
+| vLLM resource | Deployment `vllm-{name}` | Per-model Deployments | LeaderWorkerSet `vllm-{name}` |
+| Template | `40-vllm-unified.yaml` | `40-vllm-unified.yaml` | `40-vllm-unified.yaml` |
+| Config surface | `helm.models[]` | `helm.models[]` | `helm.models[].dataParallel` |
 
 ---
 
@@ -98,12 +100,26 @@ models:
 |-------|----------|---------|-------------|
 | `name` | Yes | — | Model identifier. Used in Deployment names, labels, queue names |
 | `servedModelName` | No | `name` | vLLM `--served-model-name`. Clients use this in `model:` field |
-| `replicas` | No | 1 | Number of vLLM pods for this model |
+| `replicas` | No | 1 | Number of instances (Deployment pods, or LWS groups in DP mode) |
 | `modelSubPath` | No | `modelVolume.modelSubPath` | NFS subpath to model weights |
 | `tensorParallelSize` | No | `tensorParallelSize` (global) | TP size for this model |
 | `batchSize` | No | `batchSize` (global) | Sidecar batch size for this model |
 | `image` | No | `images.vllm` | vLLM container image (override per model) |
 | `vllm` | No | `{}` | Per-model vLLM flags (see below) |
+| `dataParallel` | No | `{}` | Per-model LWS config (see below) |
+
+### Per-model data parallel config (inside `dataParallel:`)
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `enabled` | Yes | `false` | Enables LeaderWorkerSet instead of Deployment |
+| `size` | No | 2 | Pods per DP group (1 leader + N-1 workers) |
+| `groups` | No | (uses model `replicas`) | Deprecated — use model-level `replicas` instead |
+| `sizeLocal` | No | 1 | `--data-parallel-size-local` per pod |
+| `rpcPort` | No | 13389 | `--data-parallel-rpc-port` |
+| `nicName` | No | `""` | NIC name override (empty = auto-detect from NODE_IP) |
+| `hcclBuffSize` | No | 200 | `HCCL_BUFFSIZE` for RoCE transfers |
+| `ompNumThreads` | No | 16 | `OMP_NUM_THREADS` |
 
 ### Per-model vLLM flags (inside `vllm:`)
 
@@ -119,6 +135,9 @@ models:
 | `maxNumBatchedTokens` | `--max-num-batched-tokens` |
 | `trustRemoteCode` | `--trust-remote-code` |
 | `compilationConfig` | `{cudagraphMode: "..."}` |
+| `seed` | `--seed` |
+| `additionalConfig` | `{multistream_overlap_shared_expert: true}` |
+| `speculativeConfig` | `{numSpeculativeTokens: 3, method: "deepseek_mtp"}` |
 | `toolCallParser` | `--tool-call-parser` |
 | `reasoningParser` | `--reasoning-parser` |
 
@@ -216,7 +235,7 @@ For a `models` list with 2 entries (`glm5-chat`, `qwen3-8b`):
 | Deployment | `boom-proxy` | Merges `models.yaml` into its config via init container |
 
 The existing single-model resources (`vllm-qwen` Deployment/Service from
-`40-vllm.yaml`) are **not** created — the guard skips them.
+`40-vllm-unified.yaml`) are **not** created — the guard skips them.
 
 ---
 

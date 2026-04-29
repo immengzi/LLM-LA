@@ -79,11 +79,11 @@
 # boom-claude-glm-200k:
 #   - pull
 
-# boom-claude-glm-dp:
-#   - pull
-
-boom-claude-glm-multi-model:
+boom-claude-glm-dp:
   - pull
+
+# boom-claude-glm-multi-model:
+#   - pull
 
 # boom-claude-glm-dp:
 #   - pull

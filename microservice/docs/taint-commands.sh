@@ -4,9 +4,7 @@
 #
 # Uses a unified "avoid=vllm" label that works for ALL
 # vLLM deployment modes:
-#   - Single-model  (40-vllm.yaml)
-#   - Multi-model   (41-vllm-multi.yaml)
-#   - Data Parallel  (43-vllm-lws.yaml)
+#   - Single-model, Multi-model, Data Parallel (40-vllm-unified.yaml)
 #
 # Nodes labelled "avoid=vllm" will NOT receive any vLLM pods.
 # -------------------------------------------------------

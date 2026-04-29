@@ -85,15 +85,7 @@ boom:
   stream: false
 
 helm:
-  replicas: 8
-  batch_size: 8
-  tensor_parallel_size: 1
-
-  # Deploy BooM with Claude Code model aliases so claude-sonnet-4-20250514 etc.
-  # resolve to "served-model" in BooM's routing config.
   boom_claude_aliases: true
-
-  # API key for external /v1/chat/completions access (empty = no auth)
   router_api_key: "ZhongRuanChuangXin!"
 
   autoscaling_enabled: false
@@ -107,15 +99,18 @@ helm:
   router_len_aware: true
   router_len_policy: "short_first"
 
-  model_name: "served-model"
   nfs_path: "/saeid/models/qwen3-8b"
   # model_host_path: "/home/haiting/models"  # uncomment to use local disk instead of NFS
-  vllm_quantization: null
-  vllm_enable_expert_parallel: false
-  vllm_gpu_memory_utilization: null
-  vllm_tool_call_parser: "qwen3_coder"
-  vllm_reasoning_parser: "qwen3"
 
   aibrix_enabled: false
-  aibrix_model_name: "served-model"
-  aibrix_port: 8200
+
+  models:
+    - name: qwen3-8b
+      servedModelName: served-model
+      replicas: 8
+      modelSubPath: qwen3-8b
+      tensorParallelSize: 1
+      batchSize: 8
+      vllm:
+        toolCallParser: qwen3_coder
+        reasoningParser: qwen3
