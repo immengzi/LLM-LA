@@ -255,20 +255,30 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	RouterAdmissionTotal.Inc()
 	RouterV1ChatTotal.Inc()
 
-	var req ChatCompletionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Decode into both typed struct and raw map so we can forward the full body.
+	var rawBody map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&rawBody); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 		return
 	}
 
+	// Re-parse into typed struct for prompt extraction and model resolution.
+	rawBytes, _ := json.Marshal(rawBody)
+	var req ChatCompletionRequest
+	json.Unmarshal(rawBytes, &req)
+
 	if req.Model == "" {
 		req.Model = "served-model"
+		rawBody["model"] = "served-model"
 	}
 
 	prompt := messagesToPrompt(req.Messages)
 	rid := s.queue.NextReqID()
 
-	meta := map[string]interface{}{"__source__": "litellm"}
+	meta := map[string]interface{}{
+		"__source__":       "litellm",
+		"__chat_request__": rawBody,
+	}
 
 	entry := QueueEntry{
 		ReqID:      rid,

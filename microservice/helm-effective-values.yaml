@@ -27,7 +27,7 @@ boom:
     requests:
       cpu: 250m
       memory: 128Mi
-  routeVia: direct
+  routeVia: router
 cacheWarm:
   enabled: false
   image: busybox
@@ -45,10 +45,10 @@ dataParallel:
   size: 2
   sizeLocal: 1
 deploy:
-  cpuHash: false
+  cpuHash: true
   mooncakeMaster: true
-  redis: false
-  router: false
+  redis: true
+  router: true
   vllm: true
 global:
   imageRegistry: reg.local:32000
@@ -149,7 +149,7 @@ router:
   sloAware: false
   sloWithKv: true
 sidecar:
-  enabled: false
+  enabled: true
   logLevel: info
 tensorParallelSize: 8
 vllm:

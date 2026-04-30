@@ -26,13 +26,12 @@ data:
       - model_name: served-model
         litellm_params:
           model: openai/served-model
-          api_base: http://vllm-qwen:8200/v1
-          api_key: "dummy"
+          api_base: http://router-service:8080/v1
+          api_key: "ZhongRuanChuangXin!"
 
     general_settings:
       master_key: "sk-boom-master"
     router_settings:
-      routing_strategy: "round_robin"
       model_group_alias:
         "claude-sonnet-4-20250514": "served-model"
         "claude-3-5-sonnet-20241022": "served-model"
@@ -70,12 +69,67 @@ subjects:
     name: kv-router-sa
     namespace: vllm
 ---
+# Source: vllm-kv-stack/templates/10-redis.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: vllm
+spec:
+  type: NodePort
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      nodePort: 30079
+---
+# Source: vllm-kv-stack/templates/20-cpu-hash.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-cpu-hash
+  namespace: vllm
+spec:
+  type: NodePort
+  selector:
+    app: vllm-cpu-hash
+  ports:
+    - name: http
+      port: 9095
+      targetPort: 9095
+      nodePort: 30095
+---
+# Source: vllm-kv-stack/templates/31-router.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: router-service
+  namespace: vllm
+spec:
+  type: NodePort
+  selector:
+    app: router-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080
+    - name: results-zmq
+      port: 5559
+      targetPort: 5559
+      nodePort: 30559
+---
 # Source: vllm-kv-stack/templates/40-vllm-unified.yaml
 apiVersion: v1
 kind: Service
 metadata:
   name: vllm-qwen
   namespace: vllm
+  labels:
+    component: vllm
+    model: qwen
 spec:
   type: NodePort
   selector:
@@ -110,6 +164,335 @@ spec:
       targetPort: 4000
       nodePort: 30401
 ---
+# Source: vllm-kv-stack/templates/10-redis.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - "node4"
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/control-plane
+          operator: Exists
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/master
+          operator: Exists
+
+      containers:
+        - name: redis
+          image: reg.local:32000/redis:7-alpine
+          args:
+            - redis-server
+            - --save
+            - "60"
+            - "1"
+            - --loglevel
+            - warning
+          ports:
+            - containerPort: 6379
+              name: redis
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+# Source: vllm-kv-stack/templates/20-cpu-hash.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-cpu-hash
+  namespace: vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-cpu-hash
+  template:
+    metadata:
+      labels:
+        app: vllm-cpu-hash
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - "node4"
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/control-plane
+          operator: Exists
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/master
+          operator: Exists
+
+      containers:
+        - name: vllm-cpu-hash
+          image: reg.local:32000/vllm-cpu-hash:latest
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command:
+            - /bin/bash
+            - -c
+          args:
+            - |
+              source /opt/venv/bin/activate 2>/dev/null || true && \
+              python kv_cache_aware/prefix_hash_service.py \
+                --model-path /model \
+                --host 0.0.0.0 \
+                --port 9095 \
+                --block-size 128
+          env:
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: PYTHONHASHSEED
+              value: "0"
+          ports:
+            - containerPort: 9095
+              name: http
+          volumeMounts:
+            - name: model
+              mountPath: /model
+              readOnly: true
+              subPath: GLM-5-w4a8-mtp-QuaRot
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "4Gi"
+            limits:
+              cpu: "4000m"
+              memory: "8Gi"
+      volumes:
+        - name: model
+          persistentVolumeClaim:
+            claimName: models-nfs-pvc
+---
+# Source: vllm-kv-stack/templates/31-router.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: router-service
+  namespace: vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: router-service
+  template:
+    metadata:
+      labels:
+        app: router-service
+    spec:
+      serviceAccountName: kv-router-sa
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - "node4"
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/control-plane
+          operator: Exists
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/master
+          operator: Exists
+
+      containers:
+        - name: router
+          image: reg.local:32000/kv-router:latest
+          # imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8080"
+            - name: ACCESS_LOG
+              value: "false"
+
+            - name: KV_LOG_KEYS
+              value: "off"
+            - name: REQ_LOG_MODE
+              value: "summary"
+
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: MODEL_NAME
+              value: "served-model"
+
+            - name: NAMESPACE
+              value: "vllm"
+            - name: LABEL_SELECTOR
+              value: "app=vllm-qwen"
+            - name: VLLM_PORT
+              value: "8200"
+
+            - name: KV_WATCH_INTERVAL_S
+              value: "1.0"
+            - name: KV_WATCH_MAX_KEYS
+              value: "200"
+            - name: KV_DISCOVERY_INTERVAL_S
+              value: "5.0"
+
+            - name: HASH_SERVICE_URL
+              value: "http://vllm-cpu-hash:9095"
+            - name: HASH_TIMEOUT_S
+              value: "2.0"
+
+            # ---- Helm-controlled routing knobs ----
+            - name: KV_AWARE
+              value: "true"
+
+            - name: LEN_AWARE
+              value: "true"
+
+            - name: LEN_POLICY
+              value: "short_first"
+            # --------------------------------------
+
+            # ---- SLO-aware routing knobs ----
+            - name: SLO_AWARE
+              value: "false"
+            - name: SLO_WITH_KV
+              value: "true"
+            - name: ADMISSION_THROTTLE
+              value: "false"
+            - name: FIXED_BATCH_SIZE
+              value: "0"
+            - name: OUTPUT_LEN_PREDICTOR
+              value: "simple"
+            - name: BATCH_SIZE_ESTIMATE
+              value: "fixed"
+            - name: FIXED_BATCH_ESTIMATE
+              value: "8"
+            - name: LATENCY_PREDICTOR
+              value: "linear"
+            - name: LATENCY_ONLINE_UPDATE
+              value: "false"
+            - name: QUEUE_WAIT_MODEL
+              value: "none"
+            - name: CHUNKED_PREFILL_AWARE
+              value: "false"
+            - name: MAX_NUM_BATCHED_TOKENS
+              value: "0"
+            # ---------------------------------
+
+            - name: POOL_FACTOR
+              value: "4"
+            - name: DEFAULT_MAX_TOKENS
+              value: "1024"
+
+            - name: ROUTER_MODE
+              value: "pull"
+
+            - name: SIDECAR_PORT
+              value: "9000"
+
+            - name: PUSH_LEASTQ_MODE
+              value: "local"
+
+            - name: RESULT_TIMEOUT_S
+              value: "1000.0"
+            - name: RESULT_POLL_INTERVAL_S
+              value: "0.02"
+
+            - name: PUSH_HTTP_TIMEOUT_S
+              value: "2.0"
+
+            - name: TRACE_ENABLED
+              value: "true"
+
+            - name: TRANSPORT_MODE
+              value: "async_pubsub"
+            - name: SUBMIT_PATH
+              value: "/submit"
+            - name: RESULTS_ZMQ_BIND
+              value: "tcp://0.0.0.0:5559"
+            - name: RESULTS_ZMQ_TOPIC
+              value: "results"
+            - name: RESULTS_ZMQ_HWM
+              value: "500000"
+            - name: RESULTS_GRACE_S
+              value: "5.0"
+
+            - name: RESULT_TRANSPORT_MODE
+              value: "submit_ack"
+            - name: RESULT_SUBMIT_PATH
+              value: "/result_submit"
+            - name: API_KEY
+              value: "ZhongRuanChuangXin!"
+
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 5559
+              name: results-zmq
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+---
 # Source: vllm-kv-stack/templates/40-vllm-unified.yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -126,6 +509,7 @@ spec:
     metadata:
       labels:
         app: vllm-qwen
+        component: vllm
         model: qwen
     spec:
       restartPolicy: Always
@@ -183,6 +567,7 @@ spec:
                 --no-enable-prefix-caching \
                 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
                 --host 0.0.0.0 \
+                --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@served-model"}' \
                 &
               VLLM_PID=$!
               echo "[vllm-wrapper] vLLM PID=$VLLM_PID model=qwen"
@@ -242,6 +627,9 @@ spec:
           ports:
             - containerPort: 8200
               name: http
+              protocol: TCP
+            - containerPort: 5557
+              name: kvpub
               protocol: TCP
             - containerPort: 9101
               name: vllmthr
@@ -304,6 +692,63 @@ spec:
             limits:
               huawei.com/Ascend: 8
               ephemeral-storage: "4Gi"
+        - name: kv-sidecar
+          image: reg.local:32000/kv-sidecar:latest
+          imagePullPolicy: Always
+          env:
+            - name: ROUTER_URL
+              value: "http://router-service:8080"
+            - name: VLLM_URL
+              value: "http://127.0.0.1:8200"
+            - name: MODEL_NAME
+              value: "served-model"
+            - name: SIDECAR_PORT
+              value: "9000"
+            - name: BATCH_SIZE
+              value: "32"
+            - name: SIDECAR_MODE
+              value: "pull"
+            - name: PULL_INTERVAL_S
+              value: "0.05"
+            - name: ROUTER_PULL_TIMEOUT_S
+              value: "1000.0"
+            - name: VLLM_TIMEOUT_S
+              value: "1000.0"
+            - name: ROUTER_RESULT_TIMEOUT_S
+              value: "1000.0"
+            - name: RESULT_TRANSPORT_MODE
+              value: "submit_ack"
+            - name: RESULT_SUBMIT_PATH
+              value: "/result_submit"
+            - name: VLLM_HOST
+              value: "127.0.0.1"
+            - name: VLLM_SUB_PORT
+              value: "5557"
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: CONTAINER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: MODEL_NAME_REDIS
+              value: "served-model"
+            - name: TRACE_ENABLED
+              value: "true"
+            - name: LOG_LEVEL
+              value: "info"
+          ports:
+            - containerPort: 9000
+              name: sidecar-http
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
 
       volumes:
         - name: model
@@ -445,31 +890,6 @@ spec:
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
-  name: vllm-qwen
-  namespace: vllm
-  labels:
-    release: prometheus
-spec:
-  selector:
-    matchLabels:
-      app: vllm-qwen
-  podMetricsEndpoints:
-    - path: /metrics
-      port: http
-      scheme: http
-      honorLabels: true
-      interval: 1s
-
-    - path: /metrics
-      port: vllmthr
-      scheme: http
-      honorLabels: true
-      interval: 1s
----
-# Source: vllm-kv-stack/templates/50-podmonitors.yaml
-apiVersion: monitoring.coreos.com/v1
-kind: PodMonitor
-metadata:
   name: kv-router
   namespace: vllm
   labels:
@@ -496,10 +916,32 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app: vllm-qwen
+      component: vllm
   podMetricsEndpoints:
     - path: /metrics
       port: sidecar-http
+      scheme: http
+      honorLabels: true
+      interval: 1s
+---
+# Source: vllm-kv-stack/templates/50-podmonitors.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm
+  namespace: vllm
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      component: vllm
+  namespaceSelector:
+    matchNames:
+      - vllm
+  endpoints:
+    - path: /metrics
+      port: http
       scheme: http
       honorLabels: true
       interval: 1s

@@ -15,7 +15,7 @@
 backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 8
+total_requests: 100
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -29,7 +29,7 @@ hf_lmsys:
   streaming: false
   min_input_tokens: 256
   max_input_tokens: 10000000
-  repeat_each: 8
+  repeat_each: 1
 
 load_pattern:
   pattern: "det"
@@ -50,7 +50,7 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
-  max_tokens: 5
+  max_tokens: 20
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null
@@ -64,7 +64,7 @@ metrics:
   enabled: true
   prometheus_base_url: "http://7.216.57.215:31190"
   scrape_interval_s: 1.0
-  window_s: 2.0
+  window_s: 3.0
   include_debug_metrics: false
   model_name: null
   max_instances: null

@@ -1515,9 +1515,7 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
     has_tools = bool(req.tools)
     has_tool_messages = any(m.role == "tool" for m in req.messages)
 
-    chat_request_body = None
-    if has_tools or has_tool_messages:
-        chat_request_body = _build_chat_request_body(req)
+    chat_request_body = _build_chat_request_body(req)
 
     rid, t_start, result = await _enqueue_and_wait(
         prompt, req.model, chat_request_body=chat_request_body,

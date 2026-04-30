@@ -319,16 +319,36 @@ def _vllm_pods_exist(namespace: str) -> bool:
         ).stdout or ""
         if out.strip():
             return True
-        # Also check for multi-model pods (labelled with model=...)
         out2 = _kubectl(
             ["get", "pods", "-n", namespace,
-             "-l", "model",
+             "-l", "component=vllm",
              "-o", "name"],
             check=False, capture=True,
         ).stdout or ""
         return bool(out2.strip())
     except Exception:
         return False
+
+
+def _detect_current_route_mode(namespace: str) -> str:
+    """Detect the routing mode of the live deployment.
+
+    Returns "direct" if no sidecar containers exist in vLLM pods,
+    "router" if sidecars are present, or "unknown" if detection fails.
+    """
+    try:
+        out = _kubectl(
+            ["get", "pods", "-n", namespace,
+             "-l", "component=vllm",
+             "-o", "jsonpath={.items[0].spec.containers[*].name}"],
+            check=False, capture=True,
+        ).stdout or ""
+        containers = out.strip().split()
+        if not containers:
+            return "unknown"
+        return "router" if "kv-sidecar" in containers else "direct"
+    except Exception:
+        return "unknown"
 
 
 # ---------------------------
@@ -650,6 +670,12 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         set_values["modelVolume.create"] = False
 
         # ---- deploy component flags ----
+        # Determine the requested routing mode for this job.
+        _requested_route = "direct" if (
+            backend == "boom"
+            and str(getattr(h, "boom_route_via", "router")).strip().lower() == "direct"
+        ) else "router"
+
         if skip_vllm:
             vllm_running = _vllm_pods_exist(namespace)
             set_values["deploy.vllm"] = vllm_running
@@ -657,9 +683,23 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             set_values["deploy.redis"] = True
             set_values["deploy.cpuHash"] = True
             if vllm_running:
-                click.echo("[sweep] vllm-qwen pods detected — deploy.vllm=true (pods preserved)")
+                # Check that the live deployment's routing mode matches
+                # the requested one. Mismatches would mutate the vLLM pod
+                # spec (add/remove sidecars), defeating --skip-vllm.
+                _live_route = _detect_current_route_mode(namespace)
+                if _live_route != "unknown" and _live_route != _requested_route:
+                    raise click.ClickException(
+                        f"--skip-vllm: routing mode mismatch — "
+                        f"live deployment is '{_live_route}' but config requests '{_requested_route}'. "
+                        f"Run without --skip-vllm to do a full redeploy, or use a config "
+                        f"with the same routing mode."
+                    )
+                click.echo(
+                    f"[sweep] vllm pods detected (mode={_live_route}) — "
+                    f"deploy.vllm=true (pods preserved)"
+                )
             else:
-                click.echo("[sweep] WARNING: --skip-vllm set but no vllm-qwen pods found")
+                click.echo("[sweep] WARNING: --skip-vllm set but no vllm pods found")
         else:
             set_values["deploy.vllm"] = True
             set_values["deploy.router"] = True
@@ -876,12 +916,17 @@ def cli(master_config: str, skip_vllm: bool) -> None:
 
             try:
                 if skip_vllm:
-                    # Use app in (a,b,c) selector — quoted as separate -l arg, which
-                    # is correctly parsed by kubectl on all versions.
-                    _wait_ready(
-                        namespace,
-                        label_selector="app in (router-service,redis,vllm-cpu-hash)",
-                    )
+                    if _requested_route == "direct":
+                        # Direct mode: only BooM proxy is deployed (no router/redis/hash).
+                        _wait_ready(
+                            namespace,
+                            label_selector="app in (boom-proxy)",
+                        )
+                    else:
+                        _wait_ready(
+                            namespace,
+                            label_selector="app in (router-service,redis,vllm-cpu-hash)",
+                        )
                 else:
                     _wait_ready(namespace)
                 last_err = None
