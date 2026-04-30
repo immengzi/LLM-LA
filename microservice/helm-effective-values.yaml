@@ -14,6 +14,7 @@ batchSize: 32
 boom:
   claudeCodeAliases: true
   databaseUrl: ""
+  directRoutingStrategy: round_robin
   enabled: true
   extraModelAliases: []
   image: boom-gateway:latest
@@ -26,6 +27,7 @@ boom:
     requests:
       cpu: 250m
       memory: 128Mi
+  routeVia: direct
 cacheWarm:
   enabled: false
   image: busybox
@@ -43,10 +45,10 @@ dataParallel:
   size: 2
   sizeLocal: 1
 deploy:
-  cpuHash: true
+  cpuHash: false
   mooncakeMaster: true
-  redis: true
-  router: true
+  redis: false
+  router: false
   vllm: true
 global:
   imageRegistry: reg.local:32000
@@ -147,7 +149,8 @@ router:
   sloAware: false
   sloWithKv: true
 sidecar:
-  logLevel: debug
+  enabled: false
+  logLevel: info
 tensorParallelSize: 8
 vllm:
   additionalConfig: {}

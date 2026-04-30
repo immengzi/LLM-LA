@@ -342,6 +342,17 @@ class HelmConfig:
     # default model names (claude-sonnet-4-20250514, etc.) map to served-model.
     # This is a deployment-only knob — it does not affect the load test client.
     boom_claude_aliases: bool = False
+
+    # BooM routing mode: "router" (default) or "direct" (bypass our router).
+    boom_route_via: str = "router"
+
+    # BooM routing strategy when boom_route_via=direct.
+    # Options: round_robin (default), key_affinity
+    boom_direct_routing_strategy: str = "round_robin"
+    # --------------------------------------------------------------------
+
+    # ---- Sidecar logging ----
+    sidecar_log_level: str = "info"   # debug | info | warning | error
     # --------------------------------------------------------------------
 
     # ---- NFS cache warm (pre-reads model shards before vLLM starts) ----

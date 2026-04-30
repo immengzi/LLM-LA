@@ -35,6 +35,43 @@ metadata:
 data:
   boom_config.yaml: |
     model_list:
+    {{- $routeVia := .Values.boom.routeVia | default "router" }}
+    {{- if eq $routeVia "direct" }}
+    {{/* --- DIRECT MODE: BooM → vLLM pods directly (bypass router) --- */}}
+    {{- if .Values.models }}
+    {{- range .Values.models }}
+    {{- $mName := .name }}
+    {{- $served := .servedModelName | default .name }}
+    {{- $dp := .dataParallel | default dict }}
+    {{- $isDP := $dp.enabled | default false }}
+    {{- $replicas := .replicas | default 1 | int }}
+    {{- if $isDP }}
+    {{/* DP: one entry per leader pod via LWS headless DNS */}}
+    {{- range $i := until $replicas }}
+      - model_name: {{ $served | quote }}
+        litellm_params:
+          model: {{ printf "openai/%s" $served | quote }}
+          api_base: {{ printf "http://vllm-%s-%d.vllm-%s:8200/v1" $mName $i $mName | quote }}
+          api_key: "dummy"
+    {{- end }}
+    {{- else }}
+    {{/* Non-DP: one entry per replica via K8s Service (pods have no stable DNS) */}}
+      - model_name: {{ $served | quote }}
+        litellm_params:
+          model: {{ printf "openai/%s" $served | quote }}
+          api_base: {{ printf "http://vllm-%s:8200/v1" .name | quote }}
+          api_key: "dummy"
+    {{- end }}
+    {{- end }}
+    {{- else }}
+      - model_name: served-model
+        litellm_params:
+          model: openai/served-model
+          api_base: http://vllm-qwen:8200/v1
+          api_key: "dummy"
+    {{- end }}
+    {{- else }}
+    {{/* --- ROUTER MODE (default): BooM → router-service → sidecar → vLLM --- */}}
     {{- if .Values.models }}
     {{- range .Values.models }}
       - model_name: {{ .servedModelName | default .name | quote }}
@@ -50,6 +87,7 @@ data:
           api_base: http://router-service:8080/v1
           api_key: {{ if .Values.router.apiKey }}{{ .Values.router.apiKey | quote }}{{ else }}"dummy"{{ end }}
     {{- end }}
+    {{- end }}
 
     general_settings:
       master_key: {{ .Values.boom.masterKey | quote }}
@@ -57,8 +95,12 @@ data:
       database_url: {{ .Values.boom.databaseUrl | quote }}
       {{- end }}
 
-    {{- if .Values.boom.claudeCodeAliases }}
+    {{- if or (eq $routeVia "direct") .Values.boom.claudeCodeAliases }}
     router_settings:
+      {{- if eq $routeVia "direct" }}
+      routing_strategy: {{ .Values.boom.directRoutingStrategy | default "round_robin" | quote }}
+      {{- end }}
+      {{- if .Values.boom.claudeCodeAliases }}
       model_group_alias:
         {{- if .Values.models }}
         {{- $defaultModel := (index .Values.models 0).name }}
@@ -75,6 +117,7 @@ data:
         {{- range .Values.boom.extraModelAliases }}
         {{ .alias | quote }}: {{ .target | quote }}
         {{- end }}
+      {{- end }}
     {{- end }}
 
 ---

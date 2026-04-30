@@ -22,7 +22,8 @@ images:
   mooncakeMaster: quay.io/ascend/vllm-ascend:glm5-openeuler
 
 sidecar:
-  logLevel: debug    # debug | info | warning | error
+  enabled: true     # set false in boom direct mode (no router/sidecar needed)
+  logLevel: info    # debug | info | warning | error
 
 router:
   # pull | push-rr | push-random | push-leastq
@@ -348,6 +349,18 @@ litellm:
 # -----------------------------------------------------------------------
 boom:
   enabled: false
+
+  # Routing mode — controls where BooM forwards requests:
+  #   router  (default) — BooM → router-service → sidecar → vLLM (KV/len-aware)
+  #   direct            — BooM → vLLM pods directly (no router/sidecar/redis/hash)
+  # Use "direct" for A/B comparison to measure router value-add.
+  routeVia: router
+
+  # BooM routing strategy when routeVia=direct.
+  # These map to real BooM scheduler policies:
+  #   round_robin  — cycles through vLLM leader pods sequentially
+  #   key_affinity — sticky routing per API key with load-aware rebalancing
+  directRoutingStrategy: round_robin
 
   # BooM Gateway image — built from BooMGateway-main/ and pushed to your registry.
   # The global.imageRegistry rewrite applies here too if set.

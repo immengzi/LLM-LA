@@ -42,7 +42,7 @@
 
 {{/* ---- Common variables ---- */}}
 {{- $backend := lower $.Values.backend }}
-{{- $needsSidecar := or (eq $backend "router") (eq $backend "litellm") (eq $backend "boom") }}
+{{- $needsSidecar := and (ne (toString $.Values.sidecar.enabled) "false") (or (eq $backend "router") (eq $backend "litellm") (eq $backend "boom")) }}
 {{- $isLegacy := not $.Values.models }}
 
 {{/* ---- Render resources per model ---- */}}
