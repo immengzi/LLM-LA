@@ -683,10 +683,9 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 f"routing is handled inside the router pod."
             )
         elif backend == "boom":
-            click.echo(
-                f"[sweep] backend=boom: method={method!r} is a label only; "
-                f"routing is handled inside the router pod."
-            )
+            # method is the BooM routing strategy (round_robin, key_affinity)
+            # used when routeVia=direct; ignored when routeVia=router.
+            pass
 
         # ---- LiteLLM pod deployment toggle ----
         if backend == "litellm":
@@ -708,15 +707,33 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             set_values["boom.masterKey"] = str(
                 getattr(boom_cfg, "api_key", "sk-boom-master") if boom_cfg else "sk-boom-master"
             )
-            # Claude Code aliases: map Claude model names to served-model in BooM config
             boom_claude_aliases = bool(getattr(h, "boom_claude_aliases", False))
             set_values["boom.claudeCodeAliases"] = boom_claude_aliases
+            boom_route_via = str(getattr(h, "boom_route_via", "router")).strip().lower()
+            set_values["boom.routeVia"] = boom_route_via
+            if boom_route_via == "direct":
+                # In direct mode, the method IS the BooM routing strategy.
+                # Override helm config — method from master_config takes precedence.
+                set_values["boom.directRoutingStrategy"] = method
+                # No router/sidecar/redis/hash needed — BooM routes directly to vLLM.
+                set_values["deploy.router"] = False
+                set_values["deploy.redis"] = False
+                set_values["deploy.cpuHash"] = False
+                set_values["sidecar.enabled"] = False
+                click.echo(
+                    f"[sweep] boom direct mode: disabling router, redis, cpuHash, sidecars; "
+                    f"BooM routing_strategy={method}"
+                )
             click.echo(
                 f"[sweep] boom.enabled=true masterKey={set_values['boom.masterKey']!r} "
-                f"claudeCodeAliases={boom_claude_aliases}"
+                f"claudeCodeAliases={boom_claude_aliases} routeVia={boom_route_via}"
             )
         else:
             set_values["boom.enabled"] = False
+
+        # ---- Sidecar log level ----
+        sidecar_log_level = str(getattr(h, "sidecar_log_level", "info")).strip().lower()
+        set_values["sidecar.logLevel"] = sidecar_log_level
 
         # ---- Mooncake KV cache transfer toggle ----
         mooncake_enabled = bool(getattr(h, "mooncake_enabled", False))
