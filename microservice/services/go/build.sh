@@ -30,10 +30,10 @@ rm -f go.sum
 go mod tidy
 
 echo "[2/4] Building gateway binary..."
-CGO_ENABLED=0 GOOS=linux go build -o gateway ./cmd/gateway
+CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -o gateway ./cmd/gateway
 
 echo "[3/4] Building sidecar binary..."
-CGO_ENABLED=0 GOOS=linux go build -o sidecar ./cmd/sidecar
+CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -o sidecar ./cmd/sidecar
 
 # -------------------------------------------------------
 # Step 2: Docker images (just copy the binary)

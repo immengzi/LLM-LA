@@ -85,9 +85,9 @@
 # boom-claude-glm-multi-model:
 #   - pull
 
-# boom-claude-glm-dp:
-#   - pull
+boom-claude-glm-dp:
+  - pull
 
-boom-direct-glm-dp:
-  - round_robin
+# boom-direct-glm-dp:
+#   - round_robin
   # - key_affinity

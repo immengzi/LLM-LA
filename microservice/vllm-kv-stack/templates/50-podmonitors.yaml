@@ -1,23 +1,20 @@
 apiVersion: monitoring.coreos.com/v1
-kind: PodMonitor
+kind: ServiceMonitor
 metadata:
-  name: vllm-qwen
-  namespace: vllm
+  name: vllm
+  namespace: {{ .Release.Namespace }}
   labels:
     release: prometheus
 spec:
   selector:
     matchLabels:
-      app: vllm-qwen
-  podMetricsEndpoints:
+      component: vllm
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
     - path: /metrics
       port: http
-      scheme: http
-      honorLabels: true
-      interval: 1s
-
-    - path: /metrics
-      port: vllmthr
       scheme: http
       honorLabels: true
       interval: 1s
@@ -28,7 +25,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: kv-router
-  namespace: vllm
+  namespace: {{ .Release.Namespace }}
   labels:
     release: prometheus
 spec:
@@ -47,13 +44,13 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: kv-sidecar
-  namespace: vllm
+  namespace: {{ .Release.Namespace }}
   labels:
     release: prometheus
 spec:
   selector:
     matchLabels:
-      app: vllm-qwen
+      component: vllm
   podMetricsEndpoints:
     - path: /metrics
       port: sidecar-http

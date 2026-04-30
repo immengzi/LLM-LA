@@ -83,6 +83,7 @@ spec:
       metadata:
         labels:
           app: vllm-{{ $modelName }}
+          component: vllm
           model: {{ $modelName }}
           role: leader
           {{- if $.Values.aibrix.enabled }}
@@ -339,6 +340,7 @@ spec:
       metadata:
         labels:
           app: vllm-{{ $modelName }}-worker
+          component: vllm
           model: {{ $modelName }}
           role: worker
       spec:
@@ -528,6 +530,7 @@ spec:
     metadata:
       labels:
         app: vllm-{{ $modelName }}
+        component: vllm
         model: {{ $modelName }}
         {{- if $.Values.aibrix.enabled }}
         model.aibrix.ai/name: {{ $.Values.aibrix.modelName | quote }}
@@ -850,6 +853,9 @@ kind: Service
 metadata:
   name: {{ if $isDP }}vllm-{{ $modelName }}-api{{ else }}vllm-{{ $modelName }}{{ end }}
   namespace: {{ $.Release.Namespace }}
+  labels:
+    component: vllm
+    model: {{ $modelName }}
 spec:
   {{- if or $isDP $isLegacy }}
   type: NodePort
