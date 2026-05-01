@@ -15,7 +15,7 @@
 backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 100
+total_requests: 10000
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -50,7 +50,7 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
-  max_tokens: 20
+  max_tokens: 100
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null
