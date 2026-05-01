@@ -185,6 +185,12 @@ kubectl label node node1 node2 roce-pair=pair-a
 kubectl label node node3 node4 roce-pair=pair-b
 ```
 
+**Verify current pairs:**
+
+```bash
+kubectl get nodes -L roce-pair
+```
+
 **Step 2 — Set `pairTopologyKey` in the model config:**
 
 ```yaml

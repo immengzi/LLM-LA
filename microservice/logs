@@ -1938,6 +1938,53 @@ Metric (mean / p99)            | pull (exp241)     | push-rr (exp242)     | push
 254-260
 40000 requests experiments on 5 rps - aibrix methods until throughput method - should be re-done as the least-request
 
+261:
+
+Boom -> llm-la
+GLM-5
+replica 2
+batch: 8
+rps: 1
+
+262:
+
+Boom -> llm-la
+GLM-5
+replica 2
+batch: 16
+rps: 1
+
+263:
+
+Boom -> llm-la
+GLM-5
+replica 2
+batch: 32
+rps: 1
+
+264:
+
+Boom
+GLM-5
+replica 2
+batch: 8
+rps: 1
+
+265:
+
+Boom
+GLM-5
+replica 2
+batch: 16
+rps: 1
+
+266:
+
+Boom
+GLM-5
+replica 2
+batch: 32
+rps: 1
 
 
 Questions:

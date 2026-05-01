@@ -1,0 +1,135 @@
+# boom-claude-glm-dp.yaml
+# Deploys GLM-5-w4a8-mtp-QuaRot with multi-node Data Parallel (DP=2, TP=8, EP=16)
+# via LeaderWorkerSet (LWS) + BooM Gateway for Claude Code.
+#
+# Each LWS group has 2 pods: 1 leader (API server + DP rank 0) on one NPU node,
+# and 1 worker (headless DP rank 1) on a second NPU node.
+# HCCL RoCE is used for cross-node expert parallel synchronisation.
+#
+# Prerequisites:
+#   - LWS CRD/controller installed in cluster
+#   - 2 NPU nodes with 8x Ascend each, RoCE cabled and /etc/hccn.conf configured
+#
+# Claude Code connects via /v1/messages (Anthropic format) on port 30401.
+# See docs/boom_claude.md for ~/.claude/settings.json setup.
+
+backend: "boom"
+
+router_url: "http://7.216.57.215:30080"
+total_requests: 10000
+prompt_source: "hf-lmsys"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
+  split: "train"
+  tokenizer_name: "/mnt/nvme1/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  streaming: false
+  min_input_tokens: 256
+  max_input_tokens: 10000000
+  repeat_each: 1
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 2
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  max_tokens: 100
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+
+output_log_mode: "summary"
+print_trace: false
+
+metrics:
+  enabled: true
+  prometheus_base_url: "http://7.216.57.215:31190"
+  scrape_interval_s: 1.0
+  window_s: 3.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+transport:
+  mode: "async_pubsub"
+  submit_path: "/submit"
+  results_zmq: "tcp://7.216.57.215:30559"
+  topic: "results"
+  run_id: null
+  idle_timeout_s: 1000.0
+  idle_zero_running_s: 10.0
+
+boom:
+  base_url: "http://7.216.57.215:30401"
+  chat_path: "/v1/chat/completions"
+  model: "served-model"
+  api_key: "sk-boom-master"
+  timeout_s: 1000.0
+  stream: false
+
+helm:
+  boom_claude_aliases: true
+  router_api_key: "ZhongRuanChuangXin!"
+
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 1
+
+  router_kv_aware: true
+  router_len_aware: true
+  router_len_policy: "short_first"
+
+  nfs_path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  model_host_path: "/home/haiting/models"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+
+  models:
+    - name: glm5-chat
+      servedModelName: served-model
+      replicas: 2
+      modelSubPath: GLM-5-w4a8-mtp-QuaRot
+      tensorParallelSize: 8
+      batchSize: 32
+      dataParallel:
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 13389
+        hcclBuffSize: 200
+        ompNumThreads: 16
+        pairTopologyKey: roce-pair
+      vllm:
+        gpuMemoryUtilization: 0.95
+        quantization: ascend
+        enableExpertParallel: true
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 4096
+        seed: 1924
+        toolCallParser: glm47
+        reasoningParser: glm45
+        additionalConfig:
+          multistream_overlap_shared_expert: true

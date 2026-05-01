@@ -85,9 +85,38 @@
 # boom-claude-glm-multi-model:
 #   - pull
 
-boom-claude-glm-dp:
-  - pull
+# boom-claude-glm-dp:
+#   - pull
 
 # boom-direct-glm-dp:
 #   - round_robin
   # - key_affinity
+
+
+# ── BooM + our KV-aware router (pull) — sweep across replicas × batch sizes ──
+boom-claude-glm-dp-r1-b8:
+  - pull
+boom-claude-glm-dp-r1-b16:
+  - pull
+boom-claude-glm-dp-r1-b32:
+  - pull
+# boom-claude-glm-dp-r2-b8:
+#   - pull
+# boom-claude-glm-dp-r2-b16:
+#   - pull
+# boom-claude-glm-dp-r2-b32:
+#   - pull
+
+# ── BooM direct (no router/sidecar) — sweep across replicas × batch sizes ──
+boom-direct-glm-dp-r1-b8:
+  - round_robin
+boom-direct-glm-dp-r1-b16:
+  - round_robin
+boom-direct-glm-dp-r1-b32:
+  - round_robin
+# boom-direct-glm-dp-r2-b8:
+#   - round_robin
+# boom-direct-glm-dp-r2-b16:
+#   - round_robin
+# boom-direct-glm-dp-r2-b32:
+#   - round_robin
