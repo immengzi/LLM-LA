@@ -105,13 +105,13 @@ class RouterPullWorker:
 
         with self._lock:
             pending, inflight = self.local_q.state()
-            batch_size = _cfg.BATCH_SIZE
+            pull_cap = _cfg.BATCH_SIZE + _cfg.PREFETCH
             total_reserved = pending + inflight
 
-            if total_reserved >= batch_size:
+            if total_reserved >= pull_cap:
                 return
 
-            want = batch_size - total_reserved
+            want = pull_cap - total_reserved
             if want <= 0:
                 return
 

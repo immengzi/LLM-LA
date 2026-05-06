@@ -152,6 +152,7 @@ router:
 sidecar:
   enabled: true
   logLevel: info
+  prefetch: 2
 tensorParallelSize: 8
 vllm:
   additionalConfig: {}

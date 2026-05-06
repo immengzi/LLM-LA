@@ -267,6 +267,8 @@ spec:
                 value: "9000"
               - name: BATCH_SIZE
                 value: {{ mul $batchSize $dpTotal | quote }}
+              - name: PREFETCH
+                value: {{ $.Values.sidecar.prefetch | default $batchSize | quote }}
               - name: SIDECAR_MODE
                 value: {{ include "vllmkv.sidecarMode" $ | quote }}
               - name: PULL_INTERVAL_S
@@ -743,6 +745,8 @@ spec:
               value: "9000"
             - name: BATCH_SIZE
               value: {{ $batchSize | quote }}
+            - name: PREFETCH
+              value: {{ $.Values.sidecar.prefetch | default $batchSize | quote }}
             - name: SIDECAR_MODE
               value: {{ include "vllmkv.sidecarMode" $ | quote }}
             - name: PULL_INTERVAL_S
