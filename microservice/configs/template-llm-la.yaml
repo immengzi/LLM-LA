@@ -12,10 +12,10 @@
 # Everything else is identical to boom-claude-glm-dp.yaml.
 # Claude Code connects via /v1/messages (Anthropic format) on port 30401.
 
-backend: "boom"
+backend: "router"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 1000
+total_requests: 200
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -33,7 +33,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 0.1
+  rate_rps: 1
   duration_s: 1000000000.0
   warmup_reqs: 0
 

@@ -266,7 +266,7 @@ spec:
               - name: SIDECAR_PORT
                 value: "9000"
               - name: BATCH_SIZE
-                value: {{ $batchSize | quote }}
+                value: {{ mul $batchSize $dpTotal | quote }}
               - name: SIDECAR_MODE
                 value: {{ include "vllmkv.sidecarMode" $ | quote }}
               - name: PULL_INTERVAL_S
