@@ -15,7 +15,7 @@
 backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 10000
+total_requests: 1000
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -33,7 +33,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 2
+  rate_rps: 0.2
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -50,7 +50,7 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
-  max_tokens: 100
+  max_tokens: 8192
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null
@@ -89,6 +89,7 @@ boom:
 helm:
   boom_claude_aliases: true
   boom_route_via: direct
+  boom_max_inflight: 1000
   router_api_key: "ZhongRuanChuangXin!"
 
   autoscaling_enabled: false
@@ -108,10 +109,10 @@ helm:
   models:
     - name: glm5-chat
       servedModelName: served-model
-      replicas: 2
+      replicas: 4
       modelSubPath: GLM-5-w4a8-mtp-QuaRot
       tensorParallelSize: 8
-      batchSize: 32
+      batchSize: 8
       dataParallel:
         enabled: true
         size: 2

@@ -1986,6 +1986,134 @@ replica 2
 batch: 32
 rps: 1
 
+267:
+corrupted just saved for errro long
+
+268:
+boom+llm-la
+GLM-5
+replica 4
+batch: 8
+rps: 2
+10000
+
+269:
+The batch variable is being 
+controled through the helm var rather than ours not sure which one was taking effect here
+boom+llm-la
+GLM-5
+replica 4
+batch: 16
+rps: 2
+10000
+
+270:
+The batch variable is being 
+controled through the helm var rather than ours not sure which one was taking effect here
+boom+llm-la
+GLM-5
+replica 4
+batch: 32
+rps: 2
+10000
+
+271:
+boom+llm-la
+GLM-5
+replica 4
+batch: 8
+rps: 2.5
+10000
+
+272:
+The batch variable is being 
+controled through the helm var rather than ours not sure which one was taking effect here
+boom+llm-la
+GLM-5
+replica 4
+batch: 16
+rps: 2.5
+10000
+
+273:
+The batch variable is being 
+controled through the helm var rather than ours not sure which one was taking effect here
+boom+llm-la
+GLM-5
+replica 4
+batch: 32
+rps: 2.5
+10000
+
+274:
+The batch variable is being 
+controled through the helm var rather than ours not sure which one was taking effect here
+boom
+GLM-5
+replica 4
+batch: 8
+rps: 2
+10000
+
+275:
+The batch variable is being 
+controled through the helm var rather than ours not sure which one was taking effect here
+boom
+GLM-5
+replica 4
+batch: 16
+rps: 2
+10000
+
+276:
+The batch variable is being 
+controled through the helm var rather than ours not sure which one was taking effect here
+boom
+GLM-5
+replica 4
+batch: 32
+rps: 2
+10000
+
+277:
+The batch variable is being 
+controled through the helm var rather than ours not sure which one was taking effect here
+boom
+GLM-5
+replica 4
+batch: 8
+rps: 2.5
+10000
+
+278:
+The batch variable is being 
+controled through the helm var rather than ours not sure which one was taking effect here
+boom
+GLM-5
+replica 4
+batch: 16
+rps: 2.5
+10000
+
+279:
+The batch variable is being 
+controled through the helm var rather than ours not sure which one was taking effect here
+boom
+GLM-5
+replica 4
+batch: 32
+rps: 2.5
+10000
+
+280-282
+only llm-la sanity check experiments with rps of 2 and batch of 2, 4, 8,16
+
+283-289
+only llm-la sanity check experiments with rps of 2,4,8,16 and batch size of 8 for both pull and push-rr method (as a substitute of boom push-rr)
+
+290-292
+
+repeat of 284-287
 
 Questions:
 

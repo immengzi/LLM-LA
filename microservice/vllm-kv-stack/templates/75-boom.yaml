@@ -53,6 +53,10 @@ data:
           model: {{ printf "openai/%s" $served | quote }}
           api_base: {{ printf "http://vllm-%s-%d.vllm-%s:8200/v1" $mName $i $mName | quote }}
           api_key: "dummy"
+    {{- if gt (int ($.Values.boom.maxInflight | default 0)) 0 }}
+        flow_control:
+          model_queue_limit: {{ $.Values.boom.maxInflight }}
+    {{- end }}
     {{- end }}
     {{- else }}
     {{/* Non-DP: one entry per replica via K8s Service (pods have no stable DNS) */}}
@@ -61,6 +65,10 @@ data:
           model: {{ printf "openai/%s" $served | quote }}
           api_base: {{ printf "http://vllm-%s:8200/v1" .name | quote }}
           api_key: "dummy"
+    {{- if gt (int ($.Values.boom.maxInflight | default 0)) 0 }}
+        flow_control:
+          model_queue_limit: {{ $.Values.boom.maxInflight }}
+    {{- end }}
     {{- end }}
     {{- end }}
     {{- else }}
@@ -69,6 +77,10 @@ data:
           model: openai/served-model
           api_base: http://vllm-qwen:8200/v1
           api_key: "dummy"
+    {{- if gt (int (.Values.boom.maxInflight | default 0)) 0 }}
+        flow_control:
+          model_queue_limit: {{ .Values.boom.maxInflight }}
+    {{- end }}
     {{- end }}
     {{- else }}
     {{/* --- ROUTER MODE (default): BooM → router-service → sidecar → vLLM --- */}}
@@ -79,6 +91,10 @@ data:
           model: {{ printf "openai/%s" (.servedModelName | default .name) | quote }}
           api_base: "http://router-service:8080/v1"
           api_key: {{ if $.Values.router.apiKey }}{{ $.Values.router.apiKey | quote }}{{ else }}"dummy"{{ end }}
+    {{- if gt (int ($.Values.boom.maxInflight | default 0)) 0 }}
+        flow_control:
+          model_queue_limit: {{ $.Values.boom.maxInflight }}
+    {{- end }}
     {{- end }}
     {{- else }}
       - model_name: served-model
@@ -86,6 +102,10 @@ data:
           model: openai/served-model
           api_base: http://router-service:8080/v1
           api_key: {{ if .Values.router.apiKey }}{{ .Values.router.apiKey | quote }}{{ else }}"dummy"{{ end }}
+    {{- if gt (int (.Values.boom.maxInflight | default 0)) 0 }}
+        flow_control:
+          model_queue_limit: {{ .Values.boom.maxInflight }}
+    {{- end }}
     {{- end }}
     {{- end }}
 

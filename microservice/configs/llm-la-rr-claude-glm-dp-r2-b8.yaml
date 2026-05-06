@@ -1,21 +1,22 @@
-# boom-direct-glm-dp.yaml
-# DIRECT MODE: BooM routes directly to vLLM pods, bypassing the KV-aware router.
-# Use this for A/B comparison against boom-claude-glm-dp.yaml (which uses the router).
+# boom-claude-glm-dp.yaml
+# Deploys GLM-5-w4a8-mtp-QuaRot with multi-node Data Parallel (DP=2, TP=8, EP=16)
+# via LeaderWorkerSet (LWS) + BooM Gateway for Claude Code.
 #
-# In this mode:
-#   - NO router-service, redis, cpu-hash, or sidecars are deployed.
-#   - BooM routes directly to vLLM leader pods via stable LWS headless DNS.
-#   - The "method" in master_config.yaml IS the BooM routing strategy:
-#       round_robin   — simple round-robin across pods
-#       key_affinity  — sticky routing per API key with load-aware rebalancing
+# Each LWS group has 2 pods: 1 leader (API server + DP rank 0) on one NPU node,
+# and 1 worker (headless DP rank 1) on a second NPU node.
+# HCCL RoCE is used for cross-node expert parallel synchronisation.
 #
-# Everything else is identical to boom-claude-glm-dp.yaml.
+# Prerequisites:
+#   - LWS CRD/controller installed in cluster
+#   - 2 NPU nodes with 8x Ascend each, RoCE cabled and /etc/hccn.conf configured
+#
 # Claude Code connects via /v1/messages (Anthropic format) on port 30401.
+# See docs/boom_claude.md for ~/.claude/settings.json setup.
 
-backend: "boom"
+backend: "router"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 20000
+total_requests: 10000
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -33,7 +34,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 5
+  rate_rps: 2
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -88,7 +89,6 @@ boom:
 
 helm:
   boom_claude_aliases: true
-  boom_route_via: direct
   router_api_key: "ZhongRuanChuangXin!"
 
   autoscaling_enabled: false
@@ -111,7 +111,7 @@ helm:
       replicas: 4
       modelSubPath: GLM-5-w4a8-mtp-QuaRot
       tensorParallelSize: 8
-      batchSize: 32
+      batchSize: 8
       dataParallel:
         enabled: true
         size: 2
