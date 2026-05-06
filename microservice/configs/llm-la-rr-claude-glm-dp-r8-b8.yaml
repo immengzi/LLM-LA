@@ -13,10 +13,10 @@
 # Claude Code connects via /v1/messages (Anthropic format) on port 30401.
 # See docs/boom_claude.md for ~/.claude/settings.json setup.
 
-backend: "boom"
+backend: "router"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 20000
+total_requests: 10000
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -34,7 +34,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 3
+  rate_rps: 8
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -111,7 +111,7 @@ helm:
       replicas: 4
       modelSubPath: GLM-5-w4a8-mtp-QuaRot
       tensorParallelSize: 8
-      batchSize: 32
+      batchSize: 8
       dataParallel:
         enabled: true
         size: 2

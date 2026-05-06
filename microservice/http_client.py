@@ -380,6 +380,7 @@ def send_one_litellm(
             headers=headers,
             timeout=(10, float(litellm_cfg.timeout_s)),
             stream=False,
+            proxies={"http": None, "https": None},
         )
     except RequestException as e:
         print(f"[client] ✗ HTTP error talking to {label} proxy: {e}")

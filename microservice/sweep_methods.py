@@ -764,9 +764,13 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                     f"[sweep] boom direct mode: disabling router, redis, cpuHash, sidecars; "
                     f"BooM routing_strategy={method}"
                 )
+            boom_max_inflight = int(getattr(h, "boom_max_inflight", 0))
+            if boom_max_inflight > 0:
+                set_values["boom.maxInflight"] = boom_max_inflight
             click.echo(
                 f"[sweep] boom.enabled=true masterKey={set_values['boom.masterKey']!r} "
                 f"claudeCodeAliases={boom_claude_aliases} routeVia={boom_route_via}"
+                f" maxInflight={boom_max_inflight}"
             )
         else:
             set_values["boom.enabled"] = False

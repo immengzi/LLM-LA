@@ -23,18 +23,21 @@ def _build_schedule_dump(t0_mono: float, items: int) -> List[float]:
 def _build_schedule_per_second_even(
     start_mono: float,
     duration_s: float,
-    rps_int: int,
+    rps: float,
     max_items: int,
 ) -> List[float]:
     times: List[float] = []
-    if duration_s <= 0 or max_items <= 0 or rps_int <= 0:
+    if duration_s <= 0 or max_items <= 0 or rps <= 0:
         return times
 
     end_mono = start_mono + duration_s
     sec_start = start_mono
+    debt = 0.0
     while sec_start < end_mono and len(times) < max_items:
         sec_len = min(1.0, end_mono - sec_start)
-        n = int(round(rps_int * sec_len))
+        debt += rps * sec_len
+        n = int(debt)
+        debt -= n
         chunk = _emit_even_points_in_window(sec_start, sec_len, n)
         for ts in chunk:
             times.append(ts)
@@ -235,11 +238,10 @@ def build_schedule(
         plan_times = _build_schedule_dump(t0, total_items)
 
     elif pattern == "det":
-        rps_i = int(round(max(0.0, rate_rps)))
         main_times = _build_schedule_per_second_even(
             start_mono=start_main,
             duration_s=max(0.0, duration_s),
-            rps_int=rps_i,
+            rps=max(0.0, rate_rps),
             max_items=total_items,
         )
         plan_times = main_times[:total_items]

@@ -94,29 +94,39 @@
 
 
 # ── BooM + our KV-aware router (pull) — sweep across replicas × batch sizes ──
-boom-claude-glm-dp-r1-b8:
-  - pull
-boom-claude-glm-dp-r1-b16:
-  - pull
-boom-claude-glm-dp-r1-b32:
-  - pull
-# boom-claude-glm-dp-r2-b8:
+# llm-la-claude-glm-dp-r2-b8:
 #   - pull
-# boom-claude-glm-dp-r2-b16:
+# llm-la-claude-glm-dp-r4-b8:
 #   - pull
-# boom-claude-glm-dp-r2-b32:
+# llm-la-claude-glm-dp-r6-b8:
 #   - pull
+# llm-la-claude-glm-dp-r8-b8:
+#   - pull
+# llm-la-claude-glm-dp-r2-b8:
+#   - push-rr
+# llm-la-claude-glm-dp-r4-b8:
+#   - push-rr
+# llm-la-claude-glm-dp-r6-b8:
+#   - push-rr
+# llm-la-claude-glm-dp-r8-b8:
+#   - push-rr
 
 # ── BooM direct (no router/sidecar) — sweep across replicas × batch sizes ──
-boom-direct-glm-dp-r1-b8:
-  - round_robin
-boom-direct-glm-dp-r1-b16:
-  - round_robin
-boom-direct-glm-dp-r1-b32:
-  - round_robin
 # boom-direct-glm-dp-r2-b8:
 #   - round_robin
 # boom-direct-glm-dp-r2-b16:
 #   - round_robin
 # boom-direct-glm-dp-r2-b32:
 #   - round_robin
+# boom-direct-glm-dp-r2-5-b8:
+#   - round_robin
+# boom-direct-glm-dp-r2-5-b16:
+#   - round_robin
+# boom-direct-glm-dp-r2-5-b32:
+#   - round_robin
+
+boom-claude-glm:
+  - pull
+
+# boom-direct-claude-glm:
+#   - pull

@@ -349,6 +349,10 @@ class HelmConfig:
     # BooM routing strategy when boom_route_via=direct.
     # Options: round_robin (default), key_affinity
     boom_direct_routing_strategy: str = "round_robin"
+
+    # BooM flow control: max concurrent upstream connections per deployment.
+    # 0 = unlimited (default). Set >0 to queue excess requests inside BooM.
+    boom_max_inflight: int = 0
     # --------------------------------------------------------------------
 
     # ---- Sidecar logging ----

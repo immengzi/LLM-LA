@@ -1,16 +1,21 @@
-# boom-claude-glm.yaml
-# Deploys GLM-5-w4a8-mtp-QuaRot (TP=8) with BooM Gateway for Claude Code.
+# boom-direct-glm-dp.yaml
+# DIRECT MODE: BooM routes directly to vLLM pods, bypassing the KV-aware router.
+# Use this for A/B comparison against boom-claude-glm-dp.yaml (which uses the router).
 #
-# Same Claude Code integration as boom-claude.yaml but with the larger
-# GLM-5 model (W4A8 quantized MoE) instead of Qwen3-8B.
+# In this mode:
+#   - NO router-service, redis, cpu-hash, or sidecars are deployed.
+#   - BooM routes directly to vLLM leader pods via stable LWS headless DNS.
+#   - The "method" in master_config.yaml IS the BooM routing strategy:
+#       round_robin   — simple round-robin across pods
+#       key_affinity  — sticky routing per API key with load-aware rebalancing
 #
+# Everything else is identical to boom-claude-glm-dp.yaml.
 # Claude Code connects via /v1/messages (Anthropic format) on port 30401.
-# See docs/boom_claude.md for ~/.claude/settings.json setup.
 
 backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 8
+total_requests: 1000
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -24,11 +29,11 @@ hf_lmsys:
   streaming: false
   min_input_tokens: 256
   max_input_tokens: 10000000
-  repeat_each: 8
+  repeat_each: 1
 
 load_pattern:
   pattern: "det"
-  rate_rps: 2
+  rate_rps: 0.1
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -45,7 +50,7 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
-  max_tokens: 5
+  max_tokens: 8192
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null
@@ -59,7 +64,7 @@ metrics:
   enabled: true
   prometheus_base_url: "http://7.216.57.215:31190"
   scrape_interval_s: 1.0
-  window_s: 2.0
+  window_s: 3.0
   include_debug_metrics: false
   model_name: null
   max_instances: null
@@ -73,8 +78,6 @@ transport:
   idle_timeout_s: 1000.0
   idle_zero_running_s: 10.0
 
-# BooM Gateway — load test validation uses OpenAI format;
-# Claude Code connects separately via /v1/messages (Anthropic format).
 boom:
   base_url: "http://7.216.57.215:30401"
   chat_path: "/v1/chat/completions"
@@ -85,14 +88,13 @@ boom:
 
 helm:
   boom_claude_aliases: true
+  # boom_route_via: direct
+  boom_max_inflight: 1000
   router_api_key: "ZhongRuanChuangXin!"
 
   autoscaling_enabled: false
-  autoscaling_min: 16
-  autoscaling_max: 16
-  autoscaling_threshold: "16"
-  autoscaling_prometheus_query: |
-    max(router_central_queue_length{namespace="vllm"})
+  autoscaling_min: 1
+  autoscaling_max: 1
 
   router_kv_aware: true
   router_len_aware: true
@@ -107,15 +109,22 @@ helm:
   models:
     - name: glm5-chat
       servedModelName: served-model
-      replicas: 2
+      replicas: 1
       modelSubPath: GLM-5-w4a8-mtp-QuaRot
       tensorParallelSize: 8
-      batchSize: 32
+      batchSize: 8
+      dataParallel:
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 13389
+        hcclBuffSize: 200
+        ompNumThreads: 16
+        pairTopologyKey: roce-pair
       vllm:
         gpuMemoryUtilization: 0.95
         quantization: ascend
         enableExpertParallel: true
-        maxModelLen: 80896
         compilationConfig:
           cudagraphMode: "FULL_DECODE_ONLY"
         trustRemoteCode: true
@@ -123,7 +132,5 @@ helm:
         seed: 1924
         toolCallParser: glm47
         reasoningParser: glm45
-        # Speculative decoding (MTP) — enable after base model loads successfully.
-        # speculativeConfig:
-        #   numSpeculativeTokens: 3
-        #   method: deepseek_mtp
+        additionalConfig:
+          multistream_overlap_shared_expert: true
