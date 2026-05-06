@@ -23,6 +23,7 @@ class SidecarConfig:
     # ------------------------------------------------
 
     BATCH_SIZE: int = 8
+    PREFETCH: int = 0
     PULL_INTERVAL_S: float = 0.05
 
     # ------------------------------------------------
@@ -111,6 +112,7 @@ def get_config() -> SidecarConfig:
     # Queue / batching
     # ------------------------------------------------
     cfg.BATCH_SIZE = int(os.getenv("BATCH_SIZE", cfg.BATCH_SIZE))
+    cfg.PREFETCH = int(os.getenv("PREFETCH", cfg.PREFETCH))
     cfg.PULL_INTERVAL_S = float(os.getenv("PULL_INTERVAL_S", cfg.PULL_INTERVAL_S))
 
     # ------------------------------------------------

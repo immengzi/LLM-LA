@@ -116,7 +116,8 @@ def main():
 
     print(
         f"[sidecar] running in {mode.upper()} mode "
-        f"(BATCH_SIZE={_cfg.BATCH_SIZE}, port={_cfg.SIDECAR_PORT}, endpoint_id={endpoint_id})"
+        f"(BATCH_SIZE={_cfg.BATCH_SIZE}, PREFETCH={_cfg.PREFETCH}, "
+        f"port={_cfg.SIDECAR_PORT}, endpoint_id={endpoint_id})"
     )
     print(
         f"[sidecar] result transport={result_transport} "

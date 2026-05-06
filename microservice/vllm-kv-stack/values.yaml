@@ -24,6 +24,7 @@ images:
 sidecar:
   enabled: true     # set false in boom direct mode (no router/sidecar needed)
   logLevel: info    # debug | info | warning | error
+  prefetch: 2       # extra items to buffer beyond BATCH_SIZE; keeps slots full under load
 
 router:
   # pull | push-rr | push-random | push-leastq
@@ -361,6 +362,12 @@ boom:
   #   round_robin  — cycles through vLLM leader pods sequentially
   #   key_affinity — sticky routing per API key with load-aware rebalancing
   directRoutingStrategy: round_robin
+
+  # Flow control — caps concurrent upstream connections per model deployment.
+  # Without this, BooM opens one upstream connection per inflight request,
+  # which can exhaust file descriptors under load.
+  # Set to 0 to disable (unlimited). Excess requests queue inside BooM.
+  maxInflight: 0
 
   # BooM Gateway image — built from BooMGateway-main/ and pushed to your registry.
   # The global.imageRegistry rewrite applies here too if set.
