@@ -56,3 +56,17 @@ kubectl get nodes -l avoid=vllm
 
 # kubectl get nodes --show-labels | grep -v avoid=vllm
 # -------------------------------------------------------
+
+kubectl label node node5 avoid=vllm
+kubectl label node node6 avoid=vllm
+kubectl label node node7 avoid=vllm
+kubectl label node node8 avoid=vllm
+kubectl label node node9 avoid=vllm
+kubectl label node node10 avoid=vllm
+
+kubectl label node node5 avoid-
+kubectl label node node6 avoid-
+kubectl label node node7 avoid-
+kubectl label node node8 avoid-
+kubectl label node node9 avoid-
+kubectl label node node10 avoid-

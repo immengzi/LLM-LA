@@ -132,6 +132,10 @@ vllm:
   trustRemoteCode: false
   maxNumBatchedTokens: null        # null = use vLLM default
   seed: null                       # null = use vLLM default
+  # Where default sampling params come from when a request omits them:
+  #   null / omit — use the model checkpoint's generation_config.json (often temp=1, top_p=0.95 → startup WARNING)
+  #   "vllm"      — use vLLM built-in defaults instead (--generation-config vllm)
+  generationConfig: null
   additionalConfig: {}             # set to {multistreamOverlapSharedExpert: true} to enable
   speculativeConfig: {}            # set to {numSpeculativeTokens: 3, method: "deepseek_mtp"} to enable
   enablePrefixCaching: false       # true = enable prefix caching (uses KV cache memory)
@@ -369,9 +373,18 @@ boom:
   # Set to 0 to disable (unlimited). Excess requests queue inside BooM.
   maxInflight: 0
 
+  # Upstream HTTP timeout (seconds) for BooM → router/vLLM (litellm_params.timeout).
+  # Long generations need this high or BooM returns 502 ("Upstream provider unavailable").
+  upstreamTimeoutSeconds: 7200
+
   # BooM Gateway image — built from BooMGateway-main/ and pushed to your registry.
   # The global.imageRegistry rewrite applies here too if set.
-  image: boom-gateway:latest
+  # image: boom-gateway:latest
+  image: boom-gateway:v4
+
+  # Always pull so tag:latest (or any mutable tag) picks up the newest image after push.
+  # Set to IfNotPresent to use cached layers only (not recommended with :latest).
+  imagePullPolicy: Always
 
   # Admin master key — used to generate virtual keys and access the admin UI.
   # Override this in production; never commit real keys here.

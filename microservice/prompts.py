@@ -97,6 +97,8 @@ def _iter_lmsys_pairs(
 
     min_input_tokens = _to_int_or_none(cfg.min_input_tokens)
     max_input_tokens = _to_int_or_none(cfg.max_input_tokens)
+    min_output_tokens = _to_int_or_none(getattr(cfg, "min_output_tokens", None))
+    max_output_tokens = _to_int_or_none(getattr(cfg, "max_output_tokens", None))
     repeat_each = _to_int_or_none(cfg.repeat_each) or 1
     if repeat_each < 1:
         repeat_each = 1
@@ -105,6 +107,11 @@ def _iter_lmsys_pairs(
         print(
             "[LMSYS] Input token filter: "
             f"min_input={min_input_tokens}, max_input={max_input_tokens}"
+        )
+    if min_output_tokens is not None or max_output_tokens is not None:
+        print(
+            "[LMSYS] Output token filter: "
+            f"min_output={min_output_tokens}, max_output={max_output_tokens}"
         )
     if repeat_each != 1:
         print(f"[LMSYS] Repetition enabled: repeat_each={repeat_each} per example")
@@ -155,6 +162,10 @@ def _iter_lmsys_pairs(
             continue
         if max_input_tokens is not None and in_len > max_input_tokens:
             continue
+        if min_output_tokens is not None and out_len < min_output_tokens:
+            continue
+        if max_output_tokens is not None and out_len > max_output_tokens:
+            continue
 
         for _ in range(repeat_each):
             if yielded >= max_n:
@@ -168,10 +179,35 @@ def _iter_lmsys_pairs(
     )
 
 
-def build_prompts_from_lmsys(cfg: HFLmsysConfig, n: int) -> List[str]:
-    prompts: List[str] = []
-    for prompt, _out_len in _iter_lmsys_pairs(cfg, max_n=n):
-        prompts.append(prompt)
-        if len(prompts) >= n:
-            break
-    return prompts
+def build_prompts_from_lmsys(
+    cfg: HFLmsysConfig, n: int
+) -> List[Tuple[str, int]]:
+    """
+    Returns list of (prompt, output_tokens) tuples.
+    output_tokens is the tokenized length of the real assistant reply
+    from the dataset — use it for per-request min_tokens/max_tokens.
+    """
+    import random as _random
+
+    seed = getattr(cfg, "seed", None)
+
+    if seed is not None:
+        pool_size = max(n, n * 2)
+        pool: List[Tuple[str, int]] = []
+        for prompt, out_len in _iter_lmsys_pairs(cfg, max_n=pool_size):
+            pool.append((prompt, out_len))
+            if len(pool) >= pool_size:
+                break
+
+        rng = _random.Random(seed)
+        rng.shuffle(pool)
+        result = pool[:n]
+        print(f"[LMSYS] Seeded selection: seed={seed}, pool={len(pool)}, selected={len(result)}")
+    else:
+        result = []
+        for prompt, out_len in _iter_lmsys_pairs(cfg, max_n=n):
+            result.append((prompt, out_len))
+            if len(result) >= n:
+                break
+
+    return result

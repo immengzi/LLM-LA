@@ -61,6 +61,7 @@ def main():
         cfg.total_requests = int(args.n)
 
     # Build prompts
+    output_tokens_per_request = None
     if cfg.prompt_source == "file":
         prompts = load_prompts_from_file(
             path=cfg.file_prompts.path,
@@ -68,10 +69,19 @@ def main():
             n=cfg.total_requests,
         )
     elif cfg.prompt_source == "hf-lmsys":
-        prompts = build_prompts_from_lmsys(
+        pairs = build_prompts_from_lmsys(
             cfg.hf_lmsys,
             n=cfg.total_requests,
         )
+        prompts = [p for p, _ in pairs]
+        if cfg.generation.use_dataset_output_len:
+            output_tokens_per_request = [ot for _, ot in pairs]
+            print(
+                f"[client] Using dataset output lengths: "
+                f"min={min(output_tokens_per_request)}, "
+                f"max={max(output_tokens_per_request)}, "
+                f"avg={sum(output_tokens_per_request)/len(output_tokens_per_request):.0f}"
+            )
     else:
         raise ValueError(f"Unknown prompt_source '{cfg.prompt_source}'")
 
@@ -189,6 +199,8 @@ def main():
 
     if len(plan_times) < total:
         prompts = prompts[: len(plan_times)]
+        if output_tokens_per_request is not None:
+            output_tokens_per_request = output_tokens_per_request[: len(plan_times)]
         total = len(prompts)
         print(f"[client] schedule shorter than prompts; trimming to {total} events")
 
@@ -218,6 +230,7 @@ def main():
             prompts=prompts,
             plan_times=plan_times,
             gen_cfg=cfg.generation,
+            output_tokens_per_request=output_tokens_per_request,
             warmup_reqs=cfg.load_pattern.warmup_reqs,
             logger=exp_logger,
             output_log_mode=cfg.output_log_mode,

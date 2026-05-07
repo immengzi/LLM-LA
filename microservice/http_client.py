@@ -14,7 +14,13 @@ import uuid
 import requests
 from requests.exceptions import RequestException
 
-from config import AIBrixConfig, GenerationConfig, LiteLLMConfig, BooMConfig
+from config import (
+    AIBrixConfig,
+    GenerationConfig,
+    LiteLLMConfig,
+    BooMConfig,
+    generation_effective_ignore_eos,
+)
 
 
 def _build_aibrix_extra_generation_fields(gen_cfg: GenerationConfig) -> Dict[str, Any]:
@@ -42,6 +48,9 @@ def _build_aibrix_extra_generation_fields(gen_cfg: GenerationConfig) -> Dict[str
 
     if gen_cfg.target_total_tokens is not None:
         extra["target_total_tokens"] = int(gen_cfg.target_total_tokens)
+
+    if generation_effective_ignore_eos(gen_cfg):
+        extra["ignore_eos"] = True
 
     return extra
 
@@ -202,6 +211,9 @@ def send_one_aibrix(
         "max_tokens": int(gen_cfg.max_tokens),
         "temperature": float(gen_cfg.temperature),
     }
+
+    if gen_cfg.min_tokens is not None:
+        payload["min_tokens"] = int(gen_cfg.min_tokens)
 
     if bool(getattr(aibrix_cfg, "forward_extra_generation_fields", True)):
         payload.update(_build_aibrix_extra_generation_fields(gen_cfg))
@@ -366,6 +378,12 @@ def send_one_litellm(
         "max_tokens": int(gen_cfg.max_tokens),
         "temperature": float(gen_cfg.temperature),
     }
+
+    if gen_cfg.min_tokens is not None:
+        payload["min_tokens"] = int(gen_cfg.min_tokens)
+
+    # Match send_one_aibrix(): length_mode, targets, ignore_eos, thinking kwargs.
+    payload.update(_build_aibrix_extra_generation_fields(gen_cfg))
 
     # Standard OpenAI auth header — LiteLLM validates the virtual key here
     headers = {

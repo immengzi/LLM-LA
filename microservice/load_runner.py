@@ -31,7 +31,14 @@ import json
 import requests
 
 from http_client import send_one, submit_one, send_one_aibrix, send_one_litellm
-from config import GenerationConfig, AIBrixConfig, LiteLLMConfig, BooMConfig, SLOConfig
+from config import (
+    GenerationConfig,
+    AIBrixConfig,
+    LiteLLMConfig,
+    BooMConfig,
+    SLOConfig,
+    generation_effective_ignore_eos,
+)
 from trace_utils import print_trace_block, compute_trace_metrics
 from experiment_io import ExperimentLogger
 
@@ -53,6 +60,7 @@ class RequestTask:
     idx: int
     prompt: str
     ts_mono: float  # absolute monotonic timestamp for sending
+    output_tokens: Optional[int] = None  # per-request output len from dataset
 
 
 # Shared state for per-second send statistics
@@ -265,17 +273,36 @@ def _note_last_recv(progress: Dict[str, float], progress_lock: threading.Lock) -
         progress["last_recv_wall"] = now
 
 
-def _build_generation_meta(gen_cfg: GenerationConfig) -> Dict[str, Any]:
+def _replace_gen_cfg(gen_cfg: GenerationConfig, output_tokens: int) -> GenerationConfig:
+    from dataclasses import replace
+    return replace(gen_cfg, max_tokens=output_tokens, min_tokens=output_tokens)
+
+
+def _build_generation_meta(
+    gen_cfg: GenerationConfig,
+    output_tokens_override: Optional[int] = None,
+) -> Dict[str, Any]:
+    max_tok = int(gen_cfg.max_tokens)
+    min_tok = int(gen_cfg.min_tokens) if gen_cfg.min_tokens is not None else None
+
+    if output_tokens_override is not None:
+        max_tok = output_tokens_override
+        min_tok = output_tokens_override
+
     meta = {
-        "max_tokens": int(gen_cfg.max_tokens),
+        "max_tokens": max_tok,
         "temperature": float(gen_cfg.temperature),
         "length_mode": gen_cfg.length_mode,
         "enable_thinking": bool(gen_cfg.think),
     }
+    if min_tok is not None:
+        meta["min_tokens"] = min_tok
     if gen_cfg.target_output_tokens is not None:
         meta["target_output_tokens"] = int(gen_cfg.target_output_tokens)
     if gen_cfg.target_total_tokens is not None:
         meta["target_total_tokens"] = int(gen_cfg.target_total_tokens)
+    if generation_effective_ignore_eos(gen_cfg):
+        meta["ignore_eos"] = True
     return meta
 
 
@@ -352,7 +379,7 @@ def _request_thread_router_sync(
         now_send = time.monotonic()
         _log_send_tick(now_send, t0_mono)
 
-        meta = _build_generation_meta(gen_cfg)
+        meta = _build_generation_meta(gen_cfg, output_tokens_override=task.output_tokens)
         slo_fields = _build_slo_fields(slo_cfg, task.idx)
 
         print(f"[client][SEND][T{task.idx}] idx={task.idx} planned_ts={task.ts_mono:.6f}")
@@ -606,7 +633,135 @@ def _request_thread_litellm_http(
 
         t0 = time.time()
         try:
-            rid, result = send_one_litellm(session, litellm_cfg, task.prompt, gen_cfg, label=label)
+            effective_gen = gen_cfg
+            if task.output_tokens is not None:
+                effective_gen = _replace_gen_cfg(gen_cfg, task.output_tokens)
+            rid, result = send_one_litellm(session, litellm_cfg, task.prompt, effective_gen, label=label)
+            t1 = time.time()
+            end_to_end_s = t1 - t0
+
+            (
+                latency_s,
+                finish_reason,
+                output_preview,
+                output_full,
+                usage_prompt_tokens,
+                usage_completion_tokens,
+                usage_total_tokens,
+                trace_dict,
+                trace_metrics,
+            ) = _extract_result_fields(result)
+
+            if latency_s is not None:
+                print(
+                    f"[client][RECV][T{task.idx}] idx={task.idx} req_id={rid} "
+                    f"wait_wall={end_to_end_s:.3f}s model_latency={latency_s:.3f}s"
+                )
+            else:
+                print(
+                    f"[client][RECV][T{task.idx}] idx={task.idx} req_id={rid} "
+                    f"wait_wall={end_to_end_s:.3f}s"
+                )
+
+            if finish_reason is not None:
+                print(f"[client][T{task.idx}]   finish_reason={finish_reason}")
+
+            if print_trace and output_preview is not None:
+                print(f"[client][T{task.idx}]   output_preview={output_preview!r}")
+
+            if isinstance(result, dict):
+                trace = result.get("trace")
+                if isinstance(trace, dict) and print_trace:
+                    print_trace_block(task.idx, {"req_id": rid, "result": result})
+
+            if logger is not None:
+                record: Dict[str, Any] = {
+                    "idx": task.idx,
+                    "req_id": rid,
+                    "prompt": task.prompt,
+                    "planned_ts_mono": task.ts_mono,
+                    "actual_send_ts_mono": now_send,
+                    "t0_wall": t0,
+                    "t1_wall": t1,
+                    "end_to_end_s": end_to_end_s,
+                    "model_latency_s": latency_s,
+                    "finish_reason": finish_reason,
+                }
+
+                if usage_prompt_tokens is not None:
+                    record["prompt_tokens"] = usage_prompt_tokens
+                if usage_completion_tokens is not None:
+                    record["completion_tokens"] = usage_completion_tokens
+                if usage_total_tokens is not None:
+                    record["total_tokens"] = usage_total_tokens
+
+                log_output = _choose_log_output(
+                    output_log_mode=output_log_mode,
+                    output_full=output_full,
+                    output_preview=output_preview,
+                )
+                if log_output is not None:
+                    record["output"] = log_output
+
+                if trace_dict is not None:
+                    record["trace"] = trace_dict
+                if trace_metrics is not None:
+                    record["trace_metrics"] = trace_metrics
+
+                logger.log_request(record)
+
+        except Exception as e:
+            print(f"[client][RECV][T{task.idx}] ✗ ERROR idx={task.idx}: {e}")
+            if logger is not None:
+                err_record: Dict[str, Any] = {
+                    "idx": task.idx,
+                    "error": str(e),
+                    "prompt": task.prompt,
+                    "planned_ts_mono": task.ts_mono,
+                    "send_failed": True,
+                }
+                logger.log_request(err_record)
+    finally:
+        session.close()
+
+
+# ============================================================
+# Anthropic Messages API worker thread (boom-claude backend)
+#
+# Sends Anthropic-format /v1/messages requests to BooM Gateway.
+# Same threading model as LiteLLM/AIBrix but uses Anthropic wire
+# format (x-api-key header, content blocks, stop_reason).
+# ============================================================
+
+def _request_thread_anthropic_http(
+    task: RequestTask,
+    boom_cfg: BooMConfig,
+    gen_cfg: GenerationConfig,
+    t0_mono: float,
+    logger: Optional[ExperimentLogger] = None,
+    output_log_mode: str = "preview",
+    print_trace: bool = True,
+):
+    """
+    BooM Claude worker: Anthropic /v1/messages per thread.
+    Validates the exact wire path a live Claude Code agent uses.
+    """
+    session = requests.Session()
+    session.headers.update({"Connection": "close"})
+    try:
+        now = time.monotonic()
+        delay = task.ts_mono - now
+        if delay > 0:
+            time.sleep(delay)
+
+        now_send = time.monotonic()
+        _log_send_tick(now_send, t0_mono)
+
+        print(f"[client][SEND][T{task.idx}] idx={task.idx} planned_ts={task.ts_mono:.6f}")
+
+        t0 = time.time()
+        try:
+            rid, result = send_one_anthropic(session, boom_cfg, task.prompt, gen_cfg)
             t1 = time.time()
             end_to_end_s = t1 - t0
 
@@ -822,6 +977,151 @@ def _pubsub_listener_thread(
             pass
 
 
+def _drain_threads_with_fleet_idle(
+    threads: List[threading.Thread],
+    total: int,
+    t0_wall: float,
+    idle_zero_running_s: float,
+    idle_timeout_s: float,
+    logger: Optional[ExperimentLogger] = None,
+    backend_label: str = "boom",
+) -> None:
+    """
+    Wait for all request threads to finish, but abort early when the vLLM
+    fleet is idle (requests_running==0) for idle_zero_running_s — meaning
+    there are no inflight requests on the engine and any remaining threads
+    must be stuck on a lost response (BooM 502, connection hang, etc.).
+
+    Also applies a backstop idle_timeout_s after the last thread completed.
+
+    This replicates the fleet-idle safeguard from the async_pubsub drain loop
+    for backends where each request is a blocking HTTP call in its own thread
+    (BooM, LiteLLM, router-sync, aibrix).
+    """
+    alive_at_start = sum(1 for t in threads if t.is_alive())
+    completed = total - alive_at_start
+    zero_run_start_wall: Optional[float] = None
+    last_fleet_debug: Dict[str, Any] = {}
+    last_completion_wall = time.time()
+    next_progress_print = time.time() + 5.0
+
+    can_fleet_idle = (
+        idle_zero_running_s > 0
+        and get_last_metrics_tick is not None
+    )
+
+    if can_fleet_idle:
+        print(
+            f"[load_runner] {backend_label}: fleet-idle safeguard enabled "
+            f"(idle_zero_running_s={idle_zero_running_s}s)"
+        )
+    else:
+        if idle_zero_running_s > 0 and get_last_metrics_tick is None:
+            print(
+                f"[load_runner] {backend_label}: WARNING: metrics_prom.get_last_metrics_tick "
+                "not available; fleet-idle safeguard disabled"
+            )
+
+    timed_out = False
+    timeout_reason: Optional[str] = None
+
+    while True:
+        still_alive = [t for t in threads if t.is_alive()]
+        new_completed = total - len(still_alive)
+        if new_completed > completed:
+            last_completion_wall = time.time()
+            completed = new_completed
+        if not still_alive:
+            break
+
+        now = time.time()
+
+        fleet_idle_ok: Optional[bool] = None
+        if can_fleet_idle:
+            tick = get_last_metrics_tick()
+            fleet_idle_ok, last_fleet_debug = _fleet_idle_from_metrics_tick(tick)
+
+            if fleet_idle_ok is True:
+                if zero_run_start_wall is None:
+                    zero_run_start_wall = now
+                elif (now - zero_run_start_wall) >= float(idle_zero_running_s):
+                    timed_out = True
+                    timeout_reason = (
+                        f"fleet_idle (requests_running==0 for "
+                        f"{idle_zero_running_s}s while {len(still_alive)} threads stuck)"
+                    )
+                    break
+            else:
+                zero_run_start_wall = None
+
+        idle_since_last = now - last_completion_wall
+        if idle_since_last > float(idle_timeout_s):
+            timed_out = True
+            timeout_reason = (
+                f"idle_timeout_after_last_completion ({idle_timeout_s}s, "
+                f"{len(still_alive)} threads stuck)"
+            )
+            break
+
+        if now >= next_progress_print:
+            waited = now - t0_wall
+            extra = ""
+            if can_fleet_idle:
+                if fleet_idle_ok is True and zero_run_start_wall is not None:
+                    zero_idle_s = now - zero_run_start_wall
+                    zero_left = max(0.0, float(idle_zero_running_s) - zero_idle_s)
+                    extra = (
+                        f" fleet_idle=True zero_idle={zero_idle_s:.1f}s "
+                        f"zero_left≈{zero_left:.1f}s"
+                    )
+                elif fleet_idle_ok is False:
+                    mr = last_fleet_debug.get("max_running")
+                    mw = last_fleet_debug.get("max_waiting")
+                    extra = f" fleet_idle=False max_running={mr} max_waiting={mw}"
+                else:
+                    extra = f" fleet_idle=unknown reason={last_fleet_debug.get('reason')}"
+
+            idle_left = max(0.0, float(idle_timeout_s) - idle_since_last)
+            print(
+                f"[load_runner] {backend_label} drain-wait: "
+                f"inflight={len(still_alive)} completed={completed}/{total} "
+                f"waited={waited:.1f}s idle_since_last_completion={idle_since_last:.1f}s "
+                f"idle_left≈{idle_left:.1f}s{extra}"
+            )
+            next_progress_print = now + 5.0
+
+        time.sleep(0.5)
+
+    lost = 0
+    if timed_out:
+        still_alive = [t for t in threads if t.is_alive()]
+        lost = len(still_alive)
+        reason_str = timeout_reason or "unknown"
+        print(
+            f"[load_runner] {backend_label}: ABORTING — {reason_str}. "
+            f"Marking {lost} inflight request(s) as LOST."
+        )
+        for t in still_alive:
+            idx_hint = getattr(t, "name", "?")
+            print(f"[client][RECV] ✗ LOST thread={idx_hint} ({reason_str})")
+        if logger is not None:
+            for t in still_alive:
+                err_record: Dict[str, Any] = {
+                    "error": f"lost ({reason_str})",
+                    "send_failed": True,
+                }
+                logger.log_request(err_record)
+    else:
+        for t in threads:
+            t.join(timeout=2.0)
+
+    elapsed = time.time() - t0_wall
+    print(
+        f"[load_runner] Done. Sent {total} requests in {elapsed:.3f}s. "
+        f"completed={completed} lost={lost}"
+    )
+
+
 def _fleet_idle_from_metrics_tick(tick: Optional[Dict[str, Any]]) -> Tuple[Optional[bool], Dict[str, Any]]:
     """
     Determine fleet-idle from the last metrics tick:
@@ -884,6 +1184,7 @@ def run_open_loop_load(
     prompts: List[str],
     plan_times: List[float],
     gen_cfg: GenerationConfig,
+    output_tokens_per_request: Optional[List[int]] = None,
     warmup_reqs: int = 0,
     logger: Optional[ExperimentLogger] = None,
     output_log_mode: str = "preview",
@@ -1073,7 +1374,8 @@ def run_open_loop_load(
             if sleep_until > now:
                 time.sleep(sleep_until - now)
 
-            task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
+            ot = output_tokens_per_request[idx] if output_tokens_per_request else None
+            task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono, output_tokens=ot)
             t = threading.Thread(
                 target=_request_thread_litellm_http,
                 args=(task, litellm, gen_cfg, t0_mono, logger, output_log_mode, print_trace),
@@ -1114,20 +1416,26 @@ def run_open_loop_load(
             if sleep_until > now:
                 time.sleep(sleep_until - now)
 
-            task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
+            ot = output_tokens_per_request[idx] if output_tokens_per_request else None
+            task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono, output_tokens=ot)
             t = threading.Thread(
                 target=_request_thread_litellm_http,
                 args=(task, boom, gen_cfg, t0_mono, logger, output_log_mode, print_trace, "BooM"),
                 daemon=True,
+                name=f"boom-T{idx}",
             )
             t.start()
             threads.append(t)
 
-        for t in threads:
-            t.join()
-
-        elapsed = time.time() - t0_wall
-        print(f"[load_runner] Done. Sent {total} requests in {elapsed:.3f}s")
+        _drain_threads_with_fleet_idle(
+            threads=threads,
+            total=total,
+            t0_wall=t0_wall,
+            idle_zero_running_s=idle_zero_running_s,
+            idle_timeout_s=idle_timeout_s,
+            logger=logger,
+            backend_label="boom",
+        )
         return
 
     # -------------------------------------------------------
@@ -1138,20 +1446,26 @@ def run_open_loop_load(
         t0_wall = time.time()
 
         for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
-            task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono)
+            ot = output_tokens_per_request[idx] if output_tokens_per_request else None
+            task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono, output_tokens=ot)
             t = threading.Thread(
                 target=_request_thread_router_sync,
                 args=(task, router_url, gen_cfg, t0_mono, logger, output_log_mode, print_trace, slo),
                 daemon=True,
+                name=f"router-sync-T{idx}",
             )
             t.start()
             threads.append(t)
 
-        for t in threads:
-            t.join()
-
-        elapsed = time.time() - t0_wall
-        print(f"[load_runner] Done. Sent {total} requests in {elapsed:.3f}s")
+        _drain_threads_with_fleet_idle(
+            threads=threads,
+            total=total,
+            t0_wall=t0_wall,
+            idle_zero_running_s=idle_zero_running_s,
+            idle_timeout_s=idle_timeout_s,
+            logger=logger,
+            backend_label="router-sync",
+        )
         return
 
     # -------------------------------------------------------
@@ -1217,7 +1531,8 @@ def run_open_loop_load(
             now_send = time.monotonic()
             _log_send_tick(now_send, t0_mono)
 
-            meta = _build_generation_meta(gen_cfg)
+            ot = output_tokens_per_request[idx] if output_tokens_per_request else None
+            meta = _build_generation_meta(gen_cfg, output_tokens_override=ot)
             slo_fields = _build_slo_fields(slo, idx)
 
             print(f"[client][SEND][T{idx}] idx={idx} planned_ts={ts_mono:.6f}")

@@ -18,6 +18,7 @@
 */}}
 
 {{- if .Values.boom.enabled }}
+{{- $boomTimeout := int (.Values.boom.upstreamTimeoutSeconds | default 7200) }}
 
 ---
 # -----------------------------------------------------------------------
@@ -53,6 +54,7 @@ data:
           model: {{ printf "openai/%s" $served | quote }}
           api_base: {{ printf "http://vllm-%s-%d.vllm-%s:8200/v1" $mName $i $mName | quote }}
           api_key: "dummy"
+          timeout: {{ $boomTimeout }}
     {{- if gt (int ($.Values.boom.maxInflight | default 0)) 0 }}
         flow_control:
           model_queue_limit: {{ $.Values.boom.maxInflight }}
@@ -65,6 +67,7 @@ data:
           model: {{ printf "openai/%s" $served | quote }}
           api_base: {{ printf "http://vllm-%s:8200/v1" .name | quote }}
           api_key: "dummy"
+          timeout: {{ $boomTimeout }}
     {{- if gt (int ($.Values.boom.maxInflight | default 0)) 0 }}
         flow_control:
           model_queue_limit: {{ $.Values.boom.maxInflight }}
@@ -77,6 +80,7 @@ data:
           model: openai/served-model
           api_base: http://vllm-qwen:8200/v1
           api_key: "dummy"
+          timeout: {{ $boomTimeout }}
     {{- if gt (int (.Values.boom.maxInflight | default 0)) 0 }}
         flow_control:
           model_queue_limit: {{ .Values.boom.maxInflight }}
@@ -91,6 +95,7 @@ data:
           model: {{ printf "openai/%s" (.servedModelName | default .name) | quote }}
           api_base: "http://router-service:8080/v1"
           api_key: {{ if $.Values.router.apiKey }}{{ $.Values.router.apiKey | quote }}{{ else }}"dummy"{{ end }}
+          timeout: {{ $boomTimeout }}
     {{- if gt (int ($.Values.boom.maxInflight | default 0)) 0 }}
         flow_control:
           model_queue_limit: {{ $.Values.boom.maxInflight }}
@@ -102,6 +107,7 @@ data:
           model: openai/served-model
           api_base: http://router-service:8080/v1
           api_key: {{ if .Values.router.apiKey }}{{ .Values.router.apiKey | quote }}{{ else }}"dummy"{{ end }}
+          timeout: {{ $boomTimeout }}
     {{- if gt (int (.Values.boom.maxInflight | default 0)) 0 }}
         flow_control:
           model_queue_limit: {{ .Values.boom.maxInflight }}
@@ -182,7 +188,7 @@ spec:
       containers:
         - name: boom
           image: {{ include "vllmkv.image" (list . .Values.boom.image) }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: {{ .Values.boom.imagePullPolicy | default "Always" }}
 
           args:
             - --config
