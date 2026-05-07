@@ -1,16 +1,8 @@
-# boom-direct-glm-dp.yaml
+# boom-direct-glm-dp with dataset output lengths.
+# Each request's max_tokens/min_tokens is set to the real reply length from LMSYS.
+# Ensures reproducible, realistic per-request output sizes across runs.
+#
 # DIRECT MODE: BooM routes directly to vLLM pods, bypassing the KV-aware router.
-# Use this for A/B comparison against boom-claude-glm-dp.yaml (which uses the router).
-#
-# In this mode:
-#   - NO router-service, redis, cpu-hash, or sidecars are deployed.
-#   - BooM routes directly to vLLM leader pods via stable LWS headless DNS.
-#   - The "method" in master_config.yaml IS the BooM routing strategy:
-#       round_robin   — simple round-robin across pods
-#       key_affinity  — sticky routing per API key with load-aware rebalancing
-#
-# Everything else is identical to boom-claude-glm-dp.yaml.
-# Claude Code connects via /v1/messages (Anthropic format) on port 30401.
 
 backend: "boom"
 
@@ -29,7 +21,10 @@ hf_lmsys:
   streaming: false
   min_input_tokens: 256
   max_input_tokens: 10000000
+  min_output_tokens: 100
+  max_output_tokens: 10000000
   repeat_each: 1
+  seed: 42
 
 load_pattern:
   pattern: "det"
@@ -56,6 +51,7 @@ generation:
   target_output_tokens: null
   target_total_tokens: null
   think: false
+  use_dataset_output_len: true
 
 output_log_mode: "summary"
 print_trace: false
@@ -83,13 +79,13 @@ boom:
   chat_path: "/v1/chat/completions"
   model: "served-model"
   api_key: "sk-boom-master"
-  timeout_s: 10000.0
+  timeout_s: 1000.0
   stream: false
 
 helm:
   boom_claude_aliases: true
   boom_route_via: direct
-  boom_max_inflight: 10000
+  boom_max_inflight: 1000
   router_api_key: "ZhongRuanChuangXin!"
 
   autoscaling_enabled: false

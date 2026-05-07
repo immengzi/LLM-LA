@@ -767,10 +767,14 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             boom_max_inflight = int(getattr(h, "boom_max_inflight", 0))
             if boom_max_inflight > 0:
                 set_values["boom.maxInflight"] = boom_max_inflight
+            boom_upstream_timeout = int(getattr(h, "boom_upstream_timeout_seconds", 0) or 0)
+            if boom_upstream_timeout > 0:
+                set_values["boom.upstreamTimeoutSeconds"] = boom_upstream_timeout
             click.echo(
                 f"[sweep] boom.enabled=true masterKey={set_values['boom.masterKey']!r} "
                 f"claudeCodeAliases={boom_claude_aliases} routeVia={boom_route_via}"
                 f" maxInflight={boom_max_inflight}"
+                f" upstreamTimeoutSeconds={boom_upstream_timeout or 'chart-default'}"
             )
         else:
             set_values["boom.enabled"] = False

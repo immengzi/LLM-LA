@@ -28,6 +28,7 @@ data:
           model: openai/served-model
           api_base: http://router-service:8080/v1
           api_key: "ZhongRuanChuangXin!"
+          timeout: 7200
         flow_control:
           model_queue_limit: 1000
 
@@ -502,7 +503,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 1
+  replicas: 4
   selector:
     matchLabels:
       app: vllm-qwen
@@ -565,7 +566,7 @@ spec:
                 --tensor-parallel-size 8 \
                 --dtype auto \
                 --kv-cache-dtype auto \
-                --max-num-seqs 8 \
+                --max-num-seqs 4 \
                 --no-enable-prefix-caching \
                 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
                 --host 0.0.0.0 \
@@ -707,7 +708,7 @@ spec:
             - name: SIDECAR_PORT
               value: "9000"
             - name: BATCH_SIZE
-              value: "8"
+              value: "4"
             - name: PREFETCH
               value: "2"
             - name: SIDECAR_MODE
@@ -840,8 +841,8 @@ spec:
 
       containers:
         - name: boom
-          image: reg.local:32000/boom-gateway:latest
-          imagePullPolicy: IfNotPresent
+          image: reg.local:32000/boom-gateway:v4
+          imagePullPolicy: Always
 
           args:
             - --config

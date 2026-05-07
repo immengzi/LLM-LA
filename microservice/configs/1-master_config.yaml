@@ -128,8 +128,18 @@
 template-boom-claude-glm:
   - pull
 
-# template-boom-direct-claude-glm:
-#   - pull
+template-boom-direct-claude-glm:
+  - round_robin
 
 # template-llm-la:
+#   - pull
+
+
+# template-dslen-boom-claude-glm:
+#   - pull
+
+# template-dslen-boom-direct-claude-glm:
+#   - round_robin
+
+# template-dslen-llm-la:
 #   - pull

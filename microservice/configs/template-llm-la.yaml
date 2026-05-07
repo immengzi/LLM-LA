@@ -15,7 +15,7 @@
 backend: "router"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 200
+total_requests: 10
 prompt_source: "hf-lmsys"
 
 file_prompts:

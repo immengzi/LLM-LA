@@ -30,7 +30,10 @@ class HFLmsysConfig:
     streaming: bool = False
     min_input_tokens: Optional[int] = None
     max_input_tokens: Optional[int] = None
+    min_output_tokens: Optional[int] = None
+    max_output_tokens: Optional[int] = None
     repeat_each: int = 1
+    seed: Optional[int] = None
 
 
 # =========================
@@ -64,11 +67,22 @@ class LoadPatternConfig:
 @dataclass
 class GenerationConfig:
     max_tokens: int = 256
+    min_tokens: Optional[int] = None
     temperature: float = 0.0
     length_mode: str = "legacy"
     target_output_tokens: Optional[int] = None
     target_total_tokens: Optional[int] = None
     think: bool = False
+    use_dataset_output_len: bool = False
+    # When None: enable ignore_eos automatically iff use_dataset_output_len (vLLM fixed-length).
+    ignore_eos: Optional[bool] = None
+
+
+def generation_effective_ignore_eos(gen_cfg: GenerationConfig) -> bool:
+    """True → request vLLM/OpenAI-compat ignore_eos so EOS does not end decoding early."""
+    if gen_cfg.ignore_eos is not None:
+        return bool(gen_cfg.ignore_eos)
+    return bool(gen_cfg.use_dataset_output_len)
 
 
 # =========================
@@ -353,6 +367,10 @@ class HelmConfig:
     # BooM flow control: max concurrent upstream connections per deployment.
     # 0 = unlimited (default). Set >0 to queue excess requests inside BooM.
     boom_max_inflight: int = 0
+
+    # BooM upstream HTTP timeout (seconds) per model (litellm_params.timeout).
+    # 0 = use chart default (values.yaml boom.upstreamTimeoutSeconds, typically 7200).
+    boom_upstream_timeout_seconds: int = 0
     # --------------------------------------------------------------------
 
     # ---- Sidecar logging ----

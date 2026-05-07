@@ -83,7 +83,7 @@ boom:
   chat_path: "/v1/chat/completions"
   model: "served-model"
   api_key: "sk-boom-master"
-  timeout_s: 1000.0
+  timeout_s: 10000.0
   stream: false
 
 helm:
@@ -109,10 +109,10 @@ helm:
   models:
     - name: glm5-chat
       servedModelName: served-model
-      replicas: 1
+      replicas: 4
       modelSubPath: GLM-5-w4a8-mtp-QuaRot
       tensorParallelSize: 8
-      batchSize: 8
+      batchSize: 4
       dataParallel:
         enabled: true
         size: 2

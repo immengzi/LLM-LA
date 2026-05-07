@@ -10,14 +10,15 @@ autoscaling:
     max(router_central_queue_length{namespace="vllm"})
   threshold: "16"
 backend: boom
-batchSize: 8
+batchSize: 4
 boom:
   claudeCodeAliases: true
   databaseUrl: ""
   directRoutingStrategy: round_robin
   enabled: true
   extraModelAliases: []
-  image: boom-gateway:latest
+  image: boom-gateway:v4
+  imagePullPolicy: Always
   masterKey: sk-boom-master
   maxInflight: 1000
   nodePort: 30401
@@ -29,6 +30,7 @@ boom:
       cpu: 250m
       memory: 128Mi
   routeVia: router
+  upstreamTimeoutSeconds: 7200
 cacheWarm:
   enabled: false
   image: busybox
@@ -81,7 +83,7 @@ modelVolume:
   nfsServer: nfs.local
   pvcName: models-nfs-pvc
 models:
-- batchSize: 8
+- batchSize: 4
   dataParallel:
     enabled: true
     hcclBuffSize: 200
@@ -92,7 +94,7 @@ models:
     sizeLocal: 1
   modelSubPath: GLM-5-w4a8-mtp-QuaRot
   name: glm5-chat
-  replicas: 1
+  replicas: 4
   servedModelName: served-model
   tensorParallelSize: 8
   vllm:
@@ -129,7 +131,7 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 1
+  vllm: 4
 router:
   admissionThrottle: false
   apiKey: ZhongRuanChuangXin!
