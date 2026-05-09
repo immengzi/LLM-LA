@@ -33,14 +33,15 @@ def _make_pooled_session(pool_connections: int, pool_maxsize: int) -> requests.S
 
 class RouterPullWorker:
     """
-    Event-biased pull helper for a single vLLM pod.
+    Pull helper for a single vLLM pod.
 
     Responsibilities:
-      - Compute capacity from local_q.state() and global BATCH_SIZE.
+      - Compute capacity from local_q.state() and pull_cap (BATCH_SIZE + PREFETCH).
       - Call router /pull when there is spare capacity.
-      - Never exceed BATCH_SIZE = pending + inflight on this pod.
-      - No background polling; pull() is triggered by workers
-        (busy-path and idle-poke).
+      - Background poller thread continuously tops up the queue so workers
+        never starve waiting for a reactive pull after completion.
+      - Workers still call pull_if_capacity() on the busy-path for
+        immediate top-up after each completion.
 
     NOTE: endpoint_id must match what the router sees as the endpoint identity.
     """
@@ -51,8 +52,9 @@ class RouterPullWorker:
         self._stop_evt = threading.Event()
         self._lock = threading.RLock()
         self._session: requests.Session | None = None
+        self._poll_thread: threading.Thread | None = None
 
-        # Initial “discovery” flags
+        # Initial "discovery" flags
         self._first_success: bool = False
         self._printed_wait_msg: bool = False
 
@@ -60,7 +62,7 @@ class RouterPullWorker:
 
     def start(self):
         """
-        Initialize HTTP session. No polling thread, all pulls are event-driven.
+        Initialize HTTP session and start background pull poller.
         """
         if self._session is not None:
             return
@@ -72,10 +74,22 @@ class RouterPullWorker:
             pool_maxsize=_cfg.ROUTER_POOL_MAXSIZE,
         )
 
-        print(f"[sidecar] RouterPullWorker ready (endpoint_id={self.endpoint_id})")
+        self._poll_thread = threading.Thread(
+            target=self._poll_loop, daemon=True, name="pull-poller",
+        )
+        self._poll_thread.start()
+
+        pull_cap = _cfg.BATCH_SIZE + _cfg.PREFETCH
+        print(
+            f"[sidecar] RouterPullWorker ready (endpoint_id={self.endpoint_id}, "
+            f"BATCH_SIZE={_cfg.BATCH_SIZE}, PREFETCH={_cfg.PREFETCH}, pull_cap={pull_cap})"
+        )
 
     def stop(self):
         self._stop_evt.set()
+        if self._poll_thread is not None:
+            self._poll_thread.join(timeout=2.0)
+            self._poll_thread = None
         session, self._session = self._session, None
         if session is not None:
             try:
@@ -84,12 +98,29 @@ class RouterPullWorker:
                 pass
         print("[sidecar] RouterPullWorker stopped")
 
+    # ---------------- background poller ----------------
+
+    def _poll_loop(self):
+        """
+        Continuously check capacity and pull from router.
+        Ensures the local queue stays warm even when all workers are
+        blocked on long vLLM calls and no busy-path pulls fire.
+        """
+        interval = max(0.01, float(_cfg.PULL_INTERVAL_S))
+        while not self._stop_evt.is_set():
+            try:
+                self.pull_if_capacity()
+            except Exception as e:
+                if self._first_success:
+                    print(f"[sidecar] poll-loop pull error: {e}")
+            self._stop_evt.wait(timeout=interval)
+
     # ---------------- core logic ----------------
 
     def pull_if_capacity(self) -> None:
         """
         Event-biased pull:
-          - If pending+inflight < BATCH_SIZE, compute want and /pull.
+          - If pending+inflight < pull_cap, compute want and /pull.
           - Insert returned jobs into the local queue.
 
         When TRACE_ENABLED=true, also stamps:

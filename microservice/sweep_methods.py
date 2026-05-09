@@ -779,7 +779,7 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         else:
             set_values["boom.enabled"] = False
 
-        # ---- Sidecar log level ----
+        # ---- Sidecar ----
         sidecar_log_level = str(getattr(h, "sidecar_log_level", "info")).strip().lower()
         set_values["sidecar.logLevel"] = sidecar_log_level
 
@@ -854,6 +854,18 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         set_values["replicas.vllm"] = int(first_model.get("replicas", h.replicas))
         set_values["batchSize"] = int(first_model.get("batchSize", h.batch_size))
         set_values["tensorParallelSize"] = int(first_model.get("tensorParallelSize", h.tensor_parallel_size))
+
+        sidecar_prefetch = int(first_model.get("sidecarPrefetch", 0))
+        if sidecar_prefetch > 0:
+            set_values["sidecar.prefetch"] = sidecar_prefetch
+
+        gen = getattr(cfg, "generation", None)
+        force_eos = first_model.get("forceIgnoreEos", False)
+        if not force_eos and gen is not None:
+            if getattr(gen, "replay_output_lengths_from", None) or getattr(gen, "use_dataset_output_len", False):
+                force_eos = True
+        if force_eos:
+            set_values["sidecar.forceIgnoreEos"] = True
 
         # Write models YAML overlay for Helm -f
         _models_tmp = tempfile.NamedTemporaryFile(

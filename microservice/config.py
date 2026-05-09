@@ -77,6 +77,14 @@ class GenerationConfig:
     # When None: enable ignore_eos automatically iff use_dataset_output_len (vLLM fixed-length).
     ignore_eos: Optional[bool] = None
 
+    # Replay output lengths from a previous experiment's logs.json.
+    # Path to a logs.json (JSONL) from a previous run. Each line must have
+    # "idx" and "completion_tokens".  When set, the completion_tokens from
+    # that file are used as per-request max_tokens/min_tokens (same as
+    # use_dataset_output_len but sourced from a prior run instead of the
+    # LMSYS dataset).  Implies use_dataset_output_len=True + ignore_eos.
+    replay_output_lengths_from: Optional[str] = None
+
 
 def generation_effective_ignore_eos(gen_cfg: GenerationConfig) -> bool:
     """True → request vLLM/OpenAI-compat ignore_eos so EOS does not end decoding early."""
@@ -237,7 +245,8 @@ class BooMConfig:
     chat_path: str = "/v1/chat/completions"
     model: str = "served-model"                  # must match model_name in boom config
     api_key: str = "sk-boom-master"              # virtual key or master key
-    timeout_s: float = 1000.0
+    # Must be >= longest expected generation; align with boom.upstreamTimeoutSeconds / litellm_params.timeout (often 7200).
+    timeout_s: float = 7200.0
     stream: bool = False
 
 
@@ -373,8 +382,9 @@ class HelmConfig:
     boom_upstream_timeout_seconds: int = 0
     # --------------------------------------------------------------------
 
-    # ---- Sidecar logging ----
+    # ---- Sidecar ----
     sidecar_log_level: str = "info"   # debug | info | warning | error
+    # sidecarPrefetch is per-model (in models[].sidecarPrefetch), not here.
     # --------------------------------------------------------------------
 
     # ---- NFS cache warm (pre-reads model shards before vLLM starts) ----
@@ -758,7 +768,7 @@ def load_config(path: str) -> ClientConfig:
         try:
             boom.timeout_s = float(boom.timeout_s)
         except Exception:
-            boom.timeout_s = 1000.0
+            boom.timeout_s = 7200.0
         boom.timeout_s = max(1.0, boom.timeout_s)
 
     return ClientConfig(

@@ -10,6 +10,68 @@ import os
 from config import HFLmsysConfig
 
 
+def load_replay_output_lengths(logs_path: str, n: int) -> List[int]:
+    """
+    Read per-request completion_tokens from a previous experiment's logs.json.
+
+    Returns a list of length n, ordered by the original request idx.
+    Requests without a valid completion_tokens (errors, lost) are assigned
+    the median of successful values so every slot has a usable length.
+    """
+    from pathlib import Path
+    import statistics
+
+    p = Path(logs_path)
+    if not p.is_file():
+        raise FileNotFoundError(
+            f"replay_output_lengths_from: file not found: {logs_path}"
+        )
+
+    by_idx: dict[int, int] = {}
+    with open(p, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            idx = rec.get("idx")
+            ct = rec.get("completion_tokens")
+            if idx is not None and ct is not None and not rec.get("send_failed"):
+                try:
+                    by_idx[int(idx)] = int(ct)
+                except (ValueError, TypeError):
+                    continue
+
+    if not by_idx:
+        raise ValueError(
+            f"replay_output_lengths_from: no valid completion_tokens "
+            f"found in {logs_path}"
+        )
+
+    successful_vals = list(by_idx.values())
+    fallback = int(statistics.median(successful_vals))
+
+    lengths = [by_idx.get(i, fallback) for i in range(n)]
+
+    present = sum(1 for i in range(n) if i in by_idx)
+    missing = n - present
+    if missing > 0:
+        print(
+            f"[replay] WARNING: {missing}/{n} requests missing completion_tokens "
+            f"in {logs_path}; using median={fallback} as fallback"
+        )
+
+    print(
+        f"[replay] Loaded {present} output lengths from {logs_path}: "
+        f"min={min(lengths)}, max={max(lengths)}, "
+        f"avg={sum(lengths)/len(lengths):.0f}, median={fallback}"
+    )
+    return lengths
+
+
 def load_prompts_from_file(path: str, variant: str, n: int) -> List[str]:
     """
     Load prompts from a JSON file with keys: short, medium, long.

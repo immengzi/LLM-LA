@@ -15,7 +15,7 @@
 backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 200
+total_requests: 300
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -33,7 +33,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 1
+  rate_rps: 0.3
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -56,6 +56,8 @@ generation:
   target_output_tokens: null
   target_total_tokens: null
   think: false
+  use_dataset_output_len: true
+  replay_output_lengths_from: "301"
 
 output_log_mode: "summary"
 print_trace: false
@@ -105,14 +107,16 @@ helm:
 
   aibrix_enabled: false
   cache_warm_enabled: false
+  sidecar_prefetch: 2
 
   models:
     - name: glm5-chat
       servedModelName: served-model
-      replicas: 4
+      replicas: 1
       modelSubPath: GLM-5-w4a8-mtp-QuaRot
       tensorParallelSize: 8
       batchSize: 4
+      sidecarPrefetch: 2
       dataParallel:
         enabled: true
         size: 2

@@ -75,10 +75,16 @@ def main():
     result_poster.start()
 
     # ------------------------------------------------------------
-    # vLLM workers (unchanged concurrency / logic)
+    # vLLM workers
+    #
+    # Total workers = BATCH_SIZE + PREFETCH.  BATCH_SIZE workers
+    # will be actively running inside vLLM; the PREFETCH extras
+    # queue inside vLLM's internal scheduler so the engine never
+    # stalls waiting for the sidecar to pull + dispatch.
     # ------------------------------------------------------------
+    total_workers = _cfg.BATCH_SIZE + _cfg.PREFETCH
     vllm_workers = []
-    for _ in range(_cfg.BATCH_SIZE):
+    for _ in range(total_workers):
         w = VLLMWorker(
             local_q,
             pull_worker=pull_worker,
@@ -88,7 +94,7 @@ def main():
         vllm_workers.append(w)
 
     # Expose configured worker capacity
-    set_sidecar_workers_total(endpoint_id, int(_cfg.BATCH_SIZE))
+    set_sidecar_workers_total(endpoint_id, total_workers)
 
     kv_sub = KVSubscriber()
 
@@ -117,6 +123,8 @@ def main():
     print(
         f"[sidecar] running in {mode.upper()} mode "
         f"(BATCH_SIZE={_cfg.BATCH_SIZE}, PREFETCH={_cfg.PREFETCH}, "
+        f"workers={total_workers}, "
+        f"FORCE_IGNORE_EOS={_cfg.FORCE_IGNORE_EOS}, "
         f"port={_cfg.SIDECAR_PORT}, endpoint_id={endpoint_id})"
     )
     print(
