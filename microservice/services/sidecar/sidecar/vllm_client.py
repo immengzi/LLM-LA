@@ -96,14 +96,9 @@ class VLLMWorker:
         # Keep router_result_url only for fallback mode (if poster not provided)
         router_result_url = f"{_cfg.ROUTER_URL}/result"
 
-        # Idle-poke configuration
-        idle_sleep_s = 0.01
-        spins_per_second = int(1.0 / idle_sleep_s)
-        spins_per_poke_worker = max(
-            1,
-            int(spins_per_second * _cfg.PULL_INTERVAL_S * _cfg.BATCH_SIZE),
-        )
-        idle_spins = 0
+        # Idle sleep: short enough that workers pick up buffered items fast,
+        # but not a pure spin. Background poller handles queue top-up.
+        idle_sleep_s = 0.005
 
         try:
             while not self._stop_evt.is_set():
@@ -113,24 +108,8 @@ class VLLMWorker:
                 # --------------------------------------------------------
                 item = self.local_q.get_nowait()
                 if not item:
-                    idle_spins += 1
-
-                    # Occasional idle pull
-                    if (
-                        self._pull_worker is not None
-                        and idle_spins >= spins_per_poke_worker
-                    ):
-                        try:
-                            self._pull_worker.pull_if_capacity()
-                        except Exception as e:
-                            print(f"[sidecar] idle-poke pull_if_capacity error: {e}")
-                        idle_spins = 0
-
                     time.sleep(idle_sleep_s)
                     continue
-
-                # Reset idle counter
-                idle_spins = 0
 
                 req_id, prompt, meta = item
 
@@ -180,6 +159,14 @@ class VLLMWorker:
                                 "enable_thinking": enable_thinking,
                             },
                         }
+                        if "min_tokens" in meta:
+                            payload["min_tokens"] = int(meta["min_tokens"])
+
+                    if meta.get("ignore_eos"):
+                        payload["ignore_eos"] = bool(meta["ignore_eos"])
+
+                    if _cfg.FORCE_IGNORE_EOS:
+                        payload["ignore_eos"] = True
 
                     # ----------------------------------------------------
                     # Trace: vLLM send timestamp
@@ -193,7 +180,13 @@ class VLLMWorker:
                     # Call vLLM
                     # ----------------------------------------------------
                     if _cfg.LOG_LEVEL == "debug":
-                        print(f"[sidecar] vLLM send req_id={req_id} model={_cfg.MODEL_NAME}")
+                        _eos = payload.get("ignore_eos", "MISSING")
+                        _mt = payload.get("min_tokens", "MISSING")
+                        _mx = payload.get("max_tokens", "MISSING")
+                        print(
+                            f"[sidecar] vLLM send req_id={req_id} model={_cfg.MODEL_NAME} "
+                            f"ignore_eos={_eos} min_tokens={_mt} max_tokens={_mx}"
+                        )
 
                     resp = session.post(
                         vllm_url,
@@ -331,6 +324,28 @@ class VLLMWorker:
 
                 except Exception as e:
                     print(f"[sidecar] vLLM request failed for req_id={req_id}: {e}")
+                    error_result = {
+                        "req_id": req_id,
+                        "result": {
+                            "output": f"[sidecar error: {e}]",
+                            "finish_reason": "error",
+                            "error": str(e),
+                        },
+                    }
+                    if self._result_poster is not None:
+                        try:
+                            self._result_poster.submit(error_result)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            session.post(
+                                f"{_cfg.ROUTER_URL}/result",
+                                json=error_result,
+                                timeout=10.0,
+                            )
+                        except Exception:
+                            pass
 
                 finally:
                     # Mark job done

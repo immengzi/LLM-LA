@@ -503,7 +503,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 4
+  replicas: 1
   selector:
     matchLabels:
       app: vllm-qwen
@@ -718,7 +718,7 @@ spec:
             - name: ROUTER_PULL_TIMEOUT_S
               value: "1000.0"
             - name: VLLM_TIMEOUT_S
-              value: "1000.0"
+              value: "7200.0"
             - name: ROUTER_RESULT_TIMEOUT_S
               value: "1000.0"
             - name: RESULT_TRANSPORT_MODE
@@ -743,6 +743,8 @@ spec:
               value: "true"
             - name: LOG_LEVEL
               value: "info"
+            - name: FORCE_IGNORE_EOS
+              value: "true"
           ports:
             - containerPort: 9000
               name: sidecar-http

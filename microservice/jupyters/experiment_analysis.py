@@ -50,28 +50,24 @@ def _read_ndjson(path: Path) -> Iterable[JsonDict]:
 def _resolve_experiment_dir(
     exp_id: Optional[Union[int, str]] = None,
     exp_dir: Optional[PathLike] = None,
-    experiments_root: PathLike = "experiments",
+    experiments_root: PathLike = "../experiments",
 ) -> Path:
     """
     Resolve the experiment directory.
-
     You can either:
-      - pass a numeric/string experiment ID (e.g. 3 -> ./experiments/3), or
+      - pass a numeric/string experiment ID (e.g. 3 -> ../experiments/3), or
       - pass an explicit exp_dir path.
     """
     if exp_dir is not None and exp_id is not None:
         raise ValueError("Pass either exp_id or exp_dir, not both.")
-
     if exp_dir is not None:
         p = Path(exp_dir)
     else:
         if exp_id is None:
             raise ValueError("Must provide either exp_id or exp_dir.")
         p = Path(experiments_root) / str(exp_id)
-
     if not p.is_dir():
         raise FileNotFoundError(f"Experiment directory not found: {p}")
-
     return p
 
 
@@ -214,7 +210,7 @@ def load_experiment_latencies(
     *,
     exp_id: Optional[Union[int, str]] = None,
     exp_dir: Optional[PathLike] = None,
-    experiments_root: PathLike = "experiments",
+    experiments_root: PathLike = "../experiments",
     include_failed: bool = False,
     apply_time_offset_correction: bool = False,
 ) -> pd.DataFrame:
@@ -237,7 +233,7 @@ def load_experiment_latencies(
     logs_path = exp_path / "logs.json"
     config_path = exp_path / "config.json"
     podmap_path = exp_path / "pod_node_mapping_events.jsonl"
-
+    print(logs_path)
     if not logs_path.is_file():
         raise FileNotFoundError(f"logs.json not found in experiment directory: {logs_path}")
 
@@ -350,7 +346,7 @@ def load_experiment_prom_samples(
     *,
     exp_id: Optional[Union[int, str]] = None,
     exp_dir: Optional[PathLike] = None,
-    experiments_root: PathLike = "experiments",
+    experiments_root: PathLike = "../experiments",
 ) -> pd.DataFrame:
     """
     Load metrics.jsonl (written by metrics_prom.py) and flatten into a DataFrame.
@@ -406,10 +402,10 @@ def experiments_from_series(series_ids, series_size=4, start_exp_id=1):
     return experiments
 
 
-def experiments_from_series(start_exp_id, end_exp_id):
-    """
-    Return a list of experiment IDs from start_exp_id to end_exp_id (inclusive).
-    """
-    if start_exp_id > end_exp_id:
-        raise ValueError("start_exp_id must be <= end_exp_id")
-    return list(range(start_exp_id, end_exp_id + 1))
+# def experiments_from_series(start_exp_id, end_exp_id):
+#     """
+#     Return a list of experiment IDs from start_exp_id to end_exp_id (inclusive).
+#     """
+#     if start_exp_id > end_exp_id:
+#         raise ValueError("start_exp_id must be <= end_exp_id")
+#     return list(range(start_exp_id, end_exp_id + 1))

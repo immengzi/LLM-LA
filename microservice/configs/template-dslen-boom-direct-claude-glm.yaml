@@ -7,7 +7,7 @@
 backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 200
+total_requests: 2000
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -28,7 +28,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 4
+  rate_rps: 1
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -71,7 +71,7 @@ transport:
   results_zmq: "tcp://7.216.57.215:30559"
   topic: "results"
   run_id: null
-  idle_timeout_s: 1000.0
+  idle_timeout_s: 120.0
   idle_zero_running_s: 10.0
 
 boom:

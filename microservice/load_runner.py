@@ -1094,23 +1094,64 @@ def _drain_threads_with_fleet_idle(
 
     lost = 0
     if timed_out:
+        # Pipeline drain grace: give BooM/proxy time to relay in-transit
+        # responses before declaring threads LOST.  Up to 30s, but stop
+        # early if all threads finish or no further progress.
+        grace_s = 30.0
+        grace_start = time.time()
+        still_alive = [t for t in threads if t.is_alive()]
+        alive_at_grace_start = len(still_alive)
+        print(
+            f"[load_runner] {backend_label}: fleet/idle triggered — {timeout_reason}. "
+            f"{alive_at_grace_start} thread(s) still alive; "
+            f"waiting up to {grace_s:.0f}s for pipeline drain..."
+        )
+        last_progress_at = time.time()
+        while True:
+            still_alive = [t for t in threads if t.is_alive()]
+            if not still_alive:
+                print(
+                    f"[load_runner] {backend_label}: all threads completed "
+                    f"during grace period ({time.time() - grace_start:.1f}s)"
+                )
+                break
+            now = time.time()
+            new_alive = len(still_alive)
+            if new_alive < alive_at_grace_start:
+                last_progress_at = now
+                alive_at_grace_start = new_alive
+            if (now - grace_start) >= grace_s:
+                print(
+                    f"[load_runner] {backend_label}: grace period exhausted "
+                    f"({grace_s:.0f}s), {new_alive} thread(s) still stuck"
+                )
+                break
+            if (now - last_progress_at) >= 10.0:
+                print(
+                    f"[load_runner] {backend_label}: no progress for 10s "
+                    f"during grace, {new_alive} thread(s) stuck"
+                )
+                break
+            time.sleep(0.5)
+
         still_alive = [t for t in threads if t.is_alive()]
         lost = len(still_alive)
-        reason_str = timeout_reason or "unknown"
-        print(
-            f"[load_runner] {backend_label}: ABORTING — {reason_str}. "
-            f"Marking {lost} inflight request(s) as LOST."
-        )
-        for t in still_alive:
-            idx_hint = getattr(t, "name", "?")
-            print(f"[client][RECV] ✗ LOST thread={idx_hint} ({reason_str})")
-        if logger is not None:
+        if lost > 0:
+            reason_str = timeout_reason or "unknown"
+            print(
+                f"[load_runner] {backend_label}: ABORTING — {reason_str}. "
+                f"Marking {lost} inflight request(s) as LOST."
+            )
             for t in still_alive:
-                err_record: Dict[str, Any] = {
-                    "error": f"lost ({reason_str})",
-                    "send_failed": True,
-                }
-                logger.log_request(err_record)
+                idx_hint = getattr(t, "name", "?")
+                print(f"[client][RECV] ✗ LOST thread={idx_hint} ({reason_str})")
+            if logger is not None:
+                for t in still_alive:
+                    err_record: Dict[str, Any] = {
+                        "error": f"lost ({reason_str})",
+                        "send_failed": True,
+                    }
+                    logger.log_request(err_record)
     else:
         for t in threads:
             t.join(timeout=2.0)

@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 from config import load_config
-from prompts import load_prompts_from_file, build_prompts_from_lmsys
+from prompts import load_prompts_from_file, build_prompts_from_lmsys, load_replay_output_lengths
 from scheduler import build_schedule
 from load_runner import run_open_loop_load
 from experiment_io import init_experiment
@@ -85,6 +85,25 @@ def main():
     else:
         raise ValueError(f"Unknown prompt_source '{cfg.prompt_source}'")
 
+    # Replay output lengths from a previous experiment (overrides dataset lengths)
+    replay_ref = getattr(cfg.generation, "replay_output_lengths_from", None)
+    if replay_ref is not None:
+        replay_ref = str(replay_ref).strip()
+    if replay_ref:
+        replay_path = replay_ref
+        if not replay_path.endswith(".json"):
+            replay_path = str(Path("experiments") / replay_ref / "logs.json")
+        output_tokens_per_request = load_replay_output_lengths(
+            replay_path, n=len(prompts),
+        )
+        cfg.generation.use_dataset_output_len = True
+        cfg.generation.ignore_eos = True
+        print(
+            f"[client] Replay mode: output lengths from {replay_path} "
+            f"(use_dataset_output_len=True, ignore_eos=True, "
+            f"finish_reason will be 'length' not 'stop')"
+        )
+
     total = len(prompts)
     if total == 0:
         print("[client] No prompts available; exiting.")
@@ -144,6 +163,8 @@ def main():
             f"[client] boom: base_url={cfg.boom.base_url} "
             f"chat_path={cfg.boom.chat_path} "
             f"model={cfg.boom.model!r} "
+            f"timeout_s={cfg.boom.timeout_s} "
+            f"(HTTP read timeout; must cover longest generation) "
             f"stream={bool(cfg.boom.stream)}"
         )
         print(

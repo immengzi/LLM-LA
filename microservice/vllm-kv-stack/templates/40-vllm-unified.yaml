@@ -268,7 +268,7 @@ spec:
               - name: BATCH_SIZE
                 value: {{ mul $batchSize $dpTotal | quote }}
               - name: PREFETCH
-                value: {{ $.Values.sidecar.prefetch | default $batchSize | quote }}
+                value: {{ $.Values.sidecar.prefetch | quote }}
               - name: SIDECAR_MODE
                 value: {{ include "vllmkv.sidecarMode" $ | quote }}
               - name: PULL_INTERVAL_S
@@ -276,7 +276,7 @@ spec:
               - name: ROUTER_PULL_TIMEOUT_S
                 value: "1000.0"
               - name: VLLM_TIMEOUT_S
-                value: "1000.0"
+                value: "7200.0"
               - name: ROUTER_RESULT_TIMEOUT_S
                 value: "1000.0"
               - name: RESULT_TRANSPORT_MODE
@@ -301,6 +301,8 @@ spec:
                 value: "true"
               - name: LOG_LEVEL
                 value: {{ $.Values.sidecar.logLevel | default "info" | quote }}
+              - name: FORCE_IGNORE_EOS
+                value: {{ $.Values.sidecar.forceIgnoreEos | default false | quote }}
             ports:
               - containerPort: 9000
                 name: sidecar-http
@@ -746,7 +748,7 @@ spec:
             - name: BATCH_SIZE
               value: {{ $batchSize | quote }}
             - name: PREFETCH
-              value: {{ $.Values.sidecar.prefetch | default $batchSize | quote }}
+              value: {{ $.Values.sidecar.prefetch | quote }}
             - name: SIDECAR_MODE
               value: {{ include "vllmkv.sidecarMode" $ | quote }}
             - name: PULL_INTERVAL_S
@@ -754,7 +756,7 @@ spec:
             - name: ROUTER_PULL_TIMEOUT_S
               value: "1000.0"
             - name: VLLM_TIMEOUT_S
-              value: "1000.0"
+              value: "7200.0"
             - name: ROUTER_RESULT_TIMEOUT_S
               value: "1000.0"
             - name: RESULT_TRANSPORT_MODE
@@ -779,6 +781,8 @@ spec:
               value: "true"
             - name: LOG_LEVEL
               value: {{ $.Values.sidecar.logLevel | default "info" | quote }}
+            - name: FORCE_IGNORE_EOS
+              value: {{ $.Values.sidecar.forceIgnoreEos | default false | quote }}
           ports:
             - containerPort: 9000
               name: sidecar-http

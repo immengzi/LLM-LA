@@ -24,7 +24,13 @@ images:
 sidecar:
   enabled: true     # set false in boom direct mode (no router/sidecar needed)
   logLevel: info    # debug | info | warning | error
-  prefetch: 2       # extra items to buffer beyond BATCH_SIZE; keeps slots full under load
+  # Extra items to buffer beyond BATCH_SIZE (pull_cap = BATCH_SIZE + PREFETCH).
+  # Workers = BATCH_SIZE + PREFETCH, extras queue inside vLLM's internal scheduler.
+  # Control via sweep method --set sidecar.prefetch=N.
+  prefetch: 0
+  # When true, sidecar forces ignore_eos=True on every vLLM request
+  # (replay mode: generate exactly max_tokens, finish_reason="length").
+  forceIgnoreEos: false
 
 router:
   # pull | push-rr | push-random | push-leastq
@@ -379,7 +385,6 @@ boom:
 
   # BooM Gateway image — built from BooMGateway-main/ and pushed to your registry.
   # The global.imageRegistry rewrite applies here too if set.
-  # image: boom-gateway:latest
   image: boom-gateway:v4
 
   # Always pull so tag:latest (or any mutable tag) picks up the newest image after push.

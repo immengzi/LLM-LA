@@ -92,6 +92,12 @@ class SidecarConfig:
     TRACE_SAMPLE_RATE: float = 1.0
 
     # ------------------------------------------------
+    # Fixed-length / replay mode
+    # ------------------------------------------------
+
+    FORCE_IGNORE_EOS: bool = False
+
+    # ------------------------------------------------
     # Logging
     # ------------------------------------------------
 
@@ -170,6 +176,11 @@ def get_config() -> SidecarConfig:
     # ------------------------------------------------
     cfg.TRACE_ENABLED = os.getenv("TRACE_ENABLED", "false").lower() == "true"
     cfg.TRACE_SAMPLE_RATE = float(os.getenv("TRACE_SAMPLE_RATE", cfg.TRACE_SAMPLE_RATE))
+
+    # ------------------------------------------------
+    # Fixed-length / replay mode
+    # ------------------------------------------------
+    cfg.FORCE_IGNORE_EOS = os.getenv("FORCE_IGNORE_EOS", "false").lower() == "true"
 
     # ------------------------------------------------
     # Logging

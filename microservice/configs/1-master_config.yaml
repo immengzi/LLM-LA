@@ -125,11 +125,14 @@
 # boom-direct-glm-dp-r2-5-b32:
 #   - round_robin
 
+# template-dslen-boom-direct-claude-glm:
+#   - round_robin
+
 template-boom-claude-glm:
   - pull
 
-template-boom-direct-claude-glm:
-  - round_robin
+# template-boom-direct-claude-glm:
+#   - round_robin
 
 # template-llm-la:
 #   - pull
