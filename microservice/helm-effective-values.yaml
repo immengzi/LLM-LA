@@ -20,7 +20,7 @@ boom:
   image: boom-gateway:v4
   imagePullPolicy: Always
   masterKey: sk-boom-master
-  maxInflight: 1000
+  maxInflight: 10000
   nodePort: 30401
   resources:
     limits:
@@ -29,7 +29,7 @@ boom:
     requests:
       cpu: 250m
       memory: 128Mi
-  routeVia: router
+  routeVia: direct
   upstreamTimeoutSeconds: 7200
 cacheWarm:
   enabled: false
@@ -48,10 +48,10 @@ dataParallel:
   size: 2
   sizeLocal: 1
 deploy:
-  cpuHash: true
+  cpuHash: false
   mooncakeMaster: true
-  redis: true
-  router: true
+  redis: false
+  router: false
   vllm: true
 global:
   imageRegistry: reg.local:32000
@@ -96,7 +96,6 @@ models:
   name: glm5-chat
   replicas: 4
   servedModelName: served-model
-  sidecarPrefetch: 2
   tensorParallelSize: 8
   vllm:
     additionalConfig:
@@ -104,6 +103,7 @@ models:
     compilationConfig:
       cudagraphMode: FULL_DECODE_ONLY
     enableExpertParallel: true
+    enablePrefixCaching: true
     gpuMemoryUtilization: 0.95
     maxNumBatchedTokens: 4096
     quantization: ascend
@@ -113,13 +113,13 @@ models:
     trustRemoteCode: true
 mooncake:
   ascendBufferPool: "4:8"
-  enabled: false
-  evictionHighWatermark: 0.9
-  evictionRatio: 0.1
+  enabled: true
+  evictionHighWatermark: "0.9"
+  evictionRatio: "0.1"
   globalSegmentSize: 140000000000
-  lookupRpcPort: "10010"
+  lookupRpcPort: 10010
   masterPort: 50088
-  masterServerAddress: 10.50.156.106:50088
+  masterServerAddress: 7.216.57.215:50088
 pin:
   enabled: true
   nodeName: node4
@@ -153,10 +153,10 @@ router:
   sloAware: false
   sloWithKv: true
 sidecar:
-  enabled: true
+  enabled: false
   forceIgnoreEos: true
   logLevel: info
-  prefetch: 2
+  prefetch: 0
 tensorParallelSize: 8
 vllm:
   additionalConfig: {}
@@ -165,7 +165,7 @@ vllm:
     cudagraphMode: FULL_DECODE_ONLY
   enableExpertParallel: false
   enablePrefixCaching: false
-  hostNetwork: false
+  hostNetwork: true
   kvCacheDtype: auto
   speculativeConfig: {}
   trustRemoteCode: false
