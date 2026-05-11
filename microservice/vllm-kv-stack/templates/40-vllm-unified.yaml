@@ -176,6 +176,9 @@ spec:
                 export HCCL_SOCKET_IFNAME=${nic_name}
                 export HCCL_BUFFSIZE={{ $dp.hcclBuffSize | default 200 }}
                 export OMP_NUM_THREADS={{ $dp.ompNumThreads | default 16 }}
+                {{- if $.Values.mooncake.enabled }}
+                export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
+                {{- end }}
 
                 exec python -m vllm.entrypoints.openai.api_server \
                   --model /model \
@@ -189,12 +192,19 @@ spec:
                   --data-parallel-rpc-port {{ $dp.rpcPort | default 13389 }} \
 {{ include "vllmkv.vllmRuntimeFlags" $flagCtx | trim | indent 18 }}
                   --host 0.0.0.0
+                  {{- if $.Values.mooncake.enabled }} \
+                  --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"master_server_address":"{{ $.Values.mooncake.masterServerAddress }}","lookup_rpc_port":"{{ $.Values.mooncake.lookupRpcPort }}","backend":"mooncake"}}'
+                  {{- end }}
             env:
               {{- include "vllmkv.vllmBaseEnv" (dict "tp" $tp "root" $) | nindent 14 }}
               - name: NODE_IP
                 valueFrom:
                   fieldRef:
                     fieldPath: status.hostIP
+              {{- if $.Values.mooncake.enabled }}
+              - name: MOONCAKE_CONFIG_PATH
+                value: "/etc/mooncake/mooncake.json"
+              {{- end }}
             ports:
               - containerPort: 8200
                 name: http
@@ -202,6 +212,11 @@ spec:
               {{- if $needsSidecar }}
               - containerPort: 5557
                 name: kvpub
+                protocol: TCP
+              {{- end }}
+              {{- if $.Values.mooncake.enabled }}
+              - containerPort: {{ $.Values.mooncake.lookupRpcPort }}
+                name: kv-rpc
                 protocol: TCP
               {{- end }}
               - containerPort: 9101
@@ -219,6 +234,12 @@ spec:
               - name: hccn-conf
                 mountPath: /etc/hccn.conf
                 readOnly: true
+              {{- if $.Values.mooncake.enabled }}
+              - name: mooncake-config
+                mountPath: /etc/mooncake/mooncake.json
+                subPath: mooncake.json
+                readOnly: true
+              {{- end }}
               {{- include "vllmkv.ascendDriverMounts" $ | nindent 14 }}
             startupProbe:
               httpGet:
@@ -338,6 +359,11 @@ spec:
             hostPath:
               path: /etc/hccn.conf
               type: File
+          {{- if $.Values.mooncake.enabled }}
+          - name: mooncake-config
+            configMap:
+              name: mooncake-config
+          {{- end }}
           {{- include "vllmkv.ascendDriverVolumes" $ | nindent 10 }}
 
     workerTemplate:
@@ -438,6 +464,9 @@ spec:
                 export HCCL_SOCKET_IFNAME=${nic_name}
                 export HCCL_BUFFSIZE={{ $dp.hcclBuffSize | default 200 }}
                 export OMP_NUM_THREADS={{ $dp.ompNumThreads | default 16 }}
+                {{- if $.Values.mooncake.enabled }}
+                export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
+                {{- end }}
 
                 exec vllm serve /model \
                   --headless \
@@ -451,6 +480,9 @@ spec:
                   --data-parallel-rpc-port {{ $dp.rpcPort | default 13389 }} \
                   --data-parallel-start-rank ${START_RANK} \
 {{ include "vllmkv.vllmRuntimeFlags" $flagCtx | trim | indent 18 }}
+                  {{- if $.Values.mooncake.enabled }}
+                  --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"master_server_address":"{{ $.Values.mooncake.masterServerAddress }}","lookup_rpc_port":"{{ $.Values.mooncake.lookupRpcPort }}","backend":"mooncake"}}'
+                  {{- end }}
             env:
               {{- include "vllmkv.vllmBaseEnv" (dict "tp" $tp "root" $) | nindent 14 }}
               - name: NODE_IP
@@ -461,6 +493,10 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.annotations['leaderworkerset.sigs.k8s.io/leader-address']
+              {{- if $.Values.mooncake.enabled }}
+              - name: MOONCAKE_CONFIG_PATH
+                value: "/etc/mooncake/mooncake.json"
+              {{- end }}
             volumeMounts:
               - name: model
                 mountPath: /model
@@ -473,6 +509,12 @@ spec:
               - name: hccn-conf
                 mountPath: /etc/hccn.conf
                 readOnly: true
+              {{- if $.Values.mooncake.enabled }}
+              - name: mooncake-config
+                mountPath: /etc/mooncake/mooncake.json
+                subPath: mooncake.json
+                readOnly: true
+              {{- end }}
               {{- include "vllmkv.ascendDriverMounts" $ | nindent 14 }}
             livenessProbe:
               exec:
@@ -513,6 +555,11 @@ spec:
             hostPath:
               path: /etc/hccn.conf
               type: File
+          {{- if $.Values.mooncake.enabled }}
+          - name: mooncake-config
+            configMap:
+              name: mooncake-config
+          {{- end }}
           {{- include "vllmkv.ascendDriverVolumes" $ | nindent 10 }}
 
 {{/* =============================================================== */}}
