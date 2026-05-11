@@ -503,7 +503,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 1
+  replicas: 4
   selector:
     matchLabels:
       app: vllm-qwen
