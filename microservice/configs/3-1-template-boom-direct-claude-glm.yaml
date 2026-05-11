@@ -15,7 +15,7 @@
 backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 300
+total_requests: 2000
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -57,7 +57,7 @@ generation:
   target_total_tokens: null
   think: false
   use_dataset_output_len: true
-  replay_output_lengths_from: "301"
+  replay_output_lengths_from: "300"
 
 output_log_mode: "summary"
 print_trace: false
@@ -90,8 +90,8 @@ boom:
 
 helm:
   boom_claude_aliases: true
-  # boom_route_via: direct
-  boom_max_inflight: 1000
+  boom_route_via: direct
+  boom_max_inflight: 10000
   router_api_key: "ZhongRuanChuangXin!"
 
   autoscaling_enabled: false
@@ -107,16 +107,14 @@ helm:
 
   aibrix_enabled: false
   cache_warm_enabled: false
-  sidecar_prefetch: 2
 
   models:
     - name: glm5-chat
       servedModelName: served-model
-      replicas: 1
+      replicas: 4
       modelSubPath: GLM-5-w4a8-mtp-QuaRot
       tensorParallelSize: 8
       batchSize: 4
-      sidecarPrefetch: 2
       dataParallel:
         enabled: true
         size: 2
