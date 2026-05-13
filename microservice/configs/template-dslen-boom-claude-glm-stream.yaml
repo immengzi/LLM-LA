@@ -1,21 +1,15 @@
-# 4-1-template-boom-direct-claude-glm-mooncake.yaml
+# boom-claude-glm-dp with dataset output lengths + STREAMING.
+# Same as template-dslen-boom-claude-glm.yaml but with stream: true
+# and streamingMode: true on the sidecar.
+# Measures TTFT and TPOT via real SSE through the full BooM → LLM-LA pipeline.
 #
-# Mooncake variant of 4-1-template-boom-direct-claude-glm.yaml.
-# Adds the AscendStoreConnector KV-transfer pipeline (mooncake-master + per-pod
-# hostNetwork + lookup-rpc) so cross-LWS-group KV reuse works.
-#
-# NOTE — same caveat as 4-1: `boom_route_via: direct` is RESERVED. With the
-# current Helm chart this file deploys the full router-mode stack
-# (router-service + redis + cpu-hash + sidecars) PLUS mooncake-master and
-# AscendStoreConnector. Once direct mode lands, the router/redis/cpu-hash/
-# sidecar deployments will be skipped automatically.
-#
-# Claude Code connects via /v1/messages (Anthropic format) on port 30401.
+# BooM → LLM-LA router → sidecar → vLLM path.
+# Requires deploying updated sidecar + router with streaming support.
 
 backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 5000
+total_requests: 2000
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -29,11 +23,14 @@ hf_lmsys:
   streaming: false
   min_input_tokens: 256
   max_input_tokens: 10000000
+  min_output_tokens: 100
+  max_output_tokens: 10000000
   repeat_each: 1
+  seed: 42
 
 load_pattern:
   pattern: "det"
-  rate_rps: 0.3
+  rate_rps: 1
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -56,9 +53,7 @@ generation:
   target_output_tokens: null
   target_total_tokens: null
   think: false
-  # RESERVED — not yet read by GenerationConfig; safe to leave (silently ignored).
   use_dataset_output_len: true
-  replay_output_lengths_from: "300"
 
 output_log_mode: "summary"
 print_trace: false
@@ -78,7 +73,7 @@ transport:
   results_zmq: "tcp://7.216.57.215:30559"
   topic: "results"
   run_id: null
-  idle_timeout_s: 1000.0
+  idle_timeout_s: 120.0
   idle_zero_running_s: 10.0
 
 boom:
@@ -86,15 +81,13 @@ boom:
   chat_path: "/v1/chat/completions"
   model: "served-model"
   api_key: "sk-boom-master"
-  timeout_s: 10000.0
-  stream: false
+  timeout_s: 7200.0
+  stream: true                        # <<< streaming enabled (client SSE)
 
 helm:
   boom_claude_aliases: true
-  # RESERVED — `boom_route_via` is not yet wired through the chart.
-  boom_route_via: direct
-  # RESERVED — `boom_max_inflight` is not yet wired through the chart.
-  boom_max_inflight: 10000
+  # boom_route_via: direct            # NOT direct — goes through LLM-LA router
+  boom_max_inflight: 1000
   router_api_key: "ZhongRuanChuangXin!"
 
   autoscaling_enabled: false
@@ -105,36 +98,17 @@ helm:
   router_len_aware: true
   router_len_policy: "short_first"
 
-  # Model volume — local hostPath on each NPU node (bypasses NFS).
   nfs_path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
-  model_host_path: "/home/haiting/models"  # must exist on every NPU node in production
+  model_host_path: "/home/haiting/models"
 
   aibrix_enabled: false
   cache_warm_enabled: false
 
-  # ---- Mooncake KV cache transfer ----
-  # mooncake-master runs as a single hostNetwork pod pinned to one control-plane node
-  # (7.216.57.215). vLLM leader + worker pods connect to it via P2PHANDSHAKE
-  # over the RoCE NIC; AscendStoreConnector handles cross-LWS-group KV moves.
-  mooncake_enabled: true
-  mooncake_master_port: 50088
-  mooncake_master_server_address: "7.216.57.215:50088"
-  mooncake_global_segment_size: 140000000000
-  mooncake_eviction_high_watermark: 0.9
-  mooncake_eviction_ratio: 0.1
-  mooncake_ascend_buffer_pool: "4:8"
-  mooncake_lookup_rpc_port: "10010"
-  mooncake_host_network: true
-  deploy_mooncake_master: true
-
-  # ---- Model topology — GLM-5 W4A8 MoE with DP=2, TP=8, EP=16, MTP ----
-  # `replicas` is the number of LWS *groups* (each group is one DP unit
-  # spanning roce-pair: 1 leader + 1 worker). On a 2-node cluster only 1
-  # group fits; production target is 4 groups (8 NPU nodes).
   models:
     - name: glm5-chat
       servedModelName: served-model
       replicas: 4
+      streamingMode: true             # <<< sidecar streams from vLLM internally
       modelSubPath: GLM-5-w4a8-mtp-QuaRot
       tensorParallelSize: 8
       batchSize: 4
@@ -150,7 +124,6 @@ helm:
         gpuMemoryUtilization: 0.95
         quantization: ascend
         enableExpertParallel: true
-        enablePrefixCaching: true
         compilationConfig:
           cudagraphMode: "FULL_DECODE_ONLY"
         trustRemoteCode: true

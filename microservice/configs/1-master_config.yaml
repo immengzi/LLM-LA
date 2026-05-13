@@ -147,7 +147,7 @@
 # template-dslen-llm-la:
 #   - pull
 
-# 2.1-template-boom-direct-claude-glm:
+# 2-1-template-boom-direct-claude-glm:
 #   - round_robin
 
 # 2-2-template-boom-claude-glm:
@@ -165,8 +165,14 @@
 # 4-2-template-boom-claude-glm:
 #   - pull
 
-4-1-template-boom-direct-claude-glm-mooncake:
-  - round_robin
+# 4-1-template-boom-direct-claude-glm-mooncake:
+#   - round_robin
 
-4-2-template-boom-claude-glm-mooncake:
+# 4-2-template-boom-claude-glm-mooncake:
+#   - pull
+
+# 6-1-template-boom-direct-claude-glm-stream:
+#   - round_robin
+
+6-2-template-boom-claude-glm-stream:
   - pull

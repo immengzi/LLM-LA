@@ -1181,6 +1181,28 @@ async def result_callback(payload: dict):
     return {"status": "ok"}
 
 
+@app.post("/result_chunk")
+async def result_chunk_callback(payload: dict):
+    """
+    Accept an SSE chunk from the sidecar for real-time streaming.
+
+    Payload: {req_id, chunk_idx, delta, is_final, finish_reason?, usage?}
+    Pushes to the asyncio.Queue registered for this req_id.
+    If no queue exists, the chunk is silently dropped (non-streaming request).
+    """
+    req_id = payload.get("req_id")
+    if not req_id:
+        return {"status": "missing req_id"}
+
+    pushed = router_state.push_chunk(str(req_id), payload)
+    if not pushed:
+        _log_api_req(
+            f"result_chunk: no queue for req_id={req_id} (non-streaming?)",
+            level="full",
+        )
+    return {"status": "ok"}
+
+
 async def result_submit_ack(payload: dict, background_tasks: BackgroundTasks):
     req_id_raw = payload.get("req_id")
     if req_id_raw is None:
@@ -1504,6 +1526,10 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
     Streaming returns standard OpenAI SSE format so upstream gateways (e.g.
     BooM, LiteLLM) can parse it natively.
 
+    When the sidecar has STREAMING_MODE enabled and stream=true is requested,
+    chunks arrive via /result_chunk and are forwarded as real SSE events.
+    Otherwise, falls back to fake-SSE from the completed result.
+
     When the request contains tools or tool-role messages, the full request
     body is forwarded through the sidecar pipeline to vLLM so that structured
     tool calling works end-to-end.
@@ -1517,41 +1543,166 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
 
     chat_request_body = _build_chat_request_body(req)
 
-    rid, t_start, result = await _enqueue_and_wait(
-        prompt, req.model, chat_request_body=chat_request_body,
-    )
-
-    output_text = result.get("output", "")
-    finish_reason = result.get("finish_reason", "stop") or "stop"
-    usage = result.get("usage") or {}
-    tool_calls = _extract_tool_calls(result)
-
-    # --- streaming path ---
+    # ---- real-time streaming path (Phase 2B) ----
     if req.stream:
-        if tool_calls:
-            sse_payload = _build_sse_chunks_with_tool_calls(
-                rid=rid,
-                model=req.model,
-                created=int(t_start),
-                tool_calls=tool_calls,
-                finish_reason=finish_reason,
-                usage=usage,
-            )
-        else:
-            sse_payload = _build_sse_chunks(
-                rid=rid,
-                model=req.model,
-                created=int(t_start),
-                output_text=output_text,
-                finish_reason=finish_reason,
-                usage=usage,
-            )
+        chunk_q = router_state.register_chunk_queue("__pending__")
 
-        async def _event_generator():
-            yield sse_payload
+        t_start = time.time()
+        inc_admission()
+        resolved_model = _resolve_model(req.model)
+
+        meta: Dict[str, Any] = {"__source__": "litellm"}
+        if chat_request_body is not None:
+            meta["__chat_request__"] = chat_request_body
+        if _is_push_mode():
+            rid = router_state.next_req_id()
+        else:
+            rid = router_state.enqueue(prompt, t_start, meta, model=resolved_model)
+
+        router_state.remove_chunk_queue("__pending__")
+        chunk_q = router_state.register_chunk_queue(rid)
+
+        _log_api_req(
+            f"chat_completions_stream rid={rid} model={req.model} prompt_len={len(prompt)}",
+            level="summary",
+        )
+
+        router_state.register_waiter(rid)
+
+        if _is_push_mode() and _push_dispatcher is not None:
+            ok = _push_dispatcher.try_submit(rid, prompt, meta)
+            if not ok:
+                _store_and_maybe_publish_local_result(
+                    req_id=rid,
+                    result={"error": "push_dispatch_queue_full"},
+                )
+        else:
+            meta = await _maybe_register_kv_blocks(
+                rid, prompt, meta=meta,
+                is_pull_mode=not _is_push_mode(),
+            )
+            if _is_push_mode():
+                if _push_router is None:
+                    raise HTTPException(500, "PushRouter not initialized")
+                try:
+                    await _push_router.route_and_push(rid, prompt, meta)
+                except Exception as e:
+                    raise HTTPException(503, f"push failed: {e}")
+
+        chunk_id = f"chatcmpl-{rid}"
+        created = int(t_start)
+
+        async def _real_stream_generator():
+            """
+            Yield real SSE from /result_chunk, with fallback to fake-SSE
+            if the full result arrives before any chunks.
+            """
+            first_chunk_timeout = _cfg.RESULT_TIMEOUT_S
+            got_any_chunk = False
+            try:
+                try:
+                    first = await asyncio.wait_for(chunk_q.get(), timeout=first_chunk_timeout)
+                except asyncio.TimeoutError:
+                    yield "data: [DONE]\n\n"
+                    return
+
+                if first.get("__full_result__"):
+                    result = first["__full_result__"]
+                    output_text = result.get("output", "")
+                    finish_reason = result.get("finish_reason", "stop") or "stop"
+                    u = result.get("usage") or {}
+                    tc = _extract_tool_calls(result)
+                    if tc:
+                        yield _build_sse_chunks_with_tool_calls(
+                            rid=rid, model=req.model, created=created,
+                            tool_calls=tc, finish_reason=finish_reason, usage=u,
+                        )
+                    else:
+                        yield _build_sse_chunks(
+                            rid=rid, model=req.model, created=created,
+                            output_text=output_text, finish_reason=finish_reason, usage=u,
+                        )
+                    return
+
+                got_any_chunk = True
+                preamble = {
+                    "id": chunk_id, "object": "chat.completion.chunk",
+                    "created": created, "model": req.model,
+                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(preamble)}\n\n"
+
+                delta_content = first.get("delta", "")
+                if delta_content:
+                    c = {
+                        "id": chunk_id, "object": "chat.completion.chunk",
+                        "created": created, "model": req.model,
+                        "choices": [{"index": 0, "delta": {"content": delta_content}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(c)}\n\n"
+
+                if first.get("is_final"):
+                    fr = first.get("finish_reason", "stop")
+                    u = first.get("usage", {})
+                    final = {
+                        "id": chunk_id, "object": "chat.completion.chunk",
+                        "created": created, "model": req.model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": fr}],
+                        "usage": u,
+                    }
+                    yield f"data: {json.dumps(final)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(chunk_q.get(), timeout=_cfg.RESULT_TIMEOUT_S)
+                    except asyncio.TimeoutError:
+                        yield "data: [DONE]\n\n"
+                        return
+
+                    if chunk.get("__full_result__"):
+                        yield "data: [DONE]\n\n"
+                        return
+
+                    delta_content = chunk.get("delta", "")
+                    if delta_content:
+                        c = {
+                            "id": chunk_id, "object": "chat.completion.chunk",
+                            "created": created, "model": req.model,
+                            "choices": [{"index": 0, "delta": {"content": delta_content}, "finish_reason": None}],
+                        }
+                        yield f"data: {json.dumps(c)}\n\n"
+
+                    if chunk.get("is_final"):
+                        fr = chunk.get("finish_reason", "stop")
+                        u = chunk.get("usage", {})
+                        final = {
+                            "id": chunk_id, "object": "chat.completion.chunk",
+                            "created": created, "model": req.model,
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": fr}],
+                            "usage": u,
+                        }
+                        yield f"data: {json.dumps(final)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+
+            finally:
+                router_state.remove_chunk_queue(rid)
+
+        # Also register a result listener that pushes to chunk_q as fallback
+        async def _wait_and_push_fallback():
+            """If full result arrives (non-streaming sidecar), push it to chunk_q."""
+            result = await router_state.wait_for_result_async(rid, _cfg.RESULT_TIMEOUT_S)
+            if result is not None:
+                if not isinstance(result, dict):
+                    result = {"output": result}
+                router_state.push_chunk(rid, {"__full_result__": result})
+
+        asyncio.ensure_future(_wait_and_push_fallback())
 
         return StreamingResponse(
-            _event_generator(),
+            _real_stream_generator(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -1561,6 +1712,16 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
         )
 
     # --- non-streaming path ---
+    rid, t_start, result = await _enqueue_and_wait(
+        prompt, req.model, chat_request_body=chat_request_body,
+    )
+
+    output_text = result.get("output", "")
+    finish_reason = result.get("finish_reason", "stop") or "stop"
+    usage = result.get("usage") or {}
+    endpoint_id = result.get("endpoint_id")
+    tool_calls = _extract_tool_calls(result)
+
     message: Dict[str, Any] = {
         "role": "assistant",
         "content": output_text if not tool_calls else None,
@@ -1568,7 +1729,7 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
     if tool_calls:
         message["tool_calls"] = tool_calls
 
-    return {
+    resp_body: Dict[str, Any] = {
         "id": f"chatcmpl-{rid}",
         "object": "chat.completion",
         "created": int(t_start),
@@ -1586,3 +1747,6 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
             "total_tokens": usage.get("total_tokens", 0),
         },
     }
+    if endpoint_id:
+        resp_body["system_fingerprint"] = str(endpoint_id)
+    return resp_body

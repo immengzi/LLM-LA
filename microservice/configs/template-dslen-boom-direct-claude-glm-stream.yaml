@@ -1,21 +1,14 @@
-# boom-direct-glm-dp.yaml
+# boom-direct-glm-dp with dataset output lengths + STREAMING.
+# Same as template-dslen-boom-direct-claude-glm.yaml but with stream: true.
+# Measures TTFT and TPOT via real SSE from vLLM through BooM.
+#
 # DIRECT MODE: BooM routes directly to vLLM pods, bypassing the KV-aware router.
-# Use this for A/B comparison against boom-claude-glm-dp.yaml (which uses the router).
-#
-# In this mode:
-#   - NO router-service, redis, cpu-hash, or sidecars are deployed.
-#   - BooM routes directly to vLLM leader pods via stable LWS headless DNS.
-#   - The "method" in master_config.yaml IS the BooM routing strategy:
-#       round_robin   — simple round-robin across pods
-#       key_affinity  — sticky routing per API key with load-aware rebalancing
-#
-# Everything else is identical to boom-claude-glm-dp.yaml.
-# Claude Code connects via /v1/messages (Anthropic format) on port 30401.
+# No server-side changes needed — BooM already forwards stream=true to vLLM.
 
 backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 5000
+total_requests: 2000
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -29,11 +22,14 @@ hf_lmsys:
   streaming: false
   min_input_tokens: 256
   max_input_tokens: 10000000
+  min_output_tokens: 100
+  max_output_tokens: 10000000
   repeat_each: 1
+  seed: 42
 
 load_pattern:
   pattern: "det"
-  rate_rps: 0.3
+  rate_rps: 1
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -57,7 +53,6 @@ generation:
   target_total_tokens: null
   think: false
   use_dataset_output_len: true
-  replay_output_lengths_from: "300"
 
 output_log_mode: "summary"
 print_trace: false
@@ -77,7 +72,7 @@ transport:
   results_zmq: "tcp://7.216.57.215:30559"
   topic: "results"
   run_id: null
-  idle_timeout_s: 1000.0
+  idle_timeout_s: 120.0
   idle_zero_running_s: 10.0
 
 boom:
@@ -85,13 +80,13 @@ boom:
   chat_path: "/v1/chat/completions"
   model: "served-model"
   api_key: "sk-boom-master"
-  timeout_s: 10000.0
-  stream: false
+  timeout_s: 7200.0
+  stream: true                        # <<< streaming enabled
 
 helm:
   boom_claude_aliases: true
   boom_route_via: direct
-  boom_max_inflight: 10000
+  boom_max_inflight: 1000
   router_api_key: "ZhongRuanChuangXin!"
 
   autoscaling_enabled: false
@@ -111,7 +106,7 @@ helm:
   models:
     - name: glm5-chat
       servedModelName: served-model
-      replicas: 1
+      replicas: 4
       modelSubPath: GLM-5-w4a8-mtp-QuaRot
       tensorParallelSize: 8
       batchSize: 4

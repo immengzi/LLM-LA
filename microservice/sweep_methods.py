@@ -867,6 +867,10 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         if force_eos:
             set_values["sidecar.forceIgnoreEos"] = True
 
+        sidecar_streaming = first_model.get("streamingMode", False)
+        if sidecar_streaming:
+            set_values["sidecar.streamingMode"] = True
+
         # Write models YAML overlay for Helm -f
         _models_tmp = tempfile.NamedTemporaryFile(
             mode="w", prefix="sweep_models_", suffix=".yaml",

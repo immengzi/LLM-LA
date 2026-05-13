@@ -98,6 +98,12 @@ class SidecarConfig:
     FORCE_IGNORE_EOS: bool = False
 
     # ------------------------------------------------
+    # Streaming
+    # ------------------------------------------------
+
+    STREAMING_MODE: bool = False
+
+    # ------------------------------------------------
     # Logging
     # ------------------------------------------------
 
@@ -181,6 +187,11 @@ def get_config() -> SidecarConfig:
     # Fixed-length / replay mode
     # ------------------------------------------------
     cfg.FORCE_IGNORE_EOS = os.getenv("FORCE_IGNORE_EOS", "false").lower() == "true"
+
+    # ------------------------------------------------
+    # Streaming
+    # ------------------------------------------------
+    cfg.STREAMING_MODE = os.getenv("STREAMING_MODE", "false").lower() == "true"
 
     # ------------------------------------------------
     # Logging

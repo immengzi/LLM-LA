@@ -179,20 +179,166 @@ class VLLMWorker:
                     # ----------------------------------------------------
                     # Call vLLM
                     # ----------------------------------------------------
+                    use_stream = _cfg.STREAMING_MODE
+                    if use_stream:
+                        payload["stream"] = True
+                        payload["stream_options"] = {"include_usage": True}
+
                     if _cfg.LOG_LEVEL == "debug":
                         _eos = payload.get("ignore_eos", "MISSING")
                         _mt = payload.get("min_tokens", "MISSING")
                         _mx = payload.get("max_tokens", "MISSING")
                         print(
                             f"[sidecar] vLLM send req_id={req_id} model={_cfg.MODEL_NAME} "
-                            f"ignore_eos={_eos} min_tokens={_mt} max_tokens={_mx}"
+                            f"ignore_eos={_eos} min_tokens={_mt} max_tokens={_mx} "
+                            f"stream={use_stream}"
                         )
 
-                    resp = session.post(
-                        vllm_url,
-                        json=payload,
-                        timeout=_cfg.VLLM_TIMEOUT_S,
-                    )
+                    output_text: str
+                    finish_reason: Optional[str] = None
+                    usage: Optional[Dict[str, Any]] = None
+                    raw_vllm: Optional[Dict[str, Any]] = None
+                    latency_s: Optional[float] = None
+                    ttft_s: Optional[float] = None
+
+                    if use_stream:
+                        # --------------------------------------------------
+                        # Streaming path: SSE from vLLM, accumulate locally
+                        # and optionally forward chunks to router
+                        # --------------------------------------------------
+                        router_chunk_url = f"{_cfg.ROUTER_URL}/result_chunk"
+                        forward_stream = bool(meta.get("__chat_request__", {}).get("stream"))
+
+                        t_vllm_send = time.time()
+                        resp = session.post(
+                            vllm_url,
+                            json=payload,
+                            timeout=_cfg.VLLM_TIMEOUT_S,
+                            stream=True,
+                        )
+
+                        if not resp.ok:
+                            print(f"[sidecar] vLLM stream error: {resp.status_code} {resp.text}")
+                            output_text = f"[vLLM error {resp.status_code}]"
+                            resp.close()
+                        else:
+                            import json as _json
+                            parts: list = []
+                            t_first_token: Optional[float] = None
+                            chunk_idx = 0
+                            try:
+                                for raw_line in resp.iter_lines(decode_unicode=True):
+                                    if raw_line is None:
+                                        continue
+                                    line = raw_line.rstrip("\r\n")
+                                    if not line.startswith("data: "):
+                                        continue
+                                    data_str = line[6:]
+                                    if data_str.strip() == "[DONE]":
+                                        break
+                                    try:
+                                        chunk = _json.loads(data_str)
+                                    except Exception:
+                                        continue
+
+                                    delta_content = None
+                                    chunk_fr = None
+                                    choices = chunk.get("choices")
+                                    if isinstance(choices, list) and choices:
+                                        c0 = choices[0]
+                                        delta = c0.get("delta")
+                                        if isinstance(delta, dict):
+                                            content = delta.get("content")
+                                            if isinstance(content, str) and content:
+                                                if t_first_token is None:
+                                                    t_first_token = time.time()
+                                                parts.append(content)
+                                                delta_content = content
+
+                                        fr = c0.get("finish_reason")
+                                        if isinstance(fr, str):
+                                            finish_reason = fr
+                                            chunk_fr = fr
+
+                                    u = chunk.get("usage")
+                                    if isinstance(u, dict) and u:
+                                        usage = u
+
+                                    if forward_stream and (delta_content or chunk_fr):
+                                        is_final = chunk_fr is not None
+                                        chunk_payload = {
+                                            "req_id": req_id,
+                                            "chunk_idx": chunk_idx,
+                                            "delta": delta_content or "",
+                                            "is_final": is_final,
+                                        }
+                                        if chunk_fr:
+                                            chunk_payload["finish_reason"] = chunk_fr
+                                        if is_final and usage:
+                                            chunk_payload["usage"] = usage
+                                        try:
+                                            session.post(
+                                                router_chunk_url,
+                                                json=chunk_payload,
+                                                timeout=5.0,
+                                            )
+                                        except Exception as ce:
+                                            if _cfg.LOG_LEVEL == "debug":
+                                                print(f"[sidecar] chunk forward failed: {ce}")
+                                        chunk_idx += 1
+                            finally:
+                                resp.close()
+
+                            t_vllm_recv = time.time()
+                            output_text = "".join(parts) if parts else ""
+                            latency_s = t_vllm_recv - t_vllm_send
+
+                            if t_first_token is not None:
+                                ttft_s = t_first_token - t_vllm_send
+
+                    else:
+                        # --------------------------------------------------
+                        # Non-streaming path (original)
+                        # --------------------------------------------------
+                        resp = session.post(
+                            vllm_url,
+                            json=payload,
+                            timeout=_cfg.VLLM_TIMEOUT_S,
+                        )
+
+                        try:
+                            latency_s = float(resp.elapsed.total_seconds())
+                        except Exception:
+                            latency_s = None
+
+                        if not resp.ok:
+                            print(f"[sidecar] vLLM error: {resp.status_code} {resp.text}")
+                            output_text = f"[vLLM error {resp.status_code}]"
+                        else:
+                            try:
+                                data = resp.json()
+                                raw_vllm = data
+
+                                choices = data.get("choices") or []
+                                if choices:
+                                    first = choices[0]
+                                    msg = first.get("message") or {}
+                                    output_text = msg.get("content") or str(first)
+                                    finish_reason = (
+                                        first.get("finish_reason")
+                                        or data.get("finish_reason")
+                                    )
+                                else:
+                                    output_text = str(data)
+
+                                if isinstance(data.get("usage"), dict):
+                                    usage = data["usage"]
+                            except Exception as e:
+                                print(f"[sidecar] parse error for req_id={req_id}: {e}")
+                                output_text = "[parse error in vLLM response]"
+                                raw_vllm = None
+                                finish_reason = None
+                                usage = None
 
                     # ----------------------------------------------------
                     # Trace: vLLM recv timestamp
@@ -200,53 +346,9 @@ class VLLMWorker:
                     if getattr(_cfg, "TRACE_ENABLED", False):
                         tr = dict(meta.get("__trace__") or {})
                         tr["t_vllm_recv"] = time.time()
+                        if ttft_s is not None:
+                            tr["ttft_sidecar_s"] = ttft_s
                         meta["__trace__"] = tr
-
-                    # ----------------------------------------------------
-                    # Extract vLLM response, preserving EVERYTHING
-                    # ----------------------------------------------------
-                    output_text: str
-                    finish_reason: Optional[str] = None
-                    usage: Optional[Dict[str, Any]] = None
-                    raw_vllm: Optional[Dict[str, Any]] = None
-                    latency_s: Optional[float] = None
-
-                    # Try to get HTTP-level latency from requests
-                    try:
-                        latency_s = float(resp.elapsed.total_seconds())
-                    except Exception:
-                        latency_s = None
-
-                    if not resp.ok:
-                        print(f"[sidecar] vLLM error: {resp.status_code} {resp.text}")
-                        output_text = f"[vLLM error {resp.status_code}]"
-                    else:
-                        try:
-                            data = resp.json()
-                            raw_vllm = data
-
-                            choices = data.get("choices") or []
-                            if choices:
-                                first = choices[0]
-                                msg = first.get("message") or {}
-                                # Prefer message.content if present
-                                output_text = msg.get("content") or str(first)
-                                finish_reason = (
-                                    first.get("finish_reason")
-                                    or data.get("finish_reason")
-                                )
-                            else:
-                                # Fallback: just stringify the whole payload
-                                output_text = str(data)
-
-                            if isinstance(data.get("usage"), dict):
-                                usage = data["usage"]
-                        except Exception as e:
-                            print(f"[sidecar] parse error for req_id={req_id}: {e}")
-                            output_text = "[parse error in vLLM response]"
-                            raw_vllm = None
-                            finish_reason = None
-                            usage = None
 
                     # ----------------------------------------------------
                     # Trace: queue snapshot at result time
@@ -267,14 +369,18 @@ class VLLMWorker:
                     # ----------------------------------------------------
                     result_obj: Dict[str, Any] = {
                         "output": output_text,
+                        "endpoint_id": _cfg.CONTAINER_NAME,
                     }
 
                     if finish_reason is not None:
                         result_obj["finish_reason"] = finish_reason
 
-                    # HTTP-level latency as seen by sidecar → vLLM
+                    # HTTP-level latency as seen by sidecar -> vLLM
                     if latency_s is not None:
                         result_obj["latency_s"] = latency_s
+
+                    if ttft_s is not None:
+                        result_obj["ttft_sidecar_s"] = ttft_s
 
                     # Full raw OpenAI-compatible JSON from vLLM
                     if raw_vllm is not None:

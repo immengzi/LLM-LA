@@ -15,7 +15,7 @@
 backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 2000
+total_requests: 1
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -111,7 +111,7 @@ helm:
   models:
     - name: glm5-chat
       servedModelName: served-model
-      replicas: 4
+      replicas: 1
       modelSubPath: GLM-5-w4a8-mtp-QuaRot
       tensorParallelSize: 8
       batchSize: 4
