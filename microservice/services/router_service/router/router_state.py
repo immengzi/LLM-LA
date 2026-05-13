@@ -122,6 +122,9 @@ class RouterState:
         # req_id -> time when result was stored (for TTL cleanup)
         self._result_store_ts: Dict[str, float] = {}
 
+        # Streaming chunk queues: req_id -> asyncio.Queue
+        self._chunk_queues: Dict[str, asyncio.Queue] = {}
+
         # background cleanup task (lazy-start)
         self._cleanup_task: Optional[asyncio.Task] = None
 
@@ -755,6 +758,47 @@ class RouterState:
         finally:
             with self._lock:
                 self._result_futs.pop(req_id, None)
+
+    # -------------------------------------------------------
+    # Streaming chunk queues
+    # -------------------------------------------------------
+
+    def register_chunk_queue(self, req_id: str) -> asyncio.Queue:
+        """Create an asyncio.Queue for streaming chunks keyed by req_id."""
+        q: asyncio.Queue = asyncio.Queue()
+        with self._lock:
+            self._chunk_queues[req_id] = q
+        return q
+
+    def push_chunk(self, req_id: str, chunk: Dict[str, Any]) -> bool:
+        """
+        Push a chunk into the queue for req_id (thread-safe).
+        Returns False if no queue is registered for this req_id.
+        """
+        with self._lock:
+            q = self._chunk_queues.get(req_id)
+        if q is None:
+            return False
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(q.put_nowait, chunk)
+        else:
+            q.put_nowait(chunk)
+        return True
+
+    def remove_chunk_queue(self, req_id: str) -> None:
+        """Remove the chunk queue for req_id (cleanup)."""
+        with self._lock:
+            self._chunk_queues.pop(req_id, None)
+
+    def has_chunk_queue(self, req_id: str) -> bool:
+        with self._lock:
+            return req_id in self._chunk_queues
 
     # -------------------------------------------------------
     # Metrics

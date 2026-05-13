@@ -30,7 +30,7 @@ import json
 
 import requests
 
-from http_client import send_one, submit_one, send_one_aibrix, send_one_litellm
+from http_client import send_one, submit_one, send_one_aibrix, send_one_litellm, send_one_litellm_stream
 from config import (
     GenerationConfig,
     AIBrixConfig,
@@ -80,6 +80,7 @@ def _extract_result_fields(
     Optional[int],  # usage_total_tokens
     Optional[Dict[str, Any]],  # trace_dict
     Optional[Dict[str, float]],  # trace_metrics
+    Optional[str],  # endpoint_id
 ]:
     latency_s: Optional[float] = None
     finish_reason: Optional[str] = None
@@ -92,6 +93,7 @@ def _extract_result_fields(
 
     trace_dict: Optional[Dict[str, Any]] = None
     trace_metrics: Optional[Dict[str, float]] = None
+    endpoint_id: Optional[str] = None
 
     if isinstance(result, dict):
         # --- main fields ---
@@ -104,6 +106,15 @@ def _extract_result_fields(
             output_preview = output_full.replace("\n", " ")
             if len(output_preview) > 120:
                 output_preview = output_preview[:117] + "..."
+
+        # --- endpoint_id (sidecar pod that handled this request) ---
+        eid = result.get("endpoint_id")
+        if not eid:
+            raw = result.get("raw")
+            if isinstance(raw, dict):
+                eid = raw.get("system_fingerprint")
+        if isinstance(eid, str) and eid.strip():
+            endpoint_id = eid.strip()
 
         # --- usage (tokens) ---
         usage_dict: Optional[Dict[str, Any]] = None
@@ -153,6 +164,7 @@ def _extract_result_fields(
         usage_total_tokens,
         trace_dict,
         trace_metrics,
+        endpoint_id,
     )
 
 
@@ -201,6 +213,7 @@ def _emit_completion_from_result(
         usage_total_tokens,
         trace_dict,
         trace_metrics,
+        endpoint_id,
     ) = _extract_result_fields(result if isinstance(result, dict) else None)
 
     idx = int(info["idx"])
@@ -242,6 +255,8 @@ def _emit_completion_from_result(
             "finish_reason": finish_reason,
         }
 
+        if endpoint_id is not None:
+            record["endpoint_id"] = endpoint_id
         if usage_prompt_tokens is not None:
             record["prompt_tokens"] = usage_prompt_tokens
         if usage_completion_tokens is not None:
@@ -400,6 +415,7 @@ def _request_thread_router_sync(
                 usage_total_tokens,
                 trace_dict,
                 trace_metrics,
+                endpoint_id,
             ) = _extract_result_fields(result)
 
             if latency_s is not None:
@@ -438,6 +454,8 @@ def _request_thread_router_sync(
                     "finish_reason": finish_reason,
                 }
 
+                if endpoint_id is not None:
+                    record["endpoint_id"] = endpoint_id
                 if usage_prompt_tokens is not None:
                     record["prompt_tokens"] = usage_prompt_tokens
                 if usage_completion_tokens is not None:
@@ -517,6 +535,7 @@ def _request_thread_aibrix_http(
                 usage_total_tokens,
                 trace_dict,
                 trace_metrics,
+                endpoint_id,
             ) = _extract_result_fields(result)
 
             if latency_s is not None:
@@ -555,6 +574,8 @@ def _request_thread_aibrix_http(
                     "finish_reason": finish_reason,
                 }
 
+                if endpoint_id is not None:
+                    record["endpoint_id"] = endpoint_id
                 if usage_prompt_tokens is not None:
                     record["prompt_tokens"] = usage_prompt_tokens
                 if usage_completion_tokens is not None:
@@ -650,6 +671,7 @@ def _request_thread_litellm_http(
                 usage_total_tokens,
                 trace_dict,
                 trace_metrics,
+                endpoint_id,
             ) = _extract_result_fields(result)
 
             if latency_s is not None:
@@ -688,6 +710,8 @@ def _request_thread_litellm_http(
                     "finish_reason": finish_reason,
                 }
 
+                if endpoint_id is not None:
+                    record["endpoint_id"] = endpoint_id
                 if usage_prompt_tokens is not None:
                     record["prompt_tokens"] = usage_prompt_tokens
                 if usage_completion_tokens is not None:
@@ -712,6 +736,139 @@ def _request_thread_litellm_http(
 
         except Exception as e:
             print(f"[client][RECV][T{task.idx}] ✗ ERROR idx={task.idx}: {e}")
+            if logger is not None:
+                err_record: Dict[str, Any] = {
+                    "idx": task.idx,
+                    "error": str(e),
+                    "prompt": task.prompt,
+                    "planned_ts_mono": task.ts_mono,
+                    "send_failed": True,
+                }
+                logger.log_request(err_record)
+    finally:
+        session.close()
+
+
+def _request_thread_litellm_http_stream(
+    task: RequestTask,
+    litellm_cfg: LiteLLMConfig,
+    gen_cfg: GenerationConfig,
+    t0_mono: float,
+    logger: Optional[ExperimentLogger] = None,
+    output_log_mode: str = "preview",
+    print_trace: bool = True,
+    label: str = "LiteLLM",
+):
+    """
+    Streaming variant of _request_thread_litellm_http.
+    Parses SSE from the proxy, captures TTFT and TPOT metrics.
+    """
+    session = requests.Session()
+    session.headers.update({"Connection": "close"})
+    try:
+        now = time.monotonic()
+        delay = task.ts_mono - now
+        if delay > 0:
+            time.sleep(delay)
+
+        now_send = time.monotonic()
+        _log_send_tick(now_send, t0_mono)
+
+        print(f"[client][SEND][T{task.idx}] idx={task.idx} planned_ts={task.ts_mono:.6f} (stream)")
+
+        t0 = time.time()
+        try:
+            effective_gen = gen_cfg
+            if task.output_tokens is not None:
+                effective_gen = _replace_gen_cfg(gen_cfg, task.output_tokens)
+            rid, result = send_one_litellm_stream(session, litellm_cfg, task.prompt, effective_gen, label=label)
+            t1 = time.time()
+            end_to_end_s = t1 - t0
+
+            (
+                latency_s,
+                finish_reason,
+                output_preview,
+                output_full,
+                usage_prompt_tokens,
+                usage_completion_tokens,
+                usage_total_tokens,
+                trace_dict,
+                trace_metrics,
+                endpoint_id,
+            ) = _extract_result_fields(result)
+
+            ttft_s = result.get("ttft_s") if isinstance(result, dict) else None
+            tpot_avg_s = result.get("tpot_avg_s") if isinstance(result, dict) else None
+            streaming_chunks = result.get("streaming_chunks") if isinstance(result, dict) else None
+
+            ttft_str = f" ttft={ttft_s:.3f}s" if ttft_s is not None else ""
+            tpot_str = f" tpot_avg={tpot_avg_s:.4f}s" if tpot_avg_s is not None else ""
+            if latency_s is not None:
+                print(
+                    f"[client][RECV][T{task.idx}] idx={task.idx} req_id={rid} "
+                    f"wait_wall={end_to_end_s:.3f}s model_latency={latency_s:.3f}s"
+                    f"{ttft_str}{tpot_str}"
+                )
+            else:
+                print(
+                    f"[client][RECV][T{task.idx}] idx={task.idx} req_id={rid} "
+                    f"wait_wall={end_to_end_s:.3f}s{ttft_str}{tpot_str}"
+                )
+
+            if finish_reason is not None:
+                print(f"[client][T{task.idx}]   finish_reason={finish_reason}")
+
+            if print_trace and output_preview is not None:
+                print(f"[client][T{task.idx}]   output_preview={output_preview!r}")
+
+            if logger is not None:
+                record: Dict[str, Any] = {
+                    "idx": task.idx,
+                    "req_id": rid,
+                    "prompt": task.prompt,
+                    "planned_ts_mono": task.ts_mono,
+                    "actual_send_ts_mono": now_send,
+                    "t0_wall": t0,
+                    "t1_wall": t1,
+                    "end_to_end_s": end_to_end_s,
+                    "model_latency_s": latency_s,
+                    "finish_reason": finish_reason,
+                    "streaming": True,
+                }
+
+                if ttft_s is not None:
+                    record["ttft_s"] = ttft_s
+                if tpot_avg_s is not None:
+                    record["tpot_avg_s"] = tpot_avg_s
+                if streaming_chunks is not None:
+                    record["streaming_chunks"] = streaming_chunks
+                if endpoint_id is not None:
+                    record["endpoint_id"] = endpoint_id
+                if usage_prompt_tokens is not None:
+                    record["prompt_tokens"] = usage_prompt_tokens
+                if usage_completion_tokens is not None:
+                    record["completion_tokens"] = usage_completion_tokens
+                if usage_total_tokens is not None:
+                    record["total_tokens"] = usage_total_tokens
+
+                log_output = _choose_log_output(
+                    output_log_mode=output_log_mode,
+                    output_full=output_full,
+                    output_preview=output_preview,
+                )
+                if log_output is not None:
+                    record["output"] = log_output
+
+                if trace_dict is not None:
+                    record["trace"] = trace_dict
+                if trace_metrics is not None:
+                    record["trace_metrics"] = trace_metrics
+
+                logger.log_request(record)
+
+        except Exception as e:
+            print(f"[client][RECV][T{task.idx}] ✗ ERROR idx={task.idx} (stream): {e}")
             if logger is not None:
                 err_record: Dict[str, Any] = {
                     "idx": task.idx,
@@ -775,6 +932,7 @@ def _request_thread_anthropic_http(
                 usage_total_tokens,
                 trace_dict,
                 trace_metrics,
+                endpoint_id,
             ) = _extract_result_fields(result)
 
             if latency_s is not None:
@@ -813,6 +971,8 @@ def _request_thread_anthropic_http(
                     "finish_reason": finish_reason,
                 }
 
+                if endpoint_id is not None:
+                    record["endpoint_id"] = endpoint_id
                 if usage_prompt_tokens is not None:
                     record["prompt_tokens"] = usage_prompt_tokens
                 if usage_completion_tokens is not None:
@@ -1397,15 +1557,18 @@ def run_open_loop_load(
         if litellm is None:
             raise RuntimeError("backend='litellm' requires litellm config")
 
+        litellm_stream = bool(getattr(litellm, "stream", False))
+        stream_tag = " (stream=true)" if litellm_stream else ""
         print(
             f"[load_runner] LiteLLM proxy: {litellm.base_url}{litellm.chat_path} "
-            f"model={litellm.model}"
+            f"model={litellm.model}{stream_tag}"
         )
         print(
             "[load_runner] NOTE: backend=litellm routes through the LiteLLM proxy "
             "for production auth/spend validation. Use backend=router for benchmarking."
         )
 
+        thread_fn = _request_thread_litellm_http_stream if litellm_stream else _request_thread_litellm_http
         threads: List[threading.Thread] = []
         t0_wall = time.time()
 
@@ -1418,7 +1581,7 @@ def run_open_loop_load(
             ot = output_tokens_per_request[idx] if output_tokens_per_request else None
             task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono, output_tokens=ot)
             t = threading.Thread(
-                target=_request_thread_litellm_http,
+                target=thread_fn,
                 args=(task, litellm, gen_cfg, t0_mono, logger, output_log_mode, print_trace),
                 daemon=True,
             )
@@ -1439,15 +1602,18 @@ def run_open_loop_load(
         if boom is None:
             raise RuntimeError("backend='boom' requires boom config")
 
+        boom_stream = bool(getattr(boom, "stream", False))
+        stream_tag = " (stream=true)" if boom_stream else ""
         print(
             f"[load_runner] BooM Gateway: {boom.base_url}{boom.chat_path} "
-            f"model={boom.model}"
+            f"model={boom.model}{stream_tag}"
         )
         print(
             "[load_runner] NOTE: backend=boom routes through BooM Gateway "
             "for production auth/spend validation. Use backend=router for benchmarking."
         )
 
+        thread_fn = _request_thread_litellm_http_stream if boom_stream else _request_thread_litellm_http
         threads: List[threading.Thread] = []
         t0_wall = time.time()
 
@@ -1460,7 +1626,7 @@ def run_open_loop_load(
             ot = output_tokens_per_request[idx] if output_tokens_per_request else None
             task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono, output_tokens=ot)
             t = threading.Thread(
-                target=_request_thread_litellm_http,
+                target=thread_fn,
                 args=(task, boom, gen_cfg, t0_mono, logger, output_log_mode, print_trace, "BooM"),
                 daemon=True,
                 name=f"boom-T{idx}",

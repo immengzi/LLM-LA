@@ -325,6 +325,168 @@ def send_one_aibrix(
 
 
 # ============================================================
+# Streaming variant of send_one_litellm (SSE)
+# ============================================================
+
+def _iter_sse_chunks(resp: requests.Response):
+    """Yield parsed JSON objects from an OpenAI SSE stream."""
+    import json as _json
+    for raw_line in resp.iter_lines(decode_unicode=True):
+        if raw_line is None:
+            continue
+        line = raw_line.rstrip("\r\n")
+        if line == "":
+            continue
+        if line.startswith("data: "):
+            data_str = line[len("data: "):]
+            if data_str.strip() == "[DONE]":
+                return
+            try:
+                yield _json.loads(data_str)
+            except Exception:
+                pass
+
+
+def send_one_litellm_stream(
+    session: requests.Session,
+    litellm_cfg: LiteLLMConfig,
+    prompt: str,
+    gen_cfg: GenerationConfig,
+    label: str = "LiteLLM",
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """
+    Streaming variant of send_one_litellm.
+
+    Sends stream=true to the proxy, parses SSE chunks, accumulates the full
+    response, and returns the same (req_id, result_dict) shape as the
+    non-streaming version — plus ttft_s and tpot_avg_s.
+    """
+    label_lower = label.lower()
+    t_send = time.time()
+
+    url = f"{str(litellm_cfg.base_url).rstrip('/')}{str(litellm_cfg.chat_path)}"
+
+    payload: Dict[str, Any] = {
+        "model": str(litellm_cfg.model),
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "max_tokens": int(gen_cfg.max_tokens),
+        "temperature": float(gen_cfg.temperature),
+    }
+
+    if gen_cfg.min_tokens is not None:
+        payload["min_tokens"] = int(gen_cfg.min_tokens)
+
+    payload.update(_build_aibrix_extra_generation_fields(gen_cfg))
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {litellm_cfg.api_key}",
+    }
+
+    try:
+        resp = session.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=(10, float(litellm_cfg.timeout_s)),
+            stream=True,
+            proxies={"http": None, "https": None},
+        )
+    except RequestException as e:
+        print(f"[client] ✗ HTTP error talking to {label} proxy (stream): {e}")
+        raise
+
+    if not resp.ok:
+        print(f"[client] ✗ {label} streaming request failed: {resp.status_code} {resp.reason}")
+        body_preview = resp.text
+        if len(body_preview) > 2000:
+            body_preview = body_preview[:2000] + "...<truncated>"
+        print(f"[client] response_body: {body_preview}")
+        raise RuntimeError(
+            f"{label} streaming request failed: {resp.status_code} {resp.reason}"
+        )
+
+    rid: Optional[str] = None
+    output_parts: list = []
+    finish_reason: Optional[str] = None
+    usage: Optional[Dict[str, Any]] = None
+
+    t_first_token: Optional[float] = None
+    token_timestamps: list = []
+    chunk_count = 0
+
+    try:
+        for chunk in _iter_sse_chunks(resp):
+            now = time.time()
+            chunk_count += 1
+
+            if rid is None:
+                cid = chunk.get("id")
+                if isinstance(cid, str) and cid.strip():
+                    rid = cid.strip()
+
+            choices = chunk.get("choices")
+            if isinstance(choices, list) and choices:
+                c0 = choices[0]
+                delta = c0.get("delta")
+                if isinstance(delta, dict):
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        if t_first_token is None:
+                            t_first_token = now
+                        output_parts.append(content)
+                        token_timestamps.append(now)
+
+                fr = c0.get("finish_reason")
+                if isinstance(fr, str):
+                    finish_reason = fr
+
+            u = chunk.get("usage")
+            if isinstance(u, dict) and u:
+                usage = u
+    finally:
+        resp.close()
+
+    t_done = time.time()
+
+    if rid is None:
+        rid = f"{label_lower}-{uuid.uuid4().hex}"
+
+    output = "".join(output_parts) if output_parts else None
+
+    ttft_s: Optional[float] = None
+    if t_first_token is not None:
+        ttft_s = t_first_token - t_send
+
+    tpot_avg_s: Optional[float] = None
+    if len(token_timestamps) >= 2 and t_first_token is not None:
+        decode_duration = token_timestamps[-1] - t_first_token
+        tpot_avg_s = decode_duration / (len(token_timestamps) - 1)
+
+    result: Dict[str, Any] = {
+        "output": output,
+        "finish_reason": finish_reason,
+        "latency_s": float(t_done - t_send),
+        "ttft_s": ttft_s,
+        "tpot_avg_s": tpot_avg_s,
+        "streaming_chunks": chunk_count,
+        "trace": {
+            "trace_mode": "client_only_stream",
+            "t_send_client": t_send,
+            "t_first_token_client": t_first_token,
+            "t_recv_client": t_done,
+            "client_roundtrip_s": float(t_done - t_send),
+        },
+    }
+
+    if usage is not None:
+        result["usage"] = usage
+
+    return rid, result
+
+# ============================================================
 # LiteLLM proxy backend
 #
 # Sends OpenAI-format requests to the LiteLLM proxy pod, which
@@ -361,11 +523,6 @@ def send_one_litellm(
         (req_id, result_dict)
     """
     label_lower = label.lower()
-
-    if bool(litellm_cfg.stream):
-        raise RuntimeError(
-            f"{label} streaming responses are not supported by send_one_litellm()"
-        )
 
     t_send = time.time()
 

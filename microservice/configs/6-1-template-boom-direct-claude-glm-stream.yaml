@@ -1,21 +1,13 @@
-# boom-direct-glm-dp.yaml
+# 5-1: boom-direct-glm-dp + STREAMING.
+# Based on 4-1 but with stream: true for real SSE TTFT/TPOT measurement.
+#
 # DIRECT MODE: BooM routes directly to vLLM pods, bypassing the KV-aware router.
-# Use this for A/B comparison against boom-claude-glm-dp.yaml (which uses the router).
-#
-# In this mode:
-#   - NO router-service, redis, cpu-hash, or sidecars are deployed.
-#   - BooM routes directly to vLLM leader pods via stable LWS headless DNS.
-#   - The "method" in master_config.yaml IS the BooM routing strategy:
-#       round_robin   — simple round-robin across pods
-#       key_affinity  — sticky routing per API key with load-aware rebalancing
-#
-# Everything else is identical to boom-claude-glm-dp.yaml.
-# Claude Code connects via /v1/messages (Anthropic format) on port 30401.
+# No server-side changes needed — BooM already forwards stream=true to vLLM.
 
 backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 5000
+total_requests: 10
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -86,7 +78,7 @@ boom:
   model: "served-model"
   api_key: "sk-boom-master"
   timeout_s: 10000.0
-  stream: false
+  stream: true                        # <<< streaming enabled
 
 helm:
   boom_claude_aliases: true

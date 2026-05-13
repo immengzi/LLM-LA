@@ -31,6 +31,8 @@ sidecar:
   # When true, sidecar forces ignore_eos=True on every vLLM request
   # (replay mode: generate exactly max_tokens, finish_reason="length").
   forceIgnoreEos: false
+  # When true, sidecar streams from vLLM internally (captures TTFT).
+  streamingMode: false
 
 router:
   # pull | push-rr | push-random | push-leastq

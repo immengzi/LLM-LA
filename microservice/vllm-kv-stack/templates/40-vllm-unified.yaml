@@ -324,6 +324,8 @@ spec:
                 value: {{ $.Values.sidecar.logLevel | default "info" | quote }}
               - name: FORCE_IGNORE_EOS
                 value: {{ $.Values.sidecar.forceIgnoreEos | default false | quote }}
+              - name: STREAMING_MODE
+                value: {{ $.Values.sidecar.streamingMode | default false | quote }}
             ports:
               - containerPort: 9000
                 name: sidecar-http
@@ -830,6 +832,8 @@ spec:
               value: {{ $.Values.sidecar.logLevel | default "info" | quote }}
             - name: FORCE_IGNORE_EOS
               value: {{ $.Values.sidecar.forceIgnoreEos | default false | quote }}
+            - name: STREAMING_MODE
+              value: {{ $.Values.sidecar.streamingMode | default false | quote }}
           ports:
             - containerPort: 9000
               name: sidecar-http

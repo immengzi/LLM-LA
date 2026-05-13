@@ -125,6 +125,7 @@ def main():
         f"(BATCH_SIZE={_cfg.BATCH_SIZE}, PREFETCH={_cfg.PREFETCH}, "
         f"workers={total_workers}, "
         f"FORCE_IGNORE_EOS={_cfg.FORCE_IGNORE_EOS}, "
+        f"STREAMING_MODE={_cfg.STREAMING_MODE}, "
         f"port={_cfg.SIDECAR_PORT}, endpoint_id={endpoint_id})"
     )
     print(
