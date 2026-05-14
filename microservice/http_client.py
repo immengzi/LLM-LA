@@ -305,6 +305,19 @@ def send_one_aibrix(
     if isinstance(data.get("usage"), dict):
         usage = data["usage"]
 
+    # Extract endpoint identity from response headers or body.
+    # BooM may set x-litellm-model-id or similar; vLLM sets system_fingerprint.
+    endpoint_id: Optional[str] = None
+    for hdr in ("x-litellm-model-id", "x-upstream", "x-backend-server", "x-served-by"):
+        v = resp.headers.get(hdr)
+        if v:
+            endpoint_id = v
+            break
+    if not endpoint_id:
+        sf = data.get("system_fingerprint")
+        if isinstance(sf, str) and sf.strip():
+            endpoint_id = sf.strip()
+
     result: Dict[str, Any] = {
         "output": output,
         "finish_reason": finish_reason,
@@ -317,6 +330,9 @@ def send_one_aibrix(
         },
         "raw": data,
     }
+
+    if endpoint_id:
+        result["endpoint_id"] = endpoint_id
 
     if usage is not None:
         result["usage"] = usage
@@ -412,6 +428,14 @@ def send_one_litellm_stream(
     output_parts: list = []
     finish_reason: Optional[str] = None
     usage: Optional[Dict[str, Any]] = None
+    stream_endpoint_id: Optional[str] = None
+
+    # Check response headers for endpoint identity before consuming the stream
+    for hdr in ("x-litellm-model-id", "x-upstream", "x-backend-server", "x-served-by"):
+        v = resp.headers.get(hdr)
+        if v:
+            stream_endpoint_id = v
+            break
 
     t_first_token: Optional[float] = None
     token_timestamps: list = []
@@ -426,6 +450,11 @@ def send_one_litellm_stream(
                 cid = chunk.get("id")
                 if isinstance(cid, str) and cid.strip():
                     rid = cid.strip()
+
+            if stream_endpoint_id is None:
+                sf = chunk.get("system_fingerprint")
+                if isinstance(sf, str) and sf.strip():
+                    stream_endpoint_id = sf.strip()
 
             choices = chunk.get("choices")
             if isinstance(choices, list) and choices:
@@ -480,6 +509,9 @@ def send_one_litellm_stream(
             "client_roundtrip_s": float(t_done - t_send),
         },
     }
+
+    if stream_endpoint_id:
+        result["endpoint_id"] = stream_endpoint_id
 
     if usage is not None:
         result["usage"] = usage

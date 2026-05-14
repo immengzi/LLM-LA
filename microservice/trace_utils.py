@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Any, Optional
+from collections import defaultdict
+from typing import Dict, Any, List, Optional, Tuple
 
 
 def _get_ts(trace: Dict[str, Any], name: str) -> Optional[float]:
@@ -152,3 +153,171 @@ def print_trace_block(idx: int, result: Dict[str, Any]) -> None:
             # Skip raw timestamps here – we only expose derived latencies.
             continue
         print(f"[client][T{idx}]   {k}={v}")
+
+
+# ============================================================
+# Per-endpoint token accounting
+# ============================================================
+
+class EndpointTokenTracker:
+    """
+    Accumulates prefill (prompt) and decode (completion) token counts
+    per serving endpoint.  Thread-safe — can be called from request
+    callback threads in load_runner.
+
+    Usage:
+        tracker = EndpointTokenTracker()
+        # after each request completes:
+        tracker.record(endpoint="vllm-pod-0", prompt_tokens=512, completion_tokens=128)
+        ...
+        tracker.print_summary()
+    """
+
+    def __init__(self) -> None:
+        import threading
+        self._lock = threading.Lock()
+        self._prefill: Dict[str, int] = defaultdict(int)
+        self._decode: Dict[str, int] = defaultdict(int)
+        self._count: Dict[str, int] = defaultdict(int)
+
+    def record(
+        self,
+        endpoint: Optional[str],
+        prompt_tokens: Optional[int] = None,
+        completion_tokens: Optional[int] = None,
+    ) -> None:
+        ep = endpoint or "_unknown_"
+        with self._lock:
+            self._count[ep] += 1
+            if prompt_tokens is not None:
+                self._prefill[ep] += int(prompt_tokens)
+            if completion_tokens is not None:
+                self._decode[ep] += int(completion_tokens)
+
+    def snapshot(self) -> List[Dict[str, Any]]:
+        """Return per-endpoint totals as a list of dicts (sorted by endpoint)."""
+        with self._lock:
+            endpoints = sorted(
+                set(self._count) | set(self._prefill) | set(self._decode)
+            )
+            return [
+                {
+                    "endpoint": ep,
+                    "requests": self._count.get(ep, 0),
+                    "prefill_tokens": self._prefill.get(ep, 0),
+                    "decode_tokens": self._decode.get(ep, 0),
+                    "total_tokens": self._prefill.get(ep, 0) + self._decode.get(ep, 0),
+                }
+                for ep in endpoints
+            ]
+
+    def totals(self) -> Tuple[int, int, int]:
+        """Return (total_prefill, total_decode, total_requests) across all endpoints."""
+        with self._lock:
+            return (
+                sum(self._prefill.values()),
+                sum(self._decode.values()),
+                sum(self._count.values()),
+            )
+
+    def print_summary(self, label: str = "Token summary") -> None:
+        rows = self.snapshot()
+        if not rows:
+            print(f"[{label}] no token data recorded")
+            return
+
+        total_pf, total_dc, total_req = self.totals()
+        print(f"\n[{label}] per-endpoint token counts:")
+        print(f"  {'endpoint':<40s}  {'reqs':>6s}  {'prefill':>10s}  {'decode':>10s}  {'total':>10s}")
+        print(f"  {'-'*40}  {'-'*6}  {'-'*10}  {'-'*10}  {'-'*10}")
+        for r in rows:
+            print(
+                f"  {r['endpoint']:<40s}  {r['requests']:>6d}  "
+                f"{r['prefill_tokens']:>10d}  {r['decode_tokens']:>10d}  "
+                f"{r['total_tokens']:>10d}"
+            )
+        print(f"  {'TOTAL':<40s}  {total_req:>6d}  {total_pf:>10d}  {total_dc:>10d}  {total_pf + total_dc:>10d}")
+        print()
+
+
+# ============================================================
+# Post-experiment per-endpoint token summary from logs.json
+# ============================================================
+
+def summarize_endpoint_tokens(logs_path: str, save_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Read a completed experiment's logs.json and produce a per-endpoint
+    summary of prefill (prompt) and decode (completion) tokens served.
+
+    Each line in logs.json is a JSON record with optional fields:
+      endpoint_id, prompt_tokens, completion_tokens
+
+    Returns the summary rows and optionally writes them to save_path as JSON.
+    """
+    import json as _json
+
+    tracker = EndpointTokenTracker()
+    total_records = 0
+    errors = 0
+
+    try:
+        with open(logs_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = _json.loads(line)
+                except Exception:
+                    errors += 1
+                    continue
+
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("send_failed") or rec.get("error"):
+                    continue
+
+                total_records += 1
+                tracker.record(
+                    endpoint=rec.get("endpoint_id"),
+                    prompt_tokens=rec.get("prompt_tokens"),
+                    completion_tokens=rec.get("completion_tokens"),
+                )
+    except FileNotFoundError:
+        print(f"[token_summary] logs file not found: {logs_path}")
+        return []
+
+    rows = tracker.snapshot()
+    total_pf, total_dc, total_req = tracker.totals()
+
+    print(f"\n[token_summary] Analyzed {total_records} records from {logs_path}")
+    if errors:
+        print(f"[token_summary] ({errors} unparseable lines skipped)")
+
+    print(f"  {'endpoint':<40s}  {'reqs':>6s}  {'prefill':>10s}  {'decode':>10s}  {'total':>10s}")
+    print(f"  {'-'*40}  {'-'*6}  {'-'*10}  {'-'*10}  {'-'*10}")
+    for r in rows:
+        print(
+            f"  {r['endpoint']:<40s}  {r['requests']:>6d}  "
+            f"{r['prefill_tokens']:>10d}  {r['decode_tokens']:>10d}  "
+            f"{r['total_tokens']:>10d}"
+        )
+    print(f"  {'TOTAL':<40s}  {total_req:>6d}  {total_pf:>10d}  {total_dc:>10d}  {total_pf + total_dc:>10d}")
+    print()
+
+    if save_path:
+        summary = {
+            "total_records": total_records,
+            "total_prefill_tokens": total_pf,
+            "total_decode_tokens": total_dc,
+            "total_requests": total_req,
+            "per_endpoint": rows,
+        }
+        try:
+            with open(save_path, "w", encoding="utf-8") as f:
+                _json.dump(summary, f, indent=2)
+            print(f"[token_summary] saved to {save_path}")
+        except Exception as e:
+            print(f"[token_summary] WARN: failed to save: {e}")
+
+    return rows

@@ -1,5 +1,7 @@
 # router/api.py
 # -*- coding: utf-8 -*-
+_API_VERSION = "2026-05-13-streaming-endpoint-id"
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
@@ -812,6 +814,7 @@ def _ingest_result_payload(payload: dict) -> None:
 async def _startup():
     global _kv_watcher, _push_router, _publisher, _push_dispatcher, _hash_client
 
+    print(f"[router] api.py version={_API_VERSION}")
     print_config(_cfg)
     sys.stdout.flush()
 

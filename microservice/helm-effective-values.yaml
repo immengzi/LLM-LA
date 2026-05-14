@@ -94,10 +94,9 @@ models:
     sizeLocal: 1
   modelSubPath: GLM-5-w4a8-mtp-QuaRot
   name: glm5-chat
-  replicas: 1
+  replicas: 4
   servedModelName: served-model
   sidecarPrefetch: 2
-  streamingMode: true
   tensorParallelSize: 8
   vllm:
     additionalConfig:
@@ -133,7 +132,7 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 1
+  vllm: 4
 router:
   admissionThrottle: false
   apiKey: ZhongRuanChuangXin!
@@ -158,7 +157,7 @@ sidecar:
   forceIgnoreEos: true
   logLevel: info
   prefetch: 2
-  streamingMode: true
+  streamingMode: false
 tensorParallelSize: 8
 vllm:
   additionalConfig: {}
