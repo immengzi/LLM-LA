@@ -180,6 +180,8 @@ spec:
                 export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
                 {{- end }}
 
+                export PYTHONPATH="/etc/fingerprint-mw:${PYTHONPATH:-}"
+
                 exec python -m vllm.entrypoints.openai.api_server \
                   --model /model \
                   --tokenizer /model \
@@ -190,6 +192,7 @@ spec:
                   --data-parallel-size-local {{ $dp.sizeLocal | default 1 }} \
                   --data-parallel-address "${NODE_IP}" \
                   --data-parallel-rpc-port {{ $dp.rpcPort | default 13389 }} \
+                  --middleware _fp_mw.HostnameFingerprint \
 {{ include "vllmkv.vllmRuntimeFlags" $flagCtx | trim | indent 18 }}
                   --host 0.0.0.0
                   {{- if $.Values.mooncake.enabled }} \
@@ -223,6 +226,9 @@ spec:
                 name: vllmthr
                 protocol: TCP
             volumeMounts:
+              - name: fingerprint-mw
+                mountPath: /etc/fingerprint-mw
+                readOnly: true
               - name: model
                 mountPath: /model
                 readOnly: true
@@ -340,6 +346,9 @@ spec:
           {{- end }}
 
         volumes:
+          - name: fingerprint-mw
+            configMap:
+              name: {{ $.Release.Name }}-fingerprint-mw
           - name: model
             {{- if $.Values.modelVolume.hostPath }}
             hostPath:
@@ -500,6 +509,9 @@ spec:
                 value: "/etc/mooncake/mooncake.json"
               {{- end }}
             volumeMounts:
+              - name: fingerprint-mw
+                mountPath: /etc/fingerprint-mw
+                readOnly: true
               - name: model
                 mountPath: /model
                 readOnly: true
@@ -536,6 +548,9 @@ spec:
                 ephemeral-storage: "4Gi"
 
         volumes:
+          - name: fingerprint-mw
+            configMap:
+              name: {{ $.Release.Name }}-fingerprint-mw
           - name: model
             {{- if $.Values.modelVolume.hostPath }}
             hostPath:
@@ -668,12 +683,15 @@ spec:
               export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
               {{- end }}
 
+              export PYTHONPATH="/etc/fingerprint-mw:${PYTHONPATH:-}"
+
               python -m vllm.entrypoints.openai.api_server \
                 --model /model \
                 --tokenizer /model \
                 --port 8200 \
                 --served-model-name {{ $servedModelName }} \
                 --tensor-parallel-size {{ $tp }} \
+                --middleware _fp_mw.HostnameFingerprint \
 {{ include "vllmkv.vllmRuntimeFlags" $flagCtx | trim | indent 16 }}
                 --host 0.0.0.0 \
                 {{- if $needsSidecar }}
@@ -717,6 +735,9 @@ spec:
               name: vllmthr
               protocol: TCP
           volumeMounts:
+            - name: fingerprint-mw
+              mountPath: /etc/fingerprint-mw
+              readOnly: true
             - name: model
               mountPath: /model
               readOnly: true
@@ -848,6 +869,9 @@ spec:
         {{- end }}
 
       volumes:
+        - name: fingerprint-mw
+          configMap:
+            name: {{ $.Release.Name }}-fingerprint-mw
         - name: model
           {{- if $.Values.modelVolume.hostPath }}
           hostPath:

@@ -2115,6 +2115,27 @@ only llm-la sanity check experiments with rps of 2,4,8,16 and batch size of 8 fo
 
 repeat of 284-287
 
+288-299
+
+TODO should check
+
+301-302
+
+300 requests
+good results 
+
+303-304
+
+2000 requests
+good results - best comparison with Boom so far
+
+305-306
+
+5000 requests
+good results - the benefit is marginalized
+becasuse of the requests getting shorter towrad the end
+
+
 Questions:
 
 1. what is your target metric to optimize?

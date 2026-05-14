@@ -1,0 +1,70 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-fingerprint-mw
+  namespace: {{ .Release.Namespace }}
+data:
+  _fp_mw.py: |
+    import os, json
+    _H = os.environ.get("POD_NAME", os.environ.get("HOSTNAME", "unknown"))
+    class HostnameFingerprint:
+        def __init__(self, app):
+            self.app = app
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                await self.app(scope, receive, send)
+                return
+            chunks = []
+            ct = ""
+            start_msg = None
+            async def ps(msg):
+                nonlocal ct, start_msg
+                if msg["type"] == "http.response.start":
+                    hdrs = []
+                    for n, v in msg.get("headers", []):
+                        nl = n.lower()
+                        if nl == b"content-type":
+                            ct = v.decode("utf-8", "replace").lower()
+                        if nl != b"content-length":
+                            hdrs.append((n, v))
+                    start_msg = dict(msg)
+                    start_msg["headers"] = hdrs
+                    if "event-stream" in ct:
+                        await send(start_msg)
+                        start_msg = None
+                    return
+                if msg["type"] == "http.response.body":
+                    body = msg.get("body", b"")
+                    more = msg.get("more_body", False)
+                    if "event-stream" in ct:
+                        t = body.decode("utf-8", "replace")
+                        out = []
+                        for ln in t.split("\n"):
+                            if ln.startswith("data: ") and ln.strip() != "data: [DONE]":
+                                try:
+                                    c = json.loads(ln[6:])
+                                    c["system_fingerprint"] = _H
+                                    ln = "data: " + json.dumps(c)
+                                except Exception:
+                                    pass
+                            out.append(ln)
+                        await send({"type": "http.response.body", "body": "\n".join(out).encode(), "more_body": more})
+                        return
+                    if not more:
+                        chunks.append(body)
+                        full = b"".join(chunks)
+                        try:
+                            d = json.loads(full)
+                            d["system_fingerprint"] = _H
+                            full = json.dumps(d).encode()
+                        except Exception:
+                            pass
+                        if start_msg is not None:
+                            start_msg["headers"].append((b"content-length", str(len(full)).encode()))
+                            await send(start_msg)
+                        await send({"type": "http.response.body", "body": full, "more_body": False})
+                        return
+                    chunks.append(body)
+                    return
+                await send(msg)
+            await self.app(scope, receive, ps)

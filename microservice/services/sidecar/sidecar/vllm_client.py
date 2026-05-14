@@ -1,5 +1,7 @@
 # sidecar/vllm_client.py
 # -*- coding: utf-8 -*-
+_VLLM_CLIENT_VERSION = "2026-05-13-streaming-endpoint-id"
+
 import time
 import threading
 from typing import Dict, Any, Optional
@@ -13,6 +15,7 @@ from .result_poster import ResultPoster
 from .metrics import inc_completed, set_sidecar_workers_busy
 
 _cfg = get_config()
+print(f"[sidecar] vllm_client.py version={_VLLM_CLIENT_VERSION}")
 
 # ------------------------------------------------------------
 # process-wide busy counter for sidecar workers

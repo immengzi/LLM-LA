@@ -13,6 +13,7 @@ from prompts import load_prompts_from_file, build_prompts_from_lmsys, load_repla
 from scheduler import build_schedule
 from load_runner import run_open_loop_load
 from experiment_io import init_experiment
+from trace_utils import summarize_endpoint_tokens
 
 # event-driven pod->node mapping snapshots (autoscaler / churn)
 from k8s_event_podmap import EventDrivenPodMapLogger
@@ -283,6 +284,10 @@ def main():
                 pass
 
         exp_logger.close()
+
+    logs_path = str(Path(exp_dir) / "logs.json")
+    token_summary_path = str(Path(exp_dir) / "endpoint_tokens.json")
+    summarize_endpoint_tokens(logs_path, save_path=token_summary_path)
 
     dt_wall = time.time() - t_start_wall
     dt_load = (t_end_load - t_start_load) if t_end_load is not None else None
