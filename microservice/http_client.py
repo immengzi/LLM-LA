@@ -370,6 +370,7 @@ def send_one_litellm_stream(
     gen_cfg: GenerationConfig,
     label: str = "LiteLLM",
     messages: Optional[List[Dict[str, str]]] = None,
+    api_key_override: Optional[str] = None,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
     Streaming variant of send_one_litellm.
@@ -400,9 +401,10 @@ def send_one_litellm_stream(
 
     payload.update(_build_aibrix_extra_generation_fields(gen_cfg))
 
+    effective_key = api_key_override or litellm_cfg.api_key
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {litellm_cfg.api_key}",
+        "Authorization": f"Bearer {effective_key}",
     }
 
     try:
@@ -546,6 +548,7 @@ def send_one_litellm(
     gen_cfg: GenerationConfig,
     label: str = "LiteLLM",
     messages: Optional[List[Dict[str, str]]] = None,
+    api_key_override: Optional[str] = None,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
     Send one request to an OpenAI-compatible proxy (LiteLLM or BooM Gateway).
@@ -557,6 +560,8 @@ def send_one_litellm(
         label: Human-readable name for log messages (e.g. "LiteLLM", "BooM").
         messages: If provided, used directly as the messages array; otherwise
                   a single user message is built from prompt.
+        api_key_override: If set, used instead of litellm_cfg.api_key for this
+                          request (key-affinity benchmarking).
 
     Returns:
         (req_id, result_dict)
@@ -581,10 +586,10 @@ def send_one_litellm(
     # Match send_one_aibrix(): length_mode, targets, ignore_eos, thinking kwargs.
     payload.update(_build_aibrix_extra_generation_fields(gen_cfg))
 
-    # Standard OpenAI auth header — LiteLLM validates the virtual key here
+    effective_key = api_key_override or litellm_cfg.api_key
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {litellm_cfg.api_key}",
+        "Authorization": f"Bearer {effective_key}",
     }
 
     try:

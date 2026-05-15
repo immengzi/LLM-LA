@@ -177,8 +177,11 @@
 # 6-2-template-boom-claude-glm-stream:
 #   - pull
 
-7-1-template-boom-direct-multiturn-glm:
-  - round_robin
+# 7-1-template-boom-direct-multiturn-glm:
+#   - round_robin
 
-7-2-template-boom-multiturn-glm:
-  - pull
+# 7-2-template-boom-multiturn-glm:
+#   - pull
+
+8-1-template-boom-direct-multiturn-key-affinity:
+  - key_affinity

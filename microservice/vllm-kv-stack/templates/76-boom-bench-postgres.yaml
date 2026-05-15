@@ -1,0 +1,105 @@
+{{- if and .Values.boom.enabled (.Values.boom.keyAffinityBench | default false) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-boom-bench-initdb
+  namespace: {{ .Release.Namespace }}
+data:
+  init-keys.sql: |
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+    CREATE TABLE IF NOT EXISTS "boom_verification_token" (
+      token TEXT PRIMARY KEY, key_name TEXT, key_alias TEXT,
+      spend DOUBLE PRECISION NOT NULL DEFAULT 0.0, expires TIMESTAMP,
+      models TEXT[], aliases JSONB, config JSONB, user_id TEXT, team_id TEXT,
+      permissions JSONB, max_parallel_requests INTEGER, metadata JSONB,
+      blocked BOOLEAN DEFAULT false, tpm_limit BIGINT, rpm_limit BIGINT,
+      max_budget DOUBLE PRECISION, budget_duration TEXT, budget_reset_at TIMESTAMP,
+      allowed_cache_controls TEXT[], allowed_routes TEXT[], model_spend JSONB,
+      model_max_budget JSONB, budget_id TEXT, organization_id TEXT,
+      created_at TIMESTAMP DEFAULT NOW(), created_by TEXT, updated_at TIMESTAMP DEFAULT NOW()
+    );
+    DO $body$ DECLARE i INTEGER; raw_key TEXT; hashed TEXT; BEGIN
+      FOR i IN 0..63 LOOP raw_key := 'sk-bench-' || i;
+        hashed := encode(digest(raw_key, 'sha256'), 'hex');
+        INSERT INTO "boom_verification_token" (token, key_name, key_alias, spend, models, blocked, created_at, updated_at)
+        VALUES (hashed, 'bench-key-' || i, 'bench-' || i, 0.0, '{}'::TEXT[], false, NOW(), NOW())
+        ON CONFLICT (token) DO NOTHING;
+      END LOOP; END $body$;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-boom-bench-pg
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: boom-bench-pg
+    release: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: boom-bench-pg
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: boom-bench-pg
+        release: {{ .Release.Name }}
+    spec:
+      {{- if .Values.pin.enabled }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - {{ .Values.pin.nodeName | quote }}
+      tolerations:
+{{- toYaml .Values.pin.tolerations | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: postgres
+          image: {{ include "vllmkv.image" (list . "postgres:16-alpine") }}
+          env:
+            - name: POSTGRES_DB
+              value: boom
+            - name: POSTGRES_USER
+              value: boom
+            - name: POSTGRES_PASSWORD
+              value: boom
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+      volumes:
+        - name: initdb
+          configMap:
+            name: {{ .Release.Name }}-boom-bench-initdb
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-boom-bench-pg
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: boom-bench-pg
+    release: {{ .Release.Name }}
+spec:
+  selector:
+    app: boom-bench-pg
+    release: {{ .Release.Name }}
+  ports:
+    - port: 5432
+      targetPort: 5432
+{{- end }}

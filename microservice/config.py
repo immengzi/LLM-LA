@@ -249,6 +249,12 @@ class BooMConfig:
     timeout_s: float = 7200.0
     stream: bool = False
 
+    # Key-affinity benchmarking: number of pre-seeded virtual keys.
+    # 0 = disabled (all requests use api_key above).
+    # >0 = per-conversation key rotation using sk-bench-{conv_id % N}.
+    # Requires BooM deployed with keyAffinityBench=true + directRoutingStrategy=key_affinity.
+    key_affinity_keys: int = 0
+
 
 # =========================
 # SLO annotations (client → router)
@@ -372,6 +378,10 @@ class HelmConfig:
     # BooM routing strategy when boom_route_via=direct.
     # Options: round_robin (default), key_affinity
     boom_direct_routing_strategy: str = "round_robin"
+
+    # Deploy ephemeral Postgres with 64 pre-seeded virtual keys for
+    # key_affinity benchmarking. Only useful with boom_direct_routing_strategy=key_affinity.
+    boom_key_affinity_bench: bool = False
 
     # BooM flow control: max concurrent upstream connections per deployment.
     # 0 = unlimited (default). Set >0 to queue excess requests inside BooM.
