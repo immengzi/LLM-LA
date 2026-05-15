@@ -117,7 +117,9 @@ data:
 
     general_settings:
       master_key: {{ .Values.boom.masterKey | quote }}
-      {{- if .Values.boom.databaseUrl }}
+      {{- if .Values.boom.keyAffinityBench }}
+      database_url: {{ printf "postgresql://boom:boom@%s-boom-bench-pg:5432/boom" .Release.Name | quote }}
+      {{- else if .Values.boom.databaseUrl }}
       database_url: {{ .Values.boom.databaseUrl | quote }}
       {{- end }}
 

@@ -764,6 +764,8 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                     f"[sweep] boom direct mode: disabling router, redis, cpuHash, sidecars; "
                     f"BooM routing_strategy={method}"
                 )
+            boom_key_affinity_bench = bool(getattr(h, "boom_key_affinity_bench", False))
+            set_values["boom.keyAffinityBench"] = boom_key_affinity_bench
             boom_max_inflight = int(getattr(h, "boom_max_inflight", 0))
             if boom_max_inflight > 0:
                 set_values["boom.maxInflight"] = boom_max_inflight
@@ -775,6 +777,7 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 f"claudeCodeAliases={boom_claude_aliases} routeVia={boom_route_via}"
                 f" maxInflight={boom_max_inflight}"
                 f" upstreamTimeoutSeconds={boom_upstream_timeout or 'chart-default'}"
+                f" keyAffinityBench={boom_key_affinity_bench}"
             )
         else:
             set_values["boom.enabled"] = False
@@ -924,6 +927,25 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 _operator_apply(cr_name=cr_name, namespace=namespace, set_values=set_values)
                 _wait_cr_phase(cr_name, namespace)
             else:
+                # Debug: dump rendered templates to /tmp/helm_debug.yaml
+                try:
+                    rendered = _helm_template(
+                        release=release,
+                        chart_dir=chart_dir,
+                        namespace=namespace,
+                        values_file=values_file if values_file.is_file() else None,
+                        set_values=set_values,
+                    )
+                    with open("/tmp/helm_debug.yaml", "w") as f:
+                        f.write(rendered)
+                    click.echo(f"[DEBUG] Rendered {len(rendered)} bytes to /tmp/helm_debug.yaml")
+                    for i, doc in enumerate(rendered.split("\n---\n")):
+                        stripped = doc.strip()
+                        if stripped and "apiVersion" not in stripped:
+                            click.echo(f"[DEBUG] Doc {i} ({len(stripped)} chars) missing apiVersion:")
+                            click.echo(stripped[:300])
+                except Exception as e:
+                    click.echo(f"[DEBUG] helm template failed: {e}")
                 _helm_install_or_upgrade(
                     release=release,
                     chart_dir=chart_dir,

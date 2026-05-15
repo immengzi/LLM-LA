@@ -407,6 +407,12 @@ boom:
   # Example: "postgresql://boom:password@postgres-host:5432/boom"
   databaseUrl: ""
 
+  # Key-affinity benchmarking: deploy a lightweight in-memory PostgreSQL
+  # with 64 pre-seeded virtual keys (sk-bench-0 .. sk-bench-63).
+  # When true, also auto-sets databaseUrl to the internal Postgres service.
+  # Default false — no extra pods, no DB, master-key-only auth.
+  keyAffinityBench: false
+
   # Enable Claude Code compatibility aliases.
   # When true, BooM config includes router_settings.model_group_alias that
   # maps standard Claude model names (claude-sonnet-4-20250514, etc.) to

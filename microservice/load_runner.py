@@ -905,6 +905,7 @@ def _request_thread_conversation(
     print_trace: bool = True,
     label: str = "BooM",
     use_streaming: bool = False,
+    api_key_override: Optional[str] = None,
 ):
     """
     Execute a multi-turn conversation sequentially.
@@ -958,6 +959,7 @@ def _request_thread_conversation(
                 rid, result = send_fn(
                     session, litellm_cfg, user_turn.content, effective_gen,
                     label=label, messages=list(messages_history),
+                    api_key_override=api_key_override,
                 )
                 t1 = time.time()
                 end_to_end_s = t1 - t0
@@ -1015,6 +1017,8 @@ def _request_thread_conversation(
                         if streaming_chunks is not None:
                             record["streaming_chunks"] = streaming_chunks
 
+                    if api_key_override is not None:
+                        record["affinity_key"] = api_key_override
                     if endpoint_id is not None:
                         record["endpoint_id"] = endpoint_id
                     if usage_prompt_tokens is not None:
@@ -1743,9 +1747,12 @@ def run_open_loop_load(
         use_streaming = bool(getattr(proxy_cfg, "stream", False))
         conv_label = "BooM" if backend == "boom" else "LiteLLM"
         stream_tag = " (stream)" if use_streaming else ""
+
+        n_affinity_keys = getattr(proxy_cfg, "key_affinity_keys", 0) or 0
+        affinity_tag = f", key_affinity_keys={n_affinity_keys}" if n_affinity_keys > 0 else ""
         print(
             f"[load_runner] Multi-turn conversations: {len(conversations)} conversations, "
-            f"backend={backend}{stream_tag}"
+            f"backend={backend}{stream_tag}{affinity_tag}"
         )
 
         threads: List[threading.Thread] = []
@@ -1764,11 +1771,17 @@ def run_open_loop_load(
                 ts_mono=ts_mono,
                 output_tokens_per_turn=ot_per_turn,
             )
+
+            conv_api_key = None
+            if n_affinity_keys > 0:
+                conv_api_key = f"sk-bench-{cid % n_affinity_keys}"
+
             t = threading.Thread(
                 target=_request_thread_conversation,
                 args=(
                     ctask, proxy_cfg, gen_cfg, t0_mono,
                     logger, output_log_mode, print_trace, conv_label, use_streaming,
+                    conv_api_key,
                 ),
                 daemon=True,
                 name=f"conv-{cid}",

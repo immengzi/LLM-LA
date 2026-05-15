@@ -14,13 +14,14 @@ batchSize: 4
 boom:
   claudeCodeAliases: true
   databaseUrl: ""
-  directRoutingStrategy: round_robin
+  directRoutingStrategy: key_affinity
   enabled: true
   extraModelAliases: []
   image: boom-gateway:v4
   imagePullPolicy: Always
+  keyAffinityBench: true
   masterKey: sk-boom-master
-  maxInflight: 1000
+  maxInflight: 10000
   nodePort: 30401
   resources:
     limits:
@@ -29,7 +30,7 @@ boom:
     requests:
       cpu: 250m
       memory: 128Mi
-  routeVia: router
+  routeVia: direct
   upstreamTimeoutSeconds: 7200
 cacheWarm:
   enabled: false
@@ -48,10 +49,10 @@ dataParallel:
   size: 2
   sizeLocal: 1
 deploy:
-  cpuHash: true
+  cpuHash: false
   mooncakeMaster: true
-  redis: true
-  router: true
+  redis: false
+  router: false
   vllm: true
 global:
   imageRegistry: reg.local:32000
@@ -94,9 +95,8 @@ models:
     sizeLocal: 1
   modelSubPath: GLM-5-w4a8-mtp-QuaRot
   name: glm5-chat
-  replicas: 1
+  replicas: 4
   servedModelName: served-model
-  sidecarPrefetch: 2
   tensorParallelSize: 8
   vllm:
     additionalConfig:
@@ -132,7 +132,7 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 1
+  vllm: 4
 router:
   admissionThrottle: false
   apiKey: ZhongRuanChuangXin!
@@ -153,10 +153,10 @@ router:
   sloAware: false
   sloWithKv: true
 sidecar:
-  enabled: true
-  forceIgnoreEos: true
+  enabled: false
+  forceIgnoreEos: false
   logLevel: info
-  prefetch: 2
+  prefetch: 0
   streamingMode: false
 tensorParallelSize: 8
 vllm:
