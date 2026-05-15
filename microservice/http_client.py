@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, List, Tuple, Optional
 import time
 import uuid
 
@@ -369,6 +369,7 @@ def send_one_litellm_stream(
     prompt: str,
     gen_cfg: GenerationConfig,
     label: str = "LiteLLM",
+    messages: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
     Streaming variant of send_one_litellm.
@@ -376,6 +377,9 @@ def send_one_litellm_stream(
     Sends stream=true to the proxy, parses SSE chunks, accumulates the full
     response, and returns the same (req_id, result_dict) shape as the
     non-streaming version — plus ttft_s and tpot_avg_s.
+
+    If messages is provided, it is used directly; otherwise a single user
+    message is built from prompt.
     """
     label_lower = label.lower()
     t_send = time.time()
@@ -384,7 +388,7 @@ def send_one_litellm_stream(
 
     payload: Dict[str, Any] = {
         "model": str(litellm_cfg.model),
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages if messages is not None else [{"role": "user", "content": prompt}],
         "stream": True,
         "stream_options": {"include_usage": True},
         "max_tokens": int(gen_cfg.max_tokens),
@@ -541,6 +545,7 @@ def send_one_litellm(
     prompt: str,
     gen_cfg: GenerationConfig,
     label: str = "LiteLLM",
+    messages: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
     Send one request to an OpenAI-compatible proxy (LiteLLM or BooM Gateway).
@@ -550,6 +555,8 @@ def send_one_litellm(
 
     Args:
         label: Human-readable name for log messages (e.g. "LiteLLM", "BooM").
+        messages: If provided, used directly as the messages array; otherwise
+                  a single user message is built from prompt.
 
     Returns:
         (req_id, result_dict)
@@ -562,7 +569,7 @@ def send_one_litellm(
 
     payload: Dict[str, Any] = {
         "model": str(litellm_cfg.model),
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages if messages is not None else [{"role": "user", "content": prompt}],
         "stream": False,
         "max_tokens": int(gen_cfg.max_tokens),
         "temperature": float(gen_cfg.temperature),

@@ -150,8 +150,8 @@
 # 2-1-template-boom-direct-claude-glm:
 #   - round_robin
 
-2-2-template-boom-claude-glm:
-  - pull
+# 2-2-template-boom-claude-glm:
+#   - pull
 
 # 3-1-template-boom-direct-claude-glm:
 #   - round_robin
@@ -176,3 +176,9 @@
 
 # 6-2-template-boom-claude-glm-stream:
 #   - pull
+
+7-1-template-boom-direct-multiturn-glm:
+  - round_robin
+
+7-2-template-boom-multiturn-glm:
+  - pull

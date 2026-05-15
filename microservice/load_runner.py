@@ -39,6 +39,7 @@ from config import (
     SLOConfig,
     generation_effective_ignore_eos,
 )
+from prompts import Conversation, ConversationTurn
 from trace_utils import print_trace_block, compute_trace_metrics
 from experiment_io import ExperimentLogger
 
@@ -61,6 +62,14 @@ class RequestTask:
     prompt: str
     ts_mono: float  # absolute monotonic timestamp for sending
     output_tokens: Optional[int] = None  # per-request output len from dataset
+
+
+@dataclass
+class ConversationTask:
+    conv_id: int
+    conversation: Conversation
+    ts_mono: float  # scheduled arrival time for this conversation
+    output_tokens_per_turn: Optional[List[int]] = None  # per-turn override from replay
 
 
 # Shared state for per-second send statistics
@@ -883,6 +892,176 @@ def _request_thread_litellm_http_stream(
 
 
 # ============================================================
+# Multi-turn conversation worker thread
+# ============================================================
+
+def _request_thread_conversation(
+    task: ConversationTask,
+    litellm_cfg: LiteLLMConfig,
+    gen_cfg: GenerationConfig,
+    t0_mono: float,
+    logger: Optional[ExperimentLogger] = None,
+    output_log_mode: str = "preview",
+    print_trace: bool = True,
+    label: str = "BooM",
+    use_streaming: bool = False,
+):
+    """
+    Execute a multi-turn conversation sequentially.
+
+    Each turn builds the full message history (all prior user+assistant messages),
+    sends the request, and uses the real LLM response as the assistant message
+    for subsequent turns. Each turn is logged as a separate record.
+    """
+    conv = task.conversation
+    user_turns = [t for t in conv.turns if t.role == "user"]
+    assistant_dataset_turns = [t for t in conv.turns if t.role == "assistant"]
+    num_user_turns = len(user_turns)
+
+    session = requests.Session()
+    session.headers.update({"Connection": "close"})
+
+    try:
+        now = time.monotonic()
+        delay = task.ts_mono - now
+        if delay > 0:
+            time.sleep(delay)
+
+        messages_history: List[Dict[str, str]] = []
+        send_fn = send_one_litellm_stream if use_streaming else send_one_litellm
+
+        for turn_idx in range(num_user_turns):
+            user_turn = user_turns[turn_idx]
+            messages_history.append({"role": "user", "content": user_turn.content})
+
+            ot_override = None
+            if task.output_tokens_per_turn is not None and turn_idx < len(task.output_tokens_per_turn):
+                ot_override = task.output_tokens_per_turn[turn_idx]
+            elif gen_cfg.use_dataset_output_len and turn_idx < len(assistant_dataset_turns):
+                ot_override = assistant_dataset_turns[turn_idx].output_tokens
+
+            effective_gen = gen_cfg
+            if ot_override is not None:
+                effective_gen = _replace_gen_cfg(gen_cfg, ot_override)
+
+            now_send = time.monotonic()
+            _log_send_tick(now_send, t0_mono)
+
+            global_idx = f"c{task.conv_id}t{turn_idx}"
+            print(
+                f"[client][SEND][{global_idx}] conv={task.conv_id} turn={turn_idx}/{num_user_turns} "
+                f"msgs={len(messages_history)}"
+            )
+
+            t0 = time.time()
+            try:
+                rid, result = send_fn(
+                    session, litellm_cfg, user_turn.content, effective_gen,
+                    label=label, messages=list(messages_history),
+                )
+                t1 = time.time()
+                end_to_end_s = t1 - t0
+
+                (
+                    latency_s,
+                    finish_reason,
+                    output_preview,
+                    output_full,
+                    usage_prompt_tokens,
+                    usage_completion_tokens,
+                    usage_total_tokens,
+                    trace_dict,
+                    trace_metrics,
+                    endpoint_id,
+                ) = _extract_result_fields(result)
+
+                assistant_text = output_full or ""
+                messages_history.append({"role": "assistant", "content": assistant_text})
+
+                ttft_s = result.get("ttft_s") if use_streaming and isinstance(result, dict) else None
+                tpot_avg_s = result.get("tpot_avg_s") if use_streaming and isinstance(result, dict) else None
+                streaming_chunks = result.get("streaming_chunks") if use_streaming and isinstance(result, dict) else None
+
+                latency_str = f" model_latency={latency_s:.3f}s" if latency_s is not None else ""
+                ttft_str = f" ttft={ttft_s:.3f}s" if ttft_s is not None else ""
+                print(
+                    f"[client][RECV][{global_idx}] conv={task.conv_id} turn={turn_idx} "
+                    f"req_id={rid} wait_wall={end_to_end_s:.3f}s{latency_str}{ttft_str}"
+                )
+
+                if logger is not None:
+                    record: Dict[str, Any] = {
+                        "idx": f"c{task.conv_id}t{turn_idx}",
+                        "conversation_id": task.conv_id,
+                        "turn_idx": turn_idx,
+                        "num_turns": num_user_turns,
+                        "req_id": rid,
+                        "prompt": user_turn.content,
+                        "planned_ts_mono": task.ts_mono,
+                        "actual_send_ts_mono": now_send,
+                        "t0_wall": t0,
+                        "t1_wall": t1,
+                        "end_to_end_s": end_to_end_s,
+                        "model_latency_s": latency_s,
+                        "finish_reason": finish_reason,
+                    }
+
+                    if use_streaming:
+                        record["streaming"] = True
+                        if ttft_s is not None:
+                            record["ttft_s"] = ttft_s
+                        if tpot_avg_s is not None:
+                            record["tpot_avg_s"] = tpot_avg_s
+                        if streaming_chunks is not None:
+                            record["streaming_chunks"] = streaming_chunks
+
+                    if endpoint_id is not None:
+                        record["endpoint_id"] = endpoint_id
+                    if usage_prompt_tokens is not None:
+                        record["prompt_tokens"] = usage_prompt_tokens
+                    if usage_completion_tokens is not None:
+                        record["completion_tokens"] = usage_completion_tokens
+                    if usage_total_tokens is not None:
+                        record["total_tokens"] = usage_total_tokens
+
+                    log_output = _choose_log_output(
+                        output_log_mode=output_log_mode,
+                        output_full=output_full,
+                        output_preview=output_preview,
+                    )
+                    if log_output is not None:
+                        record["output"] = log_output
+
+                    if trace_dict is not None:
+                        record["trace"] = trace_dict
+                    if trace_metrics is not None:
+                        record["trace_metrics"] = trace_metrics
+
+                    logger.log_request(record)
+
+            except Exception as e:
+                print(
+                    f"[client][RECV][{global_idx}] ✗ ERROR conv={task.conv_id} "
+                    f"turn={turn_idx}: {e}"
+                )
+                if logger is not None:
+                    err_record: Dict[str, Any] = {
+                        "idx": f"c{task.conv_id}t{turn_idx}",
+                        "conversation_id": task.conv_id,
+                        "turn_idx": turn_idx,
+                        "num_turns": num_user_turns,
+                        "error": str(e),
+                        "prompt": user_turn.content,
+                        "planned_ts_mono": task.ts_mono,
+                        "send_failed": True,
+                    }
+                    logger.log_request(err_record)
+                break
+    finally:
+        session.close()
+
+
+# ============================================================
 # Anthropic Messages API worker thread (boom-claude backend)
 #
 # Sends Anthropic-format /v1/messages requests to BooM Gateway.
@@ -1396,6 +1575,8 @@ def run_open_loop_load(
     litellm: Optional[LiteLLMConfig] = None,
     boom: Optional[BooMConfig] = None,
     slo: Optional[SLOConfig] = None,
+    conversations: Optional[List[Conversation]] = None,
+    conv_output_tokens: Optional[List[List[int]]] = None,
 ):
     """
     Execute a precomputed schedule.
@@ -1548,6 +1729,62 @@ def run_open_loop_load(
 
         elapsed = time.time() - t0_wall
         print(f"[load_runner] Done. Sent {total} requests in {elapsed:.3f}s")
+        return
+
+    # -------------------------------------------------------
+    # Multi-turn conversation path (litellm / boom backends)
+    # Must be checked BEFORE the single-turn litellm/boom blocks.
+    # -------------------------------------------------------
+    if conversations is not None and backend in ("litellm", "boom"):
+        proxy_cfg = boom if backend == "boom" else litellm
+        if proxy_cfg is None:
+            raise RuntimeError(f"backend='{backend}' requires {backend} config for multi-turn")
+
+        use_streaming = bool(getattr(proxy_cfg, "stream", False))
+        conv_label = "BooM" if backend == "boom" else "LiteLLM"
+        stream_tag = " (stream)" if use_streaming else ""
+        print(
+            f"[load_runner] Multi-turn conversations: {len(conversations)} conversations, "
+            f"backend={backend}{stream_tag}"
+        )
+
+        threads: List[threading.Thread] = []
+        t0_wall = time.time()
+
+        for cid, (ts_mono, conv) in enumerate(zip(adj_plan_times, conversations)):
+            now = time.monotonic()
+            sleep_until = ts_mono - 0.005
+            if sleep_until > now:
+                time.sleep(sleep_until - now)
+
+            ot_per_turn = conv_output_tokens[cid] if conv_output_tokens else None
+            ctask = ConversationTask(
+                conv_id=cid,
+                conversation=conv,
+                ts_mono=ts_mono,
+                output_tokens_per_turn=ot_per_turn,
+            )
+            t = threading.Thread(
+                target=_request_thread_conversation,
+                args=(
+                    ctask, proxy_cfg, gen_cfg, t0_mono,
+                    logger, output_log_mode, print_trace, conv_label, use_streaming,
+                ),
+                daemon=True,
+                name=f"conv-{cid}",
+            )
+            t.start()
+            threads.append(t)
+
+        _drain_threads_with_fleet_idle(
+            threads=threads,
+            total=len(conversations),
+            t0_wall=t0_wall,
+            idle_zero_running_s=idle_zero_running_s,
+            idle_timeout_s=idle_timeout_s,
+            logger=logger,
+            backend_label=f"{backend}-multiturn",
+        )
         return
 
     # -------------------------------------------------------

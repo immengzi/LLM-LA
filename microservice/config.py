@@ -575,6 +575,8 @@ class ClientConfig:
     # - boom     -> routes through BooM Gateway (Rust LiteLLM replacement, same protocol)
     backend: str = "router"  # router | aibrix | litellm | boom
 
+    multi_turn: bool = False
+
     file_prompts: FilePromptsConfig = field(default_factory=FilePromptsConfig)
     hf_lmsys: HFLmsysConfig = field(default_factory=HFLmsysConfig)
     load_pattern: LoadPatternConfig = field(default_factory=LoadPatternConfig)
@@ -651,6 +653,8 @@ def load_config(path: str) -> ClientConfig:
     backend = str(raw.get("backend", ClientConfig.backend) or ClientConfig.backend).strip().lower()
     if backend not in ("router", "aibrix", "litellm", "boom"):
         raise ValueError(f"Invalid backend '{backend}'. Expected 'router', 'aibrix', 'litellm', or 'boom'.")
+
+    multi_turn = bool(raw.get("multi_turn", False))
 
     file_prompts = _merge_dataclass(FilePromptsConfig, raw.get("file_prompts", {}))
     hf_lmsys = _merge_dataclass(HFLmsysConfig, raw.get("hf_lmsys", {}))
@@ -776,6 +780,7 @@ def load_config(path: str) -> ClientConfig:
         total_requests=total_requests,
         prompt_source=prompt_source,
         backend=backend,
+        multi_turn=multi_turn,
         file_prompts=file_prompts,
         hf_lmsys=hf_lmsys,
         load_pattern=load_pattern,
