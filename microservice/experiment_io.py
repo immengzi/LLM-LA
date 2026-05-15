@@ -123,7 +123,7 @@ def init_experiment(
     config_path: str,
     config_name: Optional[str] = None,
     configs_root: str = "configs",
-    experiments_root: str = "experiments",
+    experiments_root: str = "/mnt/nvme1/saeid/experiments",
 ) -> Tuple[Path, ExperimentLogger]:
     """
     Create a new experiment directory and persist:

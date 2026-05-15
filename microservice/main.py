@@ -9,7 +9,13 @@ import os
 from pathlib import Path
 
 from config import load_config
-from prompts import load_prompts_from_file, build_prompts_from_lmsys, load_replay_output_lengths
+from prompts import (
+    load_prompts_from_file,
+    build_prompts_from_lmsys,
+    load_replay_output_lengths,
+    build_conversations_from_lmsys,
+    load_replay_conversation_lengths,
+)
 from scheduler import build_schedule
 from load_runner import run_open_loop_load
 from experiment_io import init_experiment
@@ -63,6 +69,9 @@ def main():
 
     # Build prompts
     output_tokens_per_request = None
+    conversations = None
+    conv_output_tokens = None
+
     if cfg.prompt_source == "file":
         prompts = load_prompts_from_file(
             path=cfg.file_prompts.path,
@@ -70,19 +79,33 @@ def main():
             n=cfg.total_requests,
         )
     elif cfg.prompt_source == "hf-lmsys":
-        pairs = build_prompts_from_lmsys(
-            cfg.hf_lmsys,
-            n=cfg.total_requests,
-        )
-        prompts = [p for p, _ in pairs]
-        if cfg.generation.use_dataset_output_len:
-            output_tokens_per_request = [ot for _, ot in pairs]
-            print(
-                f"[client] Using dataset output lengths: "
-                f"min={min(output_tokens_per_request)}, "
-                f"max={max(output_tokens_per_request)}, "
-                f"avg={sum(output_tokens_per_request)/len(output_tokens_per_request):.0f}"
+        if cfg.multi_turn:
+            conversations = build_conversations_from_lmsys(
+                cfg.hf_lmsys,
+                n=cfg.total_requests,
+                min_rounds=2,
             )
+            prompts = [c.turns[0].content for c in conversations]
+            total_turns = sum(c.num_rounds for c in conversations)
+            print(
+                f"[client] Multi-turn mode: {len(conversations)} conversations, "
+                f"{total_turns} total user turns, "
+                f"avg_rounds={total_turns/len(conversations):.1f}"
+            )
+        else:
+            pairs = build_prompts_from_lmsys(
+                cfg.hf_lmsys,
+                n=cfg.total_requests,
+            )
+            prompts = [p for p, _ in pairs]
+            if cfg.generation.use_dataset_output_len:
+                output_tokens_per_request = [ot for _, ot in pairs]
+                print(
+                    f"[client] Using dataset output lengths: "
+                    f"min={min(output_tokens_per_request)}, "
+                    f"max={max(output_tokens_per_request)}, "
+                    f"avg={sum(output_tokens_per_request)/len(output_tokens_per_request):.0f}"
+                )
     else:
         raise ValueError(f"Unknown prompt_source '{cfg.prompt_source}'")
 
@@ -93,10 +116,16 @@ def main():
     if replay_ref:
         replay_path = replay_ref
         if not replay_path.endswith(".json"):
-            replay_path = str(Path("experiments") / replay_ref / "logs.json")
-        output_tokens_per_request = load_replay_output_lengths(
-            replay_path, n=len(prompts),
-        )
+            replay_path = str(Path("/mnt/nvme1/saeid/experiments") / replay_ref / "logs.json")
+
+        if cfg.multi_turn and conversations is not None:
+            conv_output_tokens = load_replay_conversation_lengths(
+                replay_path, n_conversations=len(conversations),
+            )
+        else:
+            output_tokens_per_request = load_replay_output_lengths(
+                replay_path, n=len(prompts),
+            )
         cfg.generation.use_dataset_output_len = True
         cfg.generation.ignore_eos = True
         print(
@@ -223,6 +252,10 @@ def main():
         prompts = prompts[: len(plan_times)]
         if output_tokens_per_request is not None:
             output_tokens_per_request = output_tokens_per_request[: len(plan_times)]
+        if conversations is not None:
+            conversations = conversations[: len(plan_times)]
+        if conv_output_tokens is not None:
+            conv_output_tokens = conv_output_tokens[: len(plan_times)]
         total = len(prompts)
         print(f"[client] schedule shorter than prompts; trimming to {total} events")
 
@@ -263,6 +296,8 @@ def main():
             litellm=getattr(cfg, "litellm", None),
             boom=getattr(cfg, "boom", None),
             slo=getattr(cfg, "slo", None),
+            conversations=conversations,
+            conv_output_tokens=conv_output_tokens,
         )
     finally:
         t_end_load = time.time()
