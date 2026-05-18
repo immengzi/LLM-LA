@@ -15,7 +15,7 @@
 backend: "boom"
 
 router_url: "http://7.216.57.215:30080"
-total_requests: 10000
+total_requests: 40000
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -27,7 +27,7 @@ hf_lmsys:
   split: "train"
   tokenizer_name: "/mnt/nvme1/saeid/models/GLM-5-w4a8-mtp-QuaRot"
   streaming: false
-  min_input_tokens: 256
+  min_input_tokens: 1
   max_input_tokens: 10000000
   repeat_each: 1
 

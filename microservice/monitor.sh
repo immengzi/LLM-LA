@@ -6,7 +6,7 @@
 #   ./monitor.sh -i 10            # every 10 seconds
 #   ./monitor.sh -o /tmp/stats.csv
 
-INTERVAL=20
+INTERVAL=60
 OUTFILE="monitor.csv"
 
 while getopts "i:o:h" opt; do
