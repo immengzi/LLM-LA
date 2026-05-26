@@ -21,7 +21,7 @@ boom:
   imagePullPolicy: Always
   keyAffinityBench: false
   masterKey: sk-boom-master
-  maxInflight: 1000
+  maxInflight: 2000
   nodePort: 30401
   resources:
     limits:
@@ -31,7 +31,7 @@ boom:
       cpu: 250m
       memory: 128Mi
   routeVia: router
-  upstreamTimeoutSeconds: 7200
+  upstreamTimeoutSeconds: 300
 cacheWarm:
   enabled: false
   image: busybox
@@ -95,7 +95,7 @@ models:
     sizeLocal: 1
   modelSubPath: GLM-5-w4a8-mtp-QuaRot
   name: glm5-chat
-  replicas: 4
+  replicas: 2
   servedModelName: served-model
   sidecarPrefetch: 2
   tensorParallelSize: 8
@@ -133,7 +133,7 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 4
+  vllm: 2
 router:
   admissionThrottle: false
   apiKey: ZhongRuanChuangXin!
@@ -155,7 +155,7 @@ router:
   sloWithKv: true
 sidecar:
   enabled: true
-  forceIgnoreEos: true
+  forceIgnoreEos: false
   logLevel: info
   prefetch: 2
   streamingMode: false

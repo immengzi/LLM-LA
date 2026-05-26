@@ -14,6 +14,7 @@ from prompts import (
     build_prompts_from_lmsys,
     load_replay_output_lengths,
     build_conversations_from_lmsys,
+    build_conversations_from_codeflowbench,
     load_replay_conversation_lengths,
 )
 from scheduler import build_schedule
@@ -102,6 +103,34 @@ def main():
                 output_tokens_per_request = [ot for _, ot in pairs]
                 print(
                     f"[client] Using dataset output lengths: "
+                    f"min={min(output_tokens_per_request)}, "
+                    f"max={max(output_tokens_per_request)}, "
+                    f"avg={sum(output_tokens_per_request)/len(output_tokens_per_request):.0f}"
+                )
+    elif cfg.prompt_source == "codeflow":
+        if cfg.multi_turn:
+            conversations = build_conversations_from_codeflowbench(
+                cfg.hf_lmsys,
+                n=cfg.total_requests,
+                min_rounds=1,
+            )
+            prompts = [c.turns[0].content for c in conversations]
+            total_turns = sum(c.num_rounds for c in conversations)
+            print(
+                f"[client] CodeFlowBench: {len(conversations)} conversations, "
+                f"{total_turns} total user turns"
+            )
+        else:
+            conversations = build_conversations_from_codeflowbench(
+                cfg.hf_lmsys,
+                n=cfg.total_requests,
+                min_rounds=1,
+            )
+            prompts = [c.turns[0].content for c in conversations]
+            if cfg.generation.use_dataset_output_len:
+                output_tokens_per_request = [c.turns[1].output_tokens for c in conversations]
+                print(
+                    f"[client] CodeFlowBench using dataset output lengths: "
                     f"min={min(output_tokens_per_request)}, "
                     f"max={max(output_tokens_per_request)}, "
                     f"avg={sum(output_tokens_per_request)/len(output_tokens_per_request):.0f}"
