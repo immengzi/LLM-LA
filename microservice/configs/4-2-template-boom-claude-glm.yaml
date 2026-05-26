@@ -30,6 +30,7 @@ hf_lmsys:
   min_input_tokens: 256
   max_input_tokens: 10000000
   repeat_each: 1
+  multi_turn: true
 
 load_pattern:
   pattern: "det"
