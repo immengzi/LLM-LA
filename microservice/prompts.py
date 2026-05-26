@@ -464,6 +464,129 @@ def build_conversations_from_lmsys(
     return result
 
 
+def _iter_codeflowbench_conversations(
+    cfg: HFLmsysConfig,
+    max_n: int,
+    min_rounds: int = 1,
+) -> Iterator[Conversation]:
+    """
+    Yields Conversation objects from the CodeFlowBench dataset.
+
+    CodeFlowBench is a competitive programming dataset, not a conversational dataset.
+    Each example has:
+      - problem-description: the problem statement (user prompt)
+      - solutions: list of solution objects with "content" (assistant response)
+
+    We construct a single-turn conversation for each problem.
+    """
+    try:
+        from datasets import load_from_disk  # type: ignore
+        from transformers import PreTrainedTokenizerFast  # type: ignore
+    except Exception as e:
+        raise RuntimeError(
+            "hf-lmsys prompt_source requires 'datasets' and 'transformers' packages."
+        ) from e
+
+    tokenizer_name = cfg.tokenizer_name
+    if isinstance(tokenizer_name, str) and tokenizer_name and tokenizer_name.strip():
+        if os.path.isdir(tokenizer_name):
+            tok = PreTrainedTokenizerFast.from_pretrained(
+                tokenizer_name, local_files_only=True, extra_special_tokens={},
+            )
+        else:
+            tok = PreTrainedTokenizerFast.from_pretrained(
+                tokenizer_name, extra_special_tokens={},
+            )
+    else:
+        raise ValueError("hf_lmsys.tokenizer_name must be provided for hf-lmsys mode")
+
+    try:
+        tok.model_max_length = int(1e9)
+    except Exception:
+        pass
+
+    dataset_name = cfg.dataset_name
+    if isinstance(dataset_name, str) and os.path.isdir(dataset_name):
+        try:
+            ds = load_from_disk(dataset_name)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load local dataset at {dataset_name}: {e}") from e
+    else:
+        from datasets import load_dataset
+        ds = load_dataset(dataset_name, split=cfg.split, streaming=cfg.streaming)
+
+    def _to_int_or_none(x: Any) -> Optional[int]:
+        try:
+            return int(x) if x is not None else None
+        except Exception:
+            return None
+
+    min_input_tokens = _to_int_or_none(cfg.min_input_tokens)
+    max_input_tokens = _to_int_or_none(cfg.max_input_tokens)
+
+    yielded = 0
+    for ex in ds:
+        if yielded >= max_n:
+            break
+
+        problem = ex.get("problem-description", "").strip()
+        if not problem:
+            continue
+
+        solutions = ex.get("solutions", [])
+        if not solutions or not solutions[0].get("content"):
+            continue
+        solution = solutions[0]["content"].strip()
+
+        in_len = len(tok.encode(problem, add_special_tokens=False))
+        if min_input_tokens is not None and in_len < min_input_tokens:
+            continue
+        if max_input_tokens is not None and in_len > max_input_tokens:
+            continue
+
+        out_tok = len(tok.encode(solution, add_special_tokens=False))
+
+        turns = [
+            ConversationTurn(role="user", content=problem, output_tokens=0),
+            ConversationTurn(role="assistant", content=solution, output_tokens=out_tok),
+        ]
+
+        conv = Conversation(turns=turns)
+        yield conv
+        yielded += 1
+
+    print(
+        f"[CodeFlowBench] Yielded {yielded} conversations (max_n={max_n})"
+    )
+
+
+def build_conversations_from_codeflowbench(
+    cfg: HFLmsysConfig, n: int, min_rounds: int = 1,
+) -> List[Conversation]:
+    """
+    Returns a list of Conversation objects from the CodeFlowBench dataset.
+    """
+    import random as _random
+
+    seed = getattr(cfg, "seed", None)
+
+    if seed is not None:
+        pool_size = max(n, n * 2)
+        pool: List[Conversation] = list(_iter_codeflowbench_conversations(cfg, max_n=pool_size, min_rounds=min_rounds))
+        rng = _random.Random(seed)
+        rng.shuffle(pool)
+        result = pool[:n]
+        print(f"[CodeFlowBench] Seeded: seed={seed}, pool={len(pool)}, selected={len(result)}")
+    else:
+        result = []
+        for conv in _iter_codeflowbench_conversations(cfg, max_n=n, min_rounds=min_rounds):
+            result.append(conv)
+            if len(result) >= n:
+                break
+
+    return result
+
+
 def load_replay_conversation_lengths(
     logs_path: str, n_conversations: int,
 ) -> List[List[int]]:

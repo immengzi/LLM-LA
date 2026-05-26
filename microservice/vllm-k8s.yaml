@@ -100,9 +100,9 @@ data:
           model: openai/served-model
           api_base: http://router-service:8080/v1
           api_key: "ZhongRuanChuangXin!"
-          timeout: 7200
+          timeout: 300
         flow_control:
-          model_queue_limit: 1000
+          model_queue_limit: 2000
 
     general_settings:
       master_key: "sk-boom-master"
@@ -575,7 +575,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 4
+  replicas: 2
   selector:
     matchLabels:
       app: vllm-qwen
@@ -822,7 +822,7 @@ spec:
             - name: LOG_LEVEL
               value: "info"
             - name: FORCE_IGNORE_EOS
-              value: "true"
+              value: "false"
             - name: STREAMING_MODE
               value: "false"
           ports:
