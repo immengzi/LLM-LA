@@ -468,6 +468,7 @@ def _iter_codeflowbench_conversations(
     cfg: HFLmsysConfig,
     max_n: int,
     min_rounds: int = 1,
+    multi_turn: bool = False,
 ) -> Iterator[Conversation]:
     """
     Yields Conversation objects from the CodeFlowBench dataset.
@@ -476,8 +477,14 @@ def _iter_codeflowbench_conversations(
     Each example has:
       - problem-description: the problem statement (user prompt)
       - solutions: list of solution objects with "content" (assistant response)
+      - subproblems: decomposed sub-tasks with dependency structure
+      - overall-turns: number of subproblems
+      - overall-depth: maximum dependency depth
 
-    We construct a single-turn conversation for each problem.
+    When multi_turn=False (default): constructs a single-turn conversation per problem.
+    When multi_turn=True: constructs a multi-turn conversation where each subproblem
+    is a separate turn. Subproblems are ordered by depth descending (depth=N first,
+    then N-1, ..., 0) to respect dependencies.
     """
     try:
         from datasets import load_from_disk  # type: ignore
@@ -538,25 +545,75 @@ def _iter_codeflowbench_conversations(
             continue
         solution = solutions[0]["content"].strip()
 
+        subproblems = ex.get("subproblems", [])
+        overall_turns = ex.get("overall-turns", 0)
+
         in_len = len(tok.encode(problem, add_special_tokens=False))
         if min_input_tokens is not None and in_len < min_input_tokens:
             continue
         if max_input_tokens is not None and in_len > max_input_tokens:
             continue
 
-        out_tok = len(tok.encode(solution, add_special_tokens=False))
+        if multi_turn and len(subproblems) > 1 and overall_turns > 1:
+            # Build multi-turn conversation from subproblems
+            # Sort subproblems by depth descending (highest depth first, deps resolved in order)
+            sorted_subproblems = sorted(
+                enumerate(subproblems),
+                key=lambda x: x[1].get("depth", 0),
+                reverse=True
+            )
 
-        turns = [
-            ConversationTurn(role="user", content=problem, output_tokens=0),
-            ConversationTurn(role="assistant", content=solution, output_tokens=out_tok),
-        ]
+            turns: List[ConversationTurn] = []
+            prev_code = ""
 
-        conv = Conversation(turns=turns)
-        yield conv
-        yielded += 1
+            # First user turn: problem description + first subproblem
+            first_subproblem_idx, first_subproblem = sorted_subproblems[0]
+            first_turn_content = (
+                f"Problem Description:\n{problem}\n\n"
+                f"Subproblem to solve (depth={first_subproblem.get('depth', 0)}):\n"
+                f"{first_subproblem['statement']}"
+            )
+            turns.append(ConversationTurn(role="user", content=first_turn_content, output_tokens=0))
+            turns.append(ConversationTurn(role="assistant", content="[Model generates code]", output_tokens=0))
+
+            # Subsequent turns: each subproblem gets user + assistant turns
+            for i in range(1, len(sorted_subproblems)):
+                subproblem_idx, subproblem = sorted_subproblems[i]
+                depth = subproblem.get("depth", 0)
+                is_last = (i == len(sorted_subproblems) - 1)
+
+                user_content = (
+                    f"Context from previous subproblem(s):\n{prev_code}\n\n"
+                    f"Subproblem to solve (depth={depth}):\n{subproblem['statement']}"
+                )
+                turns.append(ConversationTurn(role="user", content=user_content, output_tokens=0))
+
+                if is_last:
+                    out_tok = len(tok.encode(solution, add_special_tokens=False))
+                else:
+                    out_tok = 0  # No ground truth for intermediate subproblems
+                turns.append(ConversationTurn(role="assistant", content="[Model generates code]", output_tokens=out_tok))
+
+                # Placeholder for context - in real execution, model output would be used
+                if not is_last:
+                    prev_code += f"\n// {subproblem['name']}\n[Model should generate code]\n"
+
+            conv = Conversation(turns=turns)
+            yield conv
+            yielded += 1
+        else:
+            # Single-turn conversation (original behavior)
+            out_tok = len(tok.encode(solution, add_special_tokens=False))
+            turns = [
+                ConversationTurn(role="user", content=problem, output_tokens=0),
+                ConversationTurn(role="assistant", content=solution, output_tokens=out_tok),
+            ]
+            conv = Conversation(turns=turns)
+            yield conv
+            yielded += 1
 
     print(
-        f"[CodeFlowBench] Yielded {yielded} conversations (max_n={max_n})"
+        f"[CodeFlowBench] Yielded {yielded} conversations (max_n={max_n}, multi_turn={multi_turn})"
     )
 
 
@@ -565,21 +622,27 @@ def build_conversations_from_codeflowbench(
 ) -> List[Conversation]:
     """
     Returns a list of Conversation objects from the CodeFlowBench dataset.
+    Respects cfg.multi_turn for multi-turn conversation building.
     """
     import random as _random
 
-    seed = getattr(cfg, "seed", None)
+    multi_turn = getattr(cfg, 'multi_turn', False)
+    seed = getattr(cfg, 'seed', None)
 
     if seed is not None:
         pool_size = max(n, n * 2)
-        pool: List[Conversation] = list(_iter_codeflowbench_conversations(cfg, max_n=pool_size, min_rounds=min_rounds))
+        pool: List[Conversation] = list(
+            _iter_codeflowbench_conversations(
+                cfg, max_n=pool_size, min_rounds=min_rounds, multi_turn=multi_turn
+            )
+        )
         rng = _random.Random(seed)
         rng.shuffle(pool)
         result = pool[:n]
-        print(f"[CodeFlowBench] Seeded: seed={seed}, pool={len(pool)}, selected={len(result)}")
+        print(f"[CodeFlowBench] Seeded: seed={seed}, pool={len(pool)}, selected={len(result)}, multi_turn={multi_turn}")
     else:
         result = []
-        for conv in _iter_codeflowbench_conversations(cfg, max_n=n, min_rounds=min_rounds):
+        for conv in _iter_codeflowbench_conversations(cfg, max_n=n, min_rounds=min_rounds, multi_turn=multi_turn):
             result.append(conv)
             if len(result) >= n:
                 break
