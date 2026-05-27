@@ -155,7 +155,7 @@ router:
   sloWithKv: true
 sidecar:
   enabled: true
-  forceIgnoreEos: true
+  forceIgnoreEos: false
   logLevel: info
   prefetch: 2
   streamingMode: false
