@@ -188,6 +188,3 @@
 
 # 9-1-template-boom-claude-glm:
 #   - pull
-
-10-1-template-boom-claude-glm-stability:
-  - pull
