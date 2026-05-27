@@ -57,7 +57,7 @@ Current images:
 ### 1. DNS — `/etc/hosts`
 
 ```
-7.216.57.215  reg.local
+10.50.156.65  reg.local
 ```
 
 Update this if the registry moves to a different node. NodePort works

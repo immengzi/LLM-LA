@@ -20,7 +20,7 @@ It excludes Kubernetes installation and focuses on:
 
 ## 1. Cluster Topology (Current Setup)
 
-- 1 control-plane node: `node1` (`7.216.57.215`)
+- 1 control-plane node: `node1` (`10.50.156.65`)
 - Worker nodes with Ascend NPUs:
   - `7.216.57.161`
   - `10.50.156.65`
@@ -74,13 +74,13 @@ This causes:
 
 `reg.local` must resolve to:
 ```
-7.216.57.215
+10.50.156.65
 ```
 
 Example `/etc/hosts` on all nodes:
 
 ```
-7.216.57.215  reg.local
+10.50.156.65  reg.local
 7.242.102.243 nfs.local
 ```
 
@@ -373,7 +373,7 @@ Registry runs as:
 - Deployment + Service type NodePort
 - Port: `32000`
 - Namespace: `registry`
-- Hosted on: `node1` (`7.216.57.215`)
+- Hosted on: `node1` (`10.50.156.65`)
 
 ### Containerd insecure registry config (on every node)
 
@@ -413,7 +413,7 @@ localhost
 reg.local
 nfs.local
 7.242.102.243
-7.216.57.215
+10.50.156.65
 .cluster.local
 10.233.0.0/16   # pod CIDR
 10.233.64.0/18  # service CIDR

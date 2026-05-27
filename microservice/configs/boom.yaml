@@ -5,7 +5,7 @@
 
 backend: "boom"
 
-router_url: "http://7.216.57.215:30080"   # kept for warmup fallback; not used in boom path
+router_url: "http://10.50.156.65:30080"   # kept for warmup fallback; not used in boom path
 total_requests: 128
 prompt_source: "hf-lmsys"
 
@@ -54,7 +54,7 @@ print_trace: false
 
 metrics:
   enabled: true
-  prometheus_base_url: "http://7.216.57.215:31190"
+  prometheus_base_url: "http://10.50.156.65:31190"
   scrape_interval_s: 1.0
   window_s: 2.0
   include_debug_metrics: false
@@ -73,7 +73,7 @@ transport:
 
 # BooM Gateway connection — points at the NodePort exposed by 75-boom.yaml
 boom:
-  base_url: "http://7.216.57.215:30401"   # boom.nodePort from values.yaml
+  base_url: "http://10.50.156.65:30401"   # boom.nodePort from values.yaml
   chat_path: "/v1/chat/completions"
   model: "served-model"                   # must match model_name in boom config
   api_key: "sk-boom-master"              # master key or a generated virtual key

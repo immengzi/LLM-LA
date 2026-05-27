@@ -575,7 +575,7 @@ metadata:
   name: vllm-qwen
   namespace: vllm
 spec:
-  replicas: 4
+  replicas: 1
   selector:
     matchLabels:
       app: vllm-qwen

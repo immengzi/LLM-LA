@@ -102,7 +102,7 @@ so Claude's default model names map to `served-model`:
 
 ```bash
 kubectl get pods -n vllm -l app=boom-proxy
-curl http://7.216.57.215:30401/health
+curl http://10.50.156.65:30401/health
 ```
 
 ---
@@ -110,7 +110,7 @@ curl http://7.216.57.215:30401/health
 ## Step 3: Test the /v1/messages endpoint
 
 ```bash
-curl http://7.216.57.215:30401/v1/messages \
+curl http://10.50.156.65:30401/v1/messages \
   -H "x-api-key: sk-boom-master" \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
@@ -136,7 +136,7 @@ Replace `~/.claude/settings.json` with:
 {
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "sk-boom-master",
-    "ANTHROPIC_BASE_URL": "http://7.216.57.215:30401",
+    "ANTHROPIC_BASE_URL": "http://10.50.156.65:30401",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "served-model",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "served-model",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "served-model",
@@ -224,7 +224,7 @@ Only the `env` section of `settings.json` changes. Everything else
 ```json
 "env": {
   "ANTHROPIC_AUTH_TOKEN": "sk-boom-master",
-  "ANTHROPIC_BASE_URL": "http://7.216.57.215:30401",
+  "ANTHROPIC_BASE_URL": "http://10.50.156.65:30401",
   "ANTHROPIC_DEFAULT_HAIKU_MODEL": "served-model",
   "ANTHROPIC_DEFAULT_OPUS_MODEL": "served-model",
   "ANTHROPIC_DEFAULT_SONNET_MODEL": "served-model",
@@ -282,9 +282,9 @@ Uncomment it to include in sweeps:
 | Check | Command |
 |---|---|
 | BooM pod status | `kubectl get pods -n vllm -l app=boom-proxy` |
-| BooM health | `curl http://7.216.57.215:30401/health` |
-| BooM models list | `curl http://7.216.57.215:30401/v1/models -H "x-api-key: sk-boom-master"` |
-| Test /v1/messages | `curl http://7.216.57.215:30401/v1/messages -H "x-api-key: sk-boom-master" -H "Content-Type: application/json" -H "anthropic-version: 2023-06-01" -d '{"model":"served-model","max_tokens":64,"messages":[{"role":"user","content":"Hello"}]}'` |
+| BooM health | `curl http://10.50.156.65:30401/health` |
+| BooM models list | `curl http://10.50.156.65:30401/v1/models -H "x-api-key: sk-boom-master"` |
+| Test /v1/messages | `curl http://10.50.156.65:30401/v1/messages -H "x-api-key: sk-boom-master" -H "Content-Type: application/json" -H "anthropic-version: 2023-06-01" -d '{"model":"served-model","max_tokens":64,"messages":[{"role":"user","content":"Hello"}]}'` |
 | Claude config | `cat ~/.claude/settings.json` |
 | Claude env vars | `env \| grep ANTHROPIC` |
 

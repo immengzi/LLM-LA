@@ -95,7 +95,7 @@ models:
     sizeLocal: 1
   modelSubPath: GLM-5-w4a8-mtp-QuaRot
   name: glm5-chat
-  replicas: 4
+  replicas: 1
   servedModelName: served-model
   sidecarPrefetch: 2
   tensorParallelSize: 8
@@ -133,7 +133,7 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 4
+  vllm: 1
 router:
   admissionThrottle: false
   apiKey: ZhongRuanChuangXin!
