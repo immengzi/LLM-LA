@@ -56,7 +56,7 @@ generation:
   target_output_tokens: null
   target_total_tokens: null
   think: false
-  use_dataset_output_len: false
+  use_dataset_output_len: true
   # replay_output_lengths_from: "305"
 
 output_log_mode: "summary"
