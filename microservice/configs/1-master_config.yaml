@@ -162,8 +162,8 @@
 # 4-1-template-boom-direct-claude-glm:
 #   - round_robin
 
-4-2-template-boom-claude-glm:
-  - pull
+# 4-2-template-boom-claude-glm:
+#   - pull
 
 # 4-1-template-boom-direct-claude-glm-mooncake:
 #   - round_robin
