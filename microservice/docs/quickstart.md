@@ -143,10 +143,10 @@ kubectl get pods -n vllm -w
 kubectl logs -f <vllm-pod> -n vllm
 
 # Check router queue depth
-curl http://7.216.57.215:30080/metrics | grep router_central_queue_length
+curl http://10.50.156.65:30080/metrics | grep router_central_queue_length
 
 # Prometheus
-open http://7.216.57.215:31190
+open http://10.50.156.65:31190
 ```
 
 ---

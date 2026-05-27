@@ -207,7 +207,7 @@ You're serving Qwen3-8B as `served-model`. This is the out-of-the-box setup.
 backend: "boom"
 boom:
   model: "served-model"
-  base_url: "http://7.216.57.215:30401"
+  base_url: "http://10.50.156.65:30401"
   api_key: "sk-boom-master"
 ```
 
@@ -236,7 +236,7 @@ You're serving GLM-5-w4a8 and want to call it `"glm5"`.
 backend: "boom"
 boom:
   model: "glm5"
-  base_url: "http://7.216.57.215:30401"
+  base_url: "http://10.50.156.65:30401"
   api_key: "sk-boom-master"
 
 helm:

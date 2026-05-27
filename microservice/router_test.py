@@ -73,7 +73,7 @@ def send_request(idx: int, base_url: str, model: str, api_key: str, max_tokens: 
 
 def main():
     parser = argparse.ArgumentParser(description="BooM gateway routing test")
-    parser.add_argument("--base-url", default="http://7.216.57.215:30401")
+    parser.add_argument("--base-url", default="http://10.50.156.65:30401")
     parser.add_argument("--model", default="served-model")
     parser.add_argument("--api-key", default="sk-boom-master")
     parser.add_argument("--num", type=int, default=10, help="total requests")

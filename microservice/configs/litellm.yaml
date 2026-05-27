@@ -5,7 +5,7 @@
 
 backend: "litellm"
 
-router_url: "http://7.216.57.215:30080"   # kept for warmup fallback; not used in litellm path
+router_url: "http://10.50.156.65:30080"   # kept for warmup fallback; not used in litellm path
 total_requests: 128
 prompt_source: "hf-lmsys"
 
@@ -54,7 +54,7 @@ print_trace: false
 
 metrics:
   enabled: true
-  prometheus_base_url: "http://7.216.57.215:31190"
+  prometheus_base_url: "http://10.50.156.65:31190"
   scrape_interval_s: 1.0
   window_s: 2.0
   include_debug_metrics: false
@@ -74,7 +74,7 @@ transport:
 
 # LiteLLM proxy connection — points at the NodePort exposed by 70-litellm.yaml
 litellm:
-  base_url: "http://7.216.57.215:30400"   # litellm.nodePort from values.yaml
+  base_url: "http://10.50.156.65:30400"   # litellm.nodePort from values.yaml
   chat_path: "/v1/chat/completions"
   model: "served-model"                   # must match model_name in litellm_config.yaml
   api_key: "sk-litellm-master"            # master key or a generated virtual key

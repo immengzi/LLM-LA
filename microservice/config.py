@@ -100,7 +100,7 @@ def generation_effective_ignore_eos(gen_cfg: GenerationConfig) -> bool:
 @dataclass
 class PrometheusMetricsConfig:
     enabled: bool = True
-    prometheus_base_url: str = "http://7.216.57.215:31190"
+    prometheus_base_url: str = "http://10.50.156.65:31190"
     scrape_interval_s: float = 2.0
     window_s: float = 10.0
     include_debug_metrics: bool = False

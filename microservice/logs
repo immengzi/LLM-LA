@@ -2148,3 +2148,132 @@ Questions:
 
 
 
+*** logs - reproduce after data losts ***
+
+Series 1:
+Setup:
+- 4 replicas (2x data-parallel, TP8 each)
+- Model: GLM-5-w4a8-mtp-QuaRot
+- Backend: boom (direct routing, round_robin)
+- Batch size: 8 (helm) / 4 (model spec)
+- No cap on input tokens
+- Request response length: 512
+- Total requests: 10
+- Pattern: "det"
+- Rate_rps: 0.3
+- Dataset: lmsys_chat_1m (multi-turn)
+- Multi-turn: true
+- Streaming: false
+- KV-aware routing: true
+- Len-aware routing: true (short_first)
+- Output length predictor: simple
+
+Purpose: [TODO]
+Findings: [TODO]
+
+Observations:
+Metric (stat)               | Pull (expXX) | Push-RR (expXX)          | Winner
+----------------------------|--------------|--------------------------|--------
+↓ Latency mean (s)          | [TODO]       | [TODO]                   | [TODO]
+↓ Latency p99 (s)           | [TODO]       | [TODO]                   | [TODO]
+
+↑ Decode TPS mean           | [TODO]       | [TODO]                   | [TODO]
+↑ Prefill TPS mean          | [TODO]       | [TODO]                   | [TODO]
+
+↑ Requests running mean     | [TODO]       | [TODO]                   | [TODO]
+
+↓ TTFT mean (s)             | [TODO]       | [TODO]                   | [TODO]
+↓ TTFT p99 (s)              | [TODO]       | [TODO]                   | [TODO]
+
+↓ TPOT mean (s)             | [TODO]       | [TODO]                   | [TODO]
+↓ TPOT p99 (s)              | [TODO]       | [TODO]                   | [TODO]
+
+Notes: [TODO]
+
+
+Series 2:
+Setup:
+- 4 replicas (2x data-parallel, TP8 each)
+- Model: GLM-5-w4a8-mtp-QuaRot
+- Backend: boom (route via router — pull mode)
+- Batch size: 8 (helm) / 4 (model spec)
+- Sidecar prefetch: 2
+- No cap on input tokens
+- Request response length: 512
+- Total requests: 10
+- Pattern: "det"
+- Rate_rps: 0.3
+- Dataset: lmsys_chat_1m (multi-turn)
+- Multi-turn: true
+- Streaming: false
+- Replay output lengths from: turn 1
+- KV-aware routing: true
+- Len-aware routing: true (short_first)
+- Output length predictor: simple
+- Max inflight: 1000
+
+Purpose: [TODO]
+Findings: [TODO]
+
+Observations:
+Metric (stat)               | Pull (expXX) | Push-RR (expXX)          | Winner
+----------------------------|--------------|--------------------------|--------
+↓ Latency mean (s)          | [TODO]       | [TODO]                   | [TODO]
+↓ Latency p99 (s)           | [TODO]       | [TODO]                   | [TODO]
+
+↑ Decode TPS mean           | [TODO]       | [TODO]                   | [TODO]
+↑ Prefill TPS mean          | [TODO]       | [TODO]                   | [TODO]
+
+↑ Requests running mean     | [TODO]       | [TODO]                   | [TODO]
+
+↓ TTFT mean (s)             | [TODO]       | [TODO]                   | [TODO]
+↓ TTFT p99 (s)              | [TODO]       | [TODO]                   | [TODO]
+
+↓ TPOT mean (s)             | [TODO]       | [TODO]                   | [TODO]
+↓ TPOT p99 (s)              | [TODO]       | [TODO]                   | [TODO]
+
+Notes: [TODO]
+
+
+Series 3:
+Setup:
+- 4 replicas (2x data-parallel, TP8 each), model replicas: 4
+- Model: GLM-5-w4a8-mtp-QuaRot
+- Backend: boom (route via router — pull mode)
+- Batch size: 8 (helm) / 4 (model spec)
+- Sidecar prefetch: 2
+- No cap on input tokens
+- Request response length: 8192 (use_dataset_output_len: true)
+- Total requests: 40000
+- Pattern: "det"
+- Rate_rps: 0.2
+- Dataset: lmsys_chat_1m (single-turn)
+- Multi-turn: false
+- Streaming: false
+- KV-aware routing: true
+- Len-aware routing: true (short_first)
+- Output length predictor: simple
+- Max inflight: 1000
+- Key affinity keys: 0
+
+Purpose: [TODO]
+Findings: [TODO]
+
+Observations:
+Metric (stat)               | Pull (expXX) | Push-RR (expXX)          | Winner
+----------------------------|--------------|--------------------------|--------
+↓ Latency mean (s)          | [TODO]       | [TODO]                   | [TODO]
+↓ Latency p99 (s)           | [TODO]       | [TODO]                   | [TODO]
+
+↑ Decode TPS mean           | [TODO]       | [TODO]                   | [TODO]
+↑ Prefill TPS mean          | [TODO]       | [TODO]                   | [TODO]
+
+↑ Requests running mean     | [TODO]       | [TODO]                   | [TODO]
+
+↓ TTFT mean (s)             | [TODO]       | [TODO]                   | [TODO]
+↓ TTFT p99 (s)              | [TODO]       | [TODO]                   | [TODO]
+
+↓ TPOT mean (s)             | [TODO]       | [TODO]                   | [TODO]
+↓ TPOT p99 (s)              | [TODO]       | [TODO]                   | [TODO]
+
+Notes: [TODO]

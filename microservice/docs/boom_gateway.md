@@ -142,7 +142,7 @@ python main.py --config boom
 backend: "boom"
 
 boom:
-  base_url: "http://7.216.57.215:30401"
+  base_url: "http://10.50.156.65:30401"
   chat_path: "/v1/chat/completions"
   model: "served-model"
   api_key: "sk-boom-master"

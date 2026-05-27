@@ -3,7 +3,7 @@
 
 backend: "aibrix"
 
-router_url: "http://7.216.57.215:30080"
+router_url: "http://10.50.156.65:30080"
 total_requests: 40000
 prompt_source: "hf-lmsys"
 
@@ -63,7 +63,7 @@ metrics:
 transport:
   mode: "async_pubsub"
   submit_path: "/submit"
-  results_zmq: "tcp://7.216.57.215:30559"
+  results_zmq: "tcp://10.50.156.65:30559"
   topic: "results"
   run_id: null
   idle_timeout_s: 1000.0
