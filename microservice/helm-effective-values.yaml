@@ -21,7 +21,7 @@ boom:
   imagePullPolicy: Always
   keyAffinityBench: false
   masterKey: sk-boom-master
-  maxInflight: 2000
+  maxInflight: 1000
   nodePort: 30401
   resources:
     limits:
@@ -31,7 +31,7 @@ boom:
       cpu: 250m
       memory: 128Mi
   routeVia: router
-  upstreamTimeoutSeconds: 300
+  upstreamTimeoutSeconds: 7200
 cacheWarm:
   enabled: false
   image: busybox
@@ -155,7 +155,7 @@ router:
   sloWithKv: true
 sidecar:
   enabled: true
-  forceIgnoreEos: false
+  forceIgnoreEos: true
   logLevel: info
   prefetch: 2
   streamingMode: false

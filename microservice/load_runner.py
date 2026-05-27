@@ -299,7 +299,8 @@ def _note_last_recv(progress: Dict[str, float], progress_lock: threading.Lock) -
 
 def _replace_gen_cfg(gen_cfg: GenerationConfig, output_tokens: int) -> GenerationConfig:
     from dataclasses import replace
-    return replace(gen_cfg, max_tokens=output_tokens, min_tokens=output_tokens)
+    clamped = max(output_tokens, 1)
+    return replace(gen_cfg, max_tokens=clamped, min_tokens=clamped)
 
 
 def _build_generation_meta(

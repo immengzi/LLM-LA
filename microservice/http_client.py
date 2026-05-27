@@ -295,6 +295,8 @@ def send_one_aibrix(
         msg = c0.get("message")
         if isinstance(msg, dict):
             content = msg.get("content")
+            if not isinstance(content, str) or not content:
+                content = msg.get("reasoning")
             if isinstance(content, str):
                 output = content
 
@@ -468,6 +470,8 @@ def send_one_litellm_stream(
                 delta = c0.get("delta")
                 if isinstance(delta, dict):
                     content = delta.get("content")
+                    if not isinstance(content, str) or not content:
+                        content = delta.get("reasoning")
                     if isinstance(content, str) and content:
                         if t_first_token is None:
                             t_first_token = now
@@ -651,6 +655,8 @@ def send_one_litellm(
         msg = c0.get("message")
         if isinstance(msg, dict):
             content = msg.get("content")
+            if not isinstance(content, str) or not content:
+                content = msg.get("reasoning")
             if isinstance(content, str):
                 output = content
         fr = c0.get("finish_reason")
