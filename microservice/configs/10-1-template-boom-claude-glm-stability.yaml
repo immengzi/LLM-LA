@@ -15,7 +15,7 @@
 backend: "boom"
 
 router_url: "http://10.50.156.65:30080"
-total_requests: 5000
+total_requests: 100
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -33,7 +33,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 0.3
+  rate_rps: 0.05
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -56,8 +56,8 @@ generation:
   target_output_tokens: null
   target_total_tokens: null
   think: false
-  use_dataset_output_len: true
-  replay_output_lengths_from: "305"
+  use_dataset_output_len: false
+  # replay_output_lengths_from: "305"
 
 output_log_mode: "summary"
 print_trace: false

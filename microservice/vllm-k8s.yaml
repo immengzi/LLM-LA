@@ -246,7 +246,7 @@ metadata:
   name: redis
   namespace: vllm
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: redis
@@ -822,7 +822,7 @@ spec:
             - name: LOG_LEVEL
               value: "info"
             - name: FORCE_IGNORE_EOS
-              value: "true"
+              value: "false"
             - name: STREAMING_MODE
               value: "false"
           ports:
