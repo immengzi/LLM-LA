@@ -100,9 +100,9 @@ data:
           model: openai/served-model
           api_base: http://router-service:8080/v1
           api_key: "ZhongRuanChuangXin!"
-          timeout: 7200
+          timeout: 300
         flow_control:
-          model_queue_limit: 1000
+          model_queue_limit: 2000
 
     general_settings:
       master_key: "sk-boom-master"

@@ -55,3 +55,6 @@ debug-scripts/mooncake-test/test/
 HQ-production/
 *.tar
 *.log
+venv
+data
+local_plots
