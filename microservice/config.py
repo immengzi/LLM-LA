@@ -34,6 +34,7 @@ class HFLmsysConfig:
     max_output_tokens: Optional[int] = None
     repeat_each: int = 1
     seed: Optional[int] = None
+    multi_turn: bool = False  # Enable multi-turn conversation per problem (subproblems as turns)
 
 
 # =========================

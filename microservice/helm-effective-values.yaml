@@ -21,7 +21,7 @@ boom:
   imagePullPolicy: Always
   keyAffinityBench: false
   masterKey: sk-boom-master
-  maxInflight: 1000
+  maxInflight: 2000
   nodePort: 30401
   resources:
     limits:
@@ -31,7 +31,7 @@ boom:
       cpu: 250m
       memory: 128Mi
   routeVia: router
-  upstreamTimeoutSeconds: 7200
+  upstreamTimeoutSeconds: 300
 cacheWarm:
   enabled: false
   image: busybox

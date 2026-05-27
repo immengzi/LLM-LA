@@ -16,25 +16,26 @@ backend: "boom"
 
 router_url: "http://10.50.156.65:30080"
 total_requests: 5000
-prompt_source: "hf-lmsys"
+prompt_source: "codeflow"
 
 file_prompts:
   path: "prompts.json"
   variant: "short"
 
 hf_lmsys:
-  dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
+  dataset_name: "./data/codeflowbench"
   split: "train"
-  tokenizer_name: "/mnt/nvme1/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  tokenizer_name: "zai-org/GLM-5"
   streaming: false
   min_input_tokens: 256
   max_input_tokens: 10000000
   repeat_each: 1
+  multi_turn: true
 
 load_pattern:
   pattern: "det"
   rate_rps: 0.3
-  duration_s: 1000000000.0
+  duration_s: 86400.0
   warmup_reqs: 0
 
   burst_on_s: 2.0
@@ -50,14 +51,14 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
-  max_tokens: 8192
+  max_tokens: 1024
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null
   target_total_tokens: null
   think: false
-  use_dataset_output_len: true
-  replay_output_lengths_from: "305"
+  use_dataset_output_len: false
+  # replay_output_lengths_from: "305"
 
 output_log_mode: "summary"
 print_trace: false
