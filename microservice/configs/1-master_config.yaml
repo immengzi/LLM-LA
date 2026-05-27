@@ -186,5 +186,5 @@
 # 8-1-template-boom-direct-multiturn-key-affinity:
 #   - key_affinity
 
-# 9-1-template-boom-claude-glm:
-#   - pull
+4-2-template-boom-claude-glm:
+  - pull
