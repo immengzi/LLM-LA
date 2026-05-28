@@ -37,6 +37,7 @@ from config import (
     LiteLLMConfig,
     BooMConfig,
     SLOConfig,
+    MultiModelConfig,
     generation_effective_ignore_eos,
 )
 from prompts import Conversation, ConversationTurn
@@ -643,6 +644,7 @@ def _request_thread_litellm_http(
     output_log_mode: str = "preview",
     print_trace: bool = True,
     label: str = "LiteLLM",
+    model_override: Optional[str] = None,
 ):
     """
     OpenAI-compatible proxy worker: one open HTTP request per thread.
@@ -667,7 +669,10 @@ def _request_thread_litellm_http(
             effective_gen = gen_cfg
             if task.output_tokens is not None:
                 effective_gen = _replace_gen_cfg(gen_cfg, task.output_tokens)
-            rid, result = send_one_litellm(session, litellm_cfg, task.prompt, effective_gen, label=label)
+            rid, result = send_one_litellm(
+                session, litellm_cfg, task.prompt, effective_gen, label=label,
+                model_override=model_override,
+            )
             t1 = time.time()
             end_to_end_s = t1 - t0
 
@@ -684,15 +689,16 @@ def _request_thread_litellm_http(
                 endpoint_id,
             ) = _extract_result_fields(result)
 
+            model_tag = f" model={model_override}" if model_override else ""
             if latency_s is not None:
                 print(
                     f"[client][RECV][T{task.idx}] idx={task.idx} req_id={rid} "
-                    f"wait_wall={end_to_end_s:.3f}s model_latency={latency_s:.3f}s"
+                    f"wait_wall={end_to_end_s:.3f}s model_latency={latency_s:.3f}s{model_tag}"
                 )
             else:
                 print(
                     f"[client][RECV][T{task.idx}] idx={task.idx} req_id={rid} "
-                    f"wait_wall={end_to_end_s:.3f}s"
+                    f"wait_wall={end_to_end_s:.3f}s{model_tag}"
                 )
 
             if finish_reason is not None:
@@ -720,6 +726,8 @@ def _request_thread_litellm_http(
                     "finish_reason": finish_reason,
                 }
 
+                if model_override is not None:
+                    record["target_model"] = model_override
                 if endpoint_id is not None:
                     record["endpoint_id"] = endpoint_id
                 if usage_prompt_tokens is not None:
@@ -768,6 +776,7 @@ def _request_thread_litellm_http_stream(
     output_log_mode: str = "preview",
     print_trace: bool = True,
     label: str = "LiteLLM",
+    model_override: Optional[str] = None,
 ):
     """
     Streaming variant of _request_thread_litellm_http.
@@ -791,7 +800,10 @@ def _request_thread_litellm_http_stream(
             effective_gen = gen_cfg
             if task.output_tokens is not None:
                 effective_gen = _replace_gen_cfg(gen_cfg, task.output_tokens)
-            rid, result = send_one_litellm_stream(session, litellm_cfg, task.prompt, effective_gen, label=label)
+            rid, result = send_one_litellm_stream(
+                session, litellm_cfg, task.prompt, effective_gen, label=label,
+                model_override=model_override,
+            )
             t1 = time.time()
             end_to_end_s = t1 - t0
 
@@ -812,18 +824,19 @@ def _request_thread_litellm_http_stream(
             tpot_avg_s = result.get("tpot_avg_s") if isinstance(result, dict) else None
             streaming_chunks = result.get("streaming_chunks") if isinstance(result, dict) else None
 
+            model_tag = f" model={model_override}" if model_override else ""
             ttft_str = f" ttft={ttft_s:.3f}s" if ttft_s is not None else ""
             tpot_str = f" tpot_avg={tpot_avg_s:.4f}s" if tpot_avg_s is not None else ""
             if latency_s is not None:
                 print(
                     f"[client][RECV][T{task.idx}] idx={task.idx} req_id={rid} "
                     f"wait_wall={end_to_end_s:.3f}s model_latency={latency_s:.3f}s"
-                    f"{ttft_str}{tpot_str}"
+                    f"{ttft_str}{tpot_str}{model_tag}"
                 )
             else:
                 print(
                     f"[client][RECV][T{task.idx}] idx={task.idx} req_id={rid} "
-                    f"wait_wall={end_to_end_s:.3f}s{ttft_str}{tpot_str}"
+                    f"wait_wall={end_to_end_s:.3f}s{ttft_str}{tpot_str}{model_tag}"
                 )
 
             if finish_reason is not None:
@@ -847,6 +860,8 @@ def _request_thread_litellm_http_stream(
                     "streaming": True,
                 }
 
+                if model_override is not None:
+                    record["target_model"] = model_override
                 if ttft_s is not None:
                     record["ttft_s"] = ttft_s
                 if tpot_avg_s is not None:
@@ -907,6 +922,7 @@ def _request_thread_conversation(
     label: str = "BooM",
     use_streaming: bool = False,
     api_key_override: Optional[str] = None,
+    model_override: Optional[str] = None,
 ):
     """
     Execute a multi-turn conversation sequentially.
@@ -931,6 +947,8 @@ def _request_thread_conversation(
 
         messages_history: List[Dict[str, str]] = []
         send_fn = send_one_litellm_stream if use_streaming else send_one_litellm
+        accumulated_completion_tokens = 0
+        accumulated_prompt_tokens = 0
 
         for turn_idx in range(num_user_turns):
             user_turn = user_turns[turn_idx]
@@ -961,6 +979,7 @@ def _request_thread_conversation(
                     session, litellm_cfg, user_turn.content, effective_gen,
                     label=label, messages=list(messages_history),
                     api_key_override=api_key_override,
+                    model_override=model_override,
                 )
                 t1 = time.time()
                 end_to_end_s = t1 - t0
@@ -1007,7 +1026,15 @@ def _request_thread_conversation(
                         "end_to_end_s": end_to_end_s,
                         "model_latency_s": latency_s,
                         "finish_reason": finish_reason,
+                        "messages_in_request": len(messages_history) - 1,
+                        "prior_assistant_tokens": accumulated_completion_tokens,
+                        "prior_user_tokens": accumulated_prompt_tokens,
                     }
+
+                    new_user_tokens = None
+                    if usage_prompt_tokens is not None:
+                        new_user_tokens = usage_prompt_tokens - accumulated_completion_tokens - accumulated_prompt_tokens
+                        record["new_user_tokens"] = new_user_tokens
 
                     if use_streaming:
                         record["streaming"] = True
@@ -1018,6 +1045,8 @@ def _request_thread_conversation(
                         if streaming_chunks is not None:
                             record["streaming_chunks"] = streaming_chunks
 
+                    if model_override is not None:
+                        record["target_model"] = model_override
                     if api_key_override is not None:
                         record["affinity_key"] = api_key_override
                     if endpoint_id is not None:
@@ -1043,6 +1072,9 @@ def _request_thread_conversation(
                         record["trace_metrics"] = trace_metrics
 
                     logger.log_request(record)
+
+                accumulated_prompt_tokens = usage_prompt_tokens or accumulated_prompt_tokens
+                accumulated_completion_tokens += (usage_completion_tokens or 0)
 
             except Exception as e:
                 print(
@@ -1582,6 +1614,7 @@ def run_open_loop_load(
     slo: Optional[SLOConfig] = None,
     conversations: Optional[List[Conversation]] = None,
     conv_output_tokens: Optional[List[List[int]]] = None,
+    multi_model: Optional[MultiModelConfig] = None,
 ):
     """
     Execute a precomputed schedule.
@@ -1703,6 +1736,203 @@ def run_open_loop_load(
     t0_mono = time.monotonic()
     t0_plan = plan_times[0]
     adj_plan_times = [t0_mono + (ts - t0_plan) for ts in plan_times]
+
+    # -------------------------------------------------------
+    # Multi-model dispatch (fraction / mirror)
+    # Must be checked BEFORE any single-model backend blocks.
+    # -------------------------------------------------------
+    if multi_model is not None and backend in ("litellm", "boom"):
+        import random as _mm_random
+
+        proxy_cfg = boom if backend == "boom" else litellm
+        if proxy_cfg is None:
+            raise RuntimeError(f"backend='{backend}' requires {backend} config for multi-model")
+
+        use_streaming = bool(getattr(proxy_cfg, "stream", False))
+        mm_label = "BooM" if backend == "boom" else "LiteLLM"
+        strategy = multi_model.strategy
+        targets = multi_model.targets
+        target_models = [t.model for t in targets]
+        target_weights = [t.weight for t in targets]
+
+        # Normalize weights for fraction strategy
+        weight_sum = sum(target_weights)
+        norm_weights = [w / weight_sum for w in target_weights]
+
+        weight_desc = ", ".join(
+            f"{t.model}={w:.0%}" for t, w in zip(targets, norm_weights)
+        )
+        print(
+            f"[load_runner] Multi-model {strategy}: {weight_desc}, "
+            f"backend={backend}, stream={use_streaming}"
+        )
+
+        thread_fn = _request_thread_litellm_http_stream if use_streaming else _request_thread_litellm_http
+        conv_thread_fn = _request_thread_conversation
+
+        # --- Multi-turn + multi-model ---
+        if conversations is not None:
+            n_affinity_keys = getattr(proxy_cfg, "key_affinity_keys", 0) or 0
+
+            if strategy == "fraction":
+                model_assignments = _mm_random.choices(
+                    target_models, weights=norm_weights, k=len(conversations),
+                )
+                threads: List[threading.Thread] = []
+                t0_wall = time.time()
+
+                for cid, (ts_mono, conv) in enumerate(zip(adj_plan_times, conversations)):
+                    now = time.monotonic()
+                    sleep_until = ts_mono - 0.005
+                    if sleep_until > now:
+                        time.sleep(sleep_until - now)
+
+                    ot_per_turn = conv_output_tokens[cid] if conv_output_tokens else None
+                    ctask = ConversationTask(
+                        conv_id=cid, conversation=conv, ts_mono=ts_mono,
+                        output_tokens_per_turn=ot_per_turn,
+                    )
+                    conv_api_key = f"sk-bench-{cid % n_affinity_keys}" if n_affinity_keys > 0 else None
+                    assigned_model = model_assignments[cid]
+
+                    t = threading.Thread(
+                        target=conv_thread_fn,
+                        args=(
+                            ctask, proxy_cfg, gen_cfg, t0_mono,
+                            logger, output_log_mode, print_trace, mm_label, use_streaming,
+                            conv_api_key, assigned_model,
+                        ),
+                        daemon=True, name=f"mm-conv-{cid}-{assigned_model}",
+                    )
+                    t.start()
+                    threads.append(t)
+
+                _drain_threads_with_fleet_idle(
+                    threads=threads, total=len(conversations), t0_wall=t0_wall,
+                    idle_zero_running_s=idle_zero_running_s,
+                    idle_timeout_s=idle_timeout_s, logger=logger,
+                    backend_label=f"{backend}-multimodel-fraction-multiturn",
+                )
+                return
+
+            else:  # mirror
+                threads: List[threading.Thread] = []
+                t0_wall = time.time()
+
+                for cid, (ts_mono, conv) in enumerate(zip(adj_plan_times, conversations)):
+                    now = time.monotonic()
+                    sleep_until = ts_mono - 0.005
+                    if sleep_until > now:
+                        time.sleep(sleep_until - now)
+
+                    ot_per_turn = conv_output_tokens[cid] if conv_output_tokens else None
+
+                    for mi, tgt_model in enumerate(target_models):
+                        ctask = ConversationTask(
+                            conv_id=cid, conversation=conv, ts_mono=ts_mono,
+                            output_tokens_per_turn=ot_per_turn,
+                        )
+                        conv_api_key = f"sk-bench-{cid % n_affinity_keys}" if n_affinity_keys > 0 else None
+
+                        t = threading.Thread(
+                            target=conv_thread_fn,
+                            args=(
+                                ctask, proxy_cfg, gen_cfg, t0_mono,
+                                logger, output_log_mode, print_trace, mm_label, use_streaming,
+                                conv_api_key, tgt_model,
+                            ),
+                            daemon=True, name=f"mm-conv-{cid}-{tgt_model}",
+                        )
+                        t.start()
+                        threads.append(t)
+
+                actual_total = len(conversations) * len(target_models)
+                print(
+                    f"[load_runner] Mirror: {len(conversations)} conversations x "
+                    f"{len(target_models)} models = {actual_total} conversation threads"
+                )
+                _drain_threads_with_fleet_idle(
+                    threads=threads, total=actual_total, t0_wall=t0_wall,
+                    idle_zero_running_s=idle_zero_running_s,
+                    idle_timeout_s=idle_timeout_s, logger=logger,
+                    backend_label=f"{backend}-multimodel-mirror-multiturn",
+                )
+                return
+
+        # --- Single-turn + multi-model ---
+        if strategy == "fraction":
+            model_assignments = _mm_random.choices(
+                target_models, weights=norm_weights, k=total,
+            )
+            threads: List[threading.Thread] = []
+            t0_wall = time.time()
+
+            for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
+                now = time.monotonic()
+                sleep_until = ts_mono - 0.005
+                if sleep_until > now:
+                    time.sleep(sleep_until - now)
+
+                ot = output_tokens_per_request[idx] if output_tokens_per_request else None
+                task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono, output_tokens=ot)
+                assigned_model = model_assignments[idx]
+
+                t = threading.Thread(
+                    target=thread_fn,
+                    args=(
+                        task, proxy_cfg, gen_cfg, t0_mono,
+                        logger, output_log_mode, print_trace, mm_label, assigned_model,
+                    ),
+                    daemon=True, name=f"mm-T{idx}-{assigned_model}",
+                )
+                t.start()
+                threads.append(t)
+
+            _drain_threads_with_fleet_idle(
+                threads=threads, total=total, t0_wall=t0_wall,
+                idle_zero_running_s=idle_zero_running_s,
+                idle_timeout_s=idle_timeout_s, logger=logger,
+                backend_label=f"{backend}-multimodel-fraction",
+            )
+            return
+
+        else:  # mirror
+            threads: List[threading.Thread] = []
+            t0_wall = time.time()
+
+            for idx, (ts_mono, prompt) in enumerate(zip(adj_plan_times, prompts)):
+                now = time.monotonic()
+                sleep_until = ts_mono - 0.005
+                if sleep_until > now:
+                    time.sleep(sleep_until - now)
+
+                ot = output_tokens_per_request[idx] if output_tokens_per_request else None
+
+                for tgt_model in target_models:
+                    task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono, output_tokens=ot)
+                    t = threading.Thread(
+                        target=thread_fn,
+                        args=(
+                            task, proxy_cfg, gen_cfg, t0_mono,
+                            logger, output_log_mode, print_trace, mm_label, tgt_model,
+                        ),
+                        daemon=True, name=f"mm-T{idx}-{tgt_model}",
+                    )
+                    t.start()
+                    threads.append(t)
+
+            actual_total = total * len(target_models)
+            print(
+                f"[load_runner] Mirror: {total} requests x "
+                f"{len(target_models)} models = {actual_total} actual requests"
+            )
+            _drain_threads_with_fleet_idle(
+                threads=threads, total=actual_total, t0_wall=t0_wall,
+                idle_zero_running_s=idle_zero_running_s,
+                idle_timeout_s=idle_timeout_s, logger=logger,
+                backend_label=f"{backend}-multimodel-mirror",
+            )
+            return
 
     # -------------------------------------------------------
     # AIBrix backend: threaded open-loop HTTP requests

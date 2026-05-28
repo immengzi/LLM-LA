@@ -373,6 +373,7 @@ def send_one_litellm_stream(
     label: str = "LiteLLM",
     messages: Optional[List[Dict[str, str]]] = None,
     api_key_override: Optional[str] = None,
+    model_override: Optional[str] = None,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
     Streaming variant of send_one_litellm.
@@ -389,8 +390,9 @@ def send_one_litellm_stream(
 
     url = f"{str(litellm_cfg.base_url).rstrip('/')}{str(litellm_cfg.chat_path)}"
 
+    effective_model = model_override or str(litellm_cfg.model)
     payload: Dict[str, Any] = {
-        "model": str(litellm_cfg.model),
+        "model": effective_model,
         "messages": messages if messages is not None else [{"role": "user", "content": prompt}],
         "stream": True,
         "stream_options": {"include_usage": True},
@@ -553,6 +555,7 @@ def send_one_litellm(
     label: str = "LiteLLM",
     messages: Optional[List[Dict[str, str]]] = None,
     api_key_override: Optional[str] = None,
+    model_override: Optional[str] = None,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
     Send one request to an OpenAI-compatible proxy (LiteLLM or BooM Gateway).
@@ -566,6 +569,8 @@ def send_one_litellm(
                   a single user message is built from prompt.
         api_key_override: If set, used instead of litellm_cfg.api_key for this
                           request (key-affinity benchmarking).
+        model_override: If set, overrides litellm_cfg.model for this request
+                        (multi-model routing).
 
     Returns:
         (req_id, result_dict)
@@ -576,8 +581,9 @@ def send_one_litellm(
 
     url = f"{str(litellm_cfg.base_url).rstrip('/')}{str(litellm_cfg.chat_path)}"
 
+    effective_model = model_override or str(litellm_cfg.model)
     payload: Dict[str, Any] = {
-        "model": str(litellm_cfg.model),
+        "model": effective_model,
         "messages": messages if messages is not None else [{"role": "user", "content": prompt}],
         "stream": False,
         "max_tokens": int(gen_cfg.max_tokens),

@@ -231,6 +231,17 @@ def main():
             "(production auth/spend validation). Use backend=router for benchmarking."
         )
 
+    if cfg.multi_model is not None:
+        mm = cfg.multi_model
+        weight_sum = sum(t.weight for t in mm.targets)
+        targets_desc = ", ".join(
+            f"{t.model} ({t.weight/weight_sum:.0%})" for t in mm.targets
+        )
+        print(
+            f"[client] multi_model: strategy={mm.strategy}, "
+            f"targets=[{targets_desc}]"
+        )
+
     # Initialize experiment directory + logger
     exp_dir, exp_logger = init_experiment(
         cfg,
@@ -327,6 +338,7 @@ def main():
             slo=getattr(cfg, "slo", None),
             conversations=conversations,
             conv_output_tokens=conv_output_tokens,
+            multi_model=cfg.multi_model,
         )
     finally:
         t_end_load = time.time()
@@ -384,6 +396,12 @@ def main():
         "boom_chat_path": getattr(getattr(cfg, "boom", None), "chat_path", None),
         "boom_model": getattr(getattr(cfg, "boom", None), "model", None),
         "boom_stream": getattr(getattr(cfg, "boom", None), "stream", None),
+        # multi-model fields
+        "multi_model_strategy": cfg.multi_model.strategy if cfg.multi_model else None,
+        "multi_model_targets": [
+            {"model": t.model, "weight": t.weight}
+            for t in cfg.multi_model.targets
+        ] if cfg.multi_model else None,
     }
     try:
         with (Path(exp_dir) / "run_summary.json").open("w", encoding="utf-8") as f:
