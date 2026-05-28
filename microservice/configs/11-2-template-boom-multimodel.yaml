@@ -1,26 +1,22 @@
 # 11-2: Multi-model — BooM → LLM-LA (router/sidecar path).
-# 1x GLM-5 (DP=2) + 3x Qwen3-8B (no DP).
+# 1x GLM-5 (no DP, maxModelLen=8192) + 3x Qwen3-8B (no DP).
 # BooM → router-service → sidecar → vLLM (KV/len-aware scheduling).
+# Single-turn LMSYS benchmark.
 
 backend: "boom"
 
 router_url: "http://10.50.156.65:30080"
 total_requests: 100
-prompt_source: "codeflow"
-
-file_prompts:
-  path: "prompts.json"
-  variant: "short"
+prompt_source: "hf-lmsys"
 
 hf_lmsys:
-  dataset_name: "/mnt/nvme1/saeid/datasets/CodeFlowBench-2505"
+  dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
   split: "train"
-  tokenizer_name: "/mnt/nvme1/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  tokenizer_name: "/mnt/nvme1/saeid/models/qwen3-8b"
   streaming: false
   min_input_tokens: 1
   max_input_tokens: 3000
   repeat_each: 1
-  multi_turn: true
 
 load_pattern:
   pattern: "det"
@@ -44,10 +40,9 @@ generation:
   max_tokens: 1024
   temperature: 0.0
   length_mode: "legacy"
-  target_output_tokens: null
-  target_total_tokens: null
   think: false
   use_dataset_output_len: true
+  ignore_eos: true
 
 output_log_mode: "summary"
 print_trace: false

@@ -192,11 +192,17 @@
 # 10-1-template-boom-claude-glm-stability:
 #   - pull
 
-# 10-2-template-boom-claude-glm-stability:
-#   - pull
+10-2-template-boom-claude-glm-stability:
+  - pull
 
 # 11-1-template-boom-direct-multimodel:
 #   - pull
 
-11-2-template-boom-multimodel:
-  - pull
+# 11-2-template-boom-multimodel:
+#   - pull
+
+# 12-1-template-boom-direct-multimodel-fraction:
+#   - pull
+
+# 12-2-template-boom-direct-multimodel-mirror:
+#   - pull

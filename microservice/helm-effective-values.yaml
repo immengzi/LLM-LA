@@ -86,11 +86,17 @@ modelVolume:
 models:
 - batchSize: 4
   dataParallel:
-    enabled: false
+    enabled: true
+    hcclBuffSize: 200
+    ompNumThreads: 16
+    pairTopologyKey: roce-pair
+    rpcPort: 13389
+    size: 2
+    sizeLocal: 1
   modelSubPath: GLM-5-w4a8-mtp-QuaRot
   name: glm5-chat
-  replicas: 1
-  servedModelName: served-model-glm
+  replicas: 2
+  servedModelName: served-model
   sidecarPrefetch: 2
   tensorParallelSize: 8
   vllm:
@@ -100,26 +106,11 @@ models:
       cudagraphMode: FULL_DECODE_ONLY
     enableExpertParallel: true
     gpuMemoryUtilization: 0.95
-    maxModelLen: 8192
     maxNumBatchedTokens: 4096
     quantization: ascend
     reasoningParser: glm45
     seed: 1924
     toolCallParser: glm47
-    trustRemoteCode: true
-- batchSize: 4
-  dataParallel:
-    enabled: false
-  modelSubPath: qwen3-8b
-  name: qwen3-8b
-  replicas: 3
-  servedModelName: served-model-qwen
-  sidecarPrefetch: 2
-  tensorParallelSize: 1
-  vllm:
-    gpuMemoryUtilization: 0.95
-    maxNumBatchedTokens: 4096
-    seed: 1924
     trustRemoteCode: true
 mooncake:
   ascendBufferPool: "4:8"
@@ -142,7 +133,7 @@ pin:
     operator: Exists
 replicas:
   router: 1
-  vllm: 1
+  vllm: 2
 router:
   admissionThrottle: false
   apiKey: ZhongRuanChuangXin!

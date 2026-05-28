@@ -7,7 +7,7 @@ import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Optional
+from typing import List, Optional
 import yaml
 from urllib.parse import urlparse
 
@@ -255,6 +255,31 @@ class BooMConfig:
     # >0 = per-conversation key rotation using sk-bench-{conv_id % N}.
     # Requires BooM deployed with keyAffinityBench=true + directRoutingStrategy=key_affinity.
     key_affinity_keys: int = 0
+
+
+# =========================
+# Multi-model client routing
+# =========================
+
+@dataclass
+class MultiModelTarget:
+    """One target model for multi-model load generation."""
+    model: str = "served-model"
+    weight: float = 1.0
+    prompt_source: Optional[str] = None
+    hf_lmsys: Optional[dict] = None
+
+
+@dataclass
+class MultiModelConfig:
+    """Client-side multi-model routing configuration.
+
+    strategy:
+      - "fraction": each request picks one model by weighted probability.
+      - "mirror":   every request is cloned and sent to ALL target models.
+    """
+    strategy: str = "fraction"
+    targets: List[MultiModelTarget] = field(default_factory=list)
 
 
 # =========================
@@ -615,6 +640,9 @@ class ClientConfig:
     # SLO annotation config
     slo: SLOConfig = field(default_factory=SLOConfig)
 
+    # Multi-model routing (optional; when None, single boom.model / litellm.model is used)
+    multi_model: Optional[MultiModelConfig] = None
+
     # Helm knobs
     helm: HelmConfig = field(default_factory=HelmConfig)
 
@@ -681,6 +709,27 @@ def load_config(path: str) -> ClientConfig:
 
     # SLO config
     slo = _merge_dataclass(SLOConfig, raw.get("slo", {}))
+
+    # multi-model config
+    multi_model: Optional[MultiModelConfig] = None
+    raw_mm = raw.get("multi_model")
+    if isinstance(raw_mm, dict):
+        strategy = str(raw_mm.get("strategy", "fraction")).strip().lower()
+        if strategy not in ("fraction", "mirror"):
+            raise ValueError(f"Invalid multi_model.strategy '{strategy}'. Expected 'fraction' or 'mirror'.")
+        targets: List[MultiModelTarget] = []
+        for t in raw_mm.get("targets", []):
+            if not isinstance(t, dict):
+                continue
+            targets.append(MultiModelTarget(
+                model=str(t.get("model", "served-model")),
+                weight=float(t.get("weight", 1.0)),
+                prompt_source=t.get("prompt_source"),
+                hf_lmsys=t.get("hf_lmsys"),
+            ))
+        if len(targets) < 2:
+            raise ValueError("multi_model.targets must have at least 2 entries.")
+        multi_model = MultiModelConfig(strategy=strategy, targets=targets)
 
     # helm config
     helm = _merge_dataclass(HelmConfig, raw.get("helm", {}))
@@ -804,5 +853,6 @@ def load_config(path: str) -> ClientConfig:
         litellm=litellm,
         boom=boom,
         slo=slo,
+        multi_model=multi_model,
         helm=helm,
     )
