@@ -1,5 +1,3 @@
-<img width="1920" height="1280" alt="image" src="https://github.com/user-attachments/assets/35c8d559-2bfa-49f1-ab78-2973b38d2b24" /># Post-Kubernetes-Installation Setup Guide
-
 This document covers everything required **after** a bare Kubernetes cluster
 is installed to make it ready for LLM-LB deployments.
 
