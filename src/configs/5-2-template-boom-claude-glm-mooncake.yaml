@@ -1,0 +1,168 @@
+# 4-2-template-boom-claude-glm-mooncake.yaml
+#
+# Mooncake variant of 4-2-template-boom-claude-glm.yaml.
+# ROUTER MODE: BooM Gateway -> KV-aware router-service -> vLLM pods.
+# Adds the AscendStoreConnector KV-transfer pipeline (mooncake-master + per-pod
+# hostNetwork + lookup-rpc) so cross-LWS-group KV reuse works.
+#
+# Full LLM-LA pipeline + Mooncake:
+#   boom-proxy (30401)
+#     -> router-service (KV-aware, len-aware)
+#     -> vLLM LWS groups (DP=2, TP=8, EP=16, MTP)
+#         |- sidecar: publishes KV-block events to redis
+#         |- AscendStoreConnector: cross-group KV transfer via mooncake-master
+#
+# Claude Code connects via /v1/messages (Anthropic format) on port 30401.
+
+backend: "boom"
+
+router_url: "http://10.50.156.65:30080"
+total_requests: 10
+prompt_source: "hf-lmsys"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
+  split: "train"
+  tokenizer_name: "/mnt/nvme1/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  streaming: false
+  min_input_tokens: 256
+  max_input_tokens: 10000000
+  repeat_each: 1
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 0.3
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  max_tokens: 8192
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+  # RESERVED — not yet read by GenerationConfig; safe to leave (silently ignored).
+  use_dataset_output_len: true
+  replay_output_lengths_from: "305"
+
+output_log_mode: "summary"
+print_trace: false
+
+metrics:
+  enabled: true
+  prometheus_base_url: "http://10.50.156.65:31190"
+  scrape_interval_s: 1.0
+  window_s: 3.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+transport:
+  mode: "async_pubsub"
+  submit_path: "/submit"
+  results_zmq: "tcp://10.50.156.65:30559"
+  topic: "results"
+  run_id: null
+  idle_timeout_s: 1000.0
+  idle_zero_running_s: 10.0
+
+boom:
+  base_url: "http://10.50.156.65:30401"
+  chat_path: "/v1/chat/completions"
+  model: "served-model"
+  api_key: "sk-boom-master"
+  timeout_s: 10000.0
+  stream: false
+
+helm:
+  boom_claude_aliases: true
+  # `boom_route_via` (DIRECT mode) is not yet wired — see 4-1 template.
+  # boom_route_via: direct
+  # RESERVED — `boom_max_inflight` is not yet wired through the chart.
+  boom_max_inflight: 1000
+  router_api_key: "ZhongRuanChuangXin!"
+
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 1
+
+  router_kv_aware: true
+  router_len_aware: true
+  router_len_policy: "short_first"
+
+  # Model volume — local hostPath on each NPU node (bypasses NFS).
+  nfs_path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  model_host_path: "/home/models"  # must exist on every NPU node in production
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+  # RESERVED — `sidecar_prefetch` is not yet wired through the chart.
+  sidecar_prefetch: 2
+
+  # ---- Mooncake KV cache transfer ----
+  # mooncake-master runs as a single hostNetwork pod pinned to one control-plane node
+  # (10.50.156.106). vLLM leader + worker pods connect to it via P2PHANDSHAKE
+  # over the RoCE NIC; AscendStoreConnector handles cross-LWS-group KV moves.
+  mooncake_enabled: true
+  mooncake_master_port: 50088
+  mooncake_master_server_address: "10.50.156.106:50088"
+  mooncake_global_segment_size: 140000000000
+  mooncake_eviction_high_watermark: 0.9
+  mooncake_eviction_ratio: 0.1
+  mooncake_ascend_buffer_pool: "4:8"
+  mooncake_lookup_rpc_port: "10010"
+  mooncake_host_network: true
+  deploy_mooncake_master: true
+
+  # ---- Model topology — GLM-5 W4A8 MoE with DP=2, TP=8, EP=16, MTP ----
+  # `replicas` is the number of LWS *groups* (each group is one DP unit
+  # spanning roce-pair: 1 leader + 1 worker). On a 2-node cluster only 1
+  # group fits; production target is 4 groups (8 NPU nodes).
+  models:
+    - name: glm5-chat
+      servedModelName: served-model
+      replicas: 1
+      modelSubPath: GLM-5-w4a8-mtp-QuaRot
+      tensorParallelSize: 8
+      batchSize: 4
+      # RESERVED — `sidecarPrefetch` (model-scoped) is not yet wired.
+      sidecarPrefetch: 2
+      dataParallel:
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 13389
+        hcclBuffSize: 200
+        ompNumThreads: 16
+        pairTopologyKey: roce-pair
+      vllm:
+        gpuMemoryUtilization: 0.95
+        quantization: ascend
+        enableExpertParallel: true
+        enablePrefixCaching: true
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 4096
+        seed: 1924
+        toolCallParser: glm47
+        reasoningParser: glm45
+        additionalConfig:
+          multistream_overlap_shared_expert: true

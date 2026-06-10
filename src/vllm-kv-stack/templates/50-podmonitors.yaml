@@ -1,0 +1,90 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm
+  namespace: {{ .Release.Namespace }}
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      component: vllm
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - path: /metrics
+      port: http
+      scheme: http
+      honorLabels: true
+      interval: 1s
+
+---
+{{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kv-router
+  namespace: {{ .Release.Namespace }}
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: router-service
+  podMetricsEndpoints:
+    - path: /metrics
+      port: http
+      scheme: http
+      honorLabels: true
+      interval: 1s
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kv-sidecar
+  namespace: {{ .Release.Namespace }}
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      component: vllm
+  podMetricsEndpoints:
+    - path: /metrics
+      port: sidecar-http
+      scheme: http
+      honorLabels: true
+      interval: 1s
+{{- end }}
+
+---
+{{/*
+  LiteLLM proxy PodMonitor.
+  Only rendered when litellm.enabled=true.
+  Scrapes LiteLLM's built-in Prometheus metrics at /metrics/ on port 4000.
+  enable_prometheus_system_metrics: true must be set in litellm_config.yaml
+  (done in 70-litellm.yaml) for this endpoint to return data.
+  Interval is 5s (vs 1s for router/vllm) — litellm metrics are less time-critical.
+*/}}
+{{- if .Values.litellm.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: litellm-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: litellm-proxy
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: litellm-proxy
+  podMetricsEndpoints:
+    - path: /metrics/
+      port: http
+      scheme: http
+      honorLabels: true
+      interval: 5s
+{{- end }}

@@ -1,0 +1,129 @@
+# multi-model-example.yaml
+# Deploys multiple models through a single router + BooM gateway.
+#
+# Each model gets its own vLLM Deployment(s), its own request queue in the
+# router, and its own entry in BooM's model_list — all from a single Helm
+# release.
+#
+# The shared model-registry ConfigMap is the single source of truth:
+#   - BooM reads litellm_params (model routing)
+#   - Router reads router_params (queue + pod discovery)
+#
+# Prerequisites:
+#   - NFS PV/PVC with model weights at <model_host_path>/<modelSubPath>
+#   - All model images available in reg.local:32000
+#
+# Usage:
+#   python sweep_methods.py --master configs/multi-model-master.yaml
+#
+# Or directly with Helm:
+#   helm upgrade --install vllm ./vllm-kv-stack -n vllm -f values.yaml \
+#     --set-json 'models=[...]'
+
+backend: "boom"
+
+router_url: "http://10.50.156.65:30080"
+total_requests: 8
+prompt_source: "hf-lmsys"
+
+hf_lmsys:
+  dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
+  split: "train"
+  tokenizer_name: "/mnt/nvme1/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  streaming: false
+  min_input_tokens: 256
+  max_input_tokens: 10000000
+  repeat_each: 8
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 2
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+generation:
+  max_tokens: 5
+  temperature: 0.0
+  length_mode: "legacy"
+
+output_log_mode: "summary"
+print_trace: false
+
+metrics:
+  enabled: true
+  prometheus_base_url: "http://10.50.156.65:31190"
+  scrape_interval_s: 1.0
+  window_s: 2.0
+
+transport:
+  mode: "async_pubsub"
+  submit_path: "/submit"
+  results_zmq: "tcp://10.50.156.65:30559"
+  topic: "results"
+  idle_timeout_s: 1000.0
+  idle_zero_running_s: 10.0
+
+boom:
+  base_url: "http://10.50.156.65:30401"
+  chat_path: "/v1/chat/completions"
+  model: "glm5-chat"
+  api_key: "sk-boom-master"
+  timeout_s: 1000.0
+  stream: false
+
+helm:
+  boom_claude_aliases: true
+  router_api_key: "ZhongRuanChuangXin!"
+
+  autoscaling_enabled: false
+  router_kv_aware: true
+  router_len_aware: true
+  router_len_policy: "short_first"
+
+  nfs_path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  model_host_path: "/home/models"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+
+  models:
+    - name: glm5-chat
+      servedModelName: glm5-chat
+      replicas: 1
+      modelSubPath: GLM-5-w4a8-mtp-QuaRot
+      tensorParallelSize: 8
+      batchSize: 32
+      vllm:
+        gpuMemoryUtilization: 0.95
+        quantization: ascend
+        enableExpertParallel: true
+        maxModelLen: 80896
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 4096
+        toolCallParser: glm47
+        reasoningParser: glm45
+
+    - name: qwen3-8b
+      servedModelName: qwen3-8b
+      replicas: 2
+      modelSubPath: qwen3-8b
+      tensorParallelSize: 1
+      batchSize: 64
+      vllm:
+        gpuMemoryUtilization: 0.90
+        trustRemoteCode: true
+        toolCallParser: qwen3_coder
+        reasoningParser: qwen3
+
+    # Uncomment to add more models:
+    # - name: deepseek-v3
+    #   servedModelName: deepseek-v3
+    #   replicas: 2
+    #   modelSubPath: DeepSeek-V3
+    #   tensorParallelSize: 8
+    #   batchSize: 16
+    #   vllm:
+    #     gpuMemoryUtilization: 0.95
+    #     enableExpertParallel: true
