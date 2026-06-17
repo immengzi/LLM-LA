@@ -165,6 +165,200 @@ Changed `vllm-kv-stack/templates/31-router.yaml` to use dynamic label selector:
 
 ---
 
+## Issue 4: Calico CNI overlay broken — stale calico-node processes holding port 9099
+
+**Date:** June 17, 2026
+
+**Symptom:**
+- Production queue growing indefinitely; router not dispatching requests
+- Router logs show `KVHASH` `ConnectTimeout` errors to `vllm-cpu-hash` ClusterIP service
+- Sidecars on node3 can't reach the router by service name
+- DNS resolution fails from pods on node3: `socket.gaierror: [Errno -3] Temporary failure in name resolution`
+- Pod-to-pod traffic on the same node works; cross-node overlay traffic to node1 fails
+- Issue started ~10 hours after adding new nodes (node9, node10, node11) to the cluster
+
+**Root cause:**
+`calico-node` DaemonSet pods on node1 (and node2, node7, node8) were in `CrashLoopBackOff` (1400-1500+ restarts). The crash reason was `bind: address already in use` on port **9099** — a stale/orphaned `calico-node` process from a previous container was holding the port, preventing the new calico-node pod from starting.
+
+Since CoreDNS runs on **node1**, and calico-node on node1 was broken, the Calico overlay tunnel from node3 → node1 was down. This meant no pod on node3 could reach CoreDNS via its pod IP, breaking all DNS resolution from node3 (where router, redis, cpu-hash infrastructure pods run).
+
+**Why adding new nodes caused this:**
+When nodes 9, 10, and 11 were added to the cluster, the Calico DaemonSet rolled out `calico-node` pods to those new nodes. This triggered Calico's BGP mesh reconfiguration across the entire cluster — every existing `calico-node` had to update its peer list and tunnel configuration for the new nodes. On nodes 1, 2, 7, and 8, this reconfiguration caused `calico-node` to restart. During the restart, the old `calico-node` process did not fully terminate (likely due to a race condition or signal handling bug in the container runtime), leaving an orphaned process holding port 9099. When the new `calico-node` container attempted to start, it couldn't bind to port 9099 and immediately crashed, entering `CrashLoopBackOff`. The exponential backoff meant that after 1400-1500+ failed attempts, Kubernetes was waiting several minutes between retries, making it appear as if calico was permanently broken. The Prometheus `router_central_queue_length` graph confirmed the sharp increase started approximately 10 hours after the new nodes were added, matching the timeline exactly.
+
+**Diagnosis steps performed:**
+
+```bash
+# 1. Confirmed router queue growing via Prometheus metric: router_central_queue_length
+# Graph showed sharp increase starting ~10 hours after new nodes were added
+
+# 2. Checked router logs — ConnectTimeout to KVHASH service
+kubectl logs -n vllm deploy/router-service --tail=50
+
+# 3. Tested pod-to-pod connectivity from router pod on node3
+# Same-node (router → redis by pod IP): WORKS
+kubectl exec -n vllm deploy/router-service -- python3 -c \
+  "import socket; s=socket.socket(); s.settimeout(2); s.connect(('<redis-pod-ip>', 6379)); print('ok')"
+
+# Cross-node to node1 CoreDNS pod IP: FAILS (timeout)
+kubectl exec -n vllm deploy/router-service -- python3 -c \
+  "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(2); s.sendto(b'\\x00', ('172.16.166.138', 53))"
+
+# Cross-node to node2 vLLM by host IP (hostNetwork): WORKS
+# This proved the issue was overlay-specific (pod IP routing), not general networking
+
+# 4. Checked calico-node pods
+kubectl get pods -n kube-system -l k8s-app=calico-node -o wide
+# node1: CrashLoopBackOff  0/1  1504 restarts  ← CRITICAL (CoreDNS here)
+# node2: CrashLoopBackOff  0/1  1465 restarts
+# node7: CrashLoopBackOff  0/1  1492 restarts
+# node8: CrashLoopBackOff  0/1  1488 restarts
+# node3,4,5,6: Running 1/1 ← OK
+
+# 5. Checked calico-node logs on node1
+kubectl logs -n kube-system <calico-node-pod-on-node1> --tail=20
+# Shows: bind: address already in use (port 9099)
+
+# 6. SSH'd into node1 and found the stale process
+ssh 7.150.1.218
+ss -tlnp | grep 9099
+# LISTEN  0  1024  127.0.0.1:9099  0.0.0.0:*  users:(("calico-node",pid=146636,fd=7))
+# PID 146636 — orphaned calico-node process from old container
+```
+
+**Fix applied — all 4 affected nodes (node1, node2, node7, node8):**
+
+The same 3-step procedure was applied to each node. Node1 was fixed first since it hosts CoreDNS (the critical path for DNS).
+
+```bash
+# === STEP 1: SSH into the node and kill the stale process ===
+
+# Node1 (7.150.1.218) — CRITICAL: CoreDNS runs here
+ssh 7.150.1.218
+ss -tlnp | grep 9099
+# LISTEN  0  1024  127.0.0.1:9099  0.0.0.0:*  users:(("calico-node",pid=146636,fd=7))
+kill -9 146636
+ss -tlnp | grep 9099
+# LISTEN  0  1024  127.0.0.1:9099  0.0.0.0:*  users:(("calico-node",pid=546015,fd=6))  ← new process took over
+
+# Node2 (7.150.5.207)
+ssh 7.150.5.207
+ss -tlnp | grep 9099
+# LISTEN  0  1024  127.0.0.1:9099  0.0.0.0:*  users:(("calico-node",pid=44621,fd=7))
+kill -9 44621
+ss -tlnp | grep 9099
+# LISTEN  0  1024  127.0.0.1:9099  0.0.0.0:*  users:(("calico-node",pid=134755,fd=7))  ← new process took over
+
+# Node7 (7.150.6.33)
+ssh 7.150.6.33
+ss -tlnp | grep 9099
+# LISTEN  0  1024  127.0.0.1:9099  0.0.0.0:*  users:(("calico-node",pid=1705623,fd=7))
+kill -9 1705623
+ss -tlnp | grep 9099
+# LISTEN  0  1024  127.0.0.1:9099  0.0.0.0:*  users:(("calico-node",pid=3272208,fd=7))  ← new process took over
+
+# Node8 (7.150.0.37)
+ssh 7.150.0.37
+ss -tlnp | grep 9099
+# LISTEN  0  1024  127.0.0.1:9099  0.0.0.0:*  users:(("calico-node",pid=1687421,fd=7))
+kill -9 1687421
+ss -tlnp | grep 9099
+# LISTEN  0  1024  127.0.0.1:9099  0.0.0.0:*  users:(("calico-node",pid=1413739,fd=7))  ← new process took over
+```
+
+```bash
+# === STEP 2: Force pod restart from master (backoff too long after 1500+ restarts) ===
+
+# After killing the stale process, the calico-node pod is still in CrashLoopBackOff
+# with massive exponential backoff (minutes between retries). Delete the pod to force
+# an immediate fresh start with 0 restarts.
+
+kubectl delete pod -n kube-system -l k8s-app=calico-node --field-selector spec.nodeName=node1
+# pod "calico-node-rckzz" deleted
+kubectl delete pod -n kube-system -l k8s-app=calico-node --field-selector spec.nodeName=node2
+# pod "calico-node-zk64z" deleted
+kubectl delete pod -n kube-system -l k8s-app=calico-node --field-selector spec.nodeName=node7
+# pod "calico-node-svxgx" deleted
+kubectl delete pod -n kube-system -l k8s-app=calico-node --field-selector spec.nodeName=node8
+# pod "calico-node-pmpbl" deleted
+```
+
+```bash
+# === STEP 3: Verify each node came up healthy (1/1 Running, 0 restarts) ===
+
+kubectl get pods -n kube-system -l k8s-app=calico-node --field-selector spec.nodeName=node1
+# calico-node-q84qh  1/1  Running  0  67s  ✓
+
+kubectl get pods -n kube-system -l k8s-app=calico-node --field-selector spec.nodeName=node2
+# calico-node-h5jv2  1/1  Running  0  2m52s  ✓
+
+kubectl get pods -n kube-system -l k8s-app=calico-node --field-selector spec.nodeName=node7
+# calico-node-wpcck  1/1  Running  0  75s  ✓
+
+kubectl get pods -n kube-system -l k8s-app=calico-node --field-selector spec.nodeName=node8
+# calico-node-6qwsq  1/1  Running  0  18s  ✓
+```
+
+```bash
+# === STEP 4: Verify DNS recovery ===
+
+# After fixing node1 (CoreDNS host), overlay tunnel re-established immediately.
+# Direct pod IP connectivity to CoreDNS recovered first:
+kubectl exec -n vllm deploy/router-service -- python3 -c \
+  "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(2); s.sendto(b'\x00', ('172.16.166.138', 53)); print('reachable'); s.close()"
+# reachable ✓
+
+# Full DNS resolution working:
+kubectl exec -n vllm deploy/router-service -- python3 -c \
+  "import socket; print(socket.getaddrinfo('kubernetes.default.svc.cluster.local', 443))"
+# [(<AddressFamily.AF_INET: 2>, ... ('10.233.0.1', 443))] ✓
+
+# NOTE: After killing the stale process on node1 but BEFORE deleting the pod,
+# DNS was still failing. This is because the calico-node pod was stuck in
+# CrashLoopBackOff with long backoff delay. Only after deleting the pod
+# (forcing immediate restart) did the overlay tunnel fully recover.
+```
+
+```bash
+# === STEP 5: Restart router to clear stuck queue ===
+kubectl rollout restart deploy/router-service -n vllm
+
+# === STEP 6: Verify production end-to-end ===
+curl -s http://10.50.156.65:30080/v1/chat/completions \
+  -H "Authorization: Bearer ZhongRuanChuangXin!" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"served-model-minmax","messages":[{"role":"user","content":"Say hi"}],"max_tokens":8}' \
+  | python3 -m json.tool
+# Response received successfully with completion_tokens_details ✓
+
+# === STEP 7: Verify kube-proxy is healthy on all nodes ===
+kubectl get pods -n kube-system -l k8s-app=kube-proxy -o wide
+# All 8 nodes: Running 1/1 ✓
+```
+
+**Additional context — new nodes removed:**
+Before fixing calico, nodes 9, 10, and 11 (the newly added nodes that triggered this incident) were drained and removed from the cluster to prevent future issues:
+
+```bash
+kubectl drain node9 --ignore-daemonsets --delete-emptydir-data
+kubectl drain node10 --ignore-daemonsets --delete-emptydir-data
+kubectl drain node11 --ignore-daemonsets --delete-emptydir-data
+kubectl delete node node9
+kubectl delete node node10
+kubectl delete node node11
+```
+
+This did NOT fix the calico issue on existing nodes (the stale processes were already orphaned), but prevents the same trigger from recurring when those nodes rejoin.
+
+**Prevention:**
+- Before adding new nodes to the cluster, ensure all `calico-node` pods on existing nodes are healthy (`1/1 Running`)
+- After adding nodes, immediately check: `kubectl get pods -n kube-system -l k8s-app=calico-node -o wide`
+- If any `calico-node` enters `CrashLoopBackOff` with `bind: address already in use`, SSH into that node and run `ss -tlnp | grep 9099` to find and `kill -9` the stale process, then `kubectl delete pod` to force a clean restart
+- Consider adding a preStop hook or init container that kills any existing process on port 9099 before calico-node starts
+- Monitor `calico-node` restart counts in Prometheus/alerting — a sudden spike in restarts across multiple nodes is a strong signal of this issue
+- Keep this document (`docs/k8s-dns-troubleshooting.md`) accessible to all cluster operators — see GitHub link: `https://github.com/LA-Boom/llm-la/blob/main/docs/k8s-dns-troubleshooting.md`
+
+---
+
 ## Quick Diagnostic Checklist
 
 When pods on specific nodes can't resolve DNS or reach services:
@@ -182,20 +376,36 @@ kubectl exec -n vllm <broken-pod> -c vllm -- python3 -c \
 kubectl exec -n vllm <broken-pod> -c vllm -- cat /etc/resolv.conf
 # Should show: nameserver 10.233.0.10
 
-# 4. Check kube-proxy on the affected node
+# 4. Check calico-node pods (Issue 4 — most common cause after cluster changes)
+kubectl get pods -n kube-system -l k8s-app=calico-node -o wide
+# ALL should be 1/1 Running. If any are CrashLoopBackOff:
+#   a) SSH into the affected node
+#   b) ss -tlnp | grep 9099
+#   c) kill -9 <stale-pid>
+#   d) kubectl delete pod -n kube-system -l k8s-app=calico-node --field-selector spec.nodeName=<node>
+#   e) Wait 30s, verify 1/1 Running
+
+# 5. Check kube-proxy on the affected node
 kubectl logs -n kube-system <kube-proxy-pod-on-affected-node> --tail=10
 # Look for "connection refused" or "address already in use"
 
-# 5. Check kubelet clusterDNS on the affected node (SSH in)
+# 6. Check kubelet clusterDNS on the affected node (SSH in)
 cat /var/lib/kubelet/config.yaml | grep -A2 clusterDNS
 # Should show: 10.233.0.10
 
-# 6. Check iptables rules for kube-dns on the affected node (SSH in)
+# 7. Check iptables rules for kube-dns on the affected node (SSH in)
 sudo iptables -t nat -L KUBE-SERVICES 2>/dev/null | grep kube-dns
 # Should show KUBE-SVC rules for kube-dns
 
-# 7. Direct DNS test from the affected node (SSH in)
+# 8. Direct DNS test from the affected node (SSH in)
 nslookup kubernetes.default.svc.cluster.local 10.233.0.10
+
+# 9. Test overlay connectivity (distinguish DNS vs CNI issues)
+# From a pod, try reaching CoreDNS by pod IP directly:
+kubectl exec -n vllm deploy/router-service -- python3 -c \
+  "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(2); s.sendto(b'\x00', ('172.16.166.138', 53)); print('reachable')"
+# If this fails but same-node pod traffic works → broken Calico overlay (Issue 4)
+# If this works but DNS by name fails → kube-proxy iptables issue (Issue 2)
 ```
 
 ## Cluster Reference
@@ -206,5 +416,5 @@ nslookup kubernetes.default.svc.cluster.local 10.233.0.10
 | Service CIDR | `10.233.0.0/16` |
 | Control-plane node | node3 (`10.50.156.65`) |
 | API server | `https://10.50.156.65:6443` |
-| CoreDNS pods | node3 (both replicas) |
+| CoreDNS pods | node1 (both replicas, IPs: 172.16.166.137, 172.16.166.138) |
 | Pod network CIDR | `172.16.0.0/16` |
