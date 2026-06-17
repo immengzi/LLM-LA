@@ -1,5 +1,17 @@
 backend: router
 
+# Implementation of the router + sidecar services: "python" (reference) or "go".
+# This is a single knob that swaps the router and sidecar container images for
+# their Go equivalents (images.routerGo / images.sidecarGo). Everything else
+# (env vars, endpoints, behavior) is identical, since the Go services are a
+# 100%-parity port of the Python ones.
+serviceImpl: python
+
+# Offset added to every hardcoded NodePort (redis, router, cpu-hash, vLLM).
+# Default 0 keeps original ports; set e.g. 100 for a shadow deployment to
+# avoid port collisions with the primary deployment on the same cluster.
+portOffset: 0
+
 replicas:
   router: 1
   vllm: 16
@@ -13,6 +25,9 @@ global:
 images:
   router: kv-router:latest
   sidecar: kv-sidecar:latest
+  # Go implementations (used when serviceImpl=go)
+  routerGo: kv-router-go:latest
+  sidecarGo: kv-sidecar-go:latest
   # vllm: quay.io/ascend/vllm-ascend:v0.11.0rc0
   # vllm: ascend/vllm-ascend:v0.11.0rc0
   # vllm: quay.io/ascend/vllm-ascend:latest
@@ -20,7 +35,8 @@ images:
   vllm: docker.io/library/vllm-ascend:v0.18.0
   cpuHash: vllm-cpu-hash:latest
   redis: redis:7-alpine
-  mooncakeMaster: quay.io/ascend/vllm-ascend:glm5-openeuler
+  # mooncakeMaster: quay.io/ascend/vllm-ascend:glm5-openeuler
+  mooncakeMaster: docker.io/library/vllm-ascend:v0.18.0
 
 sidecar:
   enabled: true     # set false in boom direct mode (no router/sidecar needed)
@@ -126,6 +142,11 @@ aibrix:
 
 # vLLM runtime flags — all optional, set null to disable
 vllm:
+  # Nodes labelled avoid=<avoidLabelValue> are excluded from vLLM scheduling.
+  # Override for shadow deployments (e.g. "vllm-shadow") so prod and shadow
+  # use independent avoid labels.
+  avoidLabelValue: "vllm"
+
   # Memory / performance
   kvCacheDtype: "auto"             # "auto", "fp8", "fp8_e4m3" — fp8 halves KV cache memory
   cpuOffloadGb: null               # null = off; set to e.g. 3 to offload model weights to CPU for more KV cache
@@ -151,6 +172,10 @@ vllm:
   toolCallParser: null             # e.g. "qwen3_coder", "glm47" — also enables --enable-auto-tool-choice
   reasoningParser: null            # e.g. "qwen3", "glm45"
   hostNetwork: false
+  dtype: "auto"                      # "auto", "bfloat16", "float16" — passed to --dtype
+  schedulerCls: ""                   # e.g. "lsched.lsched_vllm.LSchedVLLMAdapter" — passed to --scheduler-cls
+  modelLoaderExtraConfig: ""         # JSON string, e.g. '{"enable_multithread_load":true,"num_threads":16}'
+  ascendEnableFlashcomm1: false      # true = set VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 # -----------------------------------------------------------------------
 # Unified model definitions.
@@ -285,6 +310,39 @@ mooncake:
   ascendBufferPool: "4:8"
   lookupRpcPort: "10010"
 
+# -----------------------------------------------------------------------
+# LMCache — wraps Mooncake for cross-replica KV cache coordination.
+#
+# When enabled, replaces AscendStoreConnector with LMCacheAscendConnectorV1Dynamic
+# on vLLM pods. Mooncake master is still required (mooncake.enabled must be true).
+# vLLM pods get LMCACHE_CONFIG_FILE instead of MOONCAKE_CONFIG_PATH.
+lmcache:
+  enabled: false
+  chunkSize: 512
+  maxLocalCpuSize: 50
+  localCpu: true
+  useLayerwise: false
+  enableAsyncLoading: false
+  internalApiServerEnabled: true
+  internalApiServerHost: "0.0.0.0"
+  internalApiServerPortStart: 6999
+  extraConfig:
+    useExistsAsync: true
+    saveChunkMeta: false
+    protocol: "ascend"
+    globalSegmentSize: 80530636800
+    localBufferSize: 0
+    mooncakePreferLocalAlloc: true
+    useAscendDirect: true
+  # NDS (NVMe Direct Storage) — P2P DMA from NVMe SSD to NPU memory.
+  # Requires p2p_dev.ko kernel module loaded on the host and /dev/p2p_device present.
+  nds:
+    enabled: false
+    path: "/workspace/nds_kvcache"
+    dev: "/dev/md0"
+    size: 2048
+    xdsPath: "/workspace/qyf/xds/xds/file_p2p"
+
 # Component deployment control
 # Set to false to skip deploying a component (used for decoupled vLLM/stack deploys)
 deploy:
@@ -417,8 +475,8 @@ boom:
   # Enable Claude Code compatibility aliases.
   # When true, BooM config includes router_settings.model_group_alias that
   # maps standard Claude model names (claude-sonnet-4-20250514, etc.) to
-  # "served-model", so Claude Code can connect via /v1/messages without
-  # overriding model names in ~/.claude/settings.json.
+  # the first model's servedModelName, so Claude Code can connect via
+  # /v1/messages without overriding model names in ~/.claude/settings.json.
   claudeCodeAliases: false
 
   # Additional model aliases (only when claudeCodeAliases=true).

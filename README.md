@@ -308,3 +308,4 @@ docker build -t reg.local:32000/boom-gateway:latest . && docker push reg.local:3
 | [docs/registry.md](docs/registry.md) | Private container registry operations |
 | [src/README.md](src/README.md) | Routing algorithms and load client details |
 | [src/README_LLMLB.md](src/README_LLMLB.md) | Comprehensive system reference |
+| [docs/k8s-dns-troubleshooting.md](docs/k8s-dns-troubleshooting.md) | K8s DNS/networking troubleshooting & post-change verification checklist |

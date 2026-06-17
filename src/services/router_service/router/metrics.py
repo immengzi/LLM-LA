@@ -101,6 +101,31 @@ ROUTER_SLO_REGISTRY_SIZE = Gauge(
     "Current number of entries in the SLO registry",
 )
 
+# -------------------------------------------------
+# Per-request latency histograms (prod observability)
+# -------------------------------------------------
+
+ROUTER_REQUEST_TTFT = Histogram(
+    "router_request_ttft_seconds",
+    "Time to first token as measured by the router (seconds)",
+    ["model"],
+    buckets=[0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0],
+)
+
+ROUTER_REQUEST_TPOT_AVG = Histogram(
+    "router_request_tpot_avg_seconds",
+    "Average time per output token (seconds)",
+    ["model"],
+    buckets=[0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0],
+)
+
+ROUTER_REQUEST_E2E = Histogram(
+    "router_request_e2e_seconds",
+    "End-to-end request latency as measured by the router (seconds)",
+    ["model"],
+    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
+)
+
 
 # ----------------------------
 # Central queue helpers
@@ -222,5 +247,30 @@ def observe_e2e_prediction_error(error_s: float) -> None:
 def set_slo_registry_size(n: int) -> None:
     try:
         ROUTER_SLO_REGISTRY_SIZE.set(int(n))
+    except Exception:
+        pass
+
+
+# -------------------------------------------------
+# Per-request latency helpers
+# -------------------------------------------------
+
+def observe_request_ttft(ttft_s: float, model: str = "") -> None:
+    try:
+        ROUTER_REQUEST_TTFT.labels(model=model).observe(float(ttft_s))
+    except Exception:
+        pass
+
+
+def observe_request_tpot_avg(tpot_s: float, model: str = "") -> None:
+    try:
+        ROUTER_REQUEST_TPOT_AVG.labels(model=model).observe(float(tpot_s))
+    except Exception:
+        pass
+
+
+def observe_request_e2e(e2e_s: float, model: str = "") -> None:
+    try:
+        ROUTER_REQUEST_E2E.labels(model=model).observe(float(e2e_s))
     except Exception:
         pass

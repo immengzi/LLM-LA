@@ -8,8 +8,10 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi import status
 from fastapi import BackgroundTasks
 
+import collections
 import httpx
 import json
+import logging
 import time
 import sys
 import asyncio
@@ -37,6 +39,9 @@ from .metrics import (
     inc_slo_actual_miss,
     inc_slo_actual_met,
     set_slo_registry_size,
+    observe_request_ttft,
+    observe_request_tpot_avg,
+    observe_request_e2e,
 )
 from .slo_state import SLORegistry, SLOEntry
 
@@ -68,6 +73,21 @@ except Exception:  # pragma: no cover
 
 # Async pubsub publisher (added later as router/pubsub.py)
 from .pubsub import ResultPublisher  # type: ignore
+
+# -------------------------------------------------
+# Per-request latency log (ring buffer + logger)
+# -------------------------------------------------
+_latency_logger = logging.getLogger("router.latency")
+_LATENCY_LOG_MAX = 2000
+_latency_ring: collections.deque = collections.deque(maxlen=_LATENCY_LOG_MAX)
+_latency_ring_lock = RLock()
+
+
+def _record_latency(entry: Dict[str, Any]) -> None:
+    """Append to ring buffer and emit structured log line."""
+    with _latency_ring_lock:
+        _latency_ring.append(entry)
+    _latency_logger.info(json.dumps(entry, default=str))
 
 # ============================================================
 # Pydantic models for OpenAI-compatible /v1/chat/completions
@@ -938,8 +958,45 @@ async def _shutdown():
 # Health
 # ============================================================
 
-@app.get("/health")
-async def health():
+def _discover_vllm_leaders(cfg) -> Optional[Dict[str, str]]:
+    """
+    Discover vLLM leader pods (the ones that expose :8200/health).
+    Workers in a DataParallel group have role=worker and no API server,
+    so they are excluded.  Falls back to all component=vllm pods when
+    no role label exists (non-DP deployments).
+    """
+    try:
+        from kubernetes import client as k8s_client, config as k8s_config
+        try:
+            k8s_config.load_incluster_config()
+        except Exception:
+            k8s_config.load_kube_config()
+        v1 = k8s_client.CoreV1Api()
+
+        # First try leader-only; if zero results fall back to all vLLM pods
+        for selector in (
+            f"{cfg.LABEL_SELECTOR},role=leader",
+            cfg.LABEL_SELECTOR,
+        ):
+            pod_list = v1.list_namespaced_pod(
+                namespace=cfg.NAMESPACE,
+                label_selector=selector,
+            )
+            pods = {
+                pod.metadata.name: pod.status.pod_ip
+                for pod in pod_list.items
+                if pod.status.pod_ip and pod.status.phase == "Running"
+            }
+            if pods:
+                return pods
+        return {}
+    except Exception:
+        return None
+
+
+@app.get("/health/router")
+async def health_router():
+    """Router-only health (used by K8s probes). Always 200 if the process is alive."""
     extra = {}
     if _push_dispatcher is not None:
         extra["push_dispatch_queue"] = _push_dispatcher.qsize()
@@ -947,6 +1004,115 @@ async def health():
     if registry is not None:
         extra["models"] = sorted(registry.keys())
     return {"status": "ok", "queue_len": router_state.size(), **extra}
+
+
+@app.get("/health/backends")
+async def health_backends():
+    """
+    Aggregated health for all vLLM pods behind this router.
+
+    Returns HTTP 200 if at least one backend is healthy, HTTP 503 otherwise.
+    Response body mirrors vLLM's format with added per-pod detail so BooM
+    can treat the entire stack as a single healthy/unhealthy virtual node.
+    """
+    cfg = get_config()
+    pods = _discover_vllm_leaders(cfg)
+    if pods is None:
+        return Response(
+            content=json.dumps({"status": "error", "detail": "pod discovery failed"}),
+            status_code=503,
+            media_type="application/json",
+        )
+
+    if not pods:
+        return Response(
+            content=json.dumps({"status": "unhealthy", "healthy": 0, "total": 0, "pods": {}}),
+            status_code=503,
+            media_type="application/json",
+        )
+
+    # Probe each pod concurrently with a short timeout
+    async def _probe(name: str, ip: str) -> Tuple[str, bool]:
+        url = f"http://{ip}:{cfg.VLLM_PORT}/health"
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                r = await client.get(url)
+                return (name, r.status_code == 200)
+        except Exception:
+            return (name, False)
+
+    results = await asyncio.gather(*[_probe(n, ip) for n, ip in pods.items()])
+    pod_status = {name: "healthy" if ok else "unhealthy" for name, ok in results}
+    healthy_count = sum(1 for _, ok in results if ok)
+
+    body = {
+        "status": "healthy" if healthy_count > 0 else "unhealthy",
+        "healthy": healthy_count,
+        "total": len(results),
+        "pods": pod_status,
+    }
+
+    code = 200 if healthy_count > 0 else 503
+    return Response(
+        content=json.dumps(body),
+        status_code=code,
+        media_type="application/json",
+    )
+
+
+@app.get("/health")
+async def health_aggregated():
+    """
+    Aggregated health: router + all vLLM backends.
+
+    Returns HTTP 200 if the router is up AND at least one backend is healthy.
+    Returns HTTP 503 if no backends are reachable.
+    BooM gateway should use this as the virtual-node health endpoint.
+    """
+    # Router health
+    router_info: Dict[str, Any] = {"status": "ok", "queue_len": router_state.size()}
+    registry = get_model_registry()
+    if registry is not None:
+        router_info["models"] = sorted(registry.keys())
+
+    # Backend health (leaders only -- workers don't expose :8200)
+    cfg = get_config()
+    pods = _discover_vllm_leaders(cfg) or {}
+
+    healthy_count = 0
+    pod_status: Dict[str, str] = {}
+    if pods:
+        async def _probe(name: str, ip: str) -> Tuple[str, bool]:
+            url = f"http://{ip}:{cfg.VLLM_PORT}/health"
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    r = await client.get(url)
+                    return (name, r.status_code == 200)
+            except Exception:
+                return (name, False)
+
+        results = await asyncio.gather(*[_probe(n, ip) for n, ip in pods.items()])
+        pod_status = {name: "healthy" if ok else "unhealthy" for name, ok in results}
+        healthy_count = sum(1 for _, ok in results if ok)
+
+    overall = "healthy" if healthy_count > 0 else "unhealthy"
+    code = 200 if healthy_count > 0 else 503
+
+    body = {
+        "status": overall,
+        "router": router_info,
+        "backends": {
+            "healthy": healthy_count,
+            "total": len(pods),
+            "pods": pod_status,
+        },
+    }
+
+    return Response(
+        content=json.dumps(body),
+        status_code=code,
+        media_type="application/json",
+    )
 
 
 # ============================================================
@@ -973,6 +1139,21 @@ async def debug_slo_summary():
 @app.get("/metrics")
 def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/latency_log")
+def latency_log(last: int = 100):
+    """Return the most recent per-request latency records as JSON.
+
+    Query params:
+        last: number of records to return (default 100, max 2000)
+
+    Works without Loki/Grafana -- just curl http://<router>:port/latency_log
+    """
+    n = min(max(1, last), _LATENCY_LOG_MAX)
+    with _latency_ring_lock:
+        records = list(_latency_ring)
+    return records[-n:]
 
 
 # ============================================================
@@ -1189,7 +1370,13 @@ async def result_chunk_callback(payload: dict):
     """
     Accept an SSE chunk from the sidecar for real-time streaming.
 
-    Payload: {req_id, chunk_idx, delta, is_final, finish_reason?, usage?}
+    Payload:
+      {req_id, chunk_idx, delta, tool_calls?, is_final, finish_reason?, usage?}
+
+    `delta` remains the backwards-compatible text delta field. `tool_calls`
+    optionally carries the raw OpenAI delta.tool_calls array from the vLLM
+    stream so upstream gateways can reconstruct tool-use SSE.
+
     Pushes to the asyncio.Queue registered for this req_id.
     If no queue exists, the chunk is silently dropped (non-streaming request).
     """
@@ -1355,6 +1542,15 @@ async def _enqueue_and_wait(
     return rid, t_start, result
 
 
+def _passthrough_usage(usage: Dict[str, Any]) -> Dict[str, Any]:
+    """Forward the entire upstream usage dict, ensuring the three core fields have defaults."""
+    out = dict(usage)
+    out.setdefault("prompt_tokens", 0)
+    out.setdefault("completion_tokens", 0)
+    out.setdefault("total_tokens", 0)
+    return out
+
+
 def _build_sse_chunks(
     rid: str,
     model: str,
@@ -1362,6 +1558,7 @@ def _build_sse_chunks(
     output_text: str,
     finish_reason: str,
     usage: Dict[str, Any],
+    endpoint_id: Optional[str] = None,
 ) -> str:
     """
     Build OpenAI-format SSE event stream from a completed response.
@@ -1370,7 +1567,6 @@ def _build_sse_chunks(
     chunk_id = f"chatcmpl-{rid}"
     lines: List[str] = []
 
-    # Role-only preamble chunk (required by the OpenAI SSE protocol)
     preamble = {
         "id": chunk_id,
         "object": "chat.completion.chunk",
@@ -1378,6 +1574,8 @@ def _build_sse_chunks(
         "model": model,
         "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
     }
+    if endpoint_id:
+        preamble["system_fingerprint"] = str(endpoint_id)
     lines.append(f"data: {json.dumps(preamble)}\n\n")
 
     # Split on whitespace boundaries, preserving the whitespace in front of each word
@@ -1404,21 +1602,20 @@ def _build_sse_chunks(
             "model": model,
             "choices": [{"index": 0, "delta": {"content": tok}, "finish_reason": None}],
         }
+        if endpoint_id:
+            chunk["system_fingerprint"] = str(endpoint_id)
         lines.append(f"data: {json.dumps(chunk)}\n\n")
 
-    # Final chunk with finish_reason + usage
     final = {
         "id": chunk_id,
         "object": "chat.completion.chunk",
         "created": created,
         "model": model,
         "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-        "usage": {
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-        },
+        "usage": _passthrough_usage(usage),
     }
+    if endpoint_id:
+        final["system_fingerprint"] = str(endpoint_id)
     lines.append(f"data: {json.dumps(final)}\n\n")
     lines.append("data: [DONE]\n\n")
 
@@ -1454,6 +1651,10 @@ def _build_chat_request_body(req: _ChatCompletionRequest) -> Dict[str, Any]:
 
 def _extract_tool_calls(result: Dict[str, Any]) -> Optional[List[Any]]:
     """Extract tool_calls from the raw vLLM response if present."""
+    direct = result.get("tool_calls")
+    if isinstance(direct, list) and direct:
+        return direct
+
     raw = result.get("raw")
     if not isinstance(raw, dict):
         return None
@@ -1479,6 +1680,7 @@ def _build_sse_chunks_with_tool_calls(
     tool_calls: List[Any],
     finish_reason: str,
     usage: Dict[str, Any],
+    endpoint_id: Optional[str] = None,
 ) -> str:
     """Build OpenAI SSE stream for a tool_calls response."""
     chunk_id = f"chatcmpl-{rid}"
@@ -1491,6 +1693,8 @@ def _build_sse_chunks_with_tool_calls(
         "model": model,
         "choices": [{"index": 0, "delta": {"role": "assistant", "content": None, "tool_calls": []}, "finish_reason": None}],
     }
+    if endpoint_id:
+        preamble["system_fingerprint"] = str(endpoint_id)
     lines.append(f"data: {json.dumps(preamble)}\n\n")
 
     for i, tc in enumerate(tool_calls):
@@ -1501,6 +1705,8 @@ def _build_sse_chunks_with_tool_calls(
             "model": model,
             "choices": [{"index": 0, "delta": {"tool_calls": [{"index": i, **tc}]}, "finish_reason": None}],
         }
+        if endpoint_id:
+            chunk["system_fingerprint"] = str(endpoint_id)
         lines.append(f"data: {json.dumps(chunk)}\n\n")
 
     final = {
@@ -1509,12 +1715,10 @@ def _build_sse_chunks_with_tool_calls(
         "created": created,
         "model": model,
         "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-        "usage": {
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-        },
+        "usage": _passthrough_usage(usage),
     }
+    if endpoint_id:
+        final["system_fingerprint"] = str(endpoint_id)
     lines.append(f"data: {json.dumps(final)}\n\n")
     lines.append("data: [DONE]\n\n")
     return "".join(lines)
@@ -1602,6 +1806,36 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
             """
             first_chunk_timeout = _cfg.RESULT_TIMEOUT_S
             got_any_chunk = False
+            t_first_chunk: Optional[float] = None
+
+            def _emit_latency_metrics(u: Dict[str, Any], finish_reason: str = "stop") -> Dict[str, Any]:
+                t_end = time.time()
+                e2e_s = t_end - t_start
+                x_lat: Dict[str, Any] = {"e2e_ms": round(e2e_s * 1000, 2)}
+                observe_request_e2e(e2e_s, model=req.model)
+                if t_first_chunk is not None:
+                    ttft_s = t_first_chunk - t_start
+                    x_lat["ttft_ms"] = round(ttft_s * 1000, 2)
+                    observe_request_ttft(ttft_s, model=req.model)
+                    ct = int(u.get("completion_tokens", 0)) if u else 0
+                    if ct > 1:
+                        decode_s = e2e_s - ttft_s
+                        if decode_s > 0:
+                            tpot_s = decode_s / (ct - 1)
+                            x_lat["tpot_avg_ms"] = round(tpot_s * 1000, 2)
+                            observe_request_tpot_avg(tpot_s, model=req.model)
+                if stream_endpoint_id:
+                    x_lat["endpoint"] = str(stream_endpoint_id)
+                _record_latency({
+                    "ts": t_end, "t_start": t_start, "rid": rid, "model": req.model,
+                    "stream": True, "finish_reason": finish_reason,
+                    "prompt_tokens": int(u.get("prompt_tokens", 0)) if u else 0,
+                    "completion_tokens": int(u.get("completion_tokens", 0)) if u else 0,
+                    **x_lat,
+                })
+                return x_lat
+
+            stream_endpoint_id: Optional[str] = None
             try:
                 try:
                     first = await asyncio.wait_for(chunk_q.get(), timeout=first_chunk_timeout)
@@ -1614,45 +1848,69 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
                     output_text = result.get("output", "")
                     finish_reason = result.get("finish_reason", "stop") or "stop"
                     u = result.get("usage") or {}
+                    eid = result.get("endpoint_id")
+                    stream_endpoint_id = str(eid) if eid else None
+                    t_first_chunk = time.time()
+                    _emit_latency_metrics(u, finish_reason=finish_reason)
                     tc = _extract_tool_calls(result)
                     if tc:
                         yield _build_sse_chunks_with_tool_calls(
                             rid=rid, model=req.model, created=created,
                             tool_calls=tc, finish_reason=finish_reason, usage=u,
+                            endpoint_id=eid,
                         )
                     else:
                         yield _build_sse_chunks(
                             rid=rid, model=req.model, created=created,
                             output_text=output_text, finish_reason=finish_reason, usage=u,
+                            endpoint_id=eid,
                         )
                     return
 
                 got_any_chunk = True
+                t_first_chunk = time.time()
+                stream_endpoint_id = first.get("endpoint_id")
+                if stream_endpoint_id:
+                    stream_endpoint_id = str(stream_endpoint_id)
+
                 preamble = {
                     "id": chunk_id, "object": "chat.completion.chunk",
                     "created": created, "model": req.model,
                     "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
                 }
+                if stream_endpoint_id:
+                    preamble["system_fingerprint"] = str(stream_endpoint_id)
                 yield f"data: {json.dumps(preamble)}\n\n"
 
                 delta_content = first.get("delta", "")
+                delta_tool_calls = first.get("tool_calls")
+                delta_payload: Dict[str, Any] = {}
                 if delta_content:
+                    delta_payload["content"] = delta_content
+                if isinstance(delta_tool_calls, list) and delta_tool_calls:
+                    delta_payload["tool_calls"] = delta_tool_calls
+                if delta_payload:
                     c = {
                         "id": chunk_id, "object": "chat.completion.chunk",
                         "created": created, "model": req.model,
-                        "choices": [{"index": 0, "delta": {"content": delta_content}, "finish_reason": None}],
+                        "choices": [{"index": 0, "delta": delta_payload, "finish_reason": None}],
                     }
+                    if stream_endpoint_id:
+                        c["system_fingerprint"] = str(stream_endpoint_id)
                     yield f"data: {json.dumps(c)}\n\n"
 
                 if first.get("is_final"):
                     fr = first.get("finish_reason", "stop")
                     u = first.get("usage", {})
+                    _emit_latency_metrics(u, finish_reason=fr)
                     final = {
                         "id": chunk_id, "object": "chat.completion.chunk",
                         "created": created, "model": req.model,
                         "choices": [{"index": 0, "delta": {}, "finish_reason": fr}],
                         "usage": u,
                     }
+                    if stream_endpoint_id:
+                        final["system_fingerprint"] = str(stream_endpoint_id)
                     yield f"data: {json.dumps(final)}\n\n"
                     yield "data: [DONE]\n\n"
                     return
@@ -1668,24 +1926,39 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
                         yield "data: [DONE]\n\n"
                         return
 
+                    eid = chunk.get("endpoint_id")
+                    if eid and not stream_endpoint_id:
+                        stream_endpoint_id = str(eid)
+
                     delta_content = chunk.get("delta", "")
+                    delta_tool_calls = chunk.get("tool_calls")
+                    delta_payload: Dict[str, Any] = {}
                     if delta_content:
+                        delta_payload["content"] = delta_content
+                    if isinstance(delta_tool_calls, list) and delta_tool_calls:
+                        delta_payload["tool_calls"] = delta_tool_calls
+                    if delta_payload:
                         c = {
                             "id": chunk_id, "object": "chat.completion.chunk",
                             "created": created, "model": req.model,
-                            "choices": [{"index": 0, "delta": {"content": delta_content}, "finish_reason": None}],
+                            "choices": [{"index": 0, "delta": delta_payload, "finish_reason": None}],
                         }
+                        if stream_endpoint_id:
+                            c["system_fingerprint"] = str(stream_endpoint_id)
                         yield f"data: {json.dumps(c)}\n\n"
 
                     if chunk.get("is_final"):
                         fr = chunk.get("finish_reason", "stop")
                         u = chunk.get("usage", {})
+                        _emit_latency_metrics(u, finish_reason=fr)
                         final = {
                             "id": chunk_id, "object": "chat.completion.chunk",
                             "created": created, "model": req.model,
                             "choices": [{"index": 0, "delta": {}, "finish_reason": fr}],
                             "usage": u,
                         }
+                        if stream_endpoint_id:
+                            final["system_fingerprint"] = str(stream_endpoint_id)
                         yield f"data: {json.dumps(final)}\n\n"
                         yield "data: [DONE]\n\n"
                         return
@@ -1719,11 +1992,44 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
         prompt, req.model, chat_request_body=chat_request_body,
     )
 
+    t_done = time.time()
+    e2e_s = t_done - t_start
+
     output_text = result.get("output", "")
     finish_reason = result.get("finish_reason", "stop") or "stop"
     usage = result.get("usage") or {}
     endpoint_id = result.get("endpoint_id")
     tool_calls = _extract_tool_calls(result)
+
+    ttft_s = result.get("ttft_sidecar_s")
+    completion_tokens = int(usage.get("completion_tokens", 0))
+    tpot_avg_s: Optional[float] = None
+    if ttft_s is not None and completion_tokens > 1:
+        decode_s = e2e_s - ttft_s
+        if decode_s > 0:
+            tpot_avg_s = decode_s / (completion_tokens - 1)
+
+    observe_request_e2e(e2e_s, model=req.model)
+    if ttft_s is not None:
+        observe_request_ttft(ttft_s, model=req.model)
+    if tpot_avg_s is not None:
+        observe_request_tpot_avg(tpot_avg_s, model=req.model)
+
+    x_latency: Dict[str, Any] = {"e2e_ms": round(e2e_s * 1000, 2)}
+    if ttft_s is not None:
+        x_latency["ttft_ms"] = round(ttft_s * 1000, 2)
+    if tpot_avg_s is not None:
+        x_latency["tpot_avg_ms"] = round(tpot_avg_s * 1000, 2)
+    if endpoint_id:
+        x_latency["endpoint"] = str(endpoint_id)
+
+    _record_latency({
+        "ts": time.time(), "t_start": t_start, "rid": rid, "model": req.model,
+        "stream": False, "finish_reason": finish_reason,
+        "prompt_tokens": int(usage.get("prompt_tokens", 0)),
+        "completion_tokens": completion_tokens,
+        **x_latency,
+    })
 
     message: Dict[str, Any] = {
         "role": "assistant",
@@ -1731,6 +2037,9 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
     }
     if tool_calls:
         message["tool_calls"] = tool_calls
+
+    _usage = _passthrough_usage(usage)
+    _usage["completion_tokens"] = completion_tokens
 
     resp_body: Dict[str, Any] = {
         "id": f"chatcmpl-{rid}",
@@ -1744,11 +2053,7 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
                 "finish_reason": finish_reason,
             }
         ],
-        "usage": {
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-        },
+        "usage": _usage,
     }
     if endpoint_id:
         resp_body["system_fingerprint"] = str(endpoint_id)

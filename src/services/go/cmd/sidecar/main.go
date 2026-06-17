@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -39,15 +40,19 @@ func main() {
 	var puller *sidecar.RouterPullWorker
 	if cfg.SidecarMode == "pull" {
 		puller = sidecar.NewRouterPullWorker(cfg, queue, endpointID)
+		puller.Start()
 	}
 
 	poster := sidecar.NewResultPoster(cfg)
 	poster.Start()
 
-	var busyCount atomic.Int64
-	sidecar.WorkersTotal.WithLabelValues(endpointID).Set(float64(cfg.BatchSize))
+	// Total workers = BATCH_SIZE + PREFETCH (parity with Python main.py).
+	totalWorkers := cfg.PullCap()
 
-	for i := 0; i < cfg.BatchSize; i++ {
+	var busyCount atomic.Int64
+	sidecar.WorkersTotal.WithLabelValues(endpointID).Set(float64(totalWorkers))
+
+	for i := 0; i < totalWorkers; i++ {
 		w := sidecar.NewVLLMWorker(i, cfg, queue, poster, puller, endpointID, &busyCount)
 		w.Start()
 	}
@@ -61,9 +66,10 @@ func main() {
 
 	sidecar.StartGoroutineGauge()
 
-	if puller != nil {
-		puller.PullIfCapacity()
-	}
+	log.Printf("[sidecar] running in %s mode (BATCH_SIZE=%d, PREFETCH=%d, workers=%d, "+
+		"FORCE_IGNORE_EOS=%v, STREAMING_MODE=%v, port=%d, endpoint_id=%s)",
+		strings.ToUpper(cfg.SidecarMode), cfg.BatchSize, cfg.Prefetch, totalWorkers,
+		cfg.ForceIgnoreEos, cfg.StreamingMode, cfg.SidecarPort, endpointID)
 
 	r := chi.NewRouter()
 
@@ -89,12 +95,39 @@ func main() {
 			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 			return
 		}
+
+		sidecar.ReceivedRequests.WithLabelValues(endpointID).Inc()
+
+		meta := item.Meta
+		if meta == nil {
+			meta = map[string]any{}
+		}
+
+		st := queue.State()
+		logicalBefore := st.Pending + st.Inflight
+
+		if cfg.TraceEnabled {
+			nowPush := float64(time.Now().UnixNano()) / 1e9
+			tr, _ := meta["__trace__"].(map[string]any)
+			out := map[string]any{}
+			for k, v := range tr {
+				out[k] = v
+			}
+			out["t_arrive_sidecar_push"] = nowPush
+			out["rcpt_push_recv_wall"] = nowPush
+			out["sidecar_queue_len_before"] = st.Pending
+			out["sidecar_inflight_before"] = st.Inflight
+			out["sidecar_logical_before"] = logicalBefore
+			out["sidecar_queue_len_after"] = st.Pending + 1
+			out["sidecar_logical_after"] = logicalBefore + 1
+			meta["__trace__"] = out
+		}
+
 		queue.Put(sidecar.QueueItem{
 			ReqID:  item.ReqID,
 			Prompt: item.Prompt,
-			Meta:   item.Meta,
+			Meta:   meta,
 		})
-		sidecar.ReceivedRequests.WithLabelValues(endpointID).Inc()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
@@ -121,6 +154,9 @@ func main() {
 	defer shutCancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
 		log.Printf("[main] server shutdown error: %v", err)
+	}
+	if puller != nil {
+		puller.Stop()
 	}
 	kvSub.Stop()
 	cancel()

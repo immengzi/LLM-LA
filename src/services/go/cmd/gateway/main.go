@@ -21,24 +21,65 @@ func main() {
 
 	gateway.RegisterMetrics()
 
-	kvWatcher := gateway.NewKVWatcher(cfg)
+	registry := gateway.MaybeLoadModelRegistry(cfg)
+	kv := gateway.NewKVAware()
+
+	hashClient := gateway.NewHashClient(cfg)
+
+	kvWatcher := gateway.NewKVWatcher(cfg, kv, registry)
 	kvWatcher.Start()
 	log.Println("[router] KVWatcher started.")
 
-	queue := gateway.NewCentralQueue(cfg, kvWatcher)
+	queue := gateway.NewCentralQueue(cfg, kv)
 	results := gateway.NewResultStore()
-	results.StartCleanupLoop(5*time.Minute, 1*time.Second)
+	results.StartCleanupLoop(
+		time.Duration(cfg.PollResultTTLS*float64(time.Second)),
+		time.Duration(cfg.PollCleanupIntervalS*float64(time.Second)),
+	)
 
 	var pushRouter *gateway.PushDispatcher
 	if cfg.IsPushMode() {
-		pushRouter = gateway.NewPushDispatcher(cfg)
+		pushRouter = gateway.NewPushDispatcher(cfg, kv)
 		pushRouter.RefreshEndpoints()
 		log.Printf("[router] PushRouter started in mode=%s", cfg.RouterMode)
 	} else {
 		log.Println("[router] running in PULL mode.")
 	}
 
-	srv := gateway.NewServer(cfg, queue, results, kvWatcher, pushRouter)
+	srv := gateway.NewServer(cfg, queue, results, kv, hashClient, registry, kvWatcher, pushRouter)
+
+	// Decoupled push dispatcher: buffers requests so the request handler never
+	// blocks on the sidecar push (parity with router/api.py _PushDispatcher).
+	var pushDispatch *gateway.PushDispatchQueue
+	if cfg.IsPushMode() && cfg.PushDecoupleDispatch {
+		pushDispatch = gateway.NewPushDispatchQueue(cfg, srv.DispatchPushJob, srv.StoreLocalResult)
+		pushDispatch.Start()
+		srv.SetPushDispatch(pushDispatch)
+		defer pushDispatch.Stop()
+		log.Printf("[router] push-dispatch decoupling enabled (workers=%d, queue_max=%d)", cfg.PushDispatchWorkers, cfg.PushDispatchQueueMax)
+	}
+
+	// SLO subsystem: the registry always exists (so requests carrying SLO
+	// annotations are tracked even when SLO_AWARE is off), and the same engine
+	// drives the queue's SLO-aware scheduling when SLO_AWARE is enabled.
+	sloEngine := gateway.NewSLOEngine(cfg)
+	queue.SetSLOEngine(sloEngine)
+	srv.SetSLORegistry(sloEngine)
+
+	// Optional async pubsub publisher.
+	if cfg.TransportMode == "async_pubsub" {
+		pub, err := gateway.NewResultPublisher(cfg)
+		if err != nil {
+			log.Printf("[router] WARNING: failed to start pubsub publisher: %v", err)
+		} else if err := pub.Start(); err != nil {
+			log.Printf("[router] WARNING: failed to start pubsub publisher: %v", err)
+		} else {
+			srv.SetPublisher(pub)
+			defer pub.Stop()
+			log.Printf("[router] PubSub enabled: bind=%s topic=%s hwm=%d", cfg.ResultsZMQBind, cfg.ResultsZMQTopic, cfg.ResultsZMQHWM)
+		}
+	}
+
 	router := srv.Router()
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
@@ -70,7 +111,6 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-
 	if err := httpServer.Shutdown(ctx); err != nil {
 		log.Printf("[router] Shutdown error: %v", err)
 	}

@@ -87,14 +87,14 @@ helm upgrade vllm ./vllm-kv-stack \
 ```
 
 The `claudeCodeAliases` flag adds `router_settings.model_group_alias` entries
-so Claude's default model names map to `served-model`:
+so Claude's default model names map to the first model's `servedModelName`:
 
 | Claude model name | Maps to |
 |---|---|
-| `claude-sonnet-4-20250514` | `served-model` |
-| `claude-3-5-sonnet-20241022` | `served-model` |
-| `claude-3-haiku-20240307` | `served-model` |
-| `claude-3-opus-20240229` | `served-model` |
+| `claude-sonnet-4-20250514` | first model's `servedModelName` (e.g. `served-model-minmax`) |
+| `claude-3-5-sonnet-20241022` | first model's `servedModelName` |
+| `claude-3-haiku-20240307` | first model's `servedModelName` |
+| `claude-3-opus-20240229` | first model's `servedModelName` |
 
 ---
 

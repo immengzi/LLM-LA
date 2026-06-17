@@ -54,6 +54,32 @@ Force all images to use .Values.global.imageRegistry if set, even if image alrea
 {{- end -}}
 
 {{/*
+Select the router image based on .Values.serviceImpl ("python" | "go").
+Context: the root $ context.
+*/}}
+{{- define "vllmkv.routerImage" -}}
+{{- $root := . -}}
+{{- if eq (lower (default "python" $root.Values.serviceImpl)) "go" -}}
+{{- include "vllmkv.image" (list $root (default "kv-router-go:latest" $root.Values.images.routerGo)) -}}
+{{- else -}}
+{{- include "vllmkv.image" (list $root $root.Values.images.router) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Select the sidecar image based on .Values.serviceImpl ("python" | "go").
+Context: the root $ context.
+*/}}
+{{- define "vllmkv.sidecarImage" -}}
+{{- $root := . -}}
+{{- if eq (lower (default "python" $root.Values.serviceImpl)) "go" -}}
+{{- include "vllmkv.image" (list $root (default "kv-sidecar-go:latest" $root.Values.images.sidecarGo)) -}}
+{{- else -}}
+{{- include "vllmkv.image" (list $root $root.Values.images.sidecar) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Generate comma-separated device list for ASCEND_RT_VISIBLE_DEVICES.
 Examples:
 - tp=1 -> "0"
@@ -122,7 +148,7 @@ Context: dict with keys "mv" (per-model overrides), "gv" (global .Values.vllm), 
 Each flag line ends with ' \' for bash continuation.
 */}}
 {{- define "vllmkv.vllmRuntimeFlags" -}}
---dtype auto \
+--dtype {{ .mv.dtype | default .gv.dtype | default "auto" }} \
 --kv-cache-dtype {{ .mv.kvCacheDtype | default .gv.kvCacheDtype | default "auto" }} \
 {{- $cpuOff := .mv.cpuOffloadGb | default .gv.cpuOffloadGb -}}
 {{- if $cpuOff }}
@@ -193,6 +219,14 @@ Each flag line ends with ' \' for bash continuation.
 {{- if $rp }}
 --reasoning-parser {{ $rp }} \
 {{- end -}}
+{{- $schedCls := .mv.schedulerCls | default .gv.schedulerCls -}}
+{{- if $schedCls }}
+--scheduler-cls {{ $schedCls }} \
+{{- end -}}
+{{- $mlec := .mv.modelLoaderExtraConfig | default .gv.modelLoaderExtraConfig -}}
+{{- if $mlec }}
+--model-loader-extra-config '{{ $mlec }}' \
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -224,6 +258,14 @@ Context: dict with keys "tp" (tensor parallel size), "root" (the root $ context)
   value: "expandable_segments:True"
 - name: ASCEND_BUFFER_POOL
   value: {{ .root.Values.vllm.ascendBufferPool | default "4:8" | quote }}
+{{- if .root.Values.vllm.ascendEnableFlashcomm1 }}
+- name: VLLM_ASCEND_ENABLE_FLASHCOMM1
+  value: "1"
+{{- end }}
+{{- if or .root.Values.mooncake.enabled .root.Values.lmcache.enabled }}
+- name: OMP_PROC_BIND
+  value: "false"
+{{- end }}
 {{- end -}}
 
 {{/*

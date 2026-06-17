@@ -408,6 +408,74 @@ kubectl exec -n vllm deploy/router-service -- python3 -c \
 # If this works but DNS by name fails → kube-proxy iptables issue (Issue 2)
 ```
 
+## Post-Change Verification Checklist for llm-la
+
+After **any** cluster-level change (adding/removing nodes, upgrading Kubernetes components, changing CNI config, modifying kube-proxy, etc.), run through this checklist to make sure llm-la is still working. This should be done immediately after the change, not hours later.
+
+### 1. Cluster infrastructure health
+
+```bash
+# All nodes should be Ready
+kubectl get nodes -o wide
+
+# All calico-node pods should be 1/1 Running with low restart counts
+kubectl get pods -n kube-system -l k8s-app=calico-node -o wide
+
+# All kube-proxy pods should be 1/1 Running
+kubectl get pods -n kube-system -l k8s-app=kube-proxy -o wide
+
+# CoreDNS pods should be Running
+kubectl get pods -n kube-system -l k8s-app=kube-dns -o wide
+```
+
+### 2. DNS resolution from application pods
+
+```bash
+# Test DNS from the router pod (runs on node3, needs cross-node overlay to CoreDNS on node1)
+kubectl exec -n vllm deploy/router-service -- python3 -c \
+  "import socket; print(socket.getaddrinfo('kubernetes.default.svc.cluster.local', 443))"
+# Should return a list with 10.233.0.1 — if it hangs or errors, DNS is broken
+```
+
+### 3. llm-la application pods
+
+```bash
+# All vLLM pods should be Running and Ready
+kubectl get pods -n vllm -o wide
+
+# Router should be Running
+kubectl get pods -n vllm -l app=router-service
+
+# Check router queue is not growing (should be 0 or near 0)
+curl -s http://10.50.156.65:30080/health | python3 -m json.tool
+```
+
+### 4. End-to-end inference test
+
+```bash
+# Send a quick test request through the router
+curl -s http://10.50.156.65:30080/v1/chat/completions \
+  -H "Authorization: Bearer ZhongRuanChuangXin!" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"served-model-minmax","messages":[{"role":"user","content":"Say hi"}],"max_tokens":8}' \
+  | python3 -m json.tool
+# Should return a valid chat completion response within a few seconds
+```
+
+### 5. Prometheus metrics (if available)
+
+Check the `router_central_queue_length` metric in Prometheus/Grafana. It should be flat near 0. A sudden spike after a cluster change means something broke.
+
+### What to do if something fails
+
+- If calico-node is CrashLoopBackOff: see Issue 4 above (stale process on port 9099)
+- If DNS fails: follow the Quick Diagnostic Checklist above
+- If kube-proxy is broken: see Issue 2 above
+- If pods can't resolve DNS on specific nodes only: see Issue 1 above (wrong clusterDNS)
+- Contact Saeid or Haiting for help identifying which component is affected
+
+---
+
 ## Cluster Reference
 
 | Component | Value |

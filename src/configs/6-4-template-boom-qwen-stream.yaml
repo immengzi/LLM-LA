@@ -21,7 +21,7 @@ hf_lmsys:
   dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
   split: "train"
   tokenizer_name: "/mnt/nvme1/saeid/models/qwen3-8b"
-  streaming: false
+  streaming: true
   min_input_tokens: 1
   max_input_tokens: 10000000
   repeat_each: 1
@@ -108,7 +108,7 @@ helm:
   models:
     - name: qwen3-8b
       servedModelName: served-model-qwen
-      replicas: 4
+      replicas: 12
       streamingMode: true             # <<< sidecar streams from vLLM internally
       sidecarPrefetch: 2
       modelSubPath: qwen3-8b

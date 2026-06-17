@@ -442,6 +442,31 @@ class HelmConfig:
     deploy_mooncake_master: bool = True
     # --------------------------------------------------------------------
 
+    # ---- LMCache (wraps Mooncake for cross-replica KV coordination) ----
+    lmcache_enabled: bool = False
+    lmcache_chunk_size: Optional[int] = None
+    lmcache_max_local_cpu_size: Optional[int] = None
+    # --------------------------------------------------------------------
+
+    # ---- NDS (NVMe Direct Storage — P2P DMA for KV cache) ----
+    lmcache_nds_enabled: bool = False
+    lmcache_nds_path: str = "/workspace/nds_kvcache"
+    lmcache_nds_dev: str = "/dev/md0"
+    lmcache_nds_size: int = 2048
+    # --------------------------------------------------------------------
+
+    # ---- Image overrides (bypass registry rewrite — for local images) ----
+    vllm_image: Optional[str] = None               # injected into per-model image field (e.g. "minimax27:selfcontained")
+    mooncake_master_image: Optional[str] = None     # sets images.mooncakeMasterRaw (e.g. "minimax27:selfcontained")
+    # --------------------------------------------------------------------
+
+    # ---- New vLLM flags (dtype, schedulerCls, modelLoaderExtraConfig, etc.) ----
+    dtype: str = "auto"                              # "auto", "bfloat16", "float16"
+    scheduler_cls: Optional[str] = None              # e.g. "lsched.lsched_vllm.LSchedVLLMAdapter"
+    model_loader_extra_config: Optional[str] = None  # JSON string
+    ascend_enable_flashcomm1: bool = False
+    # --------------------------------------------------------------------
+
     # ---- Deploy mode: "helm" (direct Helm CLI) or "operator" (VllmKvStack CR) ----
     deploy_mode: str = "helm"  # helm | operator
     operator_cr_name: str = "vllm"  # metadata.name for the VllmKvStack CR
@@ -455,6 +480,15 @@ class HelmConfig:
 
     # ---- Service implementation: "python" (default) or "go" (operator-go images) ----
     service_impl: str = "python"  # python | go
+    # --------------------------------------------------------------------
+
+    # ---- Shadow deployment overrides ----
+    # Override release name and namespace for parallel deployments (e.g. shadow).
+    # Default "" means use the global constants (release="vllm", namespace="vllm").
+    release: str = ""
+    namespace: str = ""
+    port_offset: int = 0
+    pin_node_name: str = ""
     # --------------------------------------------------------------------
 
     # ---- vLLM model config (maps to Helm chart values.modelVolume.*) ----
@@ -652,6 +686,11 @@ class ClientConfig:
     # Helm knobs
     helm: HelmConfig = field(default_factory=HelmConfig)
 
+    # Shadow deployment: node selector and anti-affinity label for vLLM pods.
+    # These are top-level so sweep_methods can pass them as --set to Helm.
+    vllm_node_selector: Optional[dict] = None
+    vllm_avoid_label: str = ""
+
 
 # =========================
 # Helpers
@@ -841,6 +880,10 @@ def load_config(path: str) -> ClientConfig:
             boom.timeout_s = 7200.0
         boom.timeout_s = max(1.0, boom.timeout_s)
 
+    # Shadow deployment overrides (top-level keys)
+    vllm_node_selector = raw.get("vllm_node_selector", None)
+    vllm_avoid_label = str(raw.get("vllm_avoid_label", "") or "").strip()
+
     return ClientConfig(
         router_url=router_url,
         total_requests=total_requests,
@@ -861,4 +904,6 @@ def load_config(path: str) -> ClientConfig:
         slo=slo,
         multi_model=multi_model,
         helm=helm,
+        vllm_node_selector=vllm_node_selector,
+        vllm_avoid_label=vllm_avoid_label,
     )

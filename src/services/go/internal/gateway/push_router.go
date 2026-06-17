@@ -21,18 +21,19 @@ import (
 // random, and least-queue selection modes.
 type PushDispatcher struct {
 	cfg *Config
+	kv  *kvAware
 
-	mu               sync.Mutex
-	endpoints        []string            // pod names
-	urls             map[string]string   // pod name -> sidecar base URL
-	rrIdx            int
-	lastDiscovery    time.Time
-	logicalInflight  map[string]int
+	mu              sync.Mutex
+	endpoints       []string          // pod names
+	urls            map[string]string // pod name -> sidecar base URL
+	rrIdx           int
+	lastDiscovery   time.Time
+	logicalInflight map[string]int
 
 	client *http.Client
 }
 
-func NewPushDispatcher(cfg *Config) *PushDispatcher {
+func NewPushDispatcher(cfg *Config, kv *kvAware) *PushDispatcher {
 	transport := &http.Transport{
 		MaxIdleConns:        200,
 		MaxIdleConnsPerHost: 50,
@@ -51,6 +52,7 @@ func NewPushDispatcher(cfg *Config) *PushDispatcher {
 
 	return &PushDispatcher{
 		cfg:             cfg,
+		kv:              kv,
 		urls:            make(map[string]string),
 		logicalInflight: make(map[string]int),
 		client:          client,
@@ -65,7 +67,8 @@ func (pd *PushDispatcher) RefreshEndpoints() {
 }
 
 func (pd *PushDispatcher) refreshLocked(force bool) {
-	if !force && len(pd.endpoints) > 0 && time.Since(pd.lastDiscovery) < 5*time.Second {
+	interval := time.Duration(pd.cfg.KVDiscoveryIntervalS * float64(time.Second))
+	if !force && len(pd.endpoints) > 0 && time.Since(pd.lastDiscovery) < interval {
 		return
 	}
 
@@ -90,52 +93,136 @@ func (pd *PushDispatcher) refreshLocked(force bool) {
 	log.Printf("[PushRouter] discovered %d pods: %v", len(pd.endpoints), pd.endpoints)
 }
 
-func (pd *PushDispatcher) pickEndpoint() (string, string, error) {
-	pd.mu.Lock()
-	pd.refreshLocked(false)
-
-	if len(pd.endpoints) == 0 {
-		pd.mu.Unlock()
-		return "", "", fmt.Errorf("no endpoints available")
-	}
-
-	var ep string
+// pickEndpoint selects an endpoint per RouterMode. For push-leastq it honors
+// PushLeastQMode ("health" queries each sidecar /health; "local" uses logical
+// inflight counters).
+func (pd *PushDispatcher) pickEndpoint() string {
 	switch pd.cfg.RouterMode {
 	case "push-random":
-		ep = pd.endpoints[rand.Intn(len(pd.endpoints))]
+		pd.mu.Lock()
+		defer pd.mu.Unlock()
+		if len(pd.endpoints) == 0 {
+			return ""
+		}
+		return pd.endpoints[rand.Intn(len(pd.endpoints))]
 	case "push-leastq":
-		ep = pd.pickLeastQueueLocked()
+		if pd.cfg.PushLeastQMode == "local" {
+			return pd.pickLeastQLocal()
+		}
+		return pd.pickLeastQHealth()
 	default:
-		ep = pd.endpoints[pd.rrIdx%len(pd.endpoints)]
-		pd.rrIdx = (pd.rrIdx + 1) % len(pd.endpoints)
+		return pd.pickRR()
 	}
-
-	url := pd.urls[ep]
-	pd.mu.Unlock()
-	return ep, url, nil
 }
 
-func (pd *PushDispatcher) pickLeastQueueLocked() string {
+func (pd *PushDispatcher) pickRR() string {
+	pd.mu.Lock()
+	defer pd.mu.Unlock()
+	if len(pd.endpoints) == 0 {
+		return ""
+	}
+	ep := pd.endpoints[pd.rrIdx%len(pd.endpoints)]
+	pd.rrIdx = (pd.rrIdx + 1) % len(pd.endpoints)
+	return ep
+}
+
+func (pd *PushDispatcher) pickLeastQLocal() string {
+	pd.mu.Lock()
+	defer pd.mu.Unlock()
 	best := ""
-	bestScore := int(^uint(0) >> 1) // max int
+	bestScore := 0
 	for _, ep := range pd.endpoints {
 		score := pd.logicalInflight[ep]
-		if score < bestScore {
+		if best == "" || score < bestScore {
 			bestScore = score
 			best = ep
 		}
 	}
-	if best == "" && len(pd.endpoints) > 0 {
-		best = pd.endpoints[0]
+	return best
+}
+
+// pickLeastQHealth queries every sidecar's /health endpoint in parallel and
+// selects the one with the lowest logical (or queue_len) score. Mirrors
+// PushRouter._pick_endpoint_leastq_health.
+func (pd *PushDispatcher) pickLeastQHealth() string {
+	pd.mu.Lock()
+	eps := append([]string{}, pd.endpoints...)
+	urls := make(map[string]string, len(pd.urls))
+	for k, v := range pd.urls {
+		urls[k] = v
+	}
+	pd.mu.Unlock()
+
+	if len(eps) == 0 {
+		return ""
+	}
+
+	type scoreRes struct {
+		ep    string
+		score int
+		ok    bool
+	}
+	results := make([]scoreRes, len(eps))
+	var wg sync.WaitGroup
+	for i, ep := range eps {
+		wg.Add(1)
+		go func(i int, ep string) {
+			defer wg.Done()
+			url := urls[ep]
+			if url == "" {
+				results[i] = scoreRes{ep, 0, false}
+				return
+			}
+			resp, err := pd.client.Get(url + "/health")
+			if err != nil {
+				results[i] = scoreRes{ep, 0, false}
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				io.Copy(io.Discard, resp.Body)
+				results[i] = scoreRes{ep, 0, false}
+				return
+			}
+			var data map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+				results[i] = scoreRes{ep, 0, false}
+				return
+			}
+			score := 0
+			if v, ok := data["logical"]; ok {
+				score = int(toFloat(v))
+			} else if v, ok := data["queue_len"]; ok {
+				score = int(toFloat(v))
+			}
+			results[i] = scoreRes{ep, score, true}
+		}(i, ep)
+	}
+	wg.Wait()
+
+	best := ""
+	bestScore := 0
+	for _, r := range results {
+		if !r.ok {
+			continue
+		}
+		if best == "" || r.score < bestScore {
+			bestScore = r.score
+			best = r.ep
+		}
 	}
 	return best
 }
 
-// RouteAndPush dispatches a request to a sidecar, with one retry on failure.
+// RouteAndPush dispatches a request to a sidecar, with one retry after a forced
+// endpoint refresh. Mirrors PushRouter.route_and_push including trace
+// enrichment, dispatch metrics, and leastq-local inflight bookkeeping.
 func (pd *PushDispatcher) RouteAndPush(reqID, prompt string, meta map[string]interface{}) error {
 	pd.mu.Lock()
 	pd.refreshLocked(false)
 	pd.mu.Unlock()
+
+	localMode := pd.cfg.RouterMode == "push-leastq" && pd.cfg.PushLeastQMode == "local"
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
@@ -145,29 +232,79 @@ func (pd *PushDispatcher) RouteAndPush(reqID, prompt string, meta map[string]int
 			pd.mu.Unlock()
 		}
 
-		ep, url, err := pd.pickEndpoint()
-		if err != nil {
-			lastErr = err
-			continue
+		pd.mu.Lock()
+		n := len(pd.endpoints)
+		pd.mu.Unlock()
+		if n == 0 {
+			return fmt.Errorf("No endpoints available for push routing")
 		}
-		if url == "" {
-			lastErr = fmt.Errorf("no sidecar URL for %s", ep)
-			continue
+
+		ep := pd.pickEndpoint()
+		if ep == "" {
+			return fmt.Errorf("Failed to pick endpoint")
 		}
 
 		pd.mu.Lock()
-		pd.logicalInflight[ep]++
+		url := pd.urls[ep]
 		pd.mu.Unlock()
+		if url == "" {
+			lastErr = fmt.Errorf("No sidecar URL for endpoint %s", ep)
+			continue
+		}
+
+		// Prom: outgoing dispatch (router -> sidecar).
+		incDispatch(ep)
+
+		var logicalBefore int
+		hasLogical := false
+		if localMode {
+			pd.mu.Lock()
+			logicalBefore = pd.logicalInflight[ep]
+			pd.logicalInflight[ep] = logicalBefore + 1
+			pd.mu.Unlock()
+			hasLogical = true
+		}
+
+		sendMeta := meta
+		if pd.cfg.TraceEnabled {
+			sendMeta = cloneMeta(meta)
+			tr := traceOf(sendMeta)
+			if _, ok := tr["endpoint"]; !ok {
+				tr["endpoint"] = ep
+			}
+			if _, ok := tr["router_mode"]; !ok {
+				tr["router_mode"] = pd.cfg.RouterMode
+			}
+			tr["t_dispatch_router"] = nowS()
+			if pd.cfg.KVAware && pd.kv != nil {
+				blocks := pd.kv.getRequestBlocks(reqID)
+				ifaces := make([]interface{}, len(blocks))
+				for i, b := range blocks {
+					ifaces[i] = b
+				}
+				tr["kv_block_hashes"] = ifaces
+			}
+			if hasLogical {
+				tr["router_logical_inflight_before"] = logicalBefore
+				tr["router_logical_inflight_after"] = logicalBefore + 1
+			}
+			sendMeta["__trace__"] = tr
+		}
 
 		payload := map[string]interface{}{
 			"req_id": reqID,
 			"prompt": prompt,
-			"meta":   meta,
+			"meta":   sendMeta,
+		}
+		if pd.cfg.PushLeastQMode == "local" {
+			payload["endpoint"] = ep
 		}
 
 		body, err := json.Marshal(payload)
 		if err != nil {
-			pd.decrementInflight(ep)
+			if localMode {
+				pd.decrementInflight(ep)
+			}
 			lastErr = err
 			continue
 		}
@@ -176,7 +313,9 @@ func (pd *PushDispatcher) RouteAndPush(reqID, prompt string, meta map[string]int
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url+"/push", bytes.NewReader(body))
 		if err != nil {
 			cancel()
-			pd.decrementInflight(ep)
+			if localMode {
+				pd.decrementInflight(ep)
+			}
 			lastErr = err
 			continue
 		}
@@ -185,7 +324,9 @@ func (pd *PushDispatcher) RouteAndPush(reqID, prompt string, meta map[string]int
 		resp, err := pd.client.Do(req)
 		cancel()
 		if err != nil {
-			pd.decrementInflight(ep)
+			if localMode {
+				pd.decrementInflight(ep)
+			}
 			lastErr = err
 			log.Printf("[PushRouter] push failed for %s: %v", ep, err)
 			continue
@@ -194,26 +335,44 @@ func (pd *PushDispatcher) RouteAndPush(reqID, prompt string, meta map[string]int
 		resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			pd.decrementInflight(ep)
+			if localMode {
+				pd.decrementInflight(ep)
+			}
 			lastErr = fmt.Errorf("push to %s failed: status %d", ep, resp.StatusCode)
 			log.Printf("[PushRouter] push to %s failed: status %d", ep, resp.StatusCode)
 			continue
 		}
 
-		log.Printf("[PushRouter] push req_id=%s -> %s (%s)", reqID, ep, url)
 		return nil
 	}
 
 	if lastErr != nil {
 		return lastErr
 	}
-	return fmt.Errorf("push failed after retries")
+	return fmt.Errorf("push failed")
 }
 
-// NotifyResult decrements the logical inflight counter for an endpoint
-// when a result arrives. Used in least-queue mode.
+// NotifyResult decrements the logical inflight counter for an endpoint when a
+// result arrives (only meaningful in leastq-local mode).
 func (pd *PushDispatcher) NotifyResult(endpoint string) {
-	pd.decrementInflight(endpoint)
+	if endpoint == "" {
+		return
+	}
+	pd.mu.Lock()
+	defer pd.mu.Unlock()
+	found := false
+	for _, ep := range pd.endpoints {
+		if ep == endpoint {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return
+	}
+	if pd.logicalInflight[endpoint] > 0 {
+		pd.logicalInflight[endpoint]--
+	}
 }
 
 func (pd *PushDispatcher) decrementInflight(ep string) {
@@ -228,6 +387,12 @@ func (pd *PushDispatcher) decrementInflight(ep string) {
 // matching the configured namespace and label selector.
 // Uses raw HTTP to avoid importing the full client-go library.
 func discoverPods(cfg *Config) map[string]string {
+	return discoverPodsSelector(cfg, cfg.LabelSelector)
+}
+
+// discoverPodsSelector is discoverPods with an explicit label selector (used
+// by multi-model discovery).
+func discoverPodsSelector(cfg *Config, labelSelector string) map[string]string {
 	host := os.Getenv("KUBERNETES_SERVICE_HOST")
 	port := os.Getenv("KUBERNETES_SERVICE_PORT")
 
@@ -254,7 +419,7 @@ func discoverPods(cfg *Config) map[string]string {
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
 
 	url := fmt.Sprintf("https://%s:%s/api/v1/namespaces/%s/pods?labelSelector=%s",
-		host, port, cfg.Namespace, cfg.LabelSelector)
+		host, port, cfg.Namespace, labelSelector)
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {

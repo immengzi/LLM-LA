@@ -4,7 +4,7 @@
 backend: "router"
 
 router_url: "http://10.50.156.65:30080"
-total_requests: 100
+total_requests: 300
 prompt_source: "hf-lmsys"
 
 hf_lmsys:
@@ -82,7 +82,7 @@ helm:
   models:
     - name: qwen3-8b
       servedModelName: served-model
-      replicas: 8
+      replicas: 16
       modelSubPath: qwen3-8b
       tensorParallelSize: 1
       batchSize: 8

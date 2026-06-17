@@ -115,7 +115,7 @@ spec:
                     - key: avoid
                       operator: NotIn
                       values:
-                        - vllm
+                        - {{ $.Values.vllm.avoidLabelValue | default "vllm" }}
           {{- if $dp.pairTopologyKey }}
           podAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -149,7 +149,11 @@ spec:
         {{- end }}
         containers:
           - name: vllm
-            image: {{ include "vllmkv.image" (list $ ($m.image | default $.Values.images.vllm)) }}
+            {{- if $m.image }}
+            image: {{ $m.image }}
+            {{- else }}
+            image: {{ include "vllmkv.image" (list $ $.Values.images.vllm) }}
+            {{- end }}
             imagePullPolicy: IfNotPresent
             securityContext:
               privileged: true
@@ -176,8 +180,16 @@ spec:
                 export HCCL_SOCKET_IFNAME=${nic_name}
                 export HCCL_BUFFSIZE={{ $dp.hcclBuffSize | default 200 }}
                 export OMP_NUM_THREADS={{ $dp.ompNumThreads | default 16 }}
-                {{- if $.Values.mooncake.enabled }}
+                {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
                 export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
+                {{- end }}
+                {{- if $.Values.lmcache.enabled }}
+                sed "s/__LOCAL_HOSTNAME__/${NODE_IP}/" /etc/lmcache/lmcache_config.yaml > /tmp/lmcache_config.yaml
+                export LMCACHE_CONFIG_FILE="/tmp/lmcache_config.yaml"
+                {{- if $.Values.lmcache.nds.enabled }}
+                mkdir -p {{ $.Values.lmcache.nds.path }}
+                export PYTHONPATH="{{ $.Values.lmcache.nds.xdsPath }}:${PYTHONPATH:-}"
+                {{- end }}
                 {{- end }}
 
                 export PYTHONPATH="/etc/fingerprint-mw:${PYTHONPATH:-}"
@@ -195,7 +207,9 @@ spec:
                   --middleware _fp_mw.HostnameFingerprint \
 {{ include "vllmkv.vllmRuntimeFlags" $flagCtx | trim | indent 18 }}
                   --host 0.0.0.0
-                  {{- if $.Values.mooncake.enabled }} \
+                  {{- if $.Values.lmcache.enabled }} \
+                  --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
+                  {{- else if $.Values.mooncake.enabled }} \
                   --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"master_server_address":"{{ $.Values.mooncake.masterServerAddress }}","lookup_rpc_port":"{{ $.Values.mooncake.lookupRpcPort }}","backend":"mooncake"}}'
                   {{- end }}
             env:
@@ -204,7 +218,7 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: status.hostIP
-              {{- if $.Values.mooncake.enabled }}
+              {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
               - name: MOONCAKE_CONFIG_PATH
                 value: "/etc/mooncake/mooncake.json"
               {{- end }}
@@ -217,7 +231,7 @@ spec:
                 name: kvpub
                 protocol: TCP
               {{- end }}
-              {{- if $.Values.mooncake.enabled }}
+              {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
               - containerPort: {{ $.Values.mooncake.lookupRpcPort }}
                 name: kv-rpc
                 protocol: TCP
@@ -240,11 +254,26 @@ spec:
               - name: hccn-conf
                 mountPath: /etc/hccn.conf
                 readOnly: true
-              {{- if $.Values.mooncake.enabled }}
+              {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
               - name: mooncake-config
                 mountPath: /etc/mooncake/mooncake.json
                 subPath: mooncake.json
                 readOnly: true
+              {{- end }}
+              {{- if $.Values.lmcache.enabled }}
+              - name: lmcache-config
+                mountPath: /etc/lmcache/lmcache_config.yaml
+                subPath: lmcache_config.yaml
+                readOnly: true
+              {{- if $.Values.lmcache.nds.enabled }}
+              - name: nds-cache
+                mountPath: {{ $.Values.lmcache.nds.path }}
+              - name: p2p-device
+                mountPath: /dev/p2p_device
+              - name: xds-file-p2p
+                mountPath: {{ $.Values.lmcache.nds.xdsPath }}
+                readOnly: true
+              {{- end }}
               {{- end }}
               {{- include "vllmkv.ascendDriverMounts" $ | nindent 14 }}
             startupProbe:
@@ -281,8 +310,8 @@ spec:
 
           {{- if $needsSidecar }}
           - name: kv-sidecar
-            image: {{ include "vllmkv.image" (list $ $.Values.images.sidecar) }}
-            imagePullPolicy: IfNotPresent
+            image: {{ include "vllmkv.sidecarImage" $ }}
+            imagePullPolicy: Always
             env:
               - name: ROUTER_URL
                 value: "http://router-service:8080"
@@ -370,10 +399,29 @@ spec:
             hostPath:
               path: /etc/hccn.conf
               type: File
-          {{- if $.Values.mooncake.enabled }}
+          {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
           - name: mooncake-config
             configMap:
               name: mooncake-config
+          {{- end }}
+          {{- if $.Values.lmcache.enabled }}
+          - name: lmcache-config
+            configMap:
+              name: lmcache-config
+          {{- if $.Values.lmcache.nds.enabled }}
+          - name: nds-cache
+            hostPath:
+              path: {{ $.Values.lmcache.nds.path }}
+              type: DirectoryOrCreate
+          - name: p2p-device
+            hostPath:
+              path: /dev/p2p_device
+              type: CharDevice
+          - name: xds-file-p2p
+            hostPath:
+              path: {{ $.Values.lmcache.nds.xdsPath }}
+              type: Directory
+          {{- end }}
           {{- end }}
           {{- include "vllmkv.ascendDriverVolumes" $ | nindent 10 }}
 
@@ -408,7 +456,7 @@ spec:
                     - key: avoid
                       operator: NotIn
                       values:
-                        - vllm
+                        - {{ $.Values.vllm.avoidLabelValue | default "vllm" }}
           {{- if $dp.pairTopologyKey }}
           podAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -442,7 +490,11 @@ spec:
         {{- end }}
         containers:
           - name: vllm
-            image: {{ include "vllmkv.image" (list $ ($m.image | default $.Values.images.vllm)) }}
+            {{- if $m.image }}
+            image: {{ $m.image }}
+            {{- else }}
+            image: {{ include "vllmkv.image" (list $ $.Values.images.vllm) }}
+            {{- end }}
             imagePullPolicy: IfNotPresent
             securityContext:
               privileged: true
@@ -489,8 +541,16 @@ spec:
                 export HCCL_SOCKET_IFNAME=${nic_name}
                 export HCCL_BUFFSIZE={{ $dp.hcclBuffSize | default 200 }}
                 export OMP_NUM_THREADS={{ $dp.ompNumThreads | default 16 }}
-                {{- if $.Values.mooncake.enabled }}
+                {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
                 export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
+                {{- end }}
+                {{- if $.Values.lmcache.enabled }}
+                sed "s/__LOCAL_HOSTNAME__/${NODE_IP}/" /etc/lmcache/lmcache_config.yaml > /tmp/lmcache_config.yaml
+                export LMCACHE_CONFIG_FILE="/tmp/lmcache_config.yaml"
+                {{- if $.Values.lmcache.nds.enabled }}
+                mkdir -p {{ $.Values.lmcache.nds.path }}
+                export PYTHONPATH="{{ $.Values.lmcache.nds.xdsPath }}:${PYTHONPATH:-}"
+                {{- end }}
                 {{- end }}
 
                 exec vllm serve /model \
@@ -505,7 +565,9 @@ spec:
                   --data-parallel-rpc-port {{ $dp.rpcPort | default 13389 }} \
                   --data-parallel-start-rank ${START_RANK} \
 {{ include "vllmkv.vllmRuntimeFlags" $flagCtx | trim | indent 18 }}
-                  {{- if $.Values.mooncake.enabled }}
+                  {{- if $.Values.lmcache.enabled }}
+                  --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
+                  {{- else if $.Values.mooncake.enabled }}
                   --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"master_server_address":"{{ $.Values.mooncake.masterServerAddress }}","lookup_rpc_port":"{{ $.Values.mooncake.lookupRpcPort }}","backend":"mooncake"}}'
                   {{- end }}
             env:
@@ -518,7 +580,7 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.annotations['leaderworkerset.sigs.k8s.io/leader-address']
-              {{- if $.Values.mooncake.enabled }}
+              {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
               - name: MOONCAKE_CONFIG_PATH
                 value: "/etc/mooncake/mooncake.json"
               {{- end }}
@@ -537,11 +599,26 @@ spec:
               - name: hccn-conf
                 mountPath: /etc/hccn.conf
                 readOnly: true
-              {{- if $.Values.mooncake.enabled }}
+              {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
               - name: mooncake-config
                 mountPath: /etc/mooncake/mooncake.json
                 subPath: mooncake.json
                 readOnly: true
+              {{- end }}
+              {{- if $.Values.lmcache.enabled }}
+              - name: lmcache-config
+                mountPath: /etc/lmcache/lmcache_config.yaml
+                subPath: lmcache_config.yaml
+                readOnly: true
+              {{- if $.Values.lmcache.nds.enabled }}
+              - name: nds-cache
+                mountPath: {{ $.Values.lmcache.nds.path }}
+              - name: p2p-device
+                mountPath: /dev/p2p_device
+              - name: xds-file-p2p
+                mountPath: {{ $.Values.lmcache.nds.xdsPath }}
+                readOnly: true
+              {{- end }}
               {{- end }}
               {{- include "vllmkv.ascendDriverMounts" $ | nindent 14 }}
             livenessProbe:
@@ -586,10 +663,29 @@ spec:
             hostPath:
               path: /etc/hccn.conf
               type: File
-          {{- if $.Values.mooncake.enabled }}
+          {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
           - name: mooncake-config
             configMap:
               name: mooncake-config
+          {{- end }}
+          {{- if $.Values.lmcache.enabled }}
+          - name: lmcache-config
+            configMap:
+              name: lmcache-config
+          {{- if $.Values.lmcache.nds.enabled }}
+          - name: nds-cache
+            hostPath:
+              path: {{ $.Values.lmcache.nds.path }}
+              type: DirectoryOrCreate
+          - name: p2p-device
+            hostPath:
+              path: /dev/p2p_device
+              type: CharDevice
+          - name: xds-file-p2p
+            hostPath:
+              path: {{ $.Values.lmcache.nds.xdsPath }}
+              type: Directory
+          {{- end }}
           {{- end }}
           {{- include "vllmkv.ascendDriverVolumes" $ | nindent 10 }}
 
@@ -622,7 +718,7 @@ spec:
       restartPolicy: Always
       shareProcessNamespace: true
 
-      {{- if and $.Values.mooncake.enabled $.Values.vllm.hostNetwork }}
+      {{- if and (or $.Values.mooncake.enabled $.Values.lmcache.enabled) $.Values.vllm.hostNetwork }}
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       {{- end }}
@@ -648,7 +744,7 @@ spec:
                   - key: avoid
                     operator: NotIn
                     values:
-                      - vllm
+                      - {{ $.Values.vllm.avoidLabelValue | default "vllm" }}
         {{- if gt (int $tp) 1 }}
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -671,8 +767,16 @@ spec:
 
       containers:
         - name: vllm
-          image: {{ include "vllmkv.image" (list $ ($m.image | default $.Values.images.vllm)) }}
+          {{- if $m.image }}
+          image: {{ $m.image }}
+          {{- else }}
+          image: {{ include "vllmkv.image" (list $ $.Values.images.vllm) }}
+          {{- end }}
           imagePullPolicy: IfNotPresent
+          {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
+          securityContext:
+            privileged: true
+          {{- end }}
           command:
             - /bin/bash
             - -c
@@ -685,7 +789,7 @@ spec:
               source /usr/local/Ascend/ascend-toolkit/set_env.sh
               export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
 
-              {{- if $.Values.mooncake.enabled }}
+              {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
 {{ include "vllmkv.nicDetectScript" . | trim | indent 14 }}
               echo "[vllm] local_ip=${local_ip} nic=${nic_name}"
               export HCCL_IF_IP=${local_ip}
@@ -694,7 +798,17 @@ spec:
               export HCCL_SOCKET_IFNAME=${nic_name}
               export HCCL_BUFFSIZE=200
               export ASCEND_BUFFER_POOL={{ $.Values.vllm.ascendBufferPool | default "4:8" }}
+              {{- if not $.Values.lmcache.enabled }}
               export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
+              {{- end }}
+              {{- end }}
+              {{- if $.Values.lmcache.enabled }}
+              sed "s/__LOCAL_HOSTNAME__/${NODE_IP}/" /etc/lmcache/lmcache_config.yaml > /tmp/lmcache_config.yaml
+              export LMCACHE_CONFIG_FILE="/tmp/lmcache_config.yaml"
+              {{- if $.Values.lmcache.nds.enabled }}
+              mkdir -p {{ $.Values.lmcache.nds.path }}
+              export PYTHONPATH="{{ $.Values.lmcache.nds.xdsPath }}:${PYTHONPATH:-}"
+              {{- end }}
               {{- end }}
 
               export PYTHONPATH="/etc/fingerprint-mw:${PYTHONPATH:-}"
@@ -711,7 +825,9 @@ spec:
                 {{- if $needsSidecar }}
                 --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@{{ $servedModelName }}"}' \
                 {{- end }}
-                {{- if $.Values.mooncake.enabled }}
+                {{- if $.Values.lmcache.enabled }}
+                --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}' \
+                {{- else if $.Values.mooncake.enabled }}
                 --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"master_server_address":"{{ $.Values.mooncake.masterServerAddress }}","lookup_rpc_port":"{{ $.Values.mooncake.lookupRpcPort }}","backend":"mooncake"}}' \
                 {{- end }}
                 &
@@ -723,11 +839,13 @@ spec:
               wait "$VLLM_PID"
           env:
             {{- include "vllmkv.vllmBaseEnv" (dict "tp" $tp "root" $) | nindent 12 }}
-            {{- if $.Values.mooncake.enabled }}
+            {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
             - name: NODE_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+            {{- end }}
+            {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
             - name: MOONCAKE_CONFIG_PATH
               value: "/etc/mooncake/mooncake.json"
             {{- end }}
@@ -740,7 +858,7 @@ spec:
               name: kvpub
               protocol: TCP
             {{- end }}
-            {{- if $.Values.mooncake.enabled }}
+            {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
             - containerPort: {{ $.Values.mooncake.lookupRpcPort }}
               name: kv-rpc
               protocol: TCP
@@ -774,10 +892,30 @@ spec:
               mountPath: /dev/hisi_hdc
             - name: devmm-svm-volume
               mountPath: /dev/devmm_svm
-            {{- if $.Values.mooncake.enabled }}
+            {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
+            {{- if not $.Values.lmcache.enabled }}
             - name: mooncake-config
               mountPath: /etc/mooncake/mooncake.json
               subPath: mooncake.json
+              readOnly: true
+            {{- end }}
+            {{- if $.Values.lmcache.enabled }}
+            - name: lmcache-config
+              mountPath: /etc/lmcache/lmcache_config.yaml
+              subPath: lmcache_config.yaml
+              readOnly: true
+            {{- if $.Values.lmcache.nds.enabled }}
+            - name: nds-cache
+              mountPath: {{ $.Values.lmcache.nds.path }}
+            - name: p2p-device
+              mountPath: /dev/p2p_device
+            - name: xds-file-p2p
+              mountPath: {{ $.Values.lmcache.nds.xdsPath }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            - name: hccn-conf
+              mountPath: /etc/hccn.conf
               readOnly: true
             {{- end }}
 
@@ -818,8 +956,8 @@ spec:
 
         {{- if $needsSidecar }}
         - name: kv-sidecar
-          image: {{ include "vllmkv.image" (list $ $.Values.images.sidecar) }}
-          imagePullPolicy: IfNotPresent
+          image: {{ include "vllmkv.sidecarImage" $ }}
+          imagePullPolicy: Always
           env:
             - name: ROUTER_URL
               value: "http://router-service:8080"
@@ -931,10 +1069,35 @@ spec:
           hostPath:
             path: /dev/devmm_svm
             type: CharDevice
-        {{- if $.Values.mooncake.enabled }}
+        {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
+        {{- if not $.Values.lmcache.enabled }}
         - name: mooncake-config
           configMap:
             name: mooncake-config
+        {{- end }}
+        {{- if $.Values.lmcache.enabled }}
+        - name: lmcache-config
+          configMap:
+            name: lmcache-config
+        {{- if $.Values.lmcache.nds.enabled }}
+        - name: nds-cache
+          hostPath:
+            path: {{ $.Values.lmcache.nds.path }}
+            type: DirectoryOrCreate
+        - name: p2p-device
+          hostPath:
+            path: /dev/p2p_device
+            type: CharDevice
+        - name: xds-file-p2p
+          hostPath:
+            path: {{ $.Values.lmcache.nds.xdsPath }}
+            type: Directory
+        {{- end }}
+        {{- end }}
+        - name: hccn-conf
+          hostPath:
+            path: /etc/hccn.conf
+            type: File
         {{- end }}
 
 {{- end }}
@@ -968,7 +1131,7 @@ spec:
       {{- if $m.nodePort }}
       nodePort: {{ $m.nodePort }}
       {{- else if or $isDP $isLegacy }}
-      nodePort: 30034
+      nodePort: {{ add ($.Values.portOffset | int) 30034 }}
       {{- end }}
 
 {{- end }}
@@ -998,6 +1161,9 @@ spec:
     - name: http
       port: 8200
       targetPort: 8200
+      {{- if $pod.nodePort }}
+      nodePort: {{ $pod.nodePort }}
+      {{- end }}
 {{- end }}
 {{- end }}
 

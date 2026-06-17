@@ -54,6 +54,9 @@ Current images:
 
 ## Node configuration (required on every node)
 
+All three steps below are **mandatory** on every node. Missing any one
+of them will cause image pulls to fail.
+
 ### 1. DNS — `/etc/hosts`
 
 ```
@@ -63,27 +66,83 @@ Current images:
 Update this if the registry moves to a different node. NodePort works
 from any node IP, but containerd resolves `reg.local` when pulling.
 
-### 2. Containerd insecure registry — `/etc/containerd/config.toml`
+Verify:
 
-```toml
-[plugins."io.containerd.grpc.v1.cri".registry.mirrors."reg.local:32000"]
-  endpoint = ["http://reg.local:32000"]
-
-[plugins."io.containerd.grpc.v1.cri".registry.configs."reg.local:32000".tls]
-  insecure_skip_verify = true
+```bash
+getent hosts reg.local
 ```
 
-After editing:
+### 2. Containerd insecure registry — `hosts.toml` (folder-based)
+
+The cluster uses containerd's folder-based registry configuration via
+`config_path = "/etc/containerd/certs.d"` in `/etc/containerd/config.toml`.
+
+Create the registry host config:
+
+```bash
+mkdir -p /etc/containerd/certs.d/reg.local:32000
+```
+
+Write `/etc/containerd/certs.d/reg.local:32000/hosts.toml`:
+
+```toml
+server = "http://reg.local:32000"
+
+[host."http://reg.local:32000"]
+  capabilities = ["pull", "resolve"]
+  skip_verify = true
+```
+
+Verify that `config.toml` has the `config_path` directive (should already
+be present on all cluster nodes):
+
+```bash
+grep -i 'config_path' /etc/containerd/config.toml
+# expected: config_path = "/etc/containerd/certs.d"
+```
+
+After creating the file:
 
 ```bash
 systemctl restart containerd
 ```
 
-### 3. NO_PROXY
+### 3. NO_PROXY for containerd
 
-`reg.local` and the node IPs must be in `NO_PROXY` to avoid the HTTP
-proxy (Cntlm) intercepting registry traffic. See `multi-node-setup-guide.md`
-section 11 for the full list.
+`reg.local` **must** be in the `NO_PROXY` list in containerd's proxy
+drop-in, otherwise the corporate proxy (Cntlm) intercepts registry
+traffic and returns 504 Gateway Time-out.
+
+Verify:
+
+```bash
+grep -o 'reg.local' /etc/systemd/system/containerd.service.d/http-proxy.conf
+```
+
+If missing, add it:
+
+```bash
+sed -i 's/NO_PROXY=/NO_PROXY=reg.local,/' /etc/systemd/system/containerd.service.d/http-proxy.conf
+systemctl daemon-reload
+systemctl restart containerd
+```
+
+The full `NO_PROXY` list should also include node IPs, cluster CIDRs,
+`nfs.local`, etc. See `multi-node-setup-guide.md` section 11 for the
+complete list.
+
+### Verification (after all 3 steps)
+
+```bash
+# DNS resolves
+getent hosts reg.local
+
+# Registry reachable (bypassing shell proxy)
+curl --noproxy '*' http://reg.local:32000/v2/_catalog
+
+# Containerd can pull
+ctr -n k8s.io images pull --plain-http reg.local:32000/kv-sidecar:latest
+```
 
 ---
 

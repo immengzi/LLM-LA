@@ -131,7 +131,8 @@ data:
       {{- if .Values.boom.claudeCodeAliases }}
       model_group_alias:
         {{- if .Values.models }}
-        {{- $defaultModel := (index .Values.models 0).name }}
+        {{- $firstModel := index .Values.models 0 }}
+        {{- $defaultModel := $firstModel.servedModelName | default $firstModel.name }}
         "claude-sonnet-4-20250514": {{ $defaultModel | quote }}
         "claude-3-5-sonnet-20241022": {{ $defaultModel | quote }}
         "claude-3-haiku-20240307": {{ $defaultModel | quote }}

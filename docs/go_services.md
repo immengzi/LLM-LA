@@ -2,7 +2,16 @@
 
 ## Overview
 
-The Go services are wire-compatible reimplementations of the Python `router_service` and `sidecar` in Go. They expose the same HTTP endpoints, read the same environment variables, write the same Redis keys, and emit the same Prometheus metrics. The prefix hash service remains in Python (Option C).
+The Go services (`src/services/go`) are a **100%-parity port** of the Python
+`router_service` and `sidecar`. They expose the same HTTP endpoints, read the
+same environment variables, write the same Redis keys, emit the same Prometheus
+metrics (names/labels/buckets), speak the same ZMQ wire formats, and return
+byte-compatible request/response shapes. They are a drop-in replacement that
+works out of the box with existing Python configs.
+
+The Python **prefix-hash service** stays in place (Option C): the Go router
+calls it over HTTP exactly like the Python router does. The `service_impl`
+toggle never swaps the `cpuHash` image.
 
 Switching between Python and Go is a single config line:
 
@@ -17,134 +26,126 @@ No client code, Helm templates, or experiment configs need to change.
 
 ```
 services/go/
-├── go.mod
-├── go.sum
-├── build.sh                  # Build + tag Docker images
-├── Dockerfile.router         # Multi-stage build for kv-router-go
-├── Dockerfile.sidecar        # Multi-stage build for kv-sidecar-go
+├── go.mod / go.sum
+├── build.sh                  # host compile + minimal image build + push
+├── Dockerfile.router         # kv-router-go
+├── Dockerfile.sidecar        # kv-sidecar-go
 ├── cmd/
-│   ├── gateway/main.go       # Router entrypoint
-│   └── sidecar/main.go       # Sidecar entrypoint
+│   ├── gateway/main.go       # router entrypoint (wires queue, SLO, pubsub, push-dispatch)
+│   └── sidecar/main.go       # sidecar entrypoint (workers, KV subscriber, pull worker)
 └── internal/
-    ├── common/
-    │   ├── config.go          # Env var helpers (EnvStr, EnvInt, EnvFloat, EnvBool)
-    │   └── health.go          # Generic health handler
-    ├── gateway/
-    │   ├── config.go          # Router config (all env vars)
-    │   ├── models.go          # Request/response types + QueueEntry
-    │   ├── metrics.go         # Prometheus metrics (router_*)
-    │   ├── queue.go           # CentralQueue: FIFO + KV-aware + length-aware
-    │   ├── result_store.go    # Channel-based result correlation
-    │   ├── handlers.go        # HTTP handlers (chi router)
-    │   ├── kv_watcher.go      # Redis KV block scanner
-    │   └── push_router.go     # K8s pod discovery + push dispatch
-    └── sidecar/
-        ├── config.go          # Sidecar config (all env vars)
-        ├── metrics.go         # Prometheus metrics (sidecar_*)
-        ├── queue.go           # LocalQueue (pending + inflight tracking)
-        ├── pull_worker.go     # Event-driven pull from router
-        ├── vllm_worker.go     # vLLM chat completion client
-        ├── result_poster.go   # Async result posting to router
-        └── kv_subscriber.go   # ZMQ KV event stub (interface ready for future impl)
+    ├── common/               # env helpers + generic health
+    ├── gateway/              # router
+    │   ├── config.go          # all router env vars
+    │   ├── models.go          # request/response types (+ SLO fields)
+    │   ├── metrics.go         # router_* + push-dispatch metrics
+    │   ├── queue.go           # CentralQueue: per-model FIFO + KV-aware + length-aware + SLO hooks
+    │   ├── result_store.go    # result correlation
+    │   ├── handlers.go        # HTTP handlers (chi)
+    │   ├── kv_aware.go        # block-owner map + longest-prefix match
+    │   ├── hash_client.go     # HTTP client to the Python prefix-hash service
+    │   ├── kv_watcher.go      # Redis KV block scanner (per-model)
+    │   ├── model_registry.go  # multi-model registry + Resolve / 404
+    │   ├── predictors.go      # output-length predictors (singleton)
+    │   ├── latency_predictor.go  # linear + bayesian latency models
+    │   ├── slo_state.go       # per-request SLO registry
+    │   ├── slo_scoring.go     # batch/queue-wait estimators + computeSlack
+    │   ├── admission.go       # computeMaxSafeAdmit
+    │   ├── slo.go             # SLO engine (sloEngine + sloRegistry)
+    │   ├── pubsub.go          # ZMQ result publisher (async_pubsub)
+    │   ├── push_router.go     # K8s pod discovery + push dispatch (rr/random/leastq)
+    │   ├── push_dispatch.go   # decoupled push-dispatch queue + worker pool
+    │   ├── chat.go            # /v1/chat/completions (API key, streaming SSE, tool calls)
+    │   ├── health_backends.go # backend health aggregation
+    │   └── parity_test.go     # unit tests
+    └── sidecar/              # sidecar
+        ├── config.go          # all sidecar env vars
+        ├── metrics.go         # sidecar_* metrics
+        ├── queue.go           # LocalQueue (pending + inflight)
+        ├── pull_worker.go     # pull from router (PREFETCH-aware)
+        ├── vllm_worker.go     # vLLM client (streaming, tool calls, FORCE_IGNORE_EOS, trace)
+        ├── result_poster.go   # async result posting
+        ├── kv_subscriber.go   # ZMQ KV-event subscriber -> Redis (msgpack)
+        └── kv_subscriber_test.go  # unit tests
 ```
 
 ## Building Docker Images
 
-### Prerequisites
-
-- Docker installed
-- Network access to Go module mirrors (or proxy configured)
-
-### Quick Build
-
 ```bash
-cd services/go
+cd src/services/go
 ./build.sh
+# -> reg.local:32000/kv-router-go:latest
+# -> reg.local:32000/kv-sidecar-go:latest
 ```
 
-This builds:
-- `reg.local:32000/kv-router-go:latest`
-- `reg.local:32000/kv-sidecar-go:latest`
+`build.sh` compiles both binaries statically on the host (`CGO_ENABLED=0`),
+packages them into minimal images, and pushes them. `go mod tidy` runs inside
+the script, so transitive dependencies (e.g. `go-zeromq/zmq4`) are resolved at
+build time.
 
-### Custom Registry or Tag
+Custom registry / tag:
 
 ```bash
 REGISTRY=myregistry.io TAG=v0.1 ./build.sh
 ```
 
-### Behind a Proxy
-
-```bash
-HTTP_PROXY=http://proxy:8080 HTTPS_PROXY=http://proxy:8080 ./build.sh
-```
-
-### Push to Registry
-
-```bash
-docker push reg.local:32000/kv-router-go:latest
-docker push reg.local:32000/kv-sidecar-go:latest
-```
-
 ## How the Toggle Works
 
-`sweep_methods.py` reads `helm.service_impl` from the experiment config:
+`sweep_methods.py` reads `helm.service_impl` from the experiment config and
+passes a single Helm value:
 
-- When `"python"` (default): uses `kv-router:latest`, `kv-sidecar:latest`, `vllm-cpu-hash:latest`
-- When `"go"`: overrides to `kv-router-go:latest`, `kv-sidecar-go:latest` — prefix hash stays `vllm-cpu-hash:latest`
+```
+--set serviceImpl=go
+```
 
-The Helm templates are image-agnostic — they reference `{{ .Values.images.router }}`, etc.
+The chart helpers `vllmkv.routerImage` / `vllmkv.sidecarImage` (in
+`templates/_helpers.tpl`) then select the image:
+
+| serviceImpl | router image          | sidecar image          | prefix hash |
+|-------------|-----------------------|------------------------|-------------|
+| `python`    | `images.router`       | `images.sidecar`       | Python      |
+| `go`        | `images.routerGo`     | `images.sidecarGo`     | Python      |
+
+Everything else — env vars, ports, probes, volumes, RBAC — is identical.
 
 ## Running with Go Services
 
-### Option A: Via sweep_methods.py
+### Via sweep_methods.py
 
-Use `configs/router-go.yaml`:
-
-```bash
-python sweep_methods.py
-```
-
-This config is identical to `router.yaml` except for `helm.service_impl: "go"`.
-
-### Option B: Direct Helm Override
+Use any config with `helm.service_impl: "go"`, e.g.
+`configs/router-go.yaml` or `configs/prod-shadow-boom-minmax-lmcache-hq-go.yaml`:
 
 ```bash
-helm upgrade --install vllm-kv-stack ./vllm-kv-stack \
-  --set images.router=kv-router-go:latest \
-  --set images.sidecar=kv-sidecar-go:latest
+python sweep_methods.py --config <master_config>
 ```
 
-## API Compatibility
+### Direct Helm override
 
-### Router (Go vs Python)
+```bash
+helm upgrade --install vllm ./src/vllm-kv-stack \
+  --set serviceImpl=go
+```
 
-| Endpoint | Method | Go | Python |
-|---|---|---|---|
-| `/health` | GET | `{"status":"ok","queue_len":N}` | Same |
-| `/metrics` | GET | Prometheus text | Same |
-| `/enqueue` | POST | Sync (blocks until result) | Same |
-| `/submit` | POST | Async (202 + req_id) | Same |
-| `/pull` | POST | `{"items":[...]}` | Same |
-| `/result` | POST | `{"status":"ok"}` | Same |
-| `/v1/chat/completions` | POST | OpenAI format | Same |
-| `/debug/slo` | GET | `{}` (stub) | Full SLO debug |
-| `{RESULT_SUBMIT_PATH}` | POST | 202 + async ingest | Same |
-| `{SUBMIT_PATH}` | POST | Same as /submit | Same |
+## Parity Surface
 
-### Sidecar (Go vs Python)
-
-| Endpoint | Method | Go | Python |
-|---|---|---|---|
-| `/health` | GET | `{"status":"ok","queue_len":N,"inflight":M,"logical":N+M}` | Same |
-| `/metrics` | GET | Prometheus text | Same |
-| `/push` | POST | `{"status":"ok"}` | Same |
+| Area | Notes |
+|------|-------|
+| HTTP endpoints | `/enqueue`, `/submit`, `/pull`, `/result`, `/result_chunk`, `/result_submit`, `/v1/chat/completions`, `/health*`, `/metrics`, `/latency_log`, `/debug/slo`, `/debug/slo/{req_id}` |
+| Routing modes | `pull`, `push-rr`, `push-random`, `push-leastq` (both `health` and `local` modes) |
+| KV-aware routing | Redis block-owner scan + longest-prefix match via the Python hash service |
+| SLO-aware scheduling | slack-based sort, admission throttle, latency predictors (linear + bayesian), batch/queue-wait estimators, full `/debug/slo` |
+| Length-aware batching | `short_first`, `long_first`, `even_short_long` |
+| Transports | `sync`, `async_pubsub` (ZMQ PUB publisher), `submit_ack` |
+| Push decoupling | bounded dispatch queue + worker pool (`PUSH_DECOUPLE_DISPATCH`) with `push_dispatch_*` metrics |
+| Multi-model | `MODEL_CONFIG_PATH` registry, per-model queues + per-model KV watcher, 404 on unknown model |
+| Sidecar | PREFETCH, FORCE_IGNORE_EOS, STREAMING_MODE + `/result_chunk` forwarding, ZMQ→Redis KV subscriber (msgpack) |
+| Tracing | identical `__trace__` field set end-to-end |
 
 ### Prometheus Metrics
 
-All metric names and label sets are identical between Go and Python, with one exception:
-
-- Python: `sidecar_python_threads` (number of Python threads)
-- Go: `sidecar_goroutines` (number of goroutines)
+All metric names, label sets, and histogram buckets are identical between Go and
+Python, including `sidecar_python_threads` (the Go sidecar reports its active
+worker-routine count under the same metric name).
 
 ### Redis Key Patterns
 
@@ -155,20 +156,25 @@ Both implementations use identical Redis key patterns:
 
 ### ZMQ
 
-The Go sidecar currently runs a stub KV subscriber that logs a warning. KV-aware routing still works because the KV watcher in the router reads Redis directly (populated by whichever sidecar is running). A full ZMQ implementation can be added later via the `KVSubscriber` interface.
+- **Sidecar**: subscribes to vLLM KV-cache events (`kv@` topic), decodes the
+  msgpack `KVEventBatch` (`BlockStored` / `BlockRemoved` / `AllBlocksCleared`),
+  and mirrors block ownership into Redis with the exact schema above.
+- **Router**: when `TRANSPORT_MODE=async_pubsub`, publishes completed results on
+  a ZMQ PUB socket using the same `[topic.run_id, compact-json]` wire format.
 
 ## Environment Variables
 
-Both Go and Python services read the same environment variables with the same defaults. See:
-- Router: `internal/gateway/config.go`
-- Sidecar: `internal/sidecar/config.go`
+Both Go and Python services read the same environment variables with the same
+defaults. See `internal/gateway/config.go` (router) and
+`internal/sidecar/config.go` (sidecar).
 
-## Known Differences (v0.1)
+## Notes
 
-1. **SLO debug endpoint**: Go returns `{}` stub. Python returns full SLO state. SLO-aware scheduling logic in the queue is a framework ready for future implementation.
-
-2. **ZMQ KV subscriber**: Go sidecar uses a stub. KV data still flows because the Python prefix hash service and any Python sidecars populate Redis. The Go router's KV watcher reads from Redis regardless.
-
-3. **Prefix hash**: Stays in Python. The Go `service_impl` toggle does not swap the cpuHash image.
-
-4. **Push mode K8s discovery**: Go uses raw HTTP to the K8s API with service account tokens. Python uses the `kubernetes` client library. Both produce the same pod list.
+- **Prefix hash stays Python**: porting vLLM's tokenizer + block-hashing
+  internals to Go is out of scope; the Go router calls the Python service over
+  HTTP, identical to the Python router. The `service_impl` toggle never swaps
+  the `cpuHash` image.
+- **Block hashes as decimal strings**: vLLM KV block hashes can exceed
+  `int64`. Both the sidecar subscriber and the router store/compare them as
+  canonical decimal strings to preserve exact equality without overflow.
+```

@@ -24,9 +24,11 @@ var (
 		Help: "Total requests completed by vLLM.",
 	}, []string{"endpoint"})
 
-	Goroutines = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "sidecar_goroutines",
-		Help: "Current number of goroutines.",
+	// PythonThreads mirrors the Python sidecar's sidecar_python_threads gauge.
+	// In Go the closest analogue of "active threads" is the goroutine count.
+	PythonThreads = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "sidecar_python_threads",
+		Help: "Number of active worker routines in the kv-sidecar process",
 	})
 
 	WorkersTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
@@ -45,7 +47,7 @@ func StartGoroutineGauge() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			Goroutines.Set(float64(runtime.NumGoroutine()))
+			PythonThreads.Set(float64(runtime.NumGoroutine()))
 		}
 	}()
 }
