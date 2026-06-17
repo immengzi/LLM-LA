@@ -5,7 +5,10 @@ go 1.26
 require (
 	github.com/go-chi/chi/v5 v5.2.1
 	github.com/go-redis/redis/v8 v8.11.5
+	github.com/go-zeromq/zmq4 v0.17.0
 	github.com/prometheus/client_golang v1.22.0
+	github.com/vmihailenco/msgpack/v5 v5.4.1
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

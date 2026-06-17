@@ -33,7 +33,7 @@ spec:
 
       containers:
         - name: router
-          image: {{ include "vllmkv.image" (list . .Values.images.router) }}
+          image: {{ include "vllmkv.routerImage" . }}
           # imagePullPolicy: IfNotPresent
           imagePullPolicy: Always
           env:
@@ -57,7 +57,7 @@ spec:
               value: "served-model"
 
             - name: NAMESPACE
-              value: "vllm"
+              value: {{ .Release.Namespace | quote }}
             - name: LABEL_SELECTOR
             {{- if .Values.models }}
               value: "component=vllm"
@@ -182,14 +182,14 @@ spec:
 
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health/router
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
 
           livenessProbe:
             httpGet:
-              path: /health
+              path: /health/router
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 20
@@ -231,10 +231,10 @@ spec:
     - name: http
       port: 8080
       targetPort: 8080
-      nodePort: 30080
+      nodePort: {{ add (.Values.portOffset | int) 30080 }}
     - name: results-zmq
       port: 5559
       targetPort: 5559
-      nodePort: 30559
+      nodePort: {{ add (.Values.portOffset | int) 30559 }}
 {{- end }}
 {{- end }}

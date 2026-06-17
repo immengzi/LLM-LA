@@ -4,7 +4,7 @@ _VLLM_CLIENT_VERSION = "2026-05-13-streaming-endpoint-id"
 
 import time
 import threading
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 import requests
 
@@ -36,6 +36,74 @@ def _busy_dec() -> int:
     with _BUSY_LOCK:
         _BUSY_N = max(0, _BUSY_N - 1)
         return _BUSY_N
+
+
+def _merge_tool_call_delta(
+    acc: Dict[int, Dict[str, Any]],
+    tool_calls: Any,
+) -> None:
+    """Accumulate OpenAI streaming tool_call deltas by index.
+
+    The sidecar forwards per-chunk deltas unchanged to the router for streaming
+    clients, but it also needs a complete tool_calls list for non-streaming
+    clients when STREAMING_MODE=true and vLLM is always queried via SSE.
+    """
+    if not isinstance(tool_calls, list):
+        return
+
+    for i, tc in enumerate(tool_calls):
+        if not isinstance(tc, dict):
+            continue
+        idx_raw = tc.get("index", i)
+        try:
+            idx = int(idx_raw)
+        except Exception:
+            idx = i
+
+        cur = acc.setdefault(
+            idx,
+            {
+                "id": tc.get("id") or f"call_{idx}",
+                "type": tc.get("type") or "function",
+                "function": {"name": "", "arguments": ""},
+            },
+        )
+
+        if tc.get("id"):
+            cur["id"] = tc["id"]
+        if tc.get("type"):
+            cur["type"] = tc["type"]
+
+        func = tc.get("function")
+        if isinstance(func, dict):
+            cur_func = cur.setdefault("function", {"name": "", "arguments": ""})
+            if func.get("name"):
+                cur_func["name"] = func["name"]
+            if isinstance(func.get("arguments"), str):
+                cur_func["arguments"] = cur_func.get("arguments", "") + func["arguments"]
+
+
+def _complete_tool_calls(acc: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return completed OpenAI tool_calls ordered by streaming index."""
+    out: List[Dict[str, Any]] = []
+    for idx in sorted(acc):
+        tc = acc[idx]
+        func = tc.get("function")
+        if not isinstance(func, dict):
+            continue
+        if not func.get("name"):
+            continue
+        out.append(
+            {
+                "id": tc.get("id") or f"call_{idx}",
+                "type": tc.get("type") or "function",
+                "function": {
+                    "name": func.get("name", ""),
+                    "arguments": func.get("arguments", ""),
+                },
+            }
+        )
+    return out
 
 
 class VLLMWorker:
@@ -227,8 +295,13 @@ class VLLMWorker:
                         else:
                             import json as _json
                             parts: list = []
+                            tool_call_acc: Dict[int, Dict[str, Any]] = {}
+                            stream_response_id: Optional[str] = None
+                            stream_created: Optional[int] = None
+                            stream_model: Optional[str] = None
                             t_first_token: Optional[float] = None
                             chunk_idx = 0
+                            pending_final_payload = None
                             try:
                                 for raw_line in resp.iter_lines(decode_unicode=True):
                                     if raw_line is None:
@@ -244,7 +317,15 @@ class VLLMWorker:
                                     except Exception:
                                         continue
 
+                                    if stream_response_id is None and isinstance(chunk.get("id"), str):
+                                        stream_response_id = chunk.get("id")
+                                    if stream_created is None and isinstance(chunk.get("created"), int):
+                                        stream_created = chunk.get("created")
+                                    if stream_model is None and isinstance(chunk.get("model"), str):
+                                        stream_model = chunk.get("model")
+
                                     delta_content = None
+                                    delta_tool_calls = None
                                     chunk_fr = None
                                     choices = chunk.get("choices")
                                     if isinstance(choices, list) and choices:
@@ -257,6 +338,12 @@ class VLLMWorker:
                                                     t_first_token = time.time()
                                                 parts.append(content)
                                                 delta_content = content
+                                            tool_calls = delta.get("tool_calls")
+                                            if isinstance(tool_calls, list) and tool_calls:
+                                                if t_first_token is None:
+                                                    t_first_token = time.time()
+                                                delta_tool_calls = tool_calls
+                                                _merge_tool_call_delta(tool_call_acc, tool_calls)
 
                                         fr = c0.get("finish_reason")
                                         if isinstance(fr, str):
@@ -267,34 +354,88 @@ class VLLMWorker:
                                     if isinstance(u, dict) and u:
                                         usage = u
 
-                                    if forward_stream and (delta_content or chunk_fr):
-                                        is_final = chunk_fr is not None
-                                        chunk_payload = {
-                                            "req_id": req_id,
-                                            "chunk_idx": chunk_idx,
-                                            "delta": delta_content or "",
-                                            "is_final": is_final,
-                                        }
-                                        if chunk_fr:
-                                            chunk_payload["finish_reason"] = chunk_fr
-                                        if is_final and usage:
-                                            chunk_payload["usage"] = usage
+                                    # If a buffered is_final is waiting and usage just arrived, flush it
+                                    if forward_stream and pending_final_payload is not None and usage:
+                                        pending_final_payload["usage"] = usage
                                         try:
                                             session.post(
                                                 router_chunk_url,
-                                                json=chunk_payload,
+                                                json=pending_final_payload,
                                                 timeout=5.0,
                                             )
                                         except Exception as ce:
                                             if _cfg.LOG_LEVEL == "debug":
                                                 print(f"[sidecar] chunk forward failed: {ce}")
                                         chunk_idx += 1
+                                        pending_final_payload = None
+
+                                    if forward_stream and (delta_content or delta_tool_calls or chunk_fr):
+                                        is_final = chunk_fr is not None
+                                        chunk_payload = {
+                                            "req_id": req_id,
+                                            "chunk_idx": chunk_idx,
+                                            "delta": delta_content or "",
+                                            "is_final": is_final,
+                                            "endpoint_id": _cfg.CONTAINER_NAME,
+                                        }
+                                        if delta_tool_calls:
+                                            chunk_payload["tool_calls"] = delta_tool_calls
+                                        if chunk_fr:
+                                            chunk_payload["finish_reason"] = chunk_fr
+                                        if is_final and usage:
+                                            chunk_payload["usage"] = usage
+                                        if is_final and not usage:
+                                            # Buffer: wait for the trailing usage chunk from vLLM
+                                            pending_final_payload = chunk_payload
+                                        else:
+                                            try:
+                                                session.post(
+                                                    router_chunk_url,
+                                                    json=chunk_payload,
+                                                    timeout=5.0,
+                                                )
+                                            except Exception as ce:
+                                                if _cfg.LOG_LEVEL == "debug":
+                                                    print(f"[sidecar] chunk forward failed: {ce}")
+                                            chunk_idx += 1
                             finally:
+                                # Flush any buffered is_final that never got a usage chunk
+                                if forward_stream and pending_final_payload is not None:
+                                    if usage:
+                                        pending_final_payload["usage"] = usage
+                                    try:
+                                        session.post(
+                                            router_chunk_url,
+                                            json=pending_final_payload,
+                                            timeout=5.0,
+                                        )
+                                    except Exception as ce:
+                                        if _cfg.LOG_LEVEL == "debug":
+                                            print(f"[sidecar] chunk forward failed: {ce}")
                                 resp.close()
 
                             t_vllm_recv = time.time()
                             output_text = "".join(parts) if parts else ""
                             latency_s = t_vllm_recv - t_vllm_send
+                            completed_tool_calls = _complete_tool_calls(tool_call_acc)
+                            raw_vllm = {
+                                "id": stream_response_id or f"chatcmpl-{req_id}",
+                                "object": "chat.completion",
+                                "created": stream_created or int(t_vllm_send),
+                                "model": stream_model or _cfg.MODEL_NAME,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "message": {
+                                            "role": "assistant",
+                                            "content": output_text,
+                                            "tool_calls": completed_tool_calls,
+                                        },
+                                        "finish_reason": finish_reason,
+                                    }
+                                ],
+                                "usage": usage or {},
+                            }
 
                             if t_first_token is not None:
                                 ttft_s = t_first_token - t_vllm_send
@@ -377,6 +518,18 @@ class VLLMWorker:
 
                     if finish_reason is not None:
                         result_obj["finish_reason"] = finish_reason
+
+                    if raw_vllm is not None:
+                        try:
+                            tc = (
+                                raw_vllm.get("choices", [{}])[0]
+                                .get("message", {})
+                                .get("tool_calls")
+                            )
+                            if isinstance(tc, list) and tc:
+                                result_obj["tool_calls"] = tc
+                        except Exception:
+                            pass
 
                     # HTTP-level latency as seen by sidecar -> vLLM
                     if latency_s is not None:

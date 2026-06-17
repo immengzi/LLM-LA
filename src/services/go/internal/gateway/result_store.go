@@ -33,8 +33,6 @@ func (rs *ResultStore) Register(reqID string) <-chan map[string]interface{} {
 	ch := make(chan map[string]interface{}, 1)
 	rs.waiters[reqID] = ch
 
-	RouterActiveWaiters.Inc()
-
 	if result, ok := rs.results[reqID]; ok {
 		ch <- result
 		delete(rs.results, reqID)
@@ -48,9 +46,6 @@ func (rs *ResultStore) Register(reqID string) <-chan map[string]interface{} {
 func (rs *ResultStore) Deliver(reqID string, result map[string]interface{}) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-
-	RouterResultTotal.Inc()
-	RouterCompletedTotal.Inc()
 
 	if ch, ok := rs.waiters[reqID]; ok {
 		select {
@@ -96,7 +91,6 @@ func (rs *ResultStore) cleanup(reqID string) {
 	delete(rs.waiters, reqID)
 	delete(rs.results, reqID)
 	delete(rs.storeTSs, reqID)
-	RouterActiveWaiters.Dec()
 }
 
 // StartCleanupLoop periodically removes stale results that were never

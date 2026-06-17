@@ -37,7 +37,11 @@ spec:
 
       containers:
         - name: mooncake-master
+          {{- if .Values.images.mooncakeMasterRaw }}
+          image: {{ .Values.images.mooncakeMasterRaw }}
+          {{- else }}
           image: {{ include "vllmkv.image" (list . .Values.images.mooncakeMaster) }}
+          {{- end }}
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash

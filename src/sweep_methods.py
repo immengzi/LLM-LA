@@ -491,6 +491,7 @@ def _create_per_pod_services(
     namespace: str,
     release: str,
     chart_dir: Path,
+    port_offset: int = 0,
 ) -> List[Tuple[str, str]]:
     """Create a NodePort Service per externally-reachable vLLM pod via Helm.
 
@@ -554,8 +555,10 @@ def _create_per_pod_services(
         "--timeout", "5m",
         "--set", "perPodServices.enabled=true",
     ]
+    _per_pod_base_port = 31361 + port_offset
     for i, pname in enumerate(discovered_pods):
         cmd.extend(["--set", f"perPodServices.pods[{i}].name={pname}"])
+        cmd.extend(["--set", f"perPodServices.pods[{i}].nodePort={_per_pod_base_port + i}"])
 
     try:
         _helm(cmd, check=True, capture=False)
@@ -590,8 +593,14 @@ def _print_boom_config(
     models_list: list,
     namespace: str,
     per_pod_endpoints: Optional[List[Tuple[str, str]]] = None,
-) -> None:
-    """Print the BooM / external gateway config after deployment for sharing with maintainers."""
+) -> str:
+    """Print and return the BooM / external gateway config for sharing with maintainers."""
+    lines: list[str] = []
+
+    def _emit(line: str = "") -> None:
+        lines.append(line)
+        click.echo(line)
+
     router_api_key = str(getattr(helm_cfg, "router_api_key", "")).strip() or "dummy"
 
     # Detect node IP from router_url or boom base_url
@@ -620,42 +629,41 @@ def _print_boom_config(
     except Exception:
         pass
 
-    click.echo("")
-    click.echo("=" * 70)
-    click.echo("  BooM / External Gateway Config  (share with your BooM maintainer)")
-    click.echo("=" * 70)
+    _emit("")
+    _emit("=" * 70)
+    _emit("  BooM / External Gateway Config  (share with your BooM maintainer)")
+    _emit("=" * 70)
 
     if models_list:
-        click.echo("")
-        click.echo("model_list:")
+        _emit("")
+        _emit("model_list:")
         for m in models_list:
             name = m.get("servedModelName") or m.get("name", "unknown")
-            click.echo(f"  - model_name: {name}")
-            click.echo(f"    litellm_params:")
-            click.echo(f"      model: openai/{name}")
-            click.echo(f"      api_base: http://{node_ip}:{router_port}/v1")
-            click.echo(f'      api_key: "{router_api_key}"')
+            _emit(f"  - model_name: {name}")
+            _emit(f"    litellm_params:")
+            _emit(f"      model: openai/{name}")
+            _emit(f"      api_base: http://{node_ip}:{router_port}/v1")
+            _emit(f'      api_key: "{router_api_key}"')
     else:
         model_name = str(getattr(helm_cfg, "model_name", "served-model")).strip() or "served-model"
-        click.echo("")
-        click.echo("model_list:")
-        click.echo(f"  - model_name: {model_name}")
-        click.echo(f"    litellm_params:")
-        click.echo(f"      model: openai/{model_name}")
-        click.echo(f"      api_base: http://{node_ip}:{router_port}/v1")
-        click.echo(f'      api_key: "{router_api_key}"')
+        _emit("")
+        _emit("model_list:")
+        _emit(f"  - model_name: {model_name}")
+        _emit(f"    litellm_params:")
+        _emit(f"      model: openai/{model_name}")
+        _emit(f"      api_base: http://{node_ip}:{router_port}/v1")
+        _emit(f'      api_key: "{router_api_key}"')
 
-    click.echo("")
-    click.echo(f"Router endpoint:  http://{node_ip}:{router_port}")
+    _emit("")
+    _emit(f"Router endpoint:  http://{node_ip}:{router_port}")
 
     # Per-pod vLLM endpoints (each pod gets its own NodePort)
     if per_pod_endpoints:
-        click.echo("")
-        click.echo(f"vLLM per-pod endpoints ({len(per_pod_endpoints)} instances):")
+        _emit("")
+        _emit(f"vLLM per-pod endpoints ({len(per_pod_endpoints)} instances):")
         for pod_name, nodeport in per_pod_endpoints:
-            click.echo(f"  {pod_name}: http://{node_ip}:{nodeport}/v1")
+            _emit(f"  {pod_name}: http://{node_ip}:{nodeport}/v1")
     else:
-        # Fallback: just count running pods
         try:
             pod_count = subprocess.run(
                 ["kubectl", "get", "pods", "-n", namespace,
@@ -665,11 +673,12 @@ def _print_boom_config(
                 capture_output=True, text=True, timeout=10,
             ).stdout.strip()
             if pod_count:
-                click.echo(f"vLLM instances:   {len(pod_count)} running (via router at :{router_port})")
+                _emit(f"vLLM instances:   {len(pod_count)} running (via router at :{router_port})")
         except Exception:
             pass
 
     # BooM NodePort
+    boom_port = "30401"
     try:
         out = subprocess.run(
             ["kubectl", "get", "svc", "boom-proxy", "-n", namespace,
@@ -677,12 +686,52 @@ def _print_boom_config(
             capture_output=True, text=True, timeout=10,
         ).stdout.strip()
         if out.isdigit():
-            click.echo(f"BooM endpoint:    http://{node_ip}:{out}")
+            boom_port = out
+            _emit(f"BooM endpoint:    http://{node_ip}:{out}")
     except Exception:
         pass
 
-    click.echo("=" * 70)
-    click.echo("")
+    # Prometheus endpoint
+    prom_port = "31190"
+    _emit(f"Prometheus:       http://{node_ip}:{prom_port}/metrics")
+
+    # Served model name (first model)
+    served_model = "served-model"
+    if models_list:
+        served_model = models_list[0].get("servedModelName") or models_list[0].get("name", "served-model")
+
+    boom_api_key = "sk-boom-master"
+    boom_cfg = getattr(cfg, "boom", None)
+    if boom_cfg:
+        boom_api_key = str(getattr(boom_cfg, "api_key", boom_api_key)).strip() or boom_api_key
+
+    _emit("")
+    _emit("-" * 70)
+    _emit("  Prod Latency Collector (run in a separate terminal)")
+    _emit("-" * 70)
+    _emit(f"  python prod_latency_collector.py \\")
+    _emit(f"      --router-url http://{node_ip}:{router_port} \\")
+    _emit(f"      --prometheus-url http://{node_ip}:{prom_port} \\")
+    _emit(f"      --poll-interval 5")
+
+    _emit("")
+    _emit("-" * 70)
+    _emit('  Claude CLI  (~/.claude/settings.json  "env" block)')
+    _emit("-" * 70)
+    _emit(f'  "env": {{')
+    _emit(f'      "ANTHROPIC_AUTH_TOKEN": "{boom_api_key}",')
+    _emit(f'      "ANTHROPIC_BASE_URL": "http://{node_ip}:{boom_port}",')
+    _emit(f'      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "{served_model}",')
+    _emit(f'      "ANTHROPIC_DEFAULT_OPUS_MODEL": "{served_model}",')
+    _emit(f'      "ANTHROPIC_DEFAULT_SONNET_MODEL": "{served_model}",')
+    _emit(f'      "ANTHROPIC_MODEL": "{served_model}",')
+    _emit(f'      "ANTHROPIC_REASONING_MODEL": "{served_model}"')
+    _emit(f'  }}')
+
+    _emit("=" * 70)
+    _emit("")
+
+    return "\n".join(lines)
 
 
 # ---------------------------
@@ -721,8 +770,6 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         if not cfg.is_file():
             raise click.ClickException(f"Client config not found: {cfg}")
 
-    release = RELEASE
-    namespace = "vllm"
     chart_dir = (REPO_ROOT / "vllm-kv-stack").resolve()
     values_file = chart_dir / "values.yaml"
     if not chart_dir.is_dir():
@@ -735,7 +782,6 @@ def cli(master_config: str, skip_vllm: bool) -> None:
 
     click.echo(f"[sweep] master_config={master_path}")
     click.echo(f"[sweep] chart_dir={chart_dir}")
-    click.echo(f"[sweep] release={release} namespace={namespace}")
     click.echo(f"[sweep] skip_vllm={skip_vllm}")
     click.echo(f"[sweep] jobs={len(jobs)}")
 
@@ -748,6 +794,17 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         h = getattr(cfg, "helm", None)
         if h is None:
             raise click.ClickException(f"Config has no 'helm' section: {cfg_path}")
+
+        # Per-job overrides for release / namespace / portOffset so shadow
+        # deployments coexist with the primary deployment in the same master config.
+        release = str(getattr(h, "release", "") or "").strip() or RELEASE
+        namespace = str(getattr(h, "namespace", "") or "").strip() or "vllm"
+        _port_offset = int(getattr(h, "port_offset", 0) or 0)
+        _pin_node_override = str(getattr(h, "pin_node_name", "") or "").strip()
+        _vllm_node_selector = getattr(cfg, "vllm_node_selector", None)
+        _vllm_avoid_label = str(getattr(cfg, "vllm_avoid_label", "") or "").strip()
+
+        click.echo(f"[sweep] release={release} namespace={namespace} portOffset={_port_offset}")
 
         backend = str(getattr(cfg, "backend", "router") or "router").strip().lower()
 
@@ -796,6 +853,19 @@ def cli(master_config: str, skip_vllm: bool) -> None:
 
         # ---- PV/PVC: always disabled — deployed once externally on parent NFS dir ----
         set_values["modelVolume.create"] = False
+
+        # ---- Shadow deployment overrides (portOffset, pin, nodeSelector, avoidLabel) ----
+        if _port_offset:
+            set_values["portOffset"] = _port_offset
+            set_values["boom.nodePort"] = 30401 + _port_offset
+            set_values["litellm.nodePort"] = 30400 + _port_offset
+        if _pin_node_override:
+            set_values["pin.nodeName"] = _pin_node_override
+        if _vllm_avoid_label:
+            set_values["vllm.avoidLabelValue"] = _vllm_avoid_label
+        if _vllm_node_selector and isinstance(_vllm_node_selector, dict):
+            for k, v in _vllm_node_selector.items():
+                set_values[f"vllm.nodeSelector.{k}"] = str(v)
 
         # ---- deploy component flags ----
         # Determine the requested routing mode for this job.
@@ -945,12 +1015,75 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 f"hostNetwork={set_values['vllm.hostNetwork']}"
             )
 
+        # ---- LMCache toggle (wraps Mooncake for cross-replica KV coordination) ----
+        lmcache_enabled = bool(getattr(h, "lmcache_enabled", False))
+        if lmcache_enabled and not mooncake_enabled:
+            raise click.ClickException(
+                "lmcache_enabled=true requires mooncake_enabled=true "
+                "(lmcache uses mooncake master for KV coordination)"
+            )
+        set_values["lmcache.enabled"] = lmcache_enabled
+        if lmcache_enabled:
+            lmc_chunk = getattr(h, "lmcache_chunk_size", None)
+            if lmc_chunk is not None:
+                set_values["lmcache.chunkSize"] = int(lmc_chunk)
+            lmc_cpu = getattr(h, "lmcache_max_local_cpu_size", None)
+            if lmc_cpu is not None:
+                set_values["lmcache.maxLocalCpuSize"] = int(lmc_cpu)
+            click.echo(
+                f"[sweep] lmcache.enabled=true "
+                f"chunkSize={set_values.get('lmcache.chunkSize', 'default')} "
+                f"maxLocalCpuSize={set_values.get('lmcache.maxLocalCpuSize', 'default')}"
+            )
+
+        # ---- NDS (NVMe Direct Storage — P2P DMA for KV cache) ----
+        nds_enabled = bool(getattr(h, "lmcache_nds_enabled", False))
+        if nds_enabled:
+            set_values["lmcache.nds.enabled"] = True
+            nds_path = str(getattr(h, "lmcache_nds_path", "") or "").strip()
+            if nds_path:
+                set_values["lmcache.nds.path"] = nds_path
+            nds_dev = str(getattr(h, "lmcache_nds_dev", "") or "").strip()
+            if nds_dev:
+                set_values["lmcache.nds.dev"] = nds_dev
+            nds_size = getattr(h, "lmcache_nds_size", None)
+            if nds_size is not None:
+                set_values["lmcache.nds.size"] = int(nds_size)
+            click.echo(
+                f"[sweep] lmcache.nds.enabled=true "
+                f"path={nds_path} dev={nds_dev} size={nds_size}"
+            )
+
+        # ---- New vLLM fields (dtype, schedulerCls, modelLoaderExtraConfig, etc.) ----
+        _dtype = str(getattr(h, "dtype", "") or "").strip()
+        if _dtype and _dtype != "auto":
+            set_values["vllm.dtype"] = _dtype
+        _sched_cls = str(getattr(h, "scheduler_cls", "") or "").strip()
+        if _sched_cls:
+            set_values["vllm.schedulerCls"] = _sched_cls
+        _mlec = str(getattr(h, "model_loader_extra_config", "") or "").strip()
+        if _mlec:
+            set_values["vllm.modelLoaderExtraConfig"] = _mlec
+        _flashcomm = bool(getattr(h, "ascend_enable_flashcomm1", False))
+        if _flashcomm:
+            set_values["vllm.ascendEnableFlashcomm1"] = True
+
+        # ---- Image overrides (bypass registry rewrite — used for local images) ----
+        _mc_img = str(getattr(h, "mooncake_master_image", "") or "").strip()
+        if _mc_img:
+            set_values["images.mooncakeMasterRaw"] = _mc_img
+
         service_impl = str(getattr(h, "service_impl", "python")).strip().lower()
-        if service_impl == "go":
-            set_values["images.router"] = "kv-router-go:latest"
-            set_values["images.sidecar"] = "kv-sidecar-go:latest"
-            # prefix hash stays Python (Option C): HuggingFace tokenizers + vLLM block hashing
-            # are too heavy to port to Go for v0.1. cpuHash image is NOT overridden.
+        if service_impl not in ("python", "go"):
+            raise click.ClickException(
+                f"Invalid service_impl '{service_impl}' in {cfg_path} (expected 'python' or 'go')"
+            )
+        # Single Helm-native knob: the chart's vllmkv.routerImage / vllmkv.sidecarImage
+        # helpers swap router+sidecar images for their Go equivalents
+        # (images.routerGo / images.sidecarGo) when serviceImpl=go. The prefix-hash
+        # service stays Python (cpuHash image is never overridden): HuggingFace
+        # tokenizers + vLLM block hashing are too heavy to port to Go.
+        set_values["serviceImpl"] = service_impl
 
         set_values["autoscaling.enabled"] = bool(h.autoscaling_enabled)
 
@@ -971,6 +1104,13 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 f"No models defined in {cfg_path}. "
                 f"Add helm.models[] or legacy flat vllm_*/data_parallel_* fields."
             )
+
+        # Inject vllm_image into per-model image field (bypasses registry rewrite)
+        _vllm_img = str(getattr(h, "vllm_image", "") or "").strip()
+        if _vllm_img:
+            for mdef in models_list:
+                if not mdef.get("image"):
+                    mdef["image"] = _vllm_img
 
         click.echo(f"[sweep] models: {len(models_list)} model(s)")
         for mi, mdef in enumerate(models_list):
@@ -1145,13 +1285,26 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 namespace=namespace,
                 release=release,
                 chart_dir=chart_dir,
+                port_offset=_port_offset,
             )
             if expose_per_pod
             else []
         )
 
         # ---- Print BooM / external gateway config for maintainer ----
-        _print_boom_config(cfg, h, models_list, namespace, per_pod_endpoints)
+        _boom_config_text = _print_boom_config(cfg, h, models_list, namespace, per_pod_endpoints)
+
+        # Write deployment info immediately (before load test) so it's
+        # available even if the client run is long or gets interrupted.
+        _deploy_info_path = EXPERIMENTS_ROOT / f"deployment-info-{release}.txt"
+        try:
+            EXPERIMENTS_ROOT.mkdir(parents=True, exist_ok=True)
+            _deploy_info_path.write_text(
+                _boom_config_text or "(no deployment info captured)", encoding="utf-8"
+            )
+            click.echo(f"[sweep] wrote {_deploy_info_path}")
+        except Exception as e:
+            click.echo(f"[sweep] WARN: failed to write deployment-info: {e}")
 
         tmp_cfg_path = _write_temp_job_config(cfg, method)
 
@@ -1176,6 +1329,9 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             continue
 
         (exp_dir / "vllm-k8s.yaml").write_text(rendered_text, encoding="utf-8")
+        (exp_dir / "deployment-info.txt").write_text(
+            _boom_config_text or "(no deployment info captured)", encoding="utf-8"
+        )
         hv_path = REPO_ROOT / "helm-effective-values.yaml"
         if hv_path.is_file():
             shutil.copy2(hv_path, exp_dir / "helm-effective-values.yaml")

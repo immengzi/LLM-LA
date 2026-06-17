@@ -4,22 +4,24 @@ import "time"
 
 // EnqueueRequest matches the Python EnqueueRequest pydantic model.
 type EnqueueRequest struct {
-	Prompt       string                 `json:"prompt"`
-	ReqID        string                 `json:"req_id,omitempty"`
-	TEnqClient   *float64               `json:"t_enq_client,omitempty"`
-	Meta         map[string]interface{} `json:"meta,omitempty"`
-	SLOType      *string                `json:"slo_type,omitempty"`
-	SLOTtftMs    *float64               `json:"slo_ttft_ms,omitempty"`
-	SLOTpotMs    *float64               `json:"slo_tpot_ms,omitempty"`
-	SLOE2eMs     *float64               `json:"slo_e2e_ms,omitempty"`
-	TaskType     *string                `json:"task_type,omitempty"`
-	OutputLenHint *int                  `json:"output_len_hint,omitempty"`
+	Prompt        string                 `json:"prompt"`
+	ReqID         string                 `json:"req_id,omitempty"`
+	TEnqClient    *float64               `json:"t_enq_client,omitempty"`
+	Meta          map[string]interface{} `json:"meta,omitempty"`
+	Model         string                 `json:"model,omitempty"`
+	SLOType       *string                `json:"slo_type,omitempty"`
+	SLOTtftMs     *float64               `json:"slo_ttft_ms,omitempty"`
+	SLOTpotMs     *float64               `json:"slo_tpot_ms,omitempty"`
+	SLOE2eMs      *float64               `json:"slo_e2e_ms,omitempty"`
+	TaskType      *string                `json:"task_type,omitempty"`
+	OutputLenHint *int                   `json:"output_len_hint,omitempty"`
 }
 
 // PullRequest matches the Python PullRequest pydantic model.
 type PullRequest struct {
 	Endpoint string `json:"endpoint"`
 	Want     int    `json:"want"`
+	Model    string `json:"model,omitempty"`
 }
 
 // PullResponse matches the Python PullResponse pydantic model.

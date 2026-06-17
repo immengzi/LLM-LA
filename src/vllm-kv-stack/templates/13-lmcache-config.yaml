@@ -1,0 +1,34 @@
+{{- if .Values.lmcache.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lmcache-config
+  namespace: {{ .Release.Namespace }}
+data:
+  lmcache_config.yaml: |
+    local_cpu: {{ .Values.lmcache.localCpu }}
+    remote_url: "mooncakestore://{{ .Values.mooncake.masterServerAddress }}/"
+    max_local_cpu_size: {{ .Values.lmcache.maxLocalCpuSize }}
+    chunk_size: {{ .Values.lmcache.chunkSize }}
+    use_layerwise: {{ .Values.lmcache.useLayerwise }}
+    enable_async_loading: {{ .Values.lmcache.enableAsyncLoading }}
+    internal_api_server_enabled: {{ .Values.lmcache.internalApiServerEnabled }}
+    internal_api_server_host: {{ .Values.lmcache.internalApiServerHost | quote }}
+    internal_api_server_port_start: {{ .Values.lmcache.internalApiServerPortStart }}
+    {{- if .Values.lmcache.nds.enabled }}
+    nds_path: {{ .Values.lmcache.nds.path | quote }}
+    nds_dev: {{ .Values.lmcache.nds.dev | quote }}
+    nds_size: {{ .Values.lmcache.nds.size }}
+    {{- end }}
+    extra_config:
+      use_exists_async: {{ .Values.lmcache.extraConfig.useExistsAsync }}
+      save_chunk_meta: {{ .Values.lmcache.extraConfig.saveChunkMeta }}
+      local_hostname: "__LOCAL_HOSTNAME__"
+      metadata_server: "P2PHANDSHAKE"
+      protocol: {{ .Values.lmcache.extraConfig.protocol | quote }}
+      global_segment_size: {{ printf "%.0f" (float64 .Values.lmcache.extraConfig.globalSegmentSize) }}
+      master_server_address: {{ .Values.mooncake.masterServerAddress | quote }}
+      local_buffer_size: {{ printf "%.0f" (float64 .Values.lmcache.extraConfig.localBufferSize) }}
+      mooncake_prefer_local_alloc: {{ .Values.lmcache.extraConfig.mooncakePreferLocalAlloc }}
+      use_ascend_direct: {{ .Values.lmcache.extraConfig.useAscendDirect }}
+{{- end }}
