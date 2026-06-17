@@ -48,18 +48,23 @@ kubectl get svc -n kube-system kube-dns
 
 ```bash
 # On the broken node (SSH in):
-sed -i 's/10.96.0.10/10.233.0.10/' /var/lib/kubelet/config.yaml
+# IMPORTANT: Check which config file kubelet actually reads first!
+ps aux | grep kubelet | grep -oP 'config=\S+'
+# Typical paths: /etc/kubernetes/kubelet-config.yaml or /var/lib/kubelet/config.yaml
+
+# Fix BOTH files to be safe:
+sed -i 's/10.96.0.10/10.233.0.10/' /etc/kubernetes/kubelet-config.yaml /var/lib/kubelet/config.yaml
 systemctl restart kubelet
 
 # Verify:
-cat /var/lib/kubelet/config.yaml | grep -A2 clusterDNS
+grep -A2 clusterDNS /etc/kubernetes/kubelet-config.yaml
 systemctl status kubelet | head -5
 
 # Redeploy pods so they get the correct resolv.conf:
 kubectl rollout restart deployment -n vllm <deployment-name>
 ```
 
-**Prevention:** When adding new nodes to the cluster, always verify `clusterDNS` in `/var/lib/kubelet/config.yaml` matches the kube-dns service ClusterIP.
+**Prevention:** When adding new nodes to the cluster, always verify `clusterDNS` in **both** `/etc/kubernetes/kubelet-config.yaml` and `/var/lib/kubelet/config.yaml` matches the kube-dns service ClusterIP (`10.233.0.10`).
 
 ---
 
@@ -359,6 +364,78 @@ This did NOT fix the calico issue on existing nodes (the stale processes were al
 
 ---
 
+## Issue 5: nodelocaldns IP (169.254.25.10) in kubelet config — wrong config file path
+
+**Date:** June 17, 2026 (discovered while debugging Issue 4)
+
+**Symptom:**
+- vLLM DP worker pods can't resolve the leader's headless service name: `[vllm-dp-worker] DNS retry 1/30: cannot resolve vllm-minimax-m2-1.vllm-minimax-m2.vllm, waiting 5s...`
+- Pod `/etc/resolv.conf` shows `nameserver 169.254.25.10` instead of `10.233.0.10`
+- `169.254.25.10` is the nodelocaldns IP, but **no nodelocaldns pods exist** in the cluster (`kubectl get pods -n kube-system -l k8s-app=nodelocaldns` returns empty)
+- Only affects pods on cloud nodes (1, 2, 5, 6, 7, 8), not on-prem nodes (3, 4)
+- Shadow deployment on node3/node4 works fine; production vLLM on cloud nodes fails
+
+**Root cause:**
+Kubespray originally configured the cluster with nodelocaldns enabled, setting `clusterDNS: 169.254.25.10` in the kubelet config. Later, nodelocaldns was removed but the kubelet configs on cloud nodes were never updated.
+
+**Critical gotcha:** On kubespray-managed nodes, kubelet reads its config from **`/etc/kubernetes/kubelet-config.yaml`**, NOT `/var/lib/kubelet/config.yaml`. The earlier Issue 1 fix was applied to the wrong file, so it had no effect. You can confirm which file kubelet uses by checking its process args:
+
+```bash
+ps aux | grep kubelet | grep -v grep
+# Look for: --config=/etc/kubernetes/kubelet-config.yaml
+```
+
+**Diagnosis:**
+
+```bash
+# 1. Check pod resolv.conf — shows wrong nameserver
+kubectl exec -n vllm <pod-on-cloud-node> -c vllm -- cat /etc/resolv.conf
+# nameserver 169.254.25.10  ← WRONG (nodelocaldns, doesn't exist)
+
+# 2. Verify nodelocaldns doesn't exist
+kubectl get pods -n kube-system -l k8s-app=nodelocaldns -o wide
+# No resources found
+
+# 3. Check which config file kubelet actually uses (SSH into node)
+ps aux | grep kubelet | grep -v grep
+# --config=/etc/kubernetes/kubelet-config.yaml  ← THIS is the real config
+
+# 4. Check the REAL config file
+grep -A2 clusterDNS /etc/kubernetes/kubelet-config.yaml
+# Shows: 169.254.25.10  ← WRONG
+
+# 5. Compare with the decoy file (may show correct value from earlier fix)
+grep -A2 clusterDNS /var/lib/kubelet/config.yaml
+# Shows: 10.233.0.10  ← Looks correct but kubelet doesn't read this file!
+```
+
+**Fix:**
+
+```bash
+# On each cloud node (SSH in):
+# Fix BOTH config files to avoid future confusion
+sed -i 's/169.254.25.10/10.233.0.10/' /etc/kubernetes/kubelet-config.yaml /var/lib/kubelet/config.yaml
+
+# Verify the real config
+grep -A2 clusterDNS /etc/kubernetes/kubelet-config.yaml
+# Should show: 10.233.0.10
+
+# Restart kubelet to pick up the change
+systemctl restart kubelet
+
+# After fixing ALL nodes, redeploy pods to get new resolv.conf
+kubectl delete pods -n vllm -l component=vllm
+```
+
+**Nodes fixed:** node1, node2, node5, node6, node7, node8 (all cloud nodes)
+
+**Prevention:**
+- When fixing kubelet config, always check `ps aux | grep kubelet` to find the actual `--config=` path
+- Fix BOTH `/etc/kubernetes/kubelet-config.yaml` and `/var/lib/kubelet/config.yaml` to avoid confusion
+- After any kubelet config change, always `systemctl restart kubelet` and verify new pods get the correct resolv.conf
+
+---
+
 ## Quick Diagnostic Checklist
 
 When pods on specific nodes can't resolve DNS or reach services:
@@ -390,8 +467,11 @@ kubectl logs -n kube-system <kube-proxy-pod-on-affected-node> --tail=10
 # Look for "connection refused" or "address already in use"
 
 # 6. Check kubelet clusterDNS on the affected node (SSH in)
-cat /var/lib/kubelet/config.yaml | grep -A2 clusterDNS
-# Should show: 10.233.0.10
+# IMPORTANT: Check the REAL config file first (Issue 5)
+grep -A2 clusterDNS /etc/kubernetes/kubelet-config.yaml
+grep -A2 clusterDNS /var/lib/kubelet/config.yaml
+# BOTH should show: 10.233.0.10
+# If they differ, the real one is whichever kubelet uses: ps aux | grep kubelet | grep config=
 
 # 7. Check iptables rules for kube-dns on the affected node (SSH in)
 sudo iptables -t nat -L KUBE-SERVICES 2>/dev/null | grep kube-dns
