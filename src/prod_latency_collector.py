@@ -126,6 +126,9 @@ _METRICS_CATALOG = [
     ("prefill_tokens_per_sec",   "rate(vllm:prompt_tokens_total[{w}])",           "instance"),
     ("prefix_cache_hits_per_sec",   "rate(vllm:prefix_cache_hits_total[{w}])",    "instance"),
     ("prefix_cache_queries_per_sec","rate(vllm:prefix_cache_queries_total[{w}])", "instance"),
+    ("ext_prefix_cache_hits_per_sec",   "rate(vllm:external_prefix_cache_hits_total[{w}])",    "instance"),
+    ("ext_prefix_cache_queries_per_sec","rate(vllm:external_prefix_cache_queries_total[{w}])", "instance"),
+    ("prompt_tokens_cached_per_sec",    "rate(vllm:prompt_tokens_cached_total[{w}])",          "instance"),
     # --- vLLM histogram avgs ---
     ("ttft_seconds_avg",       "rate(vllm:time_to_first_token_seconds_sum[{w}]) / rate(vllm:time_to_first_token_seconds_count[{w}])",   "instance"),
     ("tpot_seconds_avg",       "rate(vllm:time_per_output_token_seconds_sum[{w}]) / rate(vllm:time_per_output_token_seconds_count[{w}])", "instance"),
@@ -244,6 +247,13 @@ def _scrape_prometheus(prom_url: str) -> Optional[Dict[str, Any]]:
             rec["prefix_cache_hit_rate"] = hits / queries
         else:
             rec["prefix_cache_hit_rate"] = None
+
+        ext_queries = rec.get("ext_prefix_cache_queries_per_sec")
+        ext_hits = rec.get("ext_prefix_cache_hits_per_sec")
+        if ext_queries and ext_queries > 0 and ext_hits is not None:
+            rec["ext_prefix_cache_hit_rate"] = ext_hits / ext_queries
+        else:
+            rec["ext_prefix_cache_hit_rate"] = None
 
     return {
         "ts": datetime.now(timezone.utc).isoformat(),
