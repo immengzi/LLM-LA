@@ -113,6 +113,7 @@ Start at the **[documentation index](docs/README.md)**. Highlights:
 .
 ├── README.md                 # This landing page
 ├── docs/                     # Documentation (see docs/README.md)
+├── infra/                    # Ansible cluster-prep automation (see infra/README.md)
 └── src/
     ├── main.py               # Load experiment entry point
     ├── sweep_methods.py      # Automated Helm sweep runner

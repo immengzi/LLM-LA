@@ -54,6 +54,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | Doc | Description |
 |-----|-------------|
 | [cluster-setup.md](operations/cluster-setup.md) | Post-Kubernetes prep checklist (NFS, registry, RoCE, LWS) |
+| [infra/](../infra/README.md) | Ansible automation of the cluster-setup checklist (`make prep` / `make verify`) |
 | [multi-node-setup-guide.md](operations/multi-node-setup-guide.md) | Deep multi-node infra reference (NFS, PV, registry, RoCE) |
 | [registry.md](operations/registry.md) | Private registry (`reg.local:32000`) operations |
 | [k8s-dns-troubleshooting.md](operations/k8s-dns-troubleshooting.md) | DNS/networking runbook |
