@@ -1,0 +1,8 @@
+# Managed by Ansible (infra/ansible/roles/common). Do not edit by hand.
+# Fixes split-horizon proxy bypass for containerd. NO_PROXY MUST be a single
+# comma-joined string — a list/quoted-list renders as per-character entries and
+# silently breaks proxy exclusion.
+[Service]
+Environment="HTTP_PROXY={{ proxy_url }}"
+Environment="HTTPS_PROXY={{ proxy_url }}"
+Environment="NO_PROXY={{ no_proxy_entries | join(',') }}"

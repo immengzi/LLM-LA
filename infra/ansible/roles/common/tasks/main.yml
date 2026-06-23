@@ -1,0 +1,64 @@
+---
+# Per-node OS config for every cluster node (docs/operations/cluster-setup.md §4-6).
+# Idempotent: safe to re-run.
+
+# ---- §4 split-horizon DNS via /etc/hosts ----
+- name: Ensure /etc/hosts entries for reg.local and nfs.local
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '\s{{ item.name }}\s*$'
+    line: "{{ item.ip }} {{ item.name }}"
+    state: present
+  loop: "{{ hosts_entries }}"
+
+# ---- §5 containerd insecure registry via certs.d (folder-based) ----
+- name: Read containerd config_path setting
+  ansible.builtin.command: grep -E '^\s*config_path' /etc/containerd/config.toml
+  register: containerd_config_path
+  changed_when: false
+  failed_when: false
+
+- name: Warn if containerd config_path is not set to certs.d
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: /etc/containerd/config.toml does not set
+      config_path = "/etc/containerd/certs.d". The certs.d hosts.toml below will
+      be ignored until you set it. See docs/operations/registry.md.
+  when: "'certs.d' not in containerd_config_path.stdout"
+
+- name: Create certs.d directory for the private registry
+  ansible.builtin.file:
+    path: "/etc/containerd/certs.d/{{ registry_endpoint }}"
+    state: directory
+    mode: "0755"
+
+- name: Write hosts.toml for the private registry (picked up dynamically, no restart)
+  ansible.builtin.template:
+    src: hosts.toml.j2
+    dest: "/etc/containerd/certs.d/{{ registry_endpoint }}/hosts.toml"
+    mode: "0644"
+
+# ---- §6 proxy / NO_PROXY drop-in for containerd ----
+- name: Ensure containerd systemd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/containerd.service.d
+    state: directory
+    mode: "0755"
+  when: proxy_url | length > 0
+
+- name: Write containerd proxy drop-in (correct comma-joined NO_PROXY)
+  ansible.builtin.template:
+    src: http-proxy.conf.j2
+    dest: /etc/systemd/system/containerd.service.d/http-proxy.conf
+    mode: "0644"
+  when: proxy_url | length > 0
+  notify: restart containerd
+
+# ---- §3 kube-proxy libxtables dependency (iptables backend) ----
+- name: Ensure iptables / libxtables packages are present
+  ansible.builtin.package:
+    name:
+      - iptables
+      - iptables-libs
+    state: present
+  failed_when: false

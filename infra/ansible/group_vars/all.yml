@@ -1,0 +1,104 @@
+---
+# =====================================================================
+# LA-Boom cluster preparation — all tunables in one place.
+# These defaults mirror the documented reference cluster; override per site.
+# Doc: docs/operations/cluster-setup.md
+# =====================================================================
+
+# ---- DNS / split-horizon (docs §4) ----
+# reg.local must point at the node that hosts the in-cluster registry.
+# nfs.local must point at the NFS server.
+registry_host_ip: "10.50.156.65"          # -> reg.local
+nfs_server_ip: "7.242.102.243"            # -> nfs.local
+
+hosts_entries:
+  - { ip: "{{ registry_host_ip }}", name: "reg.local" }
+  - { ip: "{{ nfs_server_ip }}",    name: "nfs.local" }
+
+# ---- Private registry (docs §5, §8, registry.md) ----
+registry_endpoint: "reg.local:32000"
+registry_namespace: "registry"
+registry_nodeport: 32000
+registry_pod_node: "node4"                # kubernetes.io/hostname to pin the registry pod
+registry_image: "registry:2"              # must be pre-imported into containerd on registry_pod_node
+registry_storage_path: "/mnt/nvme1/registry-data"   # NFS-namespace path for image layers
+
+# ---- Proxy / NO_PROXY (docs §6) ----
+# Set proxy_url to "" to skip writing a containerd proxy drop-in entirely.
+proxy_url: "http://127.0.0.1:3128"
+# Rendered as a single comma-joined string (fixes malformed list-style NO_PROXY).
+pod_cidr: "10.233.0.0/16"
+service_cidr: "10.233.64.0/18"
+no_proxy_entries:
+  - localhost
+  - 127.0.0.1
+  - "::1"
+  - reg.local
+  - nfs.local
+  - "{{ registry_host_ip }}"
+  - "{{ nfs_server_ip }}"
+  - .cluster.local
+  - .svc
+  - svc.cluster.local
+  - "{{ pod_cidr }}"
+  - "{{ service_cidr }}"
+
+# ---- NFS exports (docs §7, multi-node §3) ----
+# NFSv4 pseudo-root holds fsid=0. PV paths use the namespace path (no /mnt/nvme1 prefix).
+nfs_pseudo_root: "/mnt/nvme1"
+nfs_export_subnets:                       # subnets allowed to mount
+  - "10.50.156.0/24"
+  - "7.216.57.0/24"
+  - "10.175.112.0/22"
+nfs_model_dir: "/home/models"             # host path served read-only
+nfs_registry_data: "/mnt/nvme1/registry-data"
+
+# ---- Model storage / PV-PVC (docs §11) ----
+k8s_namespace: "vllm"
+model_subpath_placeholder: "placeholder"  # one-time PV/PVC bootstrap subpath
+
+# ---- Node scheduling labels (docs §2, §14; helm-values "Shadow deployments") ----
+# Remove the control-plane taint so infra pods (router/redis/registry) can run there.
+control_plane_node: "node3"
+remove_control_plane_taint: true
+
+# node_name -> list of "key=value" labels to apply (idempotent, --overwrite).
+node_labels:
+  node1: ["avoid=vllm-shadow", "roce-pair=pair-a"]
+  node2: ["avoid=vllm-shadow", "roce-pair=pair-a"]
+  node3: ["avoid=vllm", "roce-pair=pair-b", "vllm-pool=shadow"]
+  node4: ["avoid=vllm", "roce-pair=pair-b", "vllm-pool=shadow"]
+
+# ---- Ascend NPU (docs §1) ----
+# Host paths that must exist for the chart's hostPath mounts.
+ascend_required_paths:
+  - /usr/local/Ascend/driver/lib64
+  - /usr/local/Ascend/driver/version.info
+  - /usr/local/dcmi
+  - /usr/local/bin/npu-smi
+  - /etc/ascend_install.info
+ascend_resource_name: "huawei.com/Ascend910"
+# Optional: URL or local path to the Ascend device-plugin DaemonSet manifest.
+# Leave "" to skip applying it (install separately) — the play will still verify
+# the resource is advertised.
+ascend_device_plugin_manifest: ""
+
+# ---- LeaderWorkerSet operator (docs §12) ----
+lws_manifest: "{{ repo_root }}/docs/deployment/lws-manifests.yaml"
+
+# ---- Repo / chart locations (resolved on control_plane & build hosts) ----
+repo_root: "/home/saeid/microservice"
+chart_path: "{{ repo_root }}/src/vllm-kv-stack"
+
+# ---- Images (docs §9, registry.md) ----
+# Built from the repo on the build host, then pushed to the registry.
+build_images:
+  - { name: "kv-router",     context: "{{ repo_root }}/src/services/router_service", dockerfile: "Dockerfile" }
+  - { name: "kv-sidecar",    context: "{{ repo_root }}/src/services/sidecar",        dockerfile: "Dockerfile" }
+  - { name: "vllm-cpu-hash", context: "{{ repo_root }}/src/services/prefix_hash",    dockerfile: "Dockerfile" }
+build_scripts:                            # repo scripts that build+push themselves
+  - "{{ repo_root }}/src/services/go/build.sh"        # kv-router-go, kv-sidecar-go
+# External images to mirror into the private registry (source -> repo path).
+mirror_images:
+  - { src: "redis:7-alpine",                         dest: "redis:7-alpine" }
+  - { src: "quay.io/ascend/vllm-ascend:glm5-openeuler", dest: "ascend/vllm-ascend:glm5-openeuler" }

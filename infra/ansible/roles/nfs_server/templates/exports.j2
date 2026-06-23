@@ -1,0 +1,12 @@
+# Managed by Ansible (infra/ansible/roles/nfs_server).
+# NFSv4 pseudo-root (fsid=0) + model dir (ro) + registry data (rw).
+# docs/operations/cluster-setup.md §7, docs/operations/multi-node-setup-guide.md §3
+{% for subnet in nfs_export_subnets %}
+{{ nfs_pseudo_root }} {{ subnet }}(rw,sync,fsid=0,no_subtree_check,no_root_squash)
+{% endfor %}
+{% for subnet in nfs_export_subnets %}
+{{ nfs_model_dir }} {{ subnet }}(ro,sync,no_subtree_check,no_root_squash)
+{% endfor %}
+{% for subnet in nfs_export_subnets %}
+{{ nfs_registry_data }} {{ subnet }}(rw,sync,no_subtree_check,no_root_squash)
+{% endfor %}

@@ -1,0 +1,95 @@
+---
+# Cluster-level bootstrap, run once from control_plane.
+# docs/operations/cluster-setup.md §1-2, §11-14
+
+# ---- §14 allow infra pods on the control plane ----
+- name: Remove control-plane NoSchedule taint
+  ansible.builtin.command: >-
+    kubectl taint nodes {{ control_plane_node }}
+    node-role.kubernetes.io/control-plane:NoSchedule-
+  register: untaint
+  changed_when: "'untainted' in untaint.stdout"
+  failed_when: untaint.rc != 0 and 'not found' not in untaint.stderr
+  when: remove_control_plane_taint | bool
+
+# ---- §2 scheduling labels (avoid / roce-pair / vllm-pool) ----
+- name: Apply node scheduling labels
+  ansible.builtin.command: >-
+    kubectl label node {{ item.0.key }} {{ item.1 }} --overwrite
+  loop: "{{ node_labels | dict2items | subelements('value') }}"
+  loop_control:
+    label: "{{ item.0.key }} {{ item.1 }}"
+  register: labeling
+  changed_when: "'labeled' in labeling.stdout"
+
+# ---- §1 Ascend device plugin ----
+- name: Apply Ascend device-plugin manifest (if provided)
+  ansible.builtin.command: kubectl apply -f {{ ascend_device_plugin_manifest }}
+  register: dp_apply
+  changed_when: "'unchanged' not in dp_apply.stdout"
+  when: ascend_device_plugin_manifest | length > 0
+
+- name: Verify NPU resource is advertised on at least one node
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable.{{ ascend_resource_name | replace(".", "\\.") }}}{"\n"}{end}'
+  args:
+    executable: /bin/bash
+  register: npu_alloc
+  changed_when: false
+  failed_when: false
+
+- name: Warn if no NPU resources are allocatable yet
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: no node advertises {{ ascend_resource_name }} yet. Install/check
+      the Ascend device plugin (docs/getting-started/prerequisites.md).
+  when: npu_alloc.stdout | trim | length == 0
+
+# ---- §3 kube-proxy restart to pick up iptables/libxtables fix ----
+- name: Restart kube-proxy DaemonSet
+  ansible.builtin.command: kubectl -n kube-system rollout restart ds/kube-proxy
+  register: kp_restart
+  changed_when: "'restarted' in kp_restart.stdout"
+  failed_when: false
+
+# ---- §12 LeaderWorkerSet operator ----
+- name: Apply LeaderWorkerSet manifests
+  ansible.builtin.command: kubectl apply -f {{ lws_manifest }}
+  register: lws_apply
+  changed_when: "'unchanged' not in lws_apply.stdout"
+  failed_when: lws_apply.rc != 0 and 'created' not in lws_apply.stdout
+
+# ---- §11 one-time model PV/PVC bootstrap ----
+# Render ONLY the PV/PVC templates from the chart and apply them. The PV is
+# Retain, so re-running is safe and never touches the rest of the stack.
+- name: Ensure target namespace exists
+  ansible.builtin.command: kubectl create namespace {{ k8s_namespace }} --dry-run=client -o yaml
+  register: ns_yaml
+  changed_when: false
+
+- name: Apply target namespace
+  ansible.builtin.command: kubectl apply -f -
+  args:
+    stdin: "{{ ns_yaml.stdout }}"
+  register: ns_apply
+  changed_when: "'unchanged' not in ns_apply.stdout"
+
+- name: Render model PV/PVC from chart
+  ansible.builtin.command: >-
+    helm template laboom-storage {{ chart_path }}
+    -n {{ k8s_namespace }}
+    --set modelVolume.create=true
+    --set modelVolume.nfsServer=nfs.local
+    --set modelVolume.modelSubPath={{ model_subpath_placeholder }}
+    --show-only templates/01-model-pv.yaml
+    --show-only templates/02-model-pvc.yaml
+  register: storage_manifest
+  changed_when: false
+
+- name: Apply model PV/PVC
+  ansible.builtin.command: kubectl apply -n {{ k8s_namespace }} -f -
+  args:
+    stdin: "{{ storage_manifest.stdout }}"
+  register: storage_apply
+  changed_when: "'unchanged' not in storage_apply.stdout"
