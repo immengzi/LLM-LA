@@ -65,7 +65,7 @@ router:
   lenAware: true
 
   # Used only when lenAware=true
-  # short_first | long_first | even_short_long
+  # short_first | long_first
   lenPolicy: short_first
 
   # SLO-aware routing (disabled by default — zero impact on legacy path)
@@ -122,7 +122,7 @@ pin:
 modelVolume:
   create: false                   # never recreated by sweep — deploy once externally
   nfsServer: nfs.local
-  nfsPath: /saeid/models/         # parent directory containing all models
+  nfsPath: /home/models/          # parent directory containing all models
   # nfsPath: /saeid/models/qwen3-8b  # (old style — specific model path, no longer used)
   modelSubPath: ""                # set per-experiment by sweep (e.g. qwen3-8b, GLM-5-w4a8-mtp-QuaRot)
   pvcName: "models-nfs-pvc"       # PVC name when using NFS (default)

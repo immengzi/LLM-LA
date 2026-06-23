@@ -125,6 +125,9 @@ class RouterState:
         # Streaming chunk queues: req_id -> asyncio.Queue
         self._chunk_queues: Dict[str, asyncio.Queue] = {}
 
+        # req_id -> endpoint that pulled it (for streaming identity)
+        self._req_endpoint: Dict[str, str] = {}
+
         # background cleanup task (lazy-start)
         self._cleanup_task: Optional[asyncio.Task] = None
 
@@ -322,6 +325,7 @@ class RouterState:
             # Prom: outgoing dispatch (router -> sidecar) for each assigned item
             for _rid, _prompt, _ts, _meta in chosen:
                 inc_dispatch(endpoint)
+                self._req_endpoint[_rid] = endpoint
 
             # SLO metrics: observe slack at dispatch
             if slo_aware:
@@ -643,6 +647,7 @@ class RouterState:
                     for rid in to_del:
                         self._result_store_ts.pop(rid, None)
                         self._result_values.pop(rid, None)
+                        self._req_endpoint.pop(rid, None)
 
                         # Drop placeholder fut=None (created when no loop existed)
                         fut = self._result_futs.get(rid)
@@ -795,6 +800,12 @@ class RouterState:
         """Remove the chunk queue for req_id (cleanup)."""
         with self._lock:
             self._chunk_queues.pop(req_id, None)
+            self._req_endpoint.pop(req_id, None)
+
+    def get_req_endpoint(self, req_id: str) -> Optional[str]:
+        """Return the endpoint that pulled this req_id, or None."""
+        with self._lock:
+            return self._req_endpoint.get(req_id)
 
     def has_chunk_queue(self, req_id: str) -> bool:
         with self._lock:

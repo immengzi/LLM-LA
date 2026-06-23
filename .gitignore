@@ -58,3 +58,4 @@ HQ-production/
 venv
 data
 local_plots
+*.gz

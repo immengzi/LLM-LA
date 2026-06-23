@@ -1,0 +1,23 @@
+# LA-Boom benchmark client & orchestration dependencies
+# Install: pip install -r requirements.txt
+
+# --- Core (always needed) ---
+requests>=2.31.0
+pyyaml>=6.0
+click>=8.1.0
+
+# --- Async transport (router pubsub mode) ---
+pyzmq>=25.0.0
+
+# --- Redis inspection (watch_redis_kv.py) ---
+redis>=5.0.0
+
+# --- Prometheus metrics collection ---
+# (uses requests — no extra dep)
+
+# --- HF dataset / tokenizer (optional, for lmsys/CodeFlowBench prompts) ---
+datasets>=2.18.0
+transformers>=4.40.0
+
+# --- Experiment analysis notebooks ---
+pandas>=2.1.0

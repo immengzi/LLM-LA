@@ -16,9 +16,9 @@ file_prompts:
   variant: "short"
 
 hf_lmsys:
-  dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
+  dataset_name: "/home/data/saeid/datasets/lmsys_chat_1m"
   split: "train"
-  tokenizer_name: "/mnt/nvme1/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  tokenizer_name: "/home/models/GLM-5-w4a8-mtp-QuaRot"
   streaming: false
   min_input_tokens: 256
   max_input_tokens: 10000000
@@ -97,7 +97,7 @@ helm:
   router_len_aware: true
   router_len_policy: "short_first"
 
-  nfs_path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  nfs_path: "/home/models/GLM-5-w4a8-mtp-QuaRot"
   model_host_path: "/home/models"
 
   aibrix_enabled: false

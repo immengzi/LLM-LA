@@ -19,9 +19,9 @@ file_prompts:
   variant: "short"
 
 hf_lmsys:
-  dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
+  dataset_name: "/home/data/saeid/datasets/lmsys_chat_1m"
   split: "train"
-  tokenizer_name: "/mnt/nvme1/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  tokenizer_name: "/home/models/GLM-5-w4a8-mtp-QuaRot"
   streaming: false
   min_input_tokens: 256
   max_input_tokens: 10000000
@@ -107,7 +107,7 @@ helm:
 
   # Model config — GLM-5 W4A8 MoE (quantized)
   model_name: "served-model"
-  nfs_path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+  nfs_path: "/home/models/GLM-5-w4a8-mtp-QuaRot"
   model_host_path: "/home/models"  # local disk on each node (bypasses NFS)
   # model_host_path: ""  # uncomment (and comment above) to fall back to NFS PVC
 
