@@ -1,0 +1,5 @@
+server = "http://{{ registry_endpoint }}"
+
+[host."http://{{ registry_endpoint }}"]
+  capabilities = ["pull", "resolve"]
+  skip_verify = true

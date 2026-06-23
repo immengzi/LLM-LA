@@ -1,0 +1,43 @@
+---
+# Configure NFSv4 exports on the NFS server host (docs/operations/cluster-setup.md §7).
+
+- name: Ensure nfs-utils is installed
+  ansible.builtin.package:
+    name: nfs-utils
+    state: present
+  failed_when: false
+
+- name: Ensure exported directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ nfs_pseudo_root }}"
+    - "{{ nfs_registry_data }}"
+
+- name: Write /etc/exports
+  ansible.builtin.template:
+    src: exports.j2
+    dest: /etc/exports
+    mode: "0644"
+  notify: reload exports
+
+- name: Ensure nfs-server is enabled and running
+  ansible.builtin.systemd:
+    name: nfs-server
+    state: started
+    enabled: true
+  failed_when: false
+
+- name: Flush handlers so exports reload before verification
+  ansible.builtin.meta: flush_handlers
+
+- name: Show active exports
+  ansible.builtin.command: exportfs -v
+  register: exportfs_v
+  changed_when: false
+
+- name: Display exports
+  ansible.builtin.debug:
+    var: exportfs_v.stdout_lines

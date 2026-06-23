@@ -1,0 +1,31 @@
+---
+# Verify the Ascend NPU driver stack on worker nodes (docs/operations/cluster-setup.md §1).
+# The driver/CANN/firmware install itself is done by the vendor installer and is
+# NOT automated here — this role fails fast if the expected paths are missing.
+
+- name: Check required Ascend driver paths exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ ascend_required_paths }}"
+  register: ascend_paths
+
+- name: Assert all Ascend driver paths are present
+  ansible.builtin.assert:
+    that: "item.stat.exists"
+    fail_msg: >-
+      Ascend path missing: {{ item.item }}. Install the NPU driver/CANN before
+      continuing (docs/getting-started/prerequisites.md).
+    success_msg: "Found {{ item.item }}"
+  loop: "{{ ascend_paths.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Probe npu-smi (informational)
+  ansible.builtin.command: npu-smi info
+  register: npu_smi
+  changed_when: false
+  failed_when: false
+
+- name: Show npu-smi summary
+  ansible.builtin.debug:
+    msg: "{{ npu_smi.stdout_lines[:6] | default(['npu-smi not available']) }}"

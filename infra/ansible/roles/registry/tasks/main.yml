@@ -1,0 +1,32 @@
+---
+# Deploy the in-cluster private registry (docs/operations/registry.md).
+# Runs on control_plane (where kubectl is configured).
+# Prereq: the registry_image must already be importable on registry_pod_node
+# (containerd has it, or it's reachable). For a cold cluster, side-load it first:
+#   ctr -n k8s.io images import registry-2.tar
+
+- name: Render registry manifest
+  ansible.builtin.template:
+    src: registry.yaml.j2
+    dest: /tmp/laboom-registry.yaml
+    mode: "0644"
+
+- name: Apply registry manifest
+  ansible.builtin.command: kubectl apply -f /tmp/laboom-registry.yaml
+  register: registry_apply
+  changed_when: "'unchanged' not in registry_apply.stdout"
+
+- name: Wait for registry rollout
+  ansible.builtin.command: >-
+    kubectl -n {{ registry_namespace }} rollout status deploy/registry --timeout=120s
+  changed_when: false
+
+- name: Verify registry catalog is reachable (bypass proxy)
+  ansible.builtin.command: curl -s --noproxy '*' http://{{ registry_endpoint }}/v2/_catalog
+  register: registry_catalog
+  changed_when: false
+  failed_when: "'repositories' not in registry_catalog.stdout"
+
+- name: Show registry catalog
+  ansible.builtin.debug:
+    var: registry_catalog.stdout

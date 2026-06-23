@@ -1,0 +1,49 @@
+---
+# =====================================================================
+# LA-Boom cluster preparation — full orchestrator.
+# Mirrors the checklist in docs/operations/cluster-setup.md.
+#
+#   ansible-playbook site.yml                 # everything
+#   ansible-playbook site.yml --tags node     # per-node OS config only
+#   ansible-playbook site.yml --tags k8s      # cluster bootstrap only
+#   ansible-playbook site.yml --check         # dry run
+#
+# Run order matters: node config -> NFS -> NPU verify -> registry+images
+# -> cluster bootstrap.
+# =====================================================================
+
+- name: Per-node OS configuration (DNS, registry, proxy, kube-proxy deps)
+  hosts: cluster
+  tags: [node, common]
+  roles:
+    - common
+
+- name: NFS server exports
+  hosts: nfs
+  tags: [nfs]
+  roles:
+    - nfs_server
+
+- name: Verify NPU driver stack on workers
+  hosts: workers
+  tags: [npu]
+  roles:
+    - npu
+
+- name: Deploy private registry
+  hosts: control_plane
+  tags: [registry]
+  roles:
+    - registry
+
+- name: Build and push images
+  hosts: build
+  tags: [images]
+  roles:
+    - images
+
+- name: Cluster bootstrap (taint, labels, device plugin, PV/PVC, LWS)
+  hosts: control_plane
+  tags: [k8s, bootstrap]
+  roles:
+    - k8s_bootstrap
