@@ -6,6 +6,11 @@ post-install checklist; for a deeper infrastructure reference (NFS internals,
 PV lifecycle, registry internals, diagnostics), see
 [multi-node-setup-guide.md](multi-node-setup-guide.md).
 
+> **Automated equivalent:** the steps below are scripted as an idempotent Ansible
+> playbook under [`infra/`](../../infra/README.md). Use `make prep` to run the
+> whole checklist and `make verify` for the read-only preflight checks (§13-14).
+> This document remains the source of truth for *why* each step is needed.
+
 ---
 
 ## Contents
