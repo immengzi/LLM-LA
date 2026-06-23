@@ -8,8 +8,8 @@
 #   bash vllm-image.sh pull   <image> <tag> <source_image:tag>   # upstream → Docker → registry
 #
 # Examples:
-#   bash vllm-image.sh load   minimax27 selfcontained /mnt/nvme1/saeid/images/minimax27-selfcontained.tar.gz
-#   bash vllm-image.sh direct minimax27 selfcontained /mnt/nvme1/saeid/images/minimax27-selfcontained.tar.gz
+#   bash vllm-image.sh load   minimax27 selfcontained /home/data/saeid/images/minimax27-selfcontained.tar.gz
+#   bash vllm-image.sh direct minimax27 selfcontained /home/data/saeid/images/minimax27-selfcontained.tar.gz
 #   bash vllm-image.sh pull   ascend/vllm-ascend v0.11.0rc0 quay.io/ascend/vllm-ascend:v0.11.0rc0
 #
 set -e
@@ -30,8 +30,8 @@ usage() {
     echo "         Import tar directly into containerd on this node (no Docker needed)"
     echo ""
     echo "Examples:"
-    echo "  $0 load   minimax27 selfcontained /mnt/nvme1/saeid/images/minimax27-selfcontained.tar.gz"
-    echo "  $0 direct minimax27 selfcontained /mnt/nvme1/saeid/images/minimax27-selfcontained.tar.gz"
+    echo "  $0 load   minimax27 selfcontained /home/data/saeid/images/minimax27-selfcontained.tar.gz"
+    echo "  $0 direct minimax27 selfcontained /home/data/saeid/images/minimax27-selfcontained.tar.gz"
     echo "  $0 pull   ascend/vllm-ascend v0.11.0rc0 quay.io/ascend/vllm-ascend:v0.11.0rc0"
     exit 1
 }

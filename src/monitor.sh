@@ -8,13 +8,16 @@
 
 INTERVAL=60
 OUTFILE="monitor.csv"
+PROM_URL=""
 
-while getopts "i:o:h" opt; do
+while getopts "i:o:p:h" opt; do
     case $opt in
         i) INTERVAL="$OPTARG" ;;
         o) OUTFILE="$OPTARG" ;;
+        p) PROM_URL="$OPTARG" ;;
         h)
-            echo "Usage: $0 [-i interval_sec] [-o output_file]"
+            echo "Usage: $0 [-i interval_sec] [-o output_file] [-p prometheus_url]"
+            echo "  -p  Prometheus URL to scrape vLLM/router metrics (e.g. http://10.50.156.65:31190)"
             exit 0
             ;;
         *) echo "Unknown option: -$OPTARG" >&2; exit 1 ;;
@@ -29,10 +32,51 @@ HEADER+=",disk_total_gb,disk_used_gb,disk_percent"
 HEADER+=",disk_read_mb,disk_write_mb"
 HEADER+=",net_rx_mb,net_tx_mb"
 HEADER+=",procs_total,procs_running"
+if [[ -n "$PROM_URL" ]]; then
+    HEADER+=",vllm_requests_running,vllm_requests_waiting,vllm_kv_cache_pct"
+    HEADER+=",vllm_prefill_tok_s,vllm_gen_tok_s"
+    HEADER+=",vllm_prefix_cache_hit_rate"
+    HEADER+=",vllm_ttft_avg_s,vllm_tpot_avg_s,vllm_e2e_avg_s"
+    HEADER+=",router_queue_len,router_admission_rps,router_dispatch_rps"
+fi
 
 if [[ ! -f "$OUTFILE" ]]; then
     echo "$HEADER" > "$OUTFILE"
 fi
+
+# --- Prometheus query helper ---
+# Returns the sum (or single value) of a PromQL instant query.
+prom_query() {
+    local promql="$1"
+    local agg="${2:-sum}"  # sum | max | avg | raw (first value)
+    local result
+    result=$(curl -sf --max-time 5 \
+        "${PROM_URL}/api/v1/query" \
+        --data-urlencode "query=${promql}" 2>/dev/null)
+    [[ $? -ne 0 || -z "$result" ]] && { echo ""; return; }
+
+    local values
+    values=$(echo "$result" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    vals = [float(r['value'][1]) for r in d.get('data',{}).get('result',[]) if r.get('value')]
+    vals = [v for v in vals if v == v]  # drop NaN
+    if not vals:
+        print('')
+    elif '$agg' == 'sum':
+        print(f'{sum(vals):.4f}')
+    elif '$agg' == 'max':
+        print(f'{max(vals):.4f}')
+    elif '$agg' == 'avg':
+        print(f'{sum(vals)/len(vals):.4f}')
+    else:
+        print(f'{vals[0]:.4f}')
+except Exception:
+    print('')
+" 2>/dev/null)
+    echo "$values"
+}
 
 # --- Snapshot helpers for delta-based metrics ---
 get_disk_io() {

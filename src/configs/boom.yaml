@@ -14,9 +14,9 @@ file_prompts:
   variant: "short"
 
 hf_lmsys:
-  dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
+  dataset_name: "/home/data/saeid/datasets/lmsys_chat_1m"
   split: "train"
-  tokenizer_name: "/mnt/nvme1/saeid/models/qwen3-8b"
+  tokenizer_name: "/home/models/qwen3-8b"
   streaming: false
   min_input_tokens: 256
   max_input_tokens: 10000000
@@ -98,7 +98,7 @@ helm:
 
   # Model config
   model_name: "served-model"
-  nfs_path: "/saeid/models/qwen3-8b"
+  nfs_path: "/home/models/qwen3-8b"
   vllm_quantization: null             # Qwen3 is dense, not quantized
   vllm_enable_expert_parallel: false  # Qwen3 is not MoE
   vllm_gpu_memory_utilization: null   # use vLLM default

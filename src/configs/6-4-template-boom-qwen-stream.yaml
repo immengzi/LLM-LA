@@ -18,10 +18,10 @@ file_prompts:
   variant: "short"
 
 hf_lmsys:
-  dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
+  dataset_name: "/home/data/saeid/datasets/lmsys_chat_1m"
   split: "train"
-  tokenizer_name: "/mnt/nvme1/saeid/models/qwen3-8b"
-  streaming: true
+  tokenizer_name: "/home/models/qwen3-8b"
+  streaming: false
   min_input_tokens: 1
   max_input_tokens: 10000000
   repeat_each: 1
@@ -94,11 +94,11 @@ helm:
   autoscaling_min: 1
   autoscaling_max: 1
 
-  router_kv_aware: true
+  router_kv_aware: false
   router_len_aware: true
   router_len_policy: "short_first"
 
-  nfs_path: "/saeid/models"
+  nfs_path: "/home/models"
   model_host_path: "/home/models"
 
   aibrix_enabled: false
@@ -108,7 +108,7 @@ helm:
   models:
     - name: qwen3-8b
       servedModelName: served-model-qwen
-      replicas: 12
+      replicas: 4
       streamingMode: true             # <<< sidecar streams from vLLM internally
       sidecarPrefetch: 2
       modelSubPath: qwen3-8b

@@ -24,9 +24,9 @@ class FilePromptsConfig:
 
 @dataclass
 class HFLmsysConfig:
-    dataset_name: str = "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
+    dataset_name: str = "/home/data/saeid/datasets/lmsys_chat_1m"
     split: str = "train"
-    tokenizer_name: str = "/mnt/nvme1/saeid/models/qwen3-8b"
+    tokenizer_name: str = "/home/models/qwen3-8b"
     streaming: bool = False
     min_input_tokens: Optional[int] = None
     max_input_tokens: Optional[int] = None

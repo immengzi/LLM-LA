@@ -12,7 +12,7 @@ Usage:
     # Custom experiments root & poll interval
     python prod_latency_collector.py \
         --router-url http://10.50.156.65:30080 \
-        --experiments-root /mnt/nvme1/saeid/experiments \
+        --experiments-root /home/data/saeid/experiments \
         --poll-interval 5
 
     # Also scrape Prometheus histograms periodically
@@ -317,8 +317,8 @@ def main():
     )
     parser.add_argument("--router-url", default="http://10.50.156.65:30080",
                         help="Router base URL (default: http://10.50.156.65:30080)")
-    parser.add_argument("--experiments-root", default="/mnt/nvme1/saeid/experiments",
-                        help="Root directory for experiment outputs (default: /mnt/nvme1/saeid/experiments)")
+    parser.add_argument("--experiments-root", default="/home/data/saeid/experiments",
+                        help="Root directory for experiment outputs (default: /home/data/saeid/experiments)")
     parser.add_argument("--poll-interval", type=float, default=5.0,
                         help="Seconds between polls (default: 5)")
     parser.add_argument("--prometheus-url", default="http://10.50.156.65:31190",

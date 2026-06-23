@@ -145,7 +145,7 @@ def main():
     if replay_ref:
         replay_path = replay_ref
         if not replay_path.endswith(".json"):
-            replay_path = str(Path("/mnt/nvme1/saeid/experiments") / replay_ref / "logs.json")
+            replay_path = str(Path("/home/data/saeid/experiments") / replay_ref / "logs.json")
 
         if cfg.multi_turn and conversations is not None:
             conv_output_tokens = load_replay_conversation_lengths(

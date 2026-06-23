@@ -10,7 +10,7 @@
 backend: "boom"
 
 router_url: "http://10.50.156.65:30080"
-total_requests: 1000
+total_requests: 10
 prompt_source: "hf-lmsys"
 
 file_prompts:
@@ -18,9 +18,9 @@ file_prompts:
   variant: "short"
 
 hf_lmsys:
-  dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
+  dataset_name: "/home/data/saeid/datasets/lmsys_chat_1m"
   split: "train"
-  tokenizer_name: "/mnt/nvme1/saeid/models/MiniMax-M2.7-w8a8-QuaRot"
+  tokenizer_name: "/home/models/MiniMax-M2.7-w8a8-QuaRot"
   streaming: false
   min_input_tokens: 1
   max_input_tokens: 10000000
@@ -28,7 +28,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 0.5
+  rate_rps: 3
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -97,7 +97,7 @@ helm:
   router_len_aware: true
   router_len_policy: "short_first"
 
-  nfs_path: "/saeid/models/MiniMax-M2.7-w8a8-QuaRot"
+  nfs_path: "/home/models/MiniMax-M2.7-w8a8-QuaRot"
   model_host_path: "/home/models"
 
   aibrix_enabled: false
@@ -107,20 +107,20 @@ helm:
   models:
     - name: minimax-m2
       servedModelName: served-model-minmax
-      replicas: 2
+      replicas: 1
       streamingMode: true
       sidecarPrefetch: 2
       modelSubPath: MiniMax-M2.7-w8a8-QuaRot
       tensorParallelSize: 8
       batchSize: 4
-      # dataParallel:                # DP disabled – DNS cannot resolve leader on new nodes
-      #   enabled: true
-      #   size: 2
-      #   sizeLocal: 1
-      #   rpcPort: 13389
-      #   hcclBuffSize: 200
-      #   ompNumThreads: 16
-      #   pairTopologyKey: roce-pair
+      dataParallel:                # DP disabled – DNS cannot resolve leader on new nodes
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 13389
+        hcclBuffSize: 200
+        ompNumThreads: 16
+        pairTopologyKey: roce-pair
       dataParallel:
         enabled: false
       vllm:
