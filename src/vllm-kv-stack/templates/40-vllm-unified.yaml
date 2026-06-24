@@ -365,6 +365,22 @@ spec:
               - containerPort: 9000
                 name: sidecar-http
                 protocol: TCP
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: 9000
+              initialDelaySeconds: 10
+              periodSeconds: 10
+              failureThreshold: 3
+              timeoutSeconds: 3
+            livenessProbe:
+              httpGet:
+                path: /health
+                port: 9000
+              initialDelaySeconds: 30
+              periodSeconds: 15
+              failureThreshold: 5
+              timeoutSeconds: 3
             resources:
               requests:
                 cpu: "200m"
@@ -1011,6 +1027,22 @@ spec:
             - containerPort: 9000
               name: sidecar-http
               protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 5
+            timeoutSeconds: 3
           resources:
             requests:
               cpu: "200m"

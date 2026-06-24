@@ -12,7 +12,7 @@ from .router_client import RouterPullWorker
 from .vllm_client import VLLMWorker
 from .result_poster import ResultPoster
 from .zmq_subscriber import KVSubscriber
-from .api import app, bind_local_queue
+from .api import app, bind_local_queue, bind_pull_worker
 from .metrics import (
     set_sidecar_python_threads,
     set_sidecar_workers_total,
@@ -64,7 +64,8 @@ def main():
     pull_worker = None
     if mode == "pull":
         pull_worker = RouterPullWorker(local_q, endpoint_id)
-        pull_worker.start()  # initializes session; this is not a polling thread
+        pull_worker.start()
+    bind_pull_worker(pull_worker)
 
     # ------------------------------------------------------------
     # Result poster (async router result delivery)

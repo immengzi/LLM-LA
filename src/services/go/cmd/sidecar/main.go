@@ -75,12 +75,21 @@ func main() {
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		st := queue.State()
+		vllmOK := puller == nil || puller.VLLMHealthy()
+		status := "ok"
+		httpCode := http.StatusOK
+		if !vllmOK {
+			status = "vllm_unhealthy"
+			httpCode = http.StatusServiceUnavailable
+		}
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(httpCode)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":    "ok",
-			"queue_len": st.Pending,
-			"inflight":  st.Inflight,
-			"logical":   st.Pending + st.Inflight,
+			"status":       status,
+			"vllm_healthy": vllmOK,
+			"queue_len":    st.Pending,
+			"inflight":     st.Inflight,
+			"logical":      st.Pending + st.Inflight,
 		})
 	})
 	r.Handle("/metrics", promhttp.Handler())

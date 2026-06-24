@@ -115,24 +115,24 @@ _RATE_WINDOW = "30s"
 # (field_name, promql, label_key)
 # label_key determines which Prometheus label maps to "instance" in output
 _METRICS_CATALOG = [
-    # --- vLLM gauges ---
-    ("requests_running",    "vllm:num_requests_running",    "instance"),
-    ("requests_waiting",    "vllm:num_requests_waiting",    "instance"),
-    ("kv_cache_usage_perc", "vllm:gpu_cache_usage_perc",    "instance"),
+    # --- vLLM gauges (keyed by instance+engine for DP visibility) ---
+    ("requests_running",    "vllm:num_requests_running",    "instance+engine"),
+    ("requests_waiting",    "vllm:num_requests_waiting",    "instance+engine"),
+    ("kv_cache_usage_perc", "vllm:gpu_cache_usage_perc",    "instance+engine"),
     # --- vLLM counter rates ---
-    ("request_success_per_sec",  "rate(vllm:request_success_total[{w}])",  "instance"),
-    ("preemptions_per_sec",      "rate(vllm:num_preemptions_total[{w}])",  "instance"),
-    ("gen_tokens_per_sec",       "rate(vllm:generation_tokens_total[{w}])",       "instance"),
-    ("prefill_tokens_per_sec",   "rate(vllm:prompt_tokens_total[{w}])",           "instance"),
-    ("prefix_cache_hits_per_sec",   "rate(vllm:prefix_cache_hits_total[{w}])",    "instance"),
-    ("prefix_cache_queries_per_sec","rate(vllm:prefix_cache_queries_total[{w}])", "instance"),
-    ("ext_prefix_cache_hits_per_sec",   "rate(vllm:external_prefix_cache_hits_total[{w}])",    "instance"),
-    ("ext_prefix_cache_queries_per_sec","rate(vllm:external_prefix_cache_queries_total[{w}])", "instance"),
-    ("prompt_tokens_cached_per_sec",    "rate(vllm:prompt_tokens_cached_total[{w}])",          "instance"),
+    ("request_success_per_sec",  "rate(vllm:request_success_total[{w}])",  "instance+engine"),
+    ("preemptions_per_sec",      "rate(vllm:num_preemptions_total[{w}])",  "instance+engine"),
+    ("gen_tokens_per_sec",       "rate(vllm:generation_tokens_total[{w}])",       "instance+engine"),
+    ("prefill_tokens_per_sec",   "rate(vllm:prompt_tokens_total[{w}])",           "instance+engine"),
+    ("prefix_cache_hits_per_sec",   "rate(vllm:prefix_cache_hits_total[{w}])",    "instance+engine"),
+    ("prefix_cache_queries_per_sec","rate(vllm:prefix_cache_queries_total[{w}])", "instance+engine"),
+    ("ext_prefix_cache_hits_per_sec",   "rate(vllm:external_prefix_cache_hits_total[{w}])",    "instance+engine"),
+    ("ext_prefix_cache_queries_per_sec","rate(vllm:external_prefix_cache_queries_total[{w}])", "instance+engine"),
+    ("prompt_tokens_cached_per_sec",    "rate(vllm:prompt_tokens_cached_total[{w}])",          "instance+engine"),
     # --- vLLM histogram avgs ---
-    ("ttft_seconds_avg",       "rate(vllm:time_to_first_token_seconds_sum[{w}]) / rate(vllm:time_to_first_token_seconds_count[{w}])",   "instance"),
-    ("tpot_seconds_avg",       "rate(vllm:time_per_output_token_seconds_sum[{w}]) / rate(vllm:time_per_output_token_seconds_count[{w}])", "instance"),
-    ("e2e_latency_seconds_avg","rate(vllm:e2e_request_latency_seconds_sum[{w}]) / rate(vllm:e2e_request_latency_seconds_count[{w}])",     "instance"),
+    ("ttft_seconds_avg",       "rate(vllm:time_to_first_token_seconds_sum[{w}]) / rate(vllm:time_to_first_token_seconds_count[{w}])",   "instance+engine"),
+    ("tpot_seconds_avg",       "rate(vllm:time_per_output_token_seconds_sum[{w}]) / rate(vllm:time_per_output_token_seconds_count[{w}])", "instance+engine"),
+    ("e2e_latency_seconds_avg","rate(vllm:e2e_request_latency_seconds_sum[{w}]) / rate(vllm:e2e_request_latency_seconds_count[{w}])",     "instance+engine"),
     # --- Sidecar ---
     ("sidecar_queue_length",   "sidecar_queue_length",              "endpoint"),
     ("sidecar_received_rps",   "rate(sidecar_received_requests_total[{w}])", "endpoint"),
@@ -154,6 +154,24 @@ _METRICS_CATALOG = [
 ]
 
 
+import re as _re
+
+def _inject_ns_filter(promql: str, ns_filter: str) -> str:
+    """Inject a namespace label selector into metric selectors in a PromQL expression.
+
+    Only injects before ``[`` (rate windows) or on standalone metric names.
+    Function names like ``rate``, ``histogram_quantile`` are left untouched.
+    """
+    result = _re.sub(
+        r'([a-zA-Z_:][a-zA-Z0-9_:]*)\[',
+        lambda m: f'{m.group(1)}{{{ns_filter}}}[',
+        promql,
+    )
+    if '[' not in promql and '(' not in promql:
+        result = f'{promql}{{{ns_filter}}}'
+    return result
+
+
 def _prom_query(base_url: str, promql: str) -> List[Dict[str, Any]]:
     url = f"{base_url.rstrip('/')}/api/v1/query"
     r = requests.get(url, params={"query": promql}, timeout=10)
@@ -165,13 +183,25 @@ def _prom_query(base_url: str, promql: str) -> List[Dict[str, Any]]:
 
 
 def _vec_to_map(results: List[Dict[str, Any]], label_key: str) -> Dict[str, float]:
-    """Convert a Prometheus result vector into {label_value: float}."""
+    """Convert a Prometheus result vector into {label_value: float}.
+
+    label_key can be a single label name (e.g. "instance") or a
+    '+'-separated compound key (e.g. "instance+engine") to produce
+    composite keys like "7.150.0.37:8200:e1" when multiple series
+    share the same primary label (typical for DP engines).
+    """
+    parts = label_key.split("+")
     out: Dict[str, float] = {}
     for r in results:
         metric = r.get("metric", {})
-        key = metric.get(label_key, "")
-        if not key:
+        primary = metric.get(parts[0], "")
+        if not primary:
             continue
+        if len(parts) > 1:
+            suffix = ":".join(metric.get(p, "") for p in parts[1:])
+            key = f"{primary}:{suffix}" if suffix else primary
+        else:
+            key = primary
         val = r.get("value", [None, None])
         try:
             out[key] = float(val[1])
@@ -180,10 +210,14 @@ def _vec_to_map(results: List[Dict[str, Any]], label_key: str) -> Dict[str, floa
     return out
 
 
-def _scrape_prometheus(prom_url: str) -> Optional[Dict[str, Any]]:
+def _scrape_prometheus(prom_url: str, namespace: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Query Prometheus API and produce a tick in the same format as
     metrics_prom.py: {ts, mode, instances, samples: [{instance, pod, ...}, ...]}.
+
+    If *namespace* is set, a ``{namespace="..."}`` selector is injected
+    into every PromQL query so only metrics from that K8s namespace are
+    returned.
     """
     per_inst: Dict[str, Dict[str, Any]] = {}
     instances_ordered: List[str] = []
@@ -194,10 +228,16 @@ def _scrape_prometheus(prom_url: str) -> Optional[Dict[str, Any]]:
             instances_ordered.append(inst)
         return per_inst[inst]
 
+    ns_filter = ""
+    if namespace:
+        ns_filter = f'namespace="{namespace}"'
+
     has_data = False
 
     for field, promql_template, label_key in _METRICS_CATALOG:
         promql = promql_template.replace("{w}", _RATE_WINDOW)
+        if ns_filter:
+            promql = _inject_ns_filter(promql, ns_filter)
         try:
             results = _prom_query(prom_url, promql)
             m = _vec_to_map(results, label_key)
@@ -327,6 +367,8 @@ def main():
                         help="Seconds between Prometheus scrapes (default: 30)")
     parser.add_argument("--batch-size", type=int, default=2000,
                         help="Number of records to fetch per poll (default: 2000)")
+    parser.add_argument("--namespace", default=None,
+                        help="K8s namespace filter for Prometheus queries (e.g. 'vllm')")
     args = parser.parse_args()
 
     router_url = args.router_url.rstrip("/")
@@ -443,7 +485,7 @@ def main():
         # --- Optional Prometheus scrape ---
         now = time.time()
         if metrics_fh and args.prometheus_url and (now - last_prom_scrape) >= args.prom_interval:
-            snapshot = _scrape_prometheus(args.prometheus_url)
+            snapshot = _scrape_prometheus(args.prometheus_url, namespace=args.namespace)
             if snapshot:
                 metrics_fh.write(json.dumps(snapshot, default=str) + "\n")
                 metrics_fh.flush()
