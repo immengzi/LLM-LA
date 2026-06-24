@@ -16,11 +16,17 @@ _cfg = get_config()
 app = FastAPI(title="vLLM Sidecar", version="0.1.0")
 
 _local_q: LocalQueue | None = None
+_pull_worker = None  # RouterPullWorker | None — set via bind_pull_worker
 
 
 def bind_local_queue(q: LocalQueue):
     global _local_q
     _local_q = q
+
+
+def bind_pull_worker(pw):
+    global _pull_worker
+    _pull_worker = pw
 
 
 class PushItem(BaseModel):
@@ -38,13 +44,23 @@ def metrics():
 async def health() -> dict:
     if _local_q is None:
         return {"status": "error", "queue_len": 0, "inflight": 0, "logical": 0}
+
     pending, inflight = _local_q.state()
-    return {
-        "status": "ok",
+    vllm_ok = _pull_worker.vllm_healthy if _pull_worker is not None else True
+    status = "ok" if vllm_ok else "vllm_unhealthy"
+
+    resp = {
+        "status": status,
+        "vllm_healthy": vllm_ok,
         "queue_len": pending,
         "inflight": inflight,
         "logical": pending + inflight,
     }
+
+    from starlette.responses import JSONResponse
+    if not vllm_ok:
+        return JSONResponse(content=resp, status_code=503)
+    return resp
 
 
 @app.post("/push")

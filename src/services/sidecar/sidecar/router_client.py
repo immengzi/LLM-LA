@@ -13,6 +13,11 @@ from .metrics import inc_received
 
 _cfg = get_config()
 
+# vLLM health probe interval — avoids hammering localhost:8200/health on
+# every 50ms pull tick.  The cached result is shared across poll-loop and
+# reactive pulls.
+_VLLM_HEALTH_PROBE_INTERVAL_S = 5.0
+
 
 def _make_pooled_session(pool_connections: int, pool_maxsize: int) -> requests.Session:
     """
@@ -58,6 +63,11 @@ class RouterPullWorker:
         self._first_success: bool = False
         self._printed_wait_msg: bool = False
 
+        # vLLM health-gate state
+        self._vllm_healthy: bool = False
+        self._vllm_last_probe: float = 0.0
+        self._vllm_unhealthy_logged: bool = False
+
     # ---------------- lifecycle ----------------
 
     def start(self):
@@ -98,6 +108,44 @@ class RouterPullWorker:
                 pass
         print("[sidecar] RouterPullWorker stopped")
 
+    # ---------------- vLLM health gate ----------------
+
+    def _probe_vllm(self) -> bool:
+        """GET vLLM /health with a short timeout.  Returns True if 200."""
+        try:
+            r = requests.get(
+                f"{_cfg.VLLM_URL}/health", timeout=2.0,
+            )
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def check_vllm_health(self) -> bool:
+        """
+        Cached probe: re-checks vLLM at most every
+        _VLLM_HEALTH_PROBE_INTERVAL_S seconds.  Thread-safe.
+        """
+        now = time.monotonic()
+        if now - self._vllm_last_probe < _VLLM_HEALTH_PROBE_INTERVAL_S:
+            return self._vllm_healthy
+
+        healthy = self._probe_vllm()
+        self._vllm_last_probe = now
+
+        if healthy and not self._vllm_healthy:
+            print("[sidecar] vLLM is healthy again — resuming pulls")
+            self._vllm_unhealthy_logged = False
+        elif not healthy and not self._vllm_unhealthy_logged:
+            print("[sidecar] vLLM health check FAILED — pausing pulls until recovery")
+            self._vllm_unhealthy_logged = True
+
+        self._vllm_healthy = healthy
+        return healthy
+
+    @property
+    def vllm_healthy(self) -> bool:
+        return self._vllm_healthy
+
     # ---------------- background poller ----------------
 
     def _poll_loop(self):
@@ -105,11 +153,13 @@ class RouterPullWorker:
         Continuously check capacity and pull from router.
         Ensures the local queue stays warm even when all workers are
         blocked on long vLLM calls and no busy-path pulls fire.
+        Skips pulling when vLLM is unreachable (health gate).
         """
         interval = max(0.01, float(_cfg.PULL_INTERVAL_S))
         while not self._stop_evt.is_set():
             try:
-                self.pull_if_capacity()
+                if self.check_vllm_health():
+                    self.pull_if_capacity()
             except Exception as e:
                 if self._first_success:
                     print(f"[sidecar] poll-loop pull error: {e}")
@@ -132,6 +182,9 @@ class RouterPullWorker:
           - sidecar_logical_after_pull
         """
         if self._stop_evt.is_set():
+            return
+
+        if not self._vllm_healthy:
             return
 
         with self._lock:

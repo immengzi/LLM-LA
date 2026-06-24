@@ -58,6 +58,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | [multi-node-setup-guide.md](operations/multi-node-setup-guide.md) | Deep multi-node infra reference (NFS, PV, registry, RoCE) |
 | [registry.md](operations/registry.md) | Private registry (`reg.local:32000`) operations |
 | [k8s-dns-troubleshooting.md](operations/k8s-dns-troubleshooting.md) | DNS/networking runbook |
+| [disaster-recovery.md](operations/disaster-recovery.md) | Incident runbook: disk pressure, NPU/scheduling, node loss, OOM, stuck routing |
 | [docker-proxy-fix.md](operations/docker-proxy-fix.md) | Docker pulls behind an SSL-inspecting proxy |
 | [aibrix-long-running-requests.md](operations/aibrix-long-running-requests.md) | AIBrix Envoy stream timeout fix |
 

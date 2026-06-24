@@ -7,9 +7,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 )
+
+const vllmHealthProbeInterval = 5 * time.Second
 
 type RouterPullWorker struct {
 	cfg        *Config
@@ -20,6 +23,12 @@ type RouterPullWorker struct {
 	pulling      atomic.Bool
 	firstSuccess atomic.Bool
 	stopCh       chan struct{}
+
+	// vLLM health gate
+	healthMu           sync.Mutex
+	vllmHealthy        atomic.Bool
+	vllmLastProbe      time.Time
+	vllmUnhealthyLogged bool
 }
 
 func NewRouterPullWorker(cfg *Config, queue *LocalQueue, endpointID string) *RouterPullWorker {
@@ -48,6 +57,50 @@ func (w *RouterPullWorker) Start() {
 	go w.pollLoop()
 }
 
+// probeVLLM issues a GET to vLLM /health with a short timeout.
+func (w *RouterPullWorker) probeVLLM() bool {
+	c := &http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get(w.cfg.VLLMURL + "/health")
+	if err != nil {
+		return false
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// CheckVLLMHealth returns the cached health status, re-probing at most every
+// vllmHealthProbeInterval.
+func (w *RouterPullWorker) CheckVLLMHealth() bool {
+	w.healthMu.Lock()
+	defer w.healthMu.Unlock()
+
+	now := time.Now()
+	if now.Sub(w.vllmLastProbe) < vllmHealthProbeInterval {
+		return w.vllmHealthy.Load()
+	}
+
+	healthy := w.probeVLLM()
+	w.vllmLastProbe = now
+
+	wasHealthy := w.vllmHealthy.Load()
+	w.vllmHealthy.Store(healthy)
+
+	if healthy && !wasHealthy {
+		log.Println("[sidecar] vLLM is healthy again — resuming pulls")
+		w.vllmUnhealthyLogged = false
+	} else if !healthy && !w.vllmUnhealthyLogged {
+		log.Println("[sidecar] vLLM health check FAILED — pausing pulls until recovery")
+		w.vllmUnhealthyLogged = true
+	}
+	return healthy
+}
+
+// VLLMHealthy returns the last known vLLM health status (lock-free).
+func (w *RouterPullWorker) VLLMHealthy() bool {
+	return w.vllmHealthy.Load()
+}
+
 func (w *RouterPullWorker) Stop() {
 	close(w.stopCh)
 }
@@ -64,7 +117,9 @@ func (w *RouterPullWorker) pollLoop() {
 			return
 		default:
 		}
-		w.PullIfCapacity()
+		if w.CheckVLLMHealth() {
+			w.PullIfCapacity()
+		}
 		select {
 		case <-w.stopCh:
 			return
@@ -90,6 +145,9 @@ type pullResponse struct {
 }
 
 func (w *RouterPullWorker) PullIfCapacity() {
+	if !w.vllmHealthy.Load() {
+		return
+	}
 	if !w.pulling.CompareAndSwap(false, true) {
 		return
 	}
