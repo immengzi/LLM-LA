@@ -12,6 +12,17 @@ ROUTER_CENTRAL_QUEUE_LENGTH = Gauge(
     "Current length of the centralized router queue",
 )
 
+# Per-model breakdown of the central queue length. Additive series: the global
+# gauge above is left untouched for backward compatibility (dashboards, alerts,
+# legacy autoscaling query). The `model` label is the router's resolved queue
+# key (== servedModelName in multi-model mode, MODEL_NAME otherwise) so the
+# per-model autoscaling query can select it.
+ROUTER_CENTRAL_QUEUE_LENGTH_BY_MODEL = Gauge(
+    "router_central_queue_length_by_model",
+    "Current length of the centralized router queue, per model",
+    ["model"],
+)
+
 ROUTER_ADMISSION_REQUESTS_TOTAL = Counter(
     "router_admission_requests_total",
     "Total requests received at router admission",
@@ -21,6 +32,30 @@ ROUTER_DISPATCH_REQUESTS_TOTAL = Counter(
     "router_dispatch_requests_total",
     "Total requests dispatched from router to sidecars",
     ["endpoint"],
+)
+
+# -------------------------------------------------
+# Key-affinity routing metrics
+# -------------------------------------------------
+
+ROUTER_AFFINITY_HITS_TOTAL = Counter(
+    "router_affinity_hits_total",
+    "Requests dispatched to their affinity-target endpoint",
+)
+
+ROUTER_AFFINITY_HOLDS_TOTAL = Counter(
+    "router_affinity_holds_total",
+    "Requests withheld from a non-matching endpoint in hard affinity mode",
+)
+
+ROUTER_AFFINITY_RELEASES_TOTAL = Counter(
+    "router_affinity_releases_total",
+    "Requests released to any endpoint after the hard-affinity timeout expired",
+)
+
+ROUTER_AFFINITY_MAP_SIZE = Gauge(
+    "router_affinity_map_size",
+    "Number of live conversation->endpoint affinity mappings",
 )
 
 # -------------------------------------------------
@@ -138,6 +173,20 @@ def set_central_queue_length(n: int) -> None:
         pass
 
 
+def set_central_queue_length_by_model(per_model: "dict[str, int]") -> None:
+    """Publish the per-model central-queue breakdown.
+
+    Additive only: never touches the global ``router_central_queue_length``
+    gauge. ``per_model`` maps the router queue key (resolved model name) to its
+    current queued count.
+    """
+    try:
+        for model, n in per_model.items():
+            ROUTER_CENTRAL_QUEUE_LENGTH_BY_MODEL.labels(model=str(model)).set(int(n))
+    except Exception:
+        pass
+
+
 def inc_admission() -> None:
     try:
         ROUTER_ADMISSION_REQUESTS_TOTAL.inc()
@@ -148,6 +197,38 @@ def inc_admission() -> None:
 def inc_dispatch(endpoint: str) -> None:
     try:
         ROUTER_DISPATCH_REQUESTS_TOTAL.labels(endpoint=str(endpoint)).inc()
+    except Exception:
+        pass
+
+
+# -------------------------------------------------
+# Key-affinity helpers
+# -------------------------------------------------
+
+def inc_affinity_hit(n: int = 1) -> None:
+    try:
+        ROUTER_AFFINITY_HITS_TOTAL.inc(int(n))
+    except Exception:
+        pass
+
+
+def inc_affinity_hold(n: int = 1) -> None:
+    try:
+        ROUTER_AFFINITY_HOLDS_TOTAL.inc(int(n))
+    except Exception:
+        pass
+
+
+def inc_affinity_release(n: int = 1) -> None:
+    try:
+        ROUTER_AFFINITY_RELEASES_TOTAL.inc(int(n))
+    except Exception:
+        pass
+
+
+def set_affinity_map_size(n: int) -> None:
+    try:
+        ROUTER_AFFINITY_MAP_SIZE.set(int(n))
     except Exception:
         pass
 

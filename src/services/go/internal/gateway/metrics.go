@@ -12,6 +12,14 @@ var (
 		Help: "Current length of the centralized router queue",
 	})
 
+	// Additive per-model breakdown of the central queue length. The global
+	// gauge above is left untouched for backward compatibility; the `model`
+	// label is the resolved queue key so per-model autoscaling can select it.
+	RouterCentralQueueLengthByModel = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "router_central_queue_length_by_model",
+		Help: "Current length of the centralized router queue, per model",
+	}, []string{"model"})
+
 	RouterAdmissionRequestsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "router_admission_requests_total",
 		Help: "Total requests received at router admission",
@@ -21,6 +29,24 @@ var (
 		Name: "router_dispatch_requests_total",
 		Help: "Total requests dispatched from router to sidecars",
 	}, []string{"endpoint"})
+
+	// Key-affinity routing metrics.
+	RouterAffinityHitsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "router_affinity_hits_total",
+		Help: "Requests dispatched to their affinity-target endpoint",
+	})
+	RouterAffinityHoldsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "router_affinity_holds_total",
+		Help: "Requests withheld from a non-matching endpoint in hard affinity mode",
+	})
+	RouterAffinityReleasesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "router_affinity_releases_total",
+		Help: "Requests released to any endpoint after the hard-affinity timeout expired",
+	})
+	RouterAffinityMapSize = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "router_affinity_map_size",
+		Help: "Number of live conversation->endpoint affinity mappings",
+	})
 
 	// Push dispatch decoupling metrics.
 	RouterPushDispatchQueueLength = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -103,8 +129,13 @@ var (
 func RegisterMetrics() {
 	prometheus.MustRegister(
 		RouterCentralQueueLength,
+		RouterCentralQueueLengthByModel,
 		RouterAdmissionRequestsTotal,
 		RouterDispatchRequestsTotal,
+		RouterAffinityHitsTotal,
+		RouterAffinityHoldsTotal,
+		RouterAffinityReleasesTotal,
+		RouterAffinityMapSize,
 		RouterPushDispatchQueueLength,
 		RouterPushDispatchEnqueuedTotal,
 		RouterPushDispatchStartedTotal,
@@ -127,8 +158,15 @@ func RegisterMetrics() {
 // ---- helpers mirroring metrics.py ----
 
 func setCentralQueueLength(n int)  { RouterCentralQueueLength.Set(float64(n)) }
+func setCentralQueueLengthByModel(model string, n int) {
+	RouterCentralQueueLengthByModel.WithLabelValues(model).Set(float64(n))
+}
 func incAdmission()                { RouterAdmissionRequestsTotal.Inc() }
 func incDispatch(endpoint string)  { RouterDispatchRequestsTotal.WithLabelValues(endpoint).Inc() }
+func incAffinityHit(n int)         { RouterAffinityHitsTotal.Add(float64(n)) }
+func incAffinityHold(n int)        { RouterAffinityHoldsTotal.Add(float64(n)) }
+func incAffinityRelease(n int)     { RouterAffinityReleasesTotal.Add(float64(n)) }
+func setAffinityMapSize(n int)     { RouterAffinityMapSize.Set(float64(n)) }
 func setPushDispatchQueueLength(n int) { RouterPushDispatchQueueLength.Set(float64(n)) }
 func incPushDispatchEnqueued()     { RouterPushDispatchEnqueuedTotal.Inc() }
 func incPushDispatchStarted()      { RouterPushDispatchStartedTotal.Inc() }

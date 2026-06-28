@@ -99,6 +99,16 @@ class RouterConfig:
     LEN_AWARE: bool = True
     LEN_POLICY: str = "short_first"  # short_first | long_first
 
+    # --------------------------------------------------------------------
+    # KEY AFFINITY ROUTING (conversation stickiness)
+    # Keep all turns of one conversation on the same vLLM pod. Off by
+    # default; fully router-side (no BooM/sidecar/client changes).
+    # --------------------------------------------------------------------
+    AFFINITY_ENABLED: bool = False
+    AFFINITY_MODE: str = "soft"          # soft (preference) | hard (time-bounded pin)
+    AFFINITY_TTL_S: float = 300.0        # conversation->endpoint mapping lifetime
+    AFFINITY_HARD_TIMEOUT_S: float = 5.0  # hard mode: max hold before releasing to any pod
+
     # how many items to scan vs want
     POOL_FACTOR: int = 4
 
@@ -247,6 +257,16 @@ def get_config() -> RouterConfig:
     cfg.LEN_AWARE = os.getenv("LEN_AWARE", str(cfg.LEN_AWARE)).lower() == "true"
     cfg.LEN_POLICY = os.getenv("LEN_POLICY", cfg.LEN_POLICY)
     cfg.POOL_FACTOR = int(os.getenv("POOL_FACTOR", cfg.POOL_FACTOR))
+
+    # Key affinity routing
+    cfg.AFFINITY_ENABLED = os.getenv("AFFINITY_ENABLED", str(cfg.AFFINITY_ENABLED)).lower() == "true"
+    cfg.AFFINITY_MODE = os.getenv("AFFINITY_MODE", cfg.AFFINITY_MODE).lower()
+    if cfg.AFFINITY_MODE not in ("soft", "hard"):
+        cfg.AFFINITY_MODE = "soft"
+    cfg.AFFINITY_TTL_S = float(os.getenv("AFFINITY_TTL_S", cfg.AFFINITY_TTL_S))
+    cfg.AFFINITY_HARD_TIMEOUT_S = float(
+        os.getenv("AFFINITY_HARD_TIMEOUT_S", cfg.AFFINITY_HARD_TIMEOUT_S)
+    )
     cfg.DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", cfg.DEFAULT_MAX_TOKENS))
     cfg.HASH_SERVICE_URL = os.getenv("HASH_SERVICE_URL", cfg.HASH_SERVICE_URL)
 

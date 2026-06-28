@@ -6,22 +6,23 @@ aibrix:
 autoscaling:
   enabled: false
   maxReplicaCount: 16
+  minReplicaCount: null
   prometheusQuery: |
     max(router_central_queue_length{namespace="vllm"})
   threshold: "16"
-backend: router
-batchSize: 8
+backend: boom
+batchSize: 32
 boom:
-  claudeCodeAliases: false
+  claudeCodeAliases: true
   databaseUrl: ""
   directRoutingStrategy: round_robin
-  enabled: false
+  enabled: true
   extraModelAliases: []
   image: boom-gateway:v4
   imagePullPolicy: Always
   keyAffinityBench: false
   masterKey: sk-boom-master
-  maxInflight: 0
+  maxInflight: 1000
   nodePort: 30401
   resources:
     limits:
@@ -58,10 +59,13 @@ global:
   imageRegistry: reg.local:32000
 images:
   cpuHash: vllm-cpu-hash:latest
-  mooncakeMaster: quay.io/ascend/vllm-ascend:glm5-openeuler
+  mooncakeMaster: docker.io/library/vllm-ascend:v0.18.0
+  mooncakeMasterRaw: reg.local:32000/minimax27:selfcontained
   redis: redis:7-alpine
   router: kv-router:latest
+  routerGo: kv-router-go:latest
   sidecar: kv-sidecar:latest
+  sidecarGo: kv-sidecar-go:latest
   vllm: docker.io/library/vllm-ascend:v0.18.0
 litellm:
   databaseUrl: ""
@@ -76,36 +80,78 @@ litellm:
     requests:
       cpu: 500m
       memory: 512Mi
+lmcache:
+  chunkSize: 512
+  enableAsyncLoading: false
+  enabled: true
+  extraConfig:
+    globalSegmentSize: 80530636800
+    localBufferSize: 0
+    mooncakePreferLocalAlloc: true
+    protocol: ascend
+    saveChunkMeta: false
+    useAscendDirect: true
+    useExistsAsync: true
+  internalApiServerEnabled: true
+  internalApiServerHost: 0.0.0.0
+  internalApiServerPortStart: 6999
+  localCpu: true
+  maxLocalCpuSize: 50
+  nds:
+    dev: /dev/md0
+    enabled: true
+    path: /workspace/nds_kvcache
+    size: 1024
+    xdsPath: /workspace/qyf/xds/xds/file_p2p
+  useLayerwise: false
 modelVolume:
   create: false
   hostPath: /home/models
-  modelSubPath: qwen3-8b
+  modelSubPath: MiniMax-M2.7-w8a8-QuaRot
   nfsPath: /home/models/
   nfsServer: nfs.local
   pvcName: models-nfs-pvc
 models:
-- batchSize: 8
+- batchSize: 32
   dataParallel:
-    enabled: false
-  modelSubPath: qwen3-8b
-  name: qwen3-8b
-  replicas: 8
-  servedModelName: served-model
+    enabled: true
+    hcclBuffSize: 1024
+    ompNumThreads: 16
+    pairTopologyKey: roce-pair
+    rpcPort: 8888
+    size: 2
+    sizeLocal: 1
+  image: reg.local:32000/minimax27:selfcontained
+  modelSubPath: MiniMax-M2.7-w8a8-QuaRot
+  name: minimax-m2
+  replicas: 2
+  servedModelName: served-model-minmax
   sidecarPrefetch: 2
-  tensorParallelSize: 1
+  streamingMode: true
+  tensorParallelSize: 8
   vllm:
-    gpuMemoryUtilization: 0.95
-    seed: 1924
+    ascendEnableFlashcomm1: true
+    compilationConfig:
+      cudagraphMode: FULL_DECODE_ONLY
+    dtype: bfloat16
+    enableExpertParallel: true
+    enablePrefixCaching: true
+    gpuMemoryUtilization: 0.92
+    maxNumBatchedTokens: 32768
+    modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
+    reasoningParser: minimax_m2_append_think
+    schedulerCls: lsched.lsched_vllm.LSchedVLLMAdapter
+    toolCallParser: minimax_m2
     trustRemoteCode: true
 mooncake:
   ascendBufferPool: "4:8"
-  enabled: false
-  evictionHighWatermark: 0.9
-  evictionRatio: 0.1
+  enabled: true
+  evictionHighWatermark: "0.9"
+  evictionRatio: "0.1"
   globalSegmentSize: 140000000000
-  lookupRpcPort: "10010"
+  lookupRpcPort: 10010
   masterPort: 50088
-  masterServerAddress: 10.50.156.106:50088
+  masterServerAddress: 10.50.156.65:50088
 pin:
   enabled: true
   nodeName: node3
@@ -116,9 +162,10 @@ pin:
   - effect: NoSchedule
     key: node-role.kubernetes.io/master
     operator: Exists
+portOffset: 0
 replicas:
   router: 1
-  vllm: 8
+  vllm: 2
 router:
   admissionThrottle: false
   apiKey: ZhongRuanChuangXin!
@@ -126,7 +173,7 @@ router:
   chunkedPrefillAware: false
   fixedBatchEstimate: 8
   fixedBatchSize: 0
-  kvAware: false
+  kvAware: true
   latencyOnlineUpdate: false
   latencyPredictor: linear
   latencyProfilePath: ""
@@ -138,21 +185,38 @@ router:
   queueWaitModel: none
   sloAware: false
   sloWithKv: true
+serviceImpl: python
 sidecar:
   enabled: true
   forceIgnoreEos: false
   logLevel: info
   prefetch: 2
-  streamingMode: false
-tensorParallelSize: 1
+  streamingMode: true
+tensorParallelSize: 8
 vllm:
   additionalConfig: {}
   ascendBufferPool: "4:8"
+  ascendEnableFlashcomm1: true
+  avoidLabelValue: vllm
   compilationConfig:
     cudagraphMode: FULL_DECODE_ONLY
+  cpuOffloadGb: null
+  dtype: bfloat16
   enableExpertParallel: false
   enablePrefixCaching: false
-  hostNetwork: false
+  generationConfig: null
+  gpuMemoryUtilization: null
+  hostNetwork: true
   kvCacheDtype: auto
+  maxModelLen: null
+  maxNumBatchedTokens: null
+  modelLoaderExtraConfig:
+  - '"enable_multithread_load":true'
+  - '"num_threads":16'
+  quantization: null
+  reasoningParser: null
+  schedulerCls: lsched.lsched_vllm.LSchedVLLMAdapter
+  seed: null
   speculativeConfig: {}
+  toolCallParser: null
   trustRemoteCode: false

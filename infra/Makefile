@@ -6,7 +6,7 @@ ANSIBLE_DIR := ansible
 PLAYBOOK    := site.yml
 ANSIBLE     := cd $(ANSIBLE_DIR) && ansible-playbook $(PLAYBOOK)
 
-.PHONY: help prep node nfs npu registry images k8s check verify ping
+.PHONY: help prep node nfs npu registry images k8s monitoring keda check verify ping
 
 help:
 	@echo "LA-Boom cluster prep targets:"
@@ -19,6 +19,8 @@ help:
 	@echo "  make registry  - deploy the private registry"
 	@echo "  make images    - build + push + mirror images"
 	@echo "  make k8s       - cluster bootstrap (taint/labels/PV/LWS)"
+	@echo "  make monitoring - deploy Prometheus + Grafana stack"
+	@echo "  make keda      - install KEDA + LWS scale RBAC (autoscaling only)"
 	@echo "  make verify    - run preflight checks (read-only)"
 
 ping:
@@ -47,6 +49,12 @@ images:
 
 k8s:
 	$(ANSIBLE) --tags k8s
+
+monitoring:
+	$(ANSIBLE) --tags monitoring
+
+keda:
+	$(ANSIBLE) --tags keda
 
 verify:
 	./preflight.sh

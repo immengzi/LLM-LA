@@ -1,0 +1,202 @@
+# prod-shadow + ROUTER KEY AFFINITY (Python services): Shadow deployment of
+# MiniMax-M2.7 on node3+node4, identical to
+# prod-shadow-boom-minmax-lmcache-hq.yaml but with the router's conversation
+# key-affinity enabled (helm.router_affinity_*). Use it as the A/B counterpart
+# of the plain shadow config to measure prefix-cache reuse from conversation
+# stickiness.
+#
+# This is the ROUTER-SIDE affinity (router/affinity.py): the router derives
+# conversation identity itself and keeps each chat on the same pod. It is
+# independent of BooM's key_affinity routing (no API-key rotation, no
+# boom_key_affinity_bench) and works whether traffic arrives via BooM or direct.
+# See docs/architecture/key-affinity.md.
+#
+# Node layout:
+#   node3: prod infra (unchanged) + shadow vLLM (DP2 pod)
+#   node4: shadow infra (router, redis, BooM, mooncake-master) + shadow vLLM (DP2 pod)
+#
+# Pre-requisites:
+#   kubectl label node node3 avoid=vllm --overwrite
+#   kubectl label node node3 node4 vllm-pool=shadow --overwrite
+#   kubectl label node node1 node2 node7 node8 avoid=vllm-shadow --overwrite
+#   Pre-pull images on node4: ctr -n k8s.io images pull reg.local:32000/minimax27:selfcontained
+#   sysctl -w vm.swappiness=0 && sysctl -w kernel.numa_balancing=0  (on node3/4)
+
+backend: "boom"
+
+router_url: "http://10.50.156.65:30180"
+total_requests: 10
+prompt_source: "hf-lmsys"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_name: "/home/data/saeid/datasets/lmsys_chat_1m"
+  split: "train"
+  tokenizer_name: "/home/models/MiniMax-M2.7-w8a8-QuaRot"
+  streaming: true
+  min_input_tokens: 1
+  max_input_tokens: 10000000
+  repeat_each: 1
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 3
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  max_tokens: 8192
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+  use_dataset_output_len: false
+
+output_log_mode: "summary"
+print_trace: false
+
+metrics:
+  enabled: true
+  prometheus_base_url: "http://10.50.156.65:31190"
+  scrape_interval_s: 1.0
+  window_s: 3.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+transport:
+  mode: "async_pubsub"
+  submit_path: "/submit"
+  results_zmq: "tcp://10.50.156.65:30659"
+  topic: "results"
+  run_id: null
+  idle_timeout_s: 1000.0
+  idle_zero_running_s: 10.0
+
+boom:
+  base_url: "http://10.50.156.65:30501"
+  chat_path: "/v1/chat/completions"
+  model: "served-model-minmax"
+  api_key: "sk-boom-master"
+  timeout_s: 10000.0
+  stream: true
+
+# --- Shadow-specific overrides ---
+vllm_node_selector:
+  vllm-pool: shadow
+
+vllm_avoid_label: "vllm-shadow"
+
+helm:
+  release: vllm-shadow
+  namespace: vllm-shadow
+  port_offset: 100
+  pin_node_name: node4
+
+  boom_claude_aliases: true
+  boom_max_inflight: 1000
+  router_api_key: "ZhongRuanChuangXin!"
+
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 1
+
+  router_kv_aware: true
+  router_len_aware: true
+  router_len_policy: "short_first"
+
+  # ===== Conversation key affinity (router-side) =====
+  # soft = preference (any pod may still serve); switch to "hard" for a
+  # time-bounded pin. Keep KV-aware on so KV scoring reinforces affinity.
+  router_affinity_enabled: true
+  router_affinity_mode: "soft"
+  router_affinity_ttl_s: 300
+  router_affinity_hard_timeout_s: 5
+
+  expose_per_pod: true
+
+  nfs_path: "/home/models/MiniMax-M2.7-w8a8-QuaRot"
+  model_host_path: "/home/models"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+  sidecar_prefetch: 2
+
+  # --- Mooncake KV cache transfer (required by LMCache) ---
+  mooncake_enabled: true
+  mooncake_master_server_address: "10.50.156.106:50188"
+  mooncake_master_port: 50188
+  mooncake_global_segment_size: 140000000000
+  mooncake_eviction_high_watermark: 0.9
+  mooncake_eviction_ratio: 0.1
+  mooncake_ascend_buffer_pool: "4:8"
+  mooncake_lookup_rpc_port: "10010"
+  mooncake_host_network: true
+  deploy_mooncake_master: true
+
+  # --- LMCache (wraps Mooncake for cross-replica KV coordination) ---
+  lmcache_enabled: true
+  lmcache_chunk_size: 512
+  lmcache_max_local_cpu_size: 50
+
+  # --- NDS (NVMe Direct Storage — P2P DMA for KV cache) ---
+  lmcache_nds_enabled: false
+  lmcache_nds_path: "/workspace/nds_kvcache"
+  lmcache_nds_dev: "/dev/md0"
+  lmcache_nds_size: 1024
+
+  # --- New vLLM flags for LMCache setup ---
+  dtype: "bfloat16"
+  ascend_enable_flashcomm1: true
+  scheduler_cls: "lsched.lsched_vllm.LSchedVLLMAdapter"
+  model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":16}'
+
+  vllm_image: "reg.local:32000/minimax27:selfcontained"
+  mooncake_master_image: "reg.local:32000/minimax27:selfcontained"
+
+  models:
+    - name: minimax-m2
+      servedModelName: served-model-minmax
+      replicas: 1
+      streamingMode: true
+      modelSubPath: MiniMax-M2.7-w8a8-QuaRot
+      tensorParallelSize: 8
+      batchSize: 32
+      sidecarPrefetch: 2
+      dataParallel:
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 8888
+        hcclBuffSize: 1024
+        ompNumThreads: 16
+      vllm:
+        gpuMemoryUtilization: 0.92
+        dtype: bfloat16
+        enableExpertParallel: true
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 32768
+        enablePrefixCaching: true
+        toolCallParser: minimax_m2
+        reasoningParser: minimax_m2_append_think
+        schedulerCls: "lsched.lsched_vllm.LSchedVLLMAdapter"
+        modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
+        ascendEnableFlashcomm1: true

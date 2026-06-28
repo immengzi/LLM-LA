@@ -16,7 +16,16 @@ from .kv_aware import prefix_len
 from .predictors import get_length_predictor
 from .len_select import select_len_aware
 from .models import JobItem, now_s
-from .metrics import set_central_queue_length, inc_dispatch
+from .affinity import AffinityMap
+from .metrics import (
+    set_central_queue_length,
+    set_central_queue_length_by_model,
+    inc_dispatch,
+    inc_affinity_hit,
+    inc_affinity_hold,
+    inc_affinity_release,
+    set_affinity_map_size,
+)
 
 _cfg = get_config()
 _pred = get_length_predictor()
@@ -125,11 +134,13 @@ class RouterState:
         # Streaming chunk queues: req_id -> asyncio.Queue
         self._chunk_queues: Dict[str, asyncio.Queue] = {}
 
-        # req_id -> endpoint that pulled it (for streaming identity)
-        self._req_endpoint: Dict[str, str] = {}
-
         # background cleanup task (lazy-start)
         self._cleanup_task: Optional[asyncio.Task] = None
+
+        # Key-affinity conversation->endpoint map (None when disabled).
+        self._affinity: Optional[AffinityMap] = (
+            AffinityMap(_cfg.AFFINITY_TTL_S) if _cfg.AFFINITY_ENABLED else None
+        )
 
         # initialize gauge
         set_central_queue_length(0)
@@ -167,7 +178,7 @@ class RouterState:
             ts = float(t_enq_client) if t_enq_client else now_s()
             q = self._get_queue(model or _DEFAULT_MODEL)
             q.append((rid, prompt, ts, meta or {}))
-            set_central_queue_length(self._total_size())
+            self._publish_queue_metrics()
             return rid
 
     def update_meta(self, req_id: str, meta: dict) -> None:
@@ -194,7 +205,7 @@ class RouterState:
                 if updated:
                     break
 
-            set_central_queue_length(self._total_size())
+            self._publish_queue_metrics()
 
     # -------------------------------------------------------
     # Pull (KV-aware + length-aware)
@@ -207,7 +218,7 @@ class RouterState:
         with self._lock:
             q = self._get_queue(model or _DEFAULT_MODEL)
             if not q:
-                set_central_queue_length(self._total_size())
+                self._publish_queue_metrics()
                 return []
 
             pool_factor = max(1, int(_cfg.POOL_FACTOR))
@@ -220,7 +231,13 @@ class RouterState:
                 pool.append((rid, prompt, ts, meta))
 
             # queue length changed after draining pool
-            set_central_queue_length(self._total_size())
+            self._publish_queue_metrics()
+
+            # Hard-mode affinity: withhold items pinned to a different endpoint
+            # (still within their hold window) so they wait for their pod.
+            held_back: List[Tuple[str, str, float, dict]] = []
+            if self._affinity is not None and _cfg.AFFINITY_MODE == "hard":
+                pool, held_back = self._affinity_filter_hard(pool, endpoint)
 
             _log_req(
                 f"endpoint={endpoint} want={want} pool_size={len(pool)} "
@@ -325,7 +342,11 @@ class RouterState:
             # Prom: outgoing dispatch (router -> sidecar) for each assigned item
             for _rid, _prompt, _ts, _meta in chosen:
                 inc_dispatch(endpoint)
-                self._req_endpoint[_rid] = endpoint
+
+            # Affinity: record where each keyed conversation was dispatched so
+            # subsequent turns follow the cache to this endpoint.
+            if self._affinity is not None:
+                self._affinity_record_dispatch(chosen, endpoint)
 
             # SLO metrics: observe slack at dispatch
             if slo_aware:
@@ -342,18 +363,20 @@ class RouterState:
                 except Exception:
                     pass
 
-            # 6) Requeue leftovers
+            # 6) Requeue held-back (hard-mode affinity) items + leftovers at the
+            # front, order-preserving (extendleft reverses, so reverse input).
             leftovers = ordered[effective_want:]
-            for rid, prompt, ts, meta in leftovers:
-                q.appendleft((rid, prompt, ts, meta))
+            requeue_front = held_back + leftovers
+            if requeue_front:
+                q.extendleft(reversed(requeue_front))
 
             # queue length changed after requeue
-            set_central_queue_length(self._total_size())
+            self._publish_queue_metrics()
 
-            if leftovers:
+            if leftovers or held_back:
                 _log_req(
-                    f"leftovers requeued: "
-                    f"{[r for (r, _p, _t, _m) in leftovers]}",
+                    f"requeued held_back={[r for (r, _p, _t, _m) in held_back]} "
+                    f"leftovers={[r for (r, _p, _t, _m) in leftovers]}",
                     level="full",
                 )
 
@@ -428,6 +451,10 @@ class RouterState:
                     f"{[r for (r, _p, _t, _m) in tier]}",
                     level="full",
                 )
+
+            # Soft-mode affinity: prefer items pinned to this endpoint within
+            # the tier (no-op when affinity is disabled or in hard mode).
+            tier = self._affinity_soft_partition(tier, endpoint)
 
             ordered.extend(tier)
 
@@ -517,6 +544,8 @@ class RouterState:
         # Secondary sort within 100ms bands:
         SLACK_BAND_MS = 100.0
 
+        soft_affinity = self._affinity is not None and _cfg.AFFINITY_MODE == "soft"
+
         def _sort_key(item):
             rid, _p, _t, _m, slack, binding, cached = item
             # Quantize slack to 100ms bands for equal-slack grouping
@@ -526,6 +555,10 @@ class RouterState:
                 band = float("-inf")
             else:
                 band = round(slack * 1000 / SLACK_BAND_MS) * SLACK_BAND_MS
+
+            # Soft affinity preference within the slack band (0 = matched first).
+            # Constant when affinity is off/hard, so ordering is unchanged then.
+            aff = 0 if (soft_affinity and self._affinity_match(endpoint, _m)) else 1
 
             # Step 8: negative-slack bypass -- don't reward KV, prefer least-loaded
             if slack < 0:
@@ -539,7 +572,7 @@ class RouterState:
                 secondary = 0
 
             # Tertiary: req_id for determinism
-            return (band, secondary, rid)
+            return (band, aff, secondary, rid)
 
         scored.sort(key=_sort_key)
 
@@ -647,7 +680,6 @@ class RouterState:
                     for rid in to_del:
                         self._result_store_ts.pop(rid, None)
                         self._result_values.pop(rid, None)
-                        self._req_endpoint.pop(rid, None)
 
                         # Drop placeholder fut=None (created when no loop existed)
                         fut = self._result_futs.get(rid)
@@ -800,12 +832,6 @@ class RouterState:
         """Remove the chunk queue for req_id (cleanup)."""
         with self._lock:
             self._chunk_queues.pop(req_id, None)
-            self._req_endpoint.pop(req_id, None)
-
-    def get_req_endpoint(self, req_id: str) -> Optional[str]:
-        """Return the endpoint that pulled this req_id, or None."""
-        with self._lock:
-            return self._req_endpoint.get(req_id)
 
     def has_chunk_queue(self, req_id: str) -> bool:
         with self._lock:
@@ -818,6 +844,112 @@ class RouterState:
     def _total_size(self) -> int:
         """Total items across all model queues (must be called under lock)."""
         return sum(len(q) for q in self._queues.values())
+
+    def _publish_queue_metrics(self) -> None:
+        """Publish global + per-model central queue gauges (call under lock).
+
+        Keeps the legacy global gauge identical to ``_total_size()`` and adds
+        an additive per-model breakdown used by per-model autoscaling.
+        """
+        set_central_queue_length(self._total_size())
+        set_central_queue_length_by_model({m: len(q) for m, q in self._queues.items()})
+
+    # -------------------------------------------------------
+    # Key affinity helpers (call under lock)
+    # -------------------------------------------------------
+
+    def _affinity_match(self, endpoint: str, meta: dict) -> bool:
+        """True if this item's conversation key currently maps to endpoint."""
+        if self._affinity is None:
+            return False
+        key = (meta or {}).get("__affinity_key__")
+        if not key:
+            return False
+        return self._affinity.lookup(key) == endpoint
+
+    def _affinity_filter_hard(
+        self,
+        pool: List[Tuple[str, str, float, dict]],
+        endpoint: str,
+    ) -> Tuple[List[Tuple[str, str, float, dict]], List[Tuple[str, str, float, dict]]]:
+        """
+        Hard-mode partition: return (available, held_back).
+
+        An item is held back when its conversation is pinned to a *different*
+        endpoint and is still within the hold window (router-stamped
+        __affinity_ts__ + AFFINITY_HARD_TIMEOUT_S). Once the window elapses the
+        item is released to any endpoint.
+        """
+        if self._affinity is None:
+            return pool, []
+
+        now = time.time()
+        timeout = float(_cfg.AFFINITY_HARD_TIMEOUT_S)
+        available: List[Tuple[str, str, float, dict]] = []
+        held_back: List[Tuple[str, str, float, dict]] = []
+        holds = 0
+        releases = 0
+
+        for item in pool:
+            _rid, _prompt, ts, meta = item
+            key = (meta or {}).get("__affinity_key__")
+            if not key:
+                available.append(item)
+                continue
+            target = self._affinity.lookup(key)
+            if target is None or target == endpoint:
+                available.append(item)
+                continue
+            aff_ts = float((meta or {}).get("__affinity_ts__") or ts)
+            if now - aff_ts >= timeout:
+                available.append(item)
+                releases += 1
+            else:
+                held_back.append(item)
+                holds += 1
+
+        if holds:
+            inc_affinity_hold(holds)
+        if releases:
+            inc_affinity_release(releases)
+        return available, held_back
+
+    def _affinity_soft_partition(
+        self,
+        tier: List[Tuple[str, str, float, dict]],
+        endpoint: str,
+    ) -> List[Tuple[str, str, float, dict]]:
+        """
+        Soft-mode stable partition: items whose conversation maps to this
+        endpoint come first, preserving the input order within each group.
+        """
+        if self._affinity is None or _cfg.AFFINITY_MODE != "soft":
+            return tier
+        matched = [it for it in tier if self._affinity_match(endpoint, it[3])]
+        if not matched:
+            return tier
+        unmatched = [it for it in tier if not self._affinity_match(endpoint, it[3])]
+        return matched + unmatched
+
+    def _affinity_record_dispatch(
+        self,
+        chosen: List[Tuple[str, str, float, dict]],
+        endpoint: str,
+    ) -> None:
+        """Claim each dispatched conversation key for this endpoint; count hits."""
+        if self._affinity is None:
+            return
+        hits = 0
+        for _rid, _prompt, _ts, meta in chosen:
+            key = (meta or {}).get("__affinity_key__")
+            if not key:
+                continue
+            if self._affinity.lookup(key) == endpoint:
+                hits += 1
+            self._affinity.claim(key, endpoint)
+        if hits:
+            inc_affinity_hit(hits)
+        set_affinity_map_size(self._affinity.size())
 
     def size(self, model: str = "") -> int:
         with self._lock:

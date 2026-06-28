@@ -9,11 +9,16 @@
 # prod-boom-minmax-lmcache:
 #   - pull
 
-# prod-boom-minmax-lmcache-hq:
+prod-boom-minmax-lmcache-hq:
+  - pull
+
+# prod-shadow-boom-minmax-lmcache-hq:
 #   - pull
 
-prod-shadow-boom-minmax-lmcache-hq:
-  - pull
+# KEDA autoscaling validation on the shadow pool (release/ns vllm-shadow).
+# Requires: make monitoring && make keda. See docs/operations/autoscaling.md.
+# prod-shadow-autoscaling-qwen:
+#   - pull
 
 # router:
 #   - pull

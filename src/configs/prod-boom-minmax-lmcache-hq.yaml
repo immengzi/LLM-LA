@@ -32,7 +32,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 3
+  rate_rps: 1
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -157,6 +157,7 @@ helm:
         rpcPort: 8888
         hcclBuffSize: 1024
         ompNumThreads: 16
+        pairTopologyKey: roce-pair
       vllm:
         gpuMemoryUtilization: 0.92
         dtype: bfloat16

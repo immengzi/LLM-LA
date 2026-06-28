@@ -59,6 +59,10 @@
 {{- $dp := $m.dataParallel | default dict }}
 {{- $isDP := $dp.enabled | default false }}
 {{- $flagCtx := dict "mv" $mv "gv" $.Values.vllm "batch" $batchSize }}
+{{/* When this model is autoscaled, KEDA/HPA owns the replica count, so we omit
+     the static replicas field to avoid helm upgrades fighting the autoscaler.
+     Empty (back-compat) whenever autoscaling.enabled is false. */}}
+{{- $autoscaled := eq (include "vllmkv.modelAutoscaled" (dict "root" $ "model" $m) | trim) "true" }}
 
 {{- if gt $idx 0 }}
 ---
@@ -75,7 +79,9 @@ metadata:
   name: vllm-{{ $modelName }}
   namespace: {{ $.Release.Namespace }}
 spec:
+  {{- if not $autoscaled }}
   replicas: {{ $dp.groups | default $replicas }}
+  {{- end }}
   leaderWorkerTemplate:
     size: {{ $dp.size | default 2 }}
     restartPolicy: RecreateGroupOnPodRestart
@@ -715,7 +721,9 @@ metadata:
   name: vllm-{{ $modelName }}
   namespace: {{ $.Release.Namespace }}
 spec:
+  {{- if not $autoscaled }}
   replicas: {{ $replicas }}
+  {{- end }}
   selector:
     matchLabels:
       app: vllm-{{ $modelName }}

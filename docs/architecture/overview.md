@@ -65,4 +65,5 @@ The router and sidecar exist in both **Python** (FastAPI) and **Go** (chi), sele
 ## See also
 
 - [Request tracing](trace.md) — per-request stage timing
+- [Autoscaling](../operations/autoscaling.md) — per-model KEDA scaling on queue/KV-cache signals
 - [Configuration: client config](../configuration/client-config.md) and [Helm values](../configuration/helm-values.md)

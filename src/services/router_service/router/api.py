@@ -30,6 +30,7 @@ from .models import (
 from .router_state import router_state
 from .kv_watcher import KVWatcher
 from .kv_aware import register_request_blocks
+from .affinity import derive_affinity_key
 from .push_router import PushRouter
 from .metrics import (
     inc_admission,
@@ -1184,11 +1185,11 @@ async def submit(req: EnqueueRequest):
     if _is_push_mode():
         rid = router_state.next_req_id()
         mode_str = "push"
-        meta = req.meta or {}
+        meta = _inject_affinity(req.meta or {}, model)
         is_pull_mode = False
     else:
         t_enq = req.t_enq_client or t_start
-        meta = req.meta or {}
+        meta = _inject_affinity(req.meta or {}, model)
         rid = router_state.enqueue(req.prompt, t_enq, meta, model=model)
         mode_str = "pull"
         is_pull_mode = True
@@ -1262,11 +1263,11 @@ async def enqueue(req: EnqueueRequest):
     if _is_push_mode():
         rid = router_state.next_req_id()
         mode_str = "push"
-        meta = req.meta or {}
+        meta = _inject_affinity(req.meta or {}, model)
         is_pull_mode = False
     else:
         t_enq = req.t_enq_client or t_start
-        meta = req.meta or {}
+        meta = _inject_affinity(req.meta or {}, model)
         rid = router_state.enqueue(req.prompt, t_enq, meta, model=model)
         mode_str = "pull"
         is_pull_mode = True
@@ -1484,6 +1485,7 @@ async def _enqueue_and_wait(
     meta: Dict[str, Any] = {"__source__": source}
     if chat_request_body is not None:
         meta["__chat_request__"] = chat_request_body
+        meta = _inject_affinity(meta, resolved_model, chat_request_body.get("messages"))
     if _is_push_mode():
         rid = router_state.next_req_id()
         is_pull_mode = False
@@ -1649,6 +1651,38 @@ def _build_chat_request_body(req: _ChatCompletionRequest) -> Dict[str, Any]:
     return body
 
 
+def _inject_affinity(
+    meta: Dict[str, Any],
+    model: str,
+    messages: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Stamp the conversation affinity key + router-side timestamp into meta.
+
+    No-op when affinity is disabled. Key precedence: an explicit
+    ``meta["affinity_key"]`` (e.g. from a load-test client) wins; otherwise the
+    key is auto-derived from the conversation's stable prefix (model + system +
+    first user message). The router-stamped timestamp drives the hard-mode hold
+    window (skew-free, independent of client clocks).
+
+    Returns the (possibly mutated) meta dict.
+    """
+    if not _cfg.AFFINITY_ENABLED:
+        return meta
+
+    key = None
+    explicit = meta.get("affinity_key")
+    if explicit:
+        key = str(explicit)
+    elif messages:
+        key = derive_affinity_key(model, messages)
+
+    if key:
+        meta["__affinity_key__"] = key
+        meta["__affinity_ts__"] = time.time()
+    return meta
+
+
 def _extract_tool_calls(result: Dict[str, Any]) -> Optional[List[Any]]:
     """Extract tool_calls from the raw vLLM response if present."""
     direct = result.get("tool_calls")
@@ -1761,6 +1795,7 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
         meta: Dict[str, Any] = {"__source__": "litellm"}
         if chat_request_body is not None:
             meta["__chat_request__"] = chat_request_body
+            meta = _inject_affinity(meta, resolved_model, chat_request_body.get("messages"))
         if _is_push_mode():
             rid = router_state.next_req_id()
         else:

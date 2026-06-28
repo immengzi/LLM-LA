@@ -7,6 +7,7 @@ What you need before deploying LA-Boom and running experiments. For full cluster
 - A working Kubernetes cluster (1.28+) with `kubectl` access and cluster-admin permissions. The Helm chart creates a namespace, Deployments/LeaderWorkerSets, Services, ConfigMaps, and RBAC resources.
 - Accelerators available on worker nodes (the default images target Ascend NPUs; the chart and routing logic are accelerator-agnostic).
 - [Prometheus](https://prometheus.io/) in the cluster if you want metrics collection or autoscaling. The chart ships `ServiceMonitor`/`PodMonitor` resources.
+- [KEDA](https://keda.sh/) if you want autoscaling (`autoscaling.enabled=true`). Install via `cd infra && make keda`. See [operations/autoscaling.md](../operations/autoscaling.md).
 - For data-parallel / expert-parallel deployments: the [LeaderWorkerSet](https://github.com/kubernetes-sigs/lws) operator CRD installed, and RoCE/HCCL networking configured. See [data parallel with LWS](../deployment/data-parallel-lws.md).
 
 ## Tooling
@@ -41,6 +42,7 @@ kubectl get nodes
 helm version
 kubectl get crd | grep -i leaderworkerset   # only needed for DP/EP
 kubectl get pods -A | grep -i prometheus     # only needed for metrics/autoscaling
+kubectl get crd scaledobjects.keda.sh        # only needed for autoscaling (KEDA)
 ```
 
 ## See also

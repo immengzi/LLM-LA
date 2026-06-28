@@ -71,6 +71,7 @@ The router holds a central queue and either **pulls** work to sidecars on demand
 
 - **Routing** — pull (capacity-gated, default) and push (`push-rr`, `push-random`, `push-leastq`); KV-aware prefix-tier ordering; length-aware batching (`short_first`, `long_first`); SLO-aware slack scheduling.
 - **Serving** — multiple models from one cluster; multi-node data parallel via [LeaderWorkerSet](docs/deployment/data-parallel-lws.md) with expert parallel for MoE models (e.g. GLM-5); cross-node KV transfer via [Mooncake / LMCache](docs/deployment/mooncake/helm-integration.md); router and sidecar in both **Python and Go**.
+- **Autoscaling** — per-model [KEDA autoscaling](docs/operations/autoscaling.md) across all topologies (dense, multi-model, data-parallel LWS) on router-queue or vLLM KV-cache signals; off by default and fully backward compatible.
 - **Benchmarking** — open-loop load generator with `det`, `poisson`, `bursty`, `steps`, and `rand` patterns; multi-turn conversations; streaming TTFT/TPOT measurement; automated Helm sweeps with full artifact capture.
 - **Gateways** — [BooM Gateway](docs/gateways/boom/overview.md) (Rust) and LiteLLM (Python) for auth, virtual keys, rate limiting, and spend tracking; Claude Code support.
 - **Observability** — Prometheus metrics, per-request [tracing](docs/architecture/trace.md), and live Redis KV-state inspection.

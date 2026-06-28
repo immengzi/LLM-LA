@@ -240,6 +240,7 @@ func (s *Server) enqueueAndWait(w http.ResponseWriter, prompt, resolvedModel str
 	incAdmission()
 
 	meta := map[string]interface{}{"__source__": "litellm", "__chat_request__": chatBody}
+	s.injectAffinity(meta, resolvedModel, chatBody)
 
 	var rid string
 	isPull := !s.isPushMode()
@@ -273,6 +274,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, prompt, mode
 	incAdmission()
 
 	meta := map[string]interface{}{"__source__": "litellm", "__chat_request__": chatBody}
+	s.injectAffinity(meta, resolvedModel, chatBody)
 	var rid string
 	isPull := !s.isPushMode()
 	if s.isPushMode() {

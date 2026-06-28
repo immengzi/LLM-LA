@@ -65,8 +65,19 @@ router:
   lenAware: true
 
   # Used only when lenAware=true
-  # short_first | long_first
+  # short_first | long_first | even_short_long
   lenPolicy: short_first
+
+  # Key-affinity routing: keep all turns of a chat conversation on the same
+  # vLLM pod to reuse the engine's prefix cache. Disabled by default (zero
+  # impact on the legacy path). Fully router-side; no BooM/sidecar/client change.
+  affinityEnabled: false
+  # soft = preference (any pod may still serve), hard = time-bounded pin
+  affinityMode: soft
+  # conversation -> endpoint mapping lifetime (seconds)
+  affinityTtlS: 300
+  # hard mode: max time an item waits for its pod before release to any pod
+  affinityHardTimeoutS: 5
 
   # SLO-aware routing (disabled by default — zero impact on legacy path)
   sloAware: false
@@ -90,14 +101,51 @@ batchSize: 8
 tensorParallelSize: 8
 
 autoscaling:
+  # Master switch. When false, NO autoscaling resources are rendered and the
+  # chart behaves exactly as before (replicas come from the model spec). This
+  # is the production-safe default — leave it false unless KEDA is installed.
   enabled: false
 
+  # Scaling signal driving every model's ScaledObject (overridable per model):
+  #   queue -> router_central_queue_length_by_model  (needs a router-style
+  #            backend: router|boom|litellm; scales on central-queue depth)
+  #   vllm  -> vllm:gpu_cache_usage_perc             (router-independent; works
+  #            for direct/vllm-only topologies, scales on KV-cache pressure)
+  signal: queue
+
+  # Prometheus endpoint KEDA queries. Defaults to the Service created by the
+  # kube-prometheus-stack release (name "kube-prometheus-stack") that
+  # infra/ansible deploys into the monitoring namespace. The release-agnostic
+  # headless service http://prometheus-operated.monitoring.svc:9090 also works.
+  prometheusServerAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+
+  # null -> fall back to each model's own replica count (DP: dataParallel.groups)
   minReplicaCount: null
   maxReplicaCount: 16
-  threshold: "16"
 
-  prometheusQuery: |
-    max(router_central_queue_length{namespace="vllm"})
+  # Threshold for the queue signal (target central-queue depth per model).
+  threshold: "16"
+  # Threshold for the vllm signal (fraction of KV cache utilised, 0..1).
+  vllmThreshold: "0.8"
+
+  pollingInterval: 10
+  cooldownPeriod: 300
+
+  # Optional full-query overrides (advanced). Leave empty to use the
+  # signal-derived per-model queries above.
+  #   vllmQuery       -> overrides the vllm-signal query for every model
+  #   prometheusQuery -> overrides the queue-signal query for every model
+  #                      (back-compat with the pre-per-model single query)
+  vllmQuery: ""
+  prometheusQuery: ""
+
+  # Per-model overrides, keyed by models[].name. Each entry may set:
+  #   enabled, minReplicaCount, maxReplicaCount, threshold, signal, query
+  # Example:
+  #   perModel:
+  #     qwen:    { signal: queue, threshold: "12", maxReplicaCount: 8 }
+  #     minimax: { enabled: false }   # opt this model out of autoscaling
+  perModel: {}
 
 # Pin router + redis to a specific node by name (via kubernetes.io/hostname)
 # Example node names from `kubectl get nodes`: master / master1 / worker1

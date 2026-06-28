@@ -82,6 +82,29 @@ else
   warn "certs.d hosts.toml not found locally (only checks this host)"
 fi
 
+# 9. Monitoring stack: Prometheus reachable
+PROM_PORT="${PROMETHEUS_NODEPORT:-31190}"
+if curl -fs --noproxy '*' --max-time 5 "http://127.0.0.1:${PROM_PORT}/-/ready" >/dev/null 2>&1; then
+  ok "Prometheus reachable on NodePort ${PROM_PORT}"
+else
+  warn "Prometheus not reachable on NodePort ${PROM_PORT} (monitoring stack may not be deployed)"
+fi
+
+# 10. Monitoring stack: Grafana reachable
+GRAF_PORT="${GRAFANA_NODEPORT:-31300}"
+if curl -fs --noproxy '*' --max-time 5 "http://127.0.0.1:${GRAF_PORT}/api/health" >/dev/null 2>&1; then
+  ok "Grafana reachable on NodePort ${GRAF_PORT}"
+else
+  warn "Grafana not reachable on NodePort ${GRAF_PORT} (monitoring stack may not be deployed)"
+fi
+
+# 11. Autoscaling: KEDA CRD installed (warn-only; only needed for autoscaling)
+if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+  ok "KEDA CRD (scaledobjects.keda.sh) installed"
+else
+  warn "KEDA not installed (run: make keda) — only required for autoscaling.enabled=true"
+fi
+
 echo "==============================="
 echo "Passed: $pass  Failed: $fail"
 [ "$fail" -eq 0 ] || exit 1

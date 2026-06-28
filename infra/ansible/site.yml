@@ -47,3 +47,18 @@
   tags: [k8s, bootstrap]
   roles:
     - k8s_bootstrap
+
+- name: Deploy monitoring stack (Prometheus + Grafana)
+  hosts: control_plane
+  tags: [monitoring]
+  roles:
+    - monitoring
+
+# Optional: only needed for autoscaling.enabled=true deployments. Tagged
+# 'never' so it is skipped by a plain `site.yml` run and must be requested
+# explicitly (`--tags keda` or `make keda`), keeping `make prep` unchanged.
+- name: Install KEDA autoscaler (+ LeaderWorkerSet scale RBAC)
+  hosts: control_plane
+  tags: [keda, never]
+  roles:
+    - keda

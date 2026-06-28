@@ -831,6 +831,13 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             "router.lenAware": bool(getattr(h, "router_len_aware", True)),
             "router.lenPolicy": str(getattr(h, "router_len_policy", "short_first")),
             "router.apiKey": str(getattr(h, "router_api_key", "")),
+
+            # Conversation key-affinity knobs
+            "router.affinityEnabled": bool(getattr(h, "router_affinity_enabled", False)),
+            "router.affinityMode": str(getattr(h, "router_affinity_mode", "soft")),
+            "router.affinityTtlS": float(getattr(h, "router_affinity_ttl_s", 300.0)),
+            "router.affinityHardTimeoutS": float(getattr(h, "router_affinity_hard_timeout_s", 5.0)),
+
             "aibrix.enabled": bool(getattr(h, "aibrix_enabled", False)),
             "aibrix.modelName": str(getattr(h, "aibrix_model_name", "served-model")),
             "aibrix.port": int(getattr(h, "aibrix_port", 8200)),
@@ -1091,10 +1098,23 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             set_values["autoscaling.minReplicaCount"] = int(h.autoscaling_min)
             set_values["autoscaling.maxReplicaCount"] = int(h.autoscaling_max)
             set_values["autoscaling.threshold"] = str(h.autoscaling_threshold)
+            set_values["autoscaling.signal"] = str(h.autoscaling_signal)
+            set_values["autoscaling.vllmThreshold"] = str(h.autoscaling_vllm_threshold)
+            set_values["autoscaling.prometheusServerAddress"] = str(
+                h.autoscaling_prometheus_server_address
+            )
+            set_values["autoscaling.pollingInterval"] = int(h.autoscaling_polling_interval)
+            set_values["autoscaling.cooldownPeriod"] = int(h.autoscaling_cooldown_period)
 
+            # Optional advanced full-query override. Empty -> chart builds the
+            # signal-derived per-model query (router_central_queue_length_by_model
+            # or vllm:gpu_cache_usage_perc). Routed through perModel only when set
+            # for a single-model sweep; otherwise left to the chart defaults.
             q = str(h.autoscaling_prometheus_query or "").strip()
             q = " ".join(q.split())
-            set_values["autoscaling.prometheusQuery"] = q
+            if q:
+                set_values["autoscaling.vllmQuery" if str(h.autoscaling_signal) == "vllm"
+                           else "autoscaling.prometheusQuery"] = q
 
         # ---- Unified models[] — auto-migrate legacy flat config if needed ----
         migrate_legacy_helm_to_models(h)
@@ -1352,9 +1372,16 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 "autoscaling_enabled": bool(h.autoscaling_enabled),
                 "autoscaling_min": int(h.autoscaling_min),
                 "autoscaling_max": int(h.autoscaling_max),
+                "autoscaling_signal": str(getattr(h, "autoscaling_signal", "queue")),
+                "autoscaling_vllm_threshold": str(getattr(h, "autoscaling_vllm_threshold", "0.8")),
+                "autoscaling_prometheus_server_address": str(
+                    getattr(h, "autoscaling_prometheus_server_address", "")
+                ),
                 "router_kv_aware": bool(getattr(h, "router_kv_aware", True)),
                 "router_len_aware": bool(getattr(h, "router_len_aware", True)),
                 "router_len_policy": str(getattr(h, "router_len_policy", "short_first")),
+                "router_affinity_enabled": bool(getattr(h, "router_affinity_enabled", False)),
+                "router_affinity_mode": str(getattr(h, "router_affinity_mode", "soft")),
                 "service_impl": str(getattr(h, "service_impl", "python")),
                 "nfs_path": nfs_path,
                 "model_sub_path": model_sub_path,

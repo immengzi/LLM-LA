@@ -55,6 +55,10 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 | `kvAware` | `true` | KV-aware routing |
 | `lenAware` | `true` | Length-aware batching |
 | `lenPolicy` | `short_first` | `short_first` \| `long_first` |
+| `affinityEnabled` | `false` | Conversation key-affinity (sticky chat → pod) ([details](../architecture/key-affinity.md)) |
+| `affinityMode` | `soft` | `soft` (preference) \| `hard` (time-bounded pin) |
+| `affinityTtlS` | `300` | Conversation → endpoint mapping lifetime (s) |
+| `affinityHardTimeoutS` | `5` | Hard mode: max wait for the pinned pod before release (s) |
 | `sloAware` | `false` | Enable slack-based SLO scheduling ([details](../architecture/slo-aware-routing.md)) |
 | `sloWithKv` | `true` | Reward KV cache hits within SLO sort |
 | `admissionThrottle` | `false` | Dynamic admission control |
@@ -191,13 +195,31 @@ Optional cross-node KV transfer. Gated on `mooncake.enabled` only. See [mooncake
 
 ## Autoscaling (`autoscaling.*`)
 
+Per-model KEDA autoscaling that works across **all** topologies — single dense
+model, multi-model, and data-parallel `LeaderWorkerSet`. When `enabled: false`
+(the default) **no** autoscaling resources are rendered and the chart behaves
+exactly as before, so existing releases are unaffected. See the full runbook in
+[operations/autoscaling.md](../operations/autoscaling.md).
+
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `enabled` | `false` | KEDA ScaledObject on the router queue metric |
-| `minReplicaCount` | `null` | Min replicas (falls back to `replicas.vllm` when null) |
+| `enabled` | `false` | Master switch. When false nothing is rendered (replicas stay static) |
+| `signal` | `queue` | `queue` → per-model router central queue; `vllm` → vLLM KV-cache pressure (router-less topologies) |
+| `prometheusServerAddress` | `http://kube-prometheus-stack-prometheus.monitoring.svc:9090` | Prometheus endpoint KEDA queries (matches the `monitoring` role) |
+| `minReplicaCount` | `null` | Min replicas; `null` → each model's own replica count (DP: `dataParallel.groups`) |
 | `maxReplicaCount` | `16` | Max replicas |
-| `threshold` | `"16"` | Scale threshold |
-| `prometheusQuery` | `max(router_central_queue_length{namespace="vllm"})` | Scaling signal |
+| `threshold` | `"16"` | Target central-queue depth per model (queue signal) |
+| `vllmThreshold` | `"0.8"` | Target KV-cache utilisation 0..1 (vllm signal) |
+| `pollingInterval` | `10` | KEDA poll interval (seconds) |
+| `cooldownPeriod` | `300` | KEDA scale-to-min cooldown (seconds) |
+| `vllmQuery` / `prometheusQuery` | `""` | Optional full-query overrides applied to every model |
+| `perModel` | `{}` | Per-model overrides keyed by `models[].name` (`enabled`, `minReplicaCount`, `maxReplicaCount`, `threshold`, `signal`, `query`) |
+
+One `ScaledObject` is rendered per autoscaled model, targeting `Deployment`
+(dense/multi-model) or `LeaderWorkerSet` (data-parallel) automatically. The
+`queue` signal uses the additive `router_central_queue_length_by_model{model="<servedModelName>"}`
+metric, so the legacy global `router_central_queue_length` gauge is unchanged.
+KEDA must be installed first (`make keda` — see the runbook).
 
 ## Cache warm (`cacheWarm.*`)
 

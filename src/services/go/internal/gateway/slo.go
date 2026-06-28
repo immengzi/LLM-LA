@@ -17,6 +17,10 @@ type sloEngineImpl struct {
 	batch    *batchSizeEstimator
 	queue    *queueWaitEstimator
 	pred     OutputLengthPredictor
+
+	// affinity is the conversation->endpoint map shared with CentralQueue
+	// (nil unless AFFINITY_ENABLED). Used for soft-mode within-band tiebreak.
+	affinity *AffinityMap
 }
 
 // NewSLOEngine builds the SLO subsystem wired to the shared output-length
@@ -279,10 +283,25 @@ func (s *sloEngineImpl) sloAwareSort(pool []queueItem, endpoint string, want int
 		return 0
 	}
 
+	softAffinity := s.affinity != nil && s.cfg.AffinityMode == "soft"
+	// affRank returns 0 for items pinned to this endpoint (preferred), else 1.
+	// Constant when affinity is off/hard, so ordering is unchanged then.
+	affRank := func(si scoredItem) int {
+		if softAffinity && affinityKeyOf(si.item.meta) != "" &&
+			s.affinity.Lookup(affinityKeyOf(si.item.meta)) == endpoint {
+			return 0
+		}
+		return 1
+	}
+
 	sort.SliceStable(scored, func(i, j int) bool {
 		bi, bj := bandOf(scored[i].slack), bandOf(scored[j].slack)
 		if bi != bj {
 			return bi < bj
+		}
+		ai, aj := affRank(scored[i]), affRank(scored[j])
+		if ai != aj {
+			return ai < aj
 		}
 		si, sj := secondaryOf(scored[i]), secondaryOf(scored[j])
 		if si != sj {

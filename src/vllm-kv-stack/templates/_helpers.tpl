@@ -15,6 +15,147 @@ push
 {{- end -}}
 
 {{/*
+Per-model autoscaling helpers (used by 60-keda-scaledobject.yaml).
+All take a dict: { "root": $, "model": <model dict> }.
+The model dict matches the entries synthesized in 40-vllm-unified.yaml, so
+"name", "servedModelName", "replicas", and "dataParallel" are available.
+*/}}
+
+{{/*
+vllmkv.modelAutoscaled — emits "true" when this model should get a ScaledObject.
+A model is autoscaled when autoscaling is globally enabled AND the model is not
+explicitly opted out via autoscaling.perModel.<name>.enabled: false.
+*/}}
+{{- define "vllmkv.modelAutoscaled" -}}
+{{- $root := .root -}}
+{{- $m := .model -}}
+{{- $as := $root.Values.autoscaling | default dict -}}
+{{- if $as.enabled -}}
+  {{- $pm := get ($as.perModel | default dict) ($m.name | toString) -}}
+  {{- if not (kindIs "map" $pm) }}{{- $pm = dict -}}{{- end -}}
+  {{- if hasKey $pm "enabled" -}}
+    {{- if $pm.enabled -}}true{{- end -}}
+  {{- else -}}
+    true
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+vllmkv.modelBaseReplicas — the model's configured replica count, matching the
+fallback logic in 40-vllm-unified.yaml (DP groups for LeaderWorkerSet).
+*/}}
+{{- define "vllmkv.modelBaseReplicas" -}}
+{{- $m := .model -}}
+{{- $dp := $m.dataParallel | default dict -}}
+{{- if $dp.enabled -}}
+{{- $dp.groups | default ($m.replicas | default 1) -}}
+{{- else -}}
+{{- $m.replicas | default 1 -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+vllmkv.modelMinReplicas — KEDA minReplicaCount for this model:
+per-model override → global autoscaling.minReplicaCount → model base replicas.
+*/}}
+{{- define "vllmkv.modelMinReplicas" -}}
+{{- $root := .root -}}
+{{- $m := .model -}}
+{{- $as := $root.Values.autoscaling | default dict -}}
+{{- $pm := get ($as.perModel | default dict) ($m.name | toString) -}}
+{{- if not (kindIs "map" $pm) }}{{- $pm = dict -}}{{- end -}}
+{{- if $pm.minReplicaCount -}}
+{{- $pm.minReplicaCount -}}
+{{- else if $as.minReplicaCount -}}
+{{- $as.minReplicaCount -}}
+{{- else -}}
+{{- include "vllmkv.modelBaseReplicas" (dict "model" $m) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+vllmkv.modelMaxReplicas — per-model override → global maxReplicaCount.
+*/}}
+{{- define "vllmkv.modelMaxReplicas" -}}
+{{- $root := .root -}}
+{{- $m := .model -}}
+{{- $as := $root.Values.autoscaling | default dict -}}
+{{- $pm := get ($as.perModel | default dict) ($m.name | toString) -}}
+{{- if not (kindIs "map" $pm) }}{{- $pm = dict -}}{{- end -}}
+{{- if $pm.maxReplicaCount -}}
+{{- $pm.maxReplicaCount -}}
+{{- else -}}
+{{- $as.maxReplicaCount | default 16 -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+vllmkv.modelSignal — effective scaling signal ("queue" | "vllm") for a model.
+*/}}
+{{- define "vllmkv.modelSignal" -}}
+{{- $root := .root -}}
+{{- $m := .model -}}
+{{- $as := $root.Values.autoscaling | default dict -}}
+{{- $pm := get ($as.perModel | default dict) ($m.name | toString) -}}
+{{- if not (kindIs "map" $pm) }}{{- $pm = dict -}}{{- end -}}
+{{- if $pm.signal -}}
+{{- lower $pm.signal -}}
+{{- else -}}
+{{- lower ($as.signal | default "queue") -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+vllmkv.kedaThreshold — KEDA trigger threshold for a model (signal-aware).
+*/}}
+{{- define "vllmkv.kedaThreshold" -}}
+{{- $root := .root -}}
+{{- $m := .model -}}
+{{- $as := $root.Values.autoscaling | default dict -}}
+{{- $pm := get ($as.perModel | default dict) ($m.name | toString) -}}
+{{- if not (kindIs "map" $pm) }}{{- $pm = dict -}}{{- end -}}
+{{- $sig := include "vllmkv.modelSignal" (dict "root" $root "model" $m) -}}
+{{- if $pm.threshold -}}
+{{- $pm.threshold -}}
+{{- else if eq $sig "vllm" -}}
+{{- $as.vllmThreshold | default "0.8" -}}
+{{- else -}}
+{{- $as.threshold | default "16" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+vllmkv.kedaQuery — PromQL query for a model's ScaledObject trigger.
+Precedence: per-model query → signal-derived query.
+  queue → additive per-model router gauge (router_central_queue_length_by_model)
+  vllm  → vLLM engine load (gpu KV-cache usage), router-independent
+*/}}
+{{- define "vllmkv.kedaQuery" -}}
+{{- $root := .root -}}
+{{- $m := .model -}}
+{{- $as := $root.Values.autoscaling | default dict -}}
+{{- $pm := get ($as.perModel | default dict) ($m.name | toString) -}}
+{{- if not (kindIs "map" $pm) }}{{- $pm = dict -}}{{- end -}}
+{{- $ns := $root.Release.Namespace -}}
+{{- $served := $m.servedModelName | default $m.name -}}
+{{- $sig := include "vllmkv.modelSignal" (dict "root" $root "model" $m) -}}
+{{- if $pm.query -}}
+{{- $pm.query -}}
+{{- else if eq $sig "vllm" -}}
+{{- if $as.vllmQuery -}}
+{{- $as.vllmQuery -}}
+{{- else -}}
+{{- printf "max(vllm:gpu_cache_usage_perc{model_name=\"%s\"})" $served -}}
+{{- end -}}
+{{- else if $as.prometheusQuery -}}
+{{- $as.prometheusQuery -}}
+{{- else -}}
+{{- printf "max(router_central_queue_length_by_model{namespace=\"%s\",model=\"%s\"})" $ns $served -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Strip an existing registry from an image reference, if present.
 
 Examples:

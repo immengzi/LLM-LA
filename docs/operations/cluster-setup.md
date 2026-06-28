@@ -313,15 +313,43 @@ Confirm all 8 NPU ports show link `UP` and `net_health` `success` on each node (
 Label nodes so LWS groups are scheduled onto physically cabled pairs:
 
 ```bash
-kubectl label node node3 node4 roce-pair=pair-a
-kubectl label node node5 node6 roce-pair=pair-b
+# Prod nodes: node1+node2 are one RoCE pair, node7+node8 are the other.
+kubectl label node node1 node2 roce-pair=pair-a
+kubectl label node node7 node8 roce-pair=pair-b
 ```
 
 Verify:
 
 ```bash
 kubectl get nodes -L roce-pair
+# node1   roce-pair=pair-a
+# node2   roce-pair=pair-a
+# node7   roce-pair=pair-b
+# node8   roce-pair=pair-b
 ```
 
 **Reference**: [multi_model_router.md](../deployment/multi-model.md) "Node-pair
 pinning", [data_parallel_lws.md](../deployment/data-parallel-lws.md).
+
+---
+
+## 15. Install KEDA (optional — autoscaling)
+
+**Scope**: one-time cluster setup. Only needed if you deploy with
+`autoscaling.enabled=true`.
+
+KEDA drives the chart's per-model `ScaledObject`s (dense, multi-model, and
+data-parallel). Install it plus the LeaderWorkerSet scale RBAC:
+
+```bash
+cd infra && make keda            # helm install KEDA into the `keda` namespace + LWS RBAC
+
+# Verify:
+kubectl get crd scaledobjects.keda.sh
+kubectl -n keda rollout status deploy/keda-operator
+```
+
+`make prep` does **not** install KEDA (the play is tagged `never`), so existing
+non-autoscaling clusters are unaffected.
+
+**Reference**: [autoscaling.md](autoscaling.md).

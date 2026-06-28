@@ -1,0 +1,83 @@
+---
+# Deploy kube-prometheus-stack (Prometheus + Grafana + Alertmanager) via Helm.
+# Expose Grafana on a NodePort so it's reachable at <node-ip>:<grafana_nodeport>.
+
+- name: Add prometheus-community Helm repo
+  ansible.builtin.command: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+  register: helm_repo
+  changed_when: "'has been added' in helm_repo.stdout"
+  failed_when: helm_repo.rc != 0 and 'already exists' not in helm_repo.stderr
+
+- name: Update Helm repos
+  ansible.builtin.command: helm repo update
+  changed_when: false
+
+- name: Create monitoring namespace
+  ansible.builtin.command: kubectl create namespace {{ monitoring_namespace }} --dry-run=client -o yaml
+  register: mon_ns_yaml
+  changed_when: false
+
+- name: Apply monitoring namespace
+  ansible.builtin.command: kubectl apply -f -
+  args:
+    stdin: "{{ mon_ns_yaml.stdout }}"
+  register: mon_ns_apply
+  changed_when: "'unchanged' not in mon_ns_apply.stdout"
+
+- name: Install / upgrade kube-prometheus-stack
+  ansible.builtin.command: >-
+    helm upgrade --install kube-prometheus-stack
+    prometheus-community/kube-prometheus-stack
+    --namespace {{ monitoring_namespace }}
+    --version {{ kube_prometheus_stack_version }}
+    --set grafana.service.type=NodePort
+    --set grafana.service.nodePort={{ grafana_nodeport }}
+    --set grafana.adminPassword={{ grafana_admin_password }}
+    --set prometheus.service.type=NodePort
+    --set prometheus.service.nodePort={{ prometheus_nodeport }}
+    --wait --timeout 10m
+  register: helm_install
+  changed_when: "'STATUS: deployed' in helm_install.stdout"
+
+- name: Wait for Grafana deployment to be available
+  ansible.builtin.command: >-
+    kubectl -n {{ monitoring_namespace }} rollout status
+    deployment/kube-prometheus-stack-grafana --timeout=120s
+  changed_when: false
+
+- name: Wait for Prometheus StatefulSet to be ready
+  ansible.builtin.command: >-
+    kubectl -n {{ monitoring_namespace }} rollout status
+    statefulset/prometheus-kube-prometheus-stack-prometheus --timeout=120s
+  changed_when: false
+
+- name: Read LA-Boom dashboard JSON
+  ansible.builtin.slurp:
+    src: "{{ repo_root }}/infra/grafana-dashboards/laboom-llm-serving.json"
+  register: dashboard_json_b64
+
+- name: Deploy LA-Boom Grafana dashboard ConfigMap
+  ansible.builtin.shell: |
+    cat <<'CONFIGMAP_EOF' | kubectl apply -f -
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: laboom-llm-serving-dashboard
+      namespace: {{ monitoring_namespace }}
+      labels:
+        grafana_dashboard: "1"
+    data:
+      laboom-llm-serving.json: |
+    {{ (dashboard_json_b64.content | b64decode) | indent(6, first=True) }}
+    CONFIGMAP_EOF
+  args:
+    executable: /bin/bash
+  register: dashboard_cm
+  changed_when: "'unchanged' not in dashboard_cm.stdout"
+
+- name: Display Grafana access info
+  ansible.builtin.debug:
+    msg: >-
+      Grafana is available at http://{{ grafana_access_ip }}:{{ grafana_nodeport }}
+      (user: admin, password: <see grafana_admin_password in group_vars>).
+      The LA-Boom LLM Serving dashboard is auto-imported.
