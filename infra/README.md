@@ -19,6 +19,8 @@ LA-Boom.
 | Registry | `registry` | §8 deploy in-cluster registry + catalog check |
 | Images | `images` | §9 build/push service images + mirror external images |
 | Cluster bootstrap | `k8s_bootstrap` | §2 labels, §14 untaint, §1 device plugin, §3 kube-proxy restart, §12 LWS, §11 PV/PVC |
+| Monitoring | `monitoring` | Deploy kube-prometheus-stack (Prometheus + Grafana + Alertmanager) via Helm, expose Grafana on NodePort |
+| Autoscaling | `keda` | Install KEDA + LeaderWorkerSet scale RBAC. **Opt-in** (tagged `never`); only for `autoscaling.enabled=true` deploys. See [autoscaling.md](../docs/operations/autoscaling.md) |
 
 **Not automated** (hardware / vendor): NPU driver/CANN/firmware install and
 physical RoCE cabling + `/etc/hccn.conf` IPs. The playbook *verifies* these and
@@ -54,6 +56,8 @@ make nfs         # NFS exports only
 make registry    # deploy the registry only
 make images      # build + push images only
 make k8s         # cluster bootstrap only
+make monitoring  # deploy Prometheus + Grafana
+make keda        # install KEDA + LWS scale RBAC (autoscaling only; not run by `make prep`)
 ```
 
 ## Configuration

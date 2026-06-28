@@ -98,7 +98,7 @@ helm:
   router_len_aware: true
   router_len_policy: "short_first"
 
-  nfs_path: "/home/models"
+  nfs_path: "/saeid/models"
   model_host_path: "/home/models"
 
   aibrix_enabled: false

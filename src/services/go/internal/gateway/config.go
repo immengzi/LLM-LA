@@ -42,6 +42,11 @@ type Config struct {
 	LenAware  bool
 	LenPolicy string
 
+	AffinityEnabled      bool
+	AffinityMode         string
+	AffinityTTLS         float64
+	AffinityHardTimeoutS float64
+
 	PoolFactor       float64
 	DefaultMaxTokens int
 
@@ -126,6 +131,11 @@ func LoadConfig() *Config {
 		KVAware:   common.EnvBool("KV_AWARE", true),
 		LenAware:  common.EnvBool("LEN_AWARE", true),
 		LenPolicy: common.EnvStr("LEN_POLICY", "short_first"),
+
+		AffinityEnabled:      common.EnvBool("AFFINITY_ENABLED", false),
+		AffinityMode:         common.EnvStr("AFFINITY_MODE", "soft"),
+		AffinityTTLS:         common.EnvFloat("AFFINITY_TTL_S", 300.0),
+		AffinityHardTimeoutS: common.EnvFloat("AFFINITY_HARD_TIMEOUT_S", 5.0),
 
 		PoolFactor:       common.EnvFloat("POOL_FACTOR", 4.0),
 		DefaultMaxTokens: common.EnvInt("DEFAULT_MAX_TOKENS", 1024),
@@ -217,6 +227,12 @@ func (c *Config) normalize() {
 		lp = "short_first"
 	}
 	c.LenPolicy = lp
+
+	am := strings.TrimSpace(strings.ToLower(c.AffinityMode))
+	if am != "soft" && am != "hard" {
+		am = "soft"
+	}
+	c.AffinityMode = am
 
 	tm := strings.TrimSpace(strings.ToLower(c.TransportMode))
 	if tm != "sync" && tm != "async_pubsub" {
@@ -321,6 +337,10 @@ func (c *Config) PrintBanner() {
 		"KV_AWARE":                c.KVAware,
 		"LEN_AWARE":               c.LenAware,
 		"LEN_POLICY":              c.LenPolicy,
+		"AFFINITY_ENABLED":        c.AffinityEnabled,
+		"AFFINITY_MODE":           c.AffinityMode,
+		"AFFINITY_TTL_S":          c.AffinityTTLS,
+		"AFFINITY_HARD_TIMEOUT_S": c.AffinityHardTimeoutS,
 		"POOL_FACTOR":             c.PoolFactor,
 		"DEFAULT_MAX_TOKENS":      c.DefaultMaxTokens,
 		"ROUTER_MODE":             c.RouterMode,

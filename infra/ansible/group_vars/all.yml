@@ -63,11 +63,17 @@ control_plane_node: "node3"
 remove_control_plane_taint: true
 
 # node_name -> list of "key=value" labels to apply (idempotent, --overwrite).
+# 8 nodes, 4 RoCE pairs. Prod vLLM runs on pair-b + pair-d (avoid=vllm-shadow).
+# Shadow/infra nodes use avoid=vllm to exclude them from prod scheduling.
 node_labels:
-  node1: ["avoid=vllm-shadow", "roce-pair=pair-a"]
-  node2: ["avoid=vllm-shadow", "roce-pair=pair-a"]
-  node3: ["avoid=vllm", "roce-pair=pair-b", "vllm-pool=shadow"]
-  node4: ["avoid=vllm", "roce-pair=pair-b", "vllm-pool=shadow"]
+  node1: ["avoid=vllm-shadow", "roce-pair=pair-b"]
+  node2: ["avoid=vllm-shadow", "roce-pair=pair-b"]
+  node3: ["avoid=vllm", "roce-pair=pair-a"]
+  node4: ["avoid=vllm", "roce-pair=pair-a"]
+  node5: ["avoid=vllm", "roce-pair=pair-c"]
+  node6: ["avoid=vllm", "roce-pair=pair-c"]
+  node7: ["avoid=vllm-shadow", "roce-pair=pair-d"]
+  node8: ["avoid=vllm-shadow", "roce-pair=pair-d"]
 
 # ---- Ascend NPU (docs §1) ----
 # Host paths that must exist for the chart's hostPath mounts.
@@ -102,3 +108,22 @@ build_scripts:                            # repo scripts that build+push themsel
 mirror_images:
   - { src: "redis:7-alpine",                         dest: "redis:7-alpine" }
   - { src: "quay.io/ascend/vllm-ascend:glm5-openeuler", dest: "ascend/vllm-ascend:glm5-openeuler" }
+
+# ---- Autoscaling (KEDA) ----
+# KEDA drives the chart's ScaledObjects (src/vllm-kv-stack 60-keda-scaledobject).
+# Optional: only needed when you deploy with autoscaling.enabled=true.
+keda_namespace: "keda"
+keda_chart_version: "2.15.1"               # helm chart version; pin for reproducibility
+keda_operator_service_account: "keda-operator"   # SA the LWS scale RBAC is bound to
+# In-cluster Prometheus address KEDA queries (matches the monitoring role's
+# kube-prometheus-stack release). Surfaced here for docs / quick reference; the
+# chart's autoscaling.prometheusServerAddress is what actually takes effect.
+keda_prometheus_server_address: "http://kube-prometheus-stack-prometheus.{{ monitoring_namespace }}.svc:9090"
+
+# ---- Monitoring stack (Prometheus + Grafana) ----
+monitoring_namespace: "monitoring"
+kube_prometheus_stack_version: "72.6.2"   # helm chart version; pin for reproducibility
+grafana_nodeport: 31300                   # Grafana accessible at <node-ip>:31300
+prometheus_nodeport: 31190                # Prometheus accessible at <node-ip>:31190
+grafana_admin_password: "YGnvaWtK23WOKnGQocBe1WPUJkX0cMS87uPekjJ"
+grafana_access_ip: "{{ registry_host_ip }}"  # node3 IP, used only for the info message

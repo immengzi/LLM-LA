@@ -1,0 +1,35 @@
+---
+# Grant the keda-operator permission to read and scale LeaderWorkerSet objects.
+# KEDA scales targets through the /scale subresource; for built-in workloads
+# (Deployment/StatefulSet) the default keda-operator ClusterRole already covers
+# this, but the LeaderWorkerSet CRD needs an explicit grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: keda-operator-lws-scale
+  labels:
+    app.kubernetes.io/part-of: keda-operator
+    app.kubernetes.io/managed-by: laboom-ansible
+rules:
+  - apiGroups: ["leaderworkerset.x-k8s.io"]
+    resources: ["leaderworkersets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["leaderworkerset.x-k8s.io"]
+    resources: ["leaderworkersets/scale"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: keda-operator-lws-scale
+  labels:
+    app.kubernetes.io/part-of: keda-operator
+    app.kubernetes.io/managed-by: laboom-ansible
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: keda-operator-lws-scale
+subjects:
+  - kind: ServiceAccount
+    name: {{ keda_operator_service_account }}
+    namespace: {{ keda_namespace }}

@@ -43,6 +43,9 @@ type CentralQueue struct {
 	defaultModel string
 	queues       map[string][]queueItem
 
+	// Key-affinity conversation->endpoint map (nil unless AFFINITY_ENABLED).
+	affinity *AffinityMap
+
 	// req_id -> endpoint that pulled it (streaming identity / push notify).
 	reqEndpoint map[string]string
 
@@ -53,12 +56,17 @@ type CentralQueue struct {
 
 func NewCentralQueue(cfg *Config, kv *kvAware) *CentralQueue {
 	setCentralQueueLength(0)
+	var aff *AffinityMap
+	if cfg.AffinityEnabled {
+		aff = NewAffinityMap(cfg.AffinityTTLS)
+	}
 	return &CentralQueue{
 		cfg:          cfg,
 		kv:           kv,
 		pred:         getLengthPredictor(cfg),
 		defaultModel: cfg.ModelName,
 		queues:       make(map[string][]queueItem),
+		affinity:     aff,
 		reqEndpoint:  make(map[string]string),
 		chunkQueues:  make(map[string]chan map[string]interface{}),
 	}
@@ -106,7 +114,12 @@ func (q *CentralQueue) HasChunkQueue(reqID string) bool {
 }
 
 // SetSLOEngine wires the SLO-aware scheduler (Phase 2).
-func (q *CentralQueue) SetSLOEngine(e sloEngine) { q.slo = e }
+func (q *CentralQueue) SetSLOEngine(e sloEngine) {
+	q.slo = e
+	if impl, ok := e.(*sloEngineImpl); ok {
+		impl.affinity = q.affinity
+	}
+}
 
 // NextReqID generates a new unique request ID (uuid4 hex, like Python).
 func (q *CentralQueue) NextReqID() string {
@@ -135,6 +148,15 @@ func (q *CentralQueue) totalSizeLocked() int {
 	return n
 }
 
+// publishQueueMetricsLocked sets the legacy global gauge plus the additive
+// per-model breakdown used by per-model autoscaling. Must hold q.mu.
+func (q *CentralQueue) publishQueueMetricsLocked() {
+	setCentralQueueLength(q.totalSizeLocked())
+	for model, ql := range q.queues {
+		setCentralQueueLengthByModel(model, len(ql))
+	}
+}
+
 // Enqueue appends a request to the per-model queue.
 func (q *CentralQueue) Enqueue(prompt string, tEnqClient float64, meta map[string]interface{}, reqID, model string) string {
 	q.mu.Lock()
@@ -152,7 +174,7 @@ func (q *CentralQueue) Enqueue(prompt string, tEnqClient float64, meta map[strin
 	}
 	m := q.getQueueLocked(model)
 	q.queues[m] = append(q.queues[m], queueItem{reqID: reqID, prompt: prompt, tEnq: ts, meta: meta})
-	setCentralQueueLength(q.totalSizeLocked())
+	q.publishQueueMetricsLocked()
 	return reqID
 }
 
@@ -185,7 +207,7 @@ func (q *CentralQueue) Pull(endpoint string, want int, model string) []JobItem {
 	m := q.getQueueLocked(model)
 	ql := q.queues[m]
 	if len(ql) == 0 {
-		setCentralQueueLength(q.totalSizeLocked())
+		q.publishQueueMetricsLocked()
 		return nil
 	}
 
@@ -201,7 +223,14 @@ func (q *CentralQueue) Pull(endpoint string, want int, model string) []JobItem {
 	pool := make([]queueItem, maxScan)
 	copy(pool, ql[:maxScan])
 	q.queues[m] = ql[maxScan:]
-	setCentralQueueLength(q.totalSizeLocked())
+	q.publishQueueMetricsLocked()
+
+	// Hard-mode affinity: withhold items pinned to a different endpoint (still
+	// within their hold window) so they wait for their pod.
+	var heldBack []queueItem
+	if q.affinity != nil && q.cfg.AffinityMode == "hard" {
+		pool, heldBack = q.affinityFilterHard(pool, endpoint)
+	}
 
 	q.logReq("endpoint=%s want=%d pool_size=%d", endpoint, want, len(pool))
 
@@ -271,11 +300,18 @@ func (q *CentralQueue) Pull(endpoint string, want int, model string) []JobItem {
 		q.reqEndpoint[it.reqID] = endpoint
 	}
 
-	// Requeue leftovers at the front (preserve order).
-	if len(leftovers) > 0 {
-		q.queues[m] = append(append([]queueItem{}, leftovers...), q.queues[m]...)
+	// Affinity: record where each keyed conversation was dispatched so
+	// subsequent turns follow the cache to this endpoint.
+	if q.affinity != nil {
+		q.affinityRecordDispatch(chosen, endpoint)
 	}
-	setCentralQueueLength(q.totalSizeLocked())
+
+	// Requeue held-back (hard-mode) items + leftovers at the front, order-preserving.
+	requeueFront := append(append([]queueItem{}, heldBack...), leftovers...)
+	if len(requeueFront) > 0 {
+		q.queues[m] = append(requeueFront, q.queues[m]...)
+	}
+	q.publishQueueMetricsLocked()
 
 	items := make([]JobItem, len(chosen))
 	for i, it := range chosen {
@@ -334,9 +370,125 @@ func (q *CentralQueue) legacySort(pool []queueItem, endpoint string) ([]queueIte
 		if lenEnabled && lenPolicy != "" {
 			tier = q.selectLenAware(tier, lenPolicy)
 		}
+
+		// Soft-mode affinity: prefer items pinned to this endpoint within the
+		// tier (no-op when affinity is disabled or in hard mode).
+		tier = q.affinitySoftPartition(tier, endpoint)
+
 		ordered = append(ordered, tier...)
 	}
 	return ordered, kvHitsMap
+}
+
+// affinityKeyOf returns the conversation affinity key stamped in meta, or "".
+func affinityKeyOf(meta map[string]interface{}) string {
+	if meta == nil {
+		return ""
+	}
+	k, _ := meta["__affinity_key__"].(string)
+	return k
+}
+
+// affinityMatch reports whether this item's conversation maps to endpoint.
+func (q *CentralQueue) affinityMatch(endpoint string, meta map[string]interface{}) bool {
+	if q.affinity == nil {
+		return false
+	}
+	key := affinityKeyOf(meta)
+	if key == "" {
+		return false
+	}
+	return q.affinity.Lookup(key) == endpoint
+}
+
+// affinityFilterHard partitions the pool into (available, heldBack). An item is
+// held back when its conversation is pinned to a different endpoint and is still
+// within the hold window (router-stamped __affinity_ts__ + AffinityHardTimeoutS).
+func (q *CentralQueue) affinityFilterHard(pool []queueItem, endpoint string) ([]queueItem, []queueItem) {
+	if q.affinity == nil {
+		return pool, nil
+	}
+	now := nowS()
+	timeout := q.cfg.AffinityHardTimeoutS
+	available := make([]queueItem, 0, len(pool))
+	var heldBack []queueItem
+	holds, releases := 0, 0
+
+	for _, it := range pool {
+		key := affinityKeyOf(it.meta)
+		if key == "" {
+			available = append(available, it)
+			continue
+		}
+		target := q.affinity.Lookup(key)
+		if target == "" || target == endpoint {
+			available = append(available, it)
+			continue
+		}
+		affTS := it.tEnq
+		if v, ok := it.meta["__affinity_ts__"].(float64); ok {
+			affTS = v
+		}
+		if now-affTS >= timeout {
+			available = append(available, it)
+			releases++
+		} else {
+			heldBack = append(heldBack, it)
+			holds++
+		}
+	}
+
+	if holds > 0 {
+		incAffinityHold(holds)
+	}
+	if releases > 0 {
+		incAffinityRelease(releases)
+	}
+	return available, heldBack
+}
+
+// affinitySoftPartition stable-partitions a tier so items pinned to endpoint
+// come first, preserving input order within each group.
+func (q *CentralQueue) affinitySoftPartition(tier []queueItem, endpoint string) []queueItem {
+	if q.affinity == nil || q.cfg.AffinityMode != "soft" {
+		return tier
+	}
+	matched := make([]queueItem, 0, len(tier))
+	unmatched := make([]queueItem, 0, len(tier))
+	for _, it := range tier {
+		if q.affinityMatch(endpoint, it.meta) {
+			matched = append(matched, it)
+		} else {
+			unmatched = append(unmatched, it)
+		}
+	}
+	if len(matched) == 0 {
+		return tier
+	}
+	return append(matched, unmatched...)
+}
+
+// affinityRecordDispatch claims each dispatched conversation key for endpoint
+// and counts affinity hits.
+func (q *CentralQueue) affinityRecordDispatch(chosen []queueItem, endpoint string) {
+	if q.affinity == nil {
+		return
+	}
+	hits := 0
+	for _, it := range chosen {
+		key := affinityKeyOf(it.meta)
+		if key == "" {
+			continue
+		}
+		if q.affinity.Lookup(key) == endpoint {
+			hits++
+		}
+		q.affinity.Claim(key, endpoint)
+	}
+	if hits > 0 {
+		incAffinityHit(hits)
+	}
+	setAffinityMapSize(q.affinity.Size())
 }
 
 // selectLenAware mirrors len_select.select_len_aware: stable sort by predicted

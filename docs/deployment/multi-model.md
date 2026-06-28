@@ -386,11 +386,14 @@ The `model_list` section should contain all models.
 
 ### Per-model queue lengths
 
-The router's `/health` endpoint reports total queue length. For
-per-model debugging, check the Prometheus metric:
+The router's `/health` endpoint reports total queue length, and the global
+gauge `router_central_queue_length{namespace="vllm"}` is the cluster-wide
+total. For **per-model** depth (and per-model autoscaling), use the additive
+gauge with the `model` label (the model's `servedModelName`):
 
 ```
-router_central_queue_length{namespace="vllm"}
+router_central_queue_length_by_model{namespace="vllm", model="<servedModelName>"}
 ```
 
-Or use the `/debug/slo` endpoint for per-request tracking.
+Or use the `/debug/slo` endpoint for per-request tracking. For autoscaling on
+this metric, see [operations/autoscaling.md](../operations/autoscaling.md).

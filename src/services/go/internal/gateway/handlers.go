@@ -354,6 +354,28 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"req_id": rid})
 }
 
+// injectAffinity stamps the conversation affinity key + router-side timestamp
+// into meta. No-op when affinity is disabled. Mirrors api.py:_inject_affinity:
+// an explicit meta["affinity_key"] wins, otherwise the key is auto-derived from
+// the conversation's stable prefix (model + system + first user message).
+func (s *Server) injectAffinity(meta map[string]interface{}, model string, chatBody map[string]interface{}) {
+	if !s.cfg.AffinityEnabled || meta == nil {
+		return
+	}
+	key := ""
+	if explicit, ok := meta["affinity_key"].(string); ok && explicit != "" {
+		key = explicit
+	} else if chatBody != nil {
+		if msgs, ok := chatBody["messages"].([]interface{}); ok {
+			key = deriveAffinityKey(model, msgs)
+		}
+	}
+	if key != "" {
+		meta["__affinity_key__"] = key
+		meta["__affinity_ts__"] = nowS()
+	}
+}
+
 // admit enqueues (pull) or allocates a req_id (push) and injects the arrival
 // trace. Returns (rid, meta, isPullMode).
 func (s *Server) admit(req *EnqueueRequest, model string, tStart float64) (string, map[string]interface{}, bool) {
@@ -361,6 +383,7 @@ func (s *Server) admit(req *EnqueueRequest, model string, tStart float64) (strin
 	if meta == nil {
 		meta = make(map[string]interface{})
 	}
+	s.injectAffinity(meta, model, nil)
 
 	if s.cfg.TraceEnabled {
 		qlen := s.queue.Size()

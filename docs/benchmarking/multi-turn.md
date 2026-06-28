@@ -14,6 +14,10 @@ This is useful for:
 - Producing realistic traffic patterns that match production chat workloads
 - Comparing per-endpoint token distribution in multi-turn scenarios
 
+> Tip: to keep each conversation's turns on the same pod (maximizing prefix-cache
+> reuse), enable [conversation key affinity](../architecture/key-affinity.md) on
+> the router.
+
 ---
 
 ## How It Works

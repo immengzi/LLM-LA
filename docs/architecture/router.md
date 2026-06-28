@@ -126,6 +126,23 @@ API.
 
 ---
 
+## 5b. Conversation Key Affinity (Conceptual)
+
+Key affinity keeps all turns of one chat conversation on the same pod so the
+engine's prefix cache is reused across turns. It is **off by default** and is
+purely additive to KV- and length-awareness.
+
+The router derives a stable per-conversation key from the conversation's opening
+(`model + system prompt + first user message`) — which is identical on every
+turn — and remembers which pod last served it. On a pull it either *prefers*
+(soft mode) or *pins* (hard mode, time-bounded) that conversation to its pod.
+It requires no client/BooM/sidecar changes.
+
+See [key-affinity.md](key-affinity.md) for the full reference (modes, metrics,
+interactions, and source map).
+
+---
+
 ## 6. Configuration (High-Level)
 
 Most behavior is controlled via environment variables loaded into
@@ -134,6 +151,8 @@ Most behavior is controlled via environment variables loaded into
 - `ROUTER_MODE` – `pull`, `push-rr`, `push-random`, `push-leastq`.
 - `KV_AWARE` – enable/disable KV-aware routing.
 - `LEN_AWARE`, `LEN_POLICY` – enable length awareness and choose policy.
+- `AFFINITY_ENABLED`, `AFFINITY_MODE`, `AFFINITY_TTL_S`, `AFFINITY_HARD_TIMEOUT_S`
+  – conversation key affinity (see [key-affinity.md](key-affinity.md)).
 - `HASH_SERVICE_URL` – where to call `/compute_hashes`.
 - `REDIS_HOST`, `REDIS_PORT`, `MODEL_NAME` – KV watcher’s view of Redis keys.
 - `NAMESPACE`, `LABEL_SELECTOR`, `SIDECAR_PORT` – how to find sidecars in K8s.

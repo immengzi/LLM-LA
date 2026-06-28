@@ -361,14 +361,35 @@ class HelmConfig:
     autoscaling_max: int = 16
     autoscaling_threshold: str = "16"
 
-    # Prometheus query used by the autoscaler (string; can be multi-line in YAML)
-    autoscaling_prometheus_query: str = 'max(router_central_queue_length{namespace="vllm"})'
+    # Scaling signal: "queue" (router central queue, per model) or "vllm"
+    # (vLLM KV-cache pressure; works for router-less topologies).
+    autoscaling_signal: str = "queue"
+    # Threshold for the vllm signal (fraction of KV cache utilised, 0..1).
+    autoscaling_vllm_threshold: str = "0.8"
+    # Prometheus endpoint KEDA queries (kube-prometheus-stack service by default).
+    autoscaling_prometheus_server_address: str = (
+        "http://kube-prometheus-stack-prometheus.monitoring.svc:9090"
+    )
+    # KEDA polling / cooldown.
+    autoscaling_polling_interval: int = 10
+    autoscaling_cooldown_period: int = 300
+
+    # Optional full-query override (advanced). Empty -> use the signal-derived
+    # per-model query built by the chart. Kept for backward compatibility with
+    # older configs that set a global query string.
+    autoscaling_prometheus_query: str = ""
 
     # ---- router feature toggles (maps to Helm chart values.router.*) ----
     router_kv_aware: bool = True
     router_len_aware: bool = True
     router_len_policy: str = "short_first"  # short_first | long_first | even_short_long
     router_api_key: str = ""  # API key for /v1/chat/completions (empty = no auth)
+
+    # ---- conversation key-affinity knobs (maps to Helm chart values.router.affinity*) ----
+    router_affinity_enabled: bool = False
+    router_affinity_mode: str = "soft"  # soft | hard
+    router_affinity_ttl_s: float = 300.0
+    router_affinity_hard_timeout_s: float = 5.0
 
     # ---- AIBrix exposure knobs (maps to Helm chart values.aibrix.*) ----
     aibrix_enabled: bool = False

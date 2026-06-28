@@ -1,0 +1,63 @@
+---
+# Install KEDA (Kubernetes Event-driven Autoscaling) via Helm and grant the
+# keda-operator permission to scale LeaderWorkerSet resources (data-parallel
+# vLLM). KEDA already ships RBAC for Deployments/StatefulSets, so dense and
+# multi-model topologies need no extra grants — only the LWS /scale subresource
+# does. This role is only required when deploying with autoscaling.enabled=true.
+
+- name: Add kedacore Helm repo
+  ansible.builtin.command: helm repo add kedacore https://kedacore.github.io/charts
+  register: keda_repo
+  changed_when: "'has been added' in keda_repo.stdout"
+  failed_when: keda_repo.rc != 0 and 'already exists' not in keda_repo.stderr
+
+- name: Update Helm repos
+  ansible.builtin.command: helm repo update
+  changed_when: false
+
+- name: Create KEDA namespace
+  ansible.builtin.command: kubectl create namespace {{ keda_namespace }} --dry-run=client -o yaml
+  register: keda_ns_yaml
+  changed_when: false
+
+- name: Apply KEDA namespace
+  ansible.builtin.command: kubectl apply -f -
+  args:
+    stdin: "{{ keda_ns_yaml.stdout }}"
+  register: keda_ns_apply
+  changed_when: "'unchanged' not in keda_ns_apply.stdout"
+
+- name: Install / upgrade KEDA
+  ansible.builtin.command: >-
+    helm upgrade --install keda kedacore/keda
+    --namespace {{ keda_namespace }}
+    --version {{ keda_chart_version }}
+    --wait --timeout 5m
+  register: keda_install
+  changed_when: "'STATUS: deployed' in keda_install.stdout"
+
+- name: Wait for keda-operator deployment to be available
+  ansible.builtin.command: >-
+    kubectl -n {{ keda_namespace }} rollout status
+    deployment/keda-operator --timeout=180s
+  changed_when: false
+
+- name: Render LeaderWorkerSet scale RBAC for keda-operator
+  ansible.builtin.template:
+    src: lws-scale-rbac.yaml.j2
+    dest: /tmp/keda-lws-scale-rbac.yaml
+    mode: "0644"
+  changed_when: false
+
+- name: Apply LeaderWorkerSet scale RBAC
+  ansible.builtin.command: kubectl apply -f /tmp/keda-lws-scale-rbac.yaml
+  register: keda_rbac_apply
+  changed_when: "'unchanged' not in keda_rbac_apply.stdout"
+
+- name: Display KEDA info
+  ansible.builtin.debug:
+    msg: >-
+      KEDA is installed in namespace '{{ keda_namespace }}'. ScaledObjects from
+      the vllm-kv-stack chart (autoscaling.enabled=true) will query Prometheus at
+      {{ keda_prometheus_server_address }}. LeaderWorkerSet scaling is enabled via
+      the keda-operator-lws-scale ClusterRole.

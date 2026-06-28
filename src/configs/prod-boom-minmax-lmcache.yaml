@@ -122,7 +122,7 @@ helm:
   scheduler_cls: "lsched.lsched_vllm.LSchedVLLMAdapter"
   model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":16}'
 
-  # Image with lmcache, lmcache_ascend, and lsched pre-installed (local, not in reg.local:32000)
+  # vLLM image with lmcache, lmcache_ascend, and lsched pre-installed
   vllm_image: "minimax27:selfcontained"
   mooncake_master_image: "minimax27:selfcontained"
 
@@ -135,13 +135,15 @@ helm:
       tensorParallelSize: 8
       batchSize: 32
       sidecarPrefetch: 2
+      # dataParallel:
+      #   enabled: true
+      #   size: 2
+      #   sizeLocal: 1
+      #   rpcPort: 8888
+      #   hcclBuffSize: 1024
+      #   ompNumThreads: 16
       dataParallel:
-        enabled: true
-        size: 2
-        sizeLocal: 1
-        rpcPort: 8888
-        hcclBuffSize: 1024
-        ompNumThreads: 16
+        enabled: false
       vllm:
         gpuMemoryUtilization: 0.92
         dtype: bfloat16

@@ -90,6 +90,17 @@ spec:
               value: {{ quote .Values.router.lenPolicy }}
             # --------------------------------------
 
+            # ---- Key-affinity routing knobs ----
+            - name: AFFINITY_ENABLED
+              value: {{ ternary "true" "false" .Values.router.affinityEnabled | quote }}
+            - name: AFFINITY_MODE
+              value: {{ quote .Values.router.affinityMode }}
+            - name: AFFINITY_TTL_S
+              value: {{ quote (toString .Values.router.affinityTtlS) }}
+            - name: AFFINITY_HARD_TIMEOUT_S
+              value: {{ quote (toString .Values.router.affinityHardTimeoutS) }}
+            # ------------------------------------
+
             # ---- SLO-aware routing knobs ----
             - name: SLO_AWARE
               value: {{ ternary "true" "false" .Values.router.sloAware | quote }}

@@ -1,19 +1,64 @@
-{{- if and .Values.autoscaling.enabled (or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom")) }}
+{{/*
+  60-keda-scaledobject.yaml — Universal per-model autoscaling via KEDA.
+
+  Renders one ScaledObject per autoscaled model, covering all topologies:
+    - Single dense model  (legacy fallback, kind: Deployment)
+    - Multi-model         (one Deployment per models[] entry)
+    - Data parallel        (LeaderWorkerSet, scaled via its /scale subresource)
+
+  Fully gated on .Values.autoscaling.enabled: when false NOTHING is rendered,
+  so existing production releases (autoscaling disabled) are byte-for-byte
+  unchanged. The model list is synthesized identically to 40-vllm-unified.yaml
+  so target names and replica fallbacks always line up.
+*/}}
+{{- if .Values.autoscaling.enabled }}
+
+{{/* ---- Build effective models list (mirrors 40-vllm-unified.yaml) ---- */}}
+{{- $models := list }}
+{{- if .Values.models }}
+  {{- $models = .Values.models }}
+{{- else }}
+  {{- $legacyModel := dict
+        "name" "qwen"
+        "servedModelName" "served-model"
+        "replicas" (int (.Values.replicas.vllm | default 1))
+  }}
+  {{- if .Values.dataParallel.enabled }}
+    {{- $_ := set $legacyModel "dataParallel" .Values.dataParallel }}
+  {{- end }}
+  {{- $models = list $legacyModel }}
+{{- end }}
+
+{{- $as := .Values.autoscaling }}
+{{- range $idx, $m := $models }}
+{{- if eq (include "vllmkv.modelAutoscaled" (dict "root" $ "model" $m) | trim) "true" }}
+{{- $isDP := (default dict $m.dataParallel).enabled | default false }}
+{{- $sig := include "vllmkv.modelSignal" (dict "root" $ "model" $m) }}
+---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: vllm-qwen-scale-by-router-queue
-  namespace: {{ .Release.Namespace }}
+  name: vllm-{{ $m.name }}-autoscale
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    component: autoscaling
+    model: {{ $m.name }}
 spec:
   scaleTargetRef:
+    {{- if $isDP }}
+    apiVersion: leaderworkerset.x-k8s.io/v1
+    kind: LeaderWorkerSet
+    {{- else }}
+    apiVersion: apps/v1
     kind: Deployment
-    name: vllm-qwen
+    {{- end }}
+    name: vllm-{{ $m.name }}
 
-  minReplicaCount: {{ include "vllmkv.kedaMinReplicas" . }}
-  maxReplicaCount: {{ .Values.autoscaling.maxReplicaCount }}
+  minReplicaCount: {{ include "vllmkv.modelMinReplicas" (dict "root" $ "model" $m) }}
+  maxReplicaCount: {{ include "vllmkv.modelMaxReplicas" (dict "root" $ "model" $m) }}
 
-  pollingInterval: 10
-  cooldownPeriod: 300
+  pollingInterval: {{ $as.pollingInterval | default 10 }}
+  cooldownPeriod: {{ $as.cooldownPeriod | default 300 }}
 
   advanced:
     horizontalPodAutoscalerConfig:
@@ -39,9 +84,11 @@ spec:
   triggers:
     - type: prometheus
       metadata:
-        serverAddress: http://prometheus-kube-prometheus-prometheus.observability:9090
-        metricName: router_queue_pressure
+        serverAddress: {{ $as.prometheusServerAddress | default "http://kube-prometheus-stack-prometheus.monitoring.svc:9090" }}
+        metricName: {{ regexReplaceAll "[^a-zA-Z0-9_]" (printf "laboom_autoscale_%s_%s" $m.name $sig) "_" }}
         query: |
-{{ .Values.autoscaling.prometheusQuery | indent 10 }}
-        threshold: {{ quote .Values.autoscaling.threshold }}
+{{ include "vllmkv.kedaQuery" (dict "root" $ "model" $m) | indent 10 }}
+        threshold: {{ include "vllmkv.kedaThreshold" (dict "root" $ "model" $m) | quote }}
+{{- end }}
+{{- end }}
 {{- end }}

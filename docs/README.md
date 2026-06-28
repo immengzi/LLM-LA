@@ -25,6 +25,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | [router.md](architecture/router.md) | Central queue, pull/push dispatch, HTTP/ZMQ APIs |
 | [sidecar.md](architecture/sidecar.md) | Local queue, vLLM forwarding, KV event reporting |
 | [kv-cache-flow.md](architecture/kv-cache-flow.md) | KV-aware routing deep dive (Redis schema, scoring) |
+| [key-affinity.md](architecture/key-affinity.md) | Conversation stickiness (same chat → same pod) |
 | [prefix-hash.md](architecture/prefix-hash.md) | vLLM-compatible block hashing service |
 | [slo-aware-routing.md](architecture/slo-aware-routing.md) | Slack-based deadline scheduling |
 | [trace.md](architecture/trace.md) | Per-request distributed tracing |
@@ -54,6 +55,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | Doc | Description |
 |-----|-------------|
 | [cluster-setup.md](operations/cluster-setup.md) | Post-Kubernetes prep checklist (NFS, registry, RoCE, LWS) |
+| [autoscaling.md](operations/autoscaling.md) | Per-model KEDA autoscaling (dense, multi-model, data-parallel) |
 | [infra/](../infra/README.md) | Ansible automation of the cluster-setup checklist (`make prep` / `make verify`) |
 | [multi-node-setup-guide.md](operations/multi-node-setup-guide.md) | Deep multi-node infra reference (NFS, PV, registry, RoCE) |
 | [registry.md](operations/registry.md) | Private registry (`reg.local:32000`) operations |

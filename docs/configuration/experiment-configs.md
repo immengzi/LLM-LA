@@ -23,6 +23,10 @@ The same routing behaviour is expressed under three names depending on the layer
 | `router_kv_aware` | `router.kvAware` | `KV_AWARE` | bool |
 | `router_len_aware` | `router.lenAware` | `LEN_AWARE` | bool |
 | `router_len_policy` | `router.lenPolicy` | `LEN_POLICY` | `short_first`, `long_first` |
+| `router_affinity_enabled` | `router.affinityEnabled` | `AFFINITY_ENABLED` | bool ([details](../architecture/key-affinity.md)) |
+| `router_affinity_mode` | `router.affinityMode` | `AFFINITY_MODE` | `soft`, `hard` |
+| `router_affinity_ttl_s` | `router.affinityTtlS` | `AFFINITY_TTL_S` | float (s) |
+| `router_affinity_hard_timeout_s` | `router.affinityHardTimeoutS` | `AFFINITY_HARD_TIMEOUT_S` | float (s) |
 
 Minimal example:
 
