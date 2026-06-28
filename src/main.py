@@ -340,6 +340,7 @@ def main():
             conversations=conversations,
             conv_output_tokens=conv_output_tokens,
             multi_model=cfg.multi_model,
+            claude_code_injection=getattr(cfg, "claude_code_injection", None),
         )
     finally:
         t_end_load = time.time()

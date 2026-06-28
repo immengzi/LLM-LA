@@ -1321,14 +1321,6 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         except Exception as e:
             click.echo(f"[sweep] WARN: failed to helm get values: {e}")
 
-        rendered_text = _helm_template(
-            release=effective_release,
-            chart_dir=chart_dir,
-            namespace=namespace,
-            values_file=values_file if values_file.is_file() else None,
-            set_values=set_values,
-        )
-
         # ---- Create per-pod NodePort services for direct vLLM access ----
         per_pod_endpoints = (
             _create_per_pod_services(
@@ -1340,6 +1332,19 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             if expose_per_pod
             else []
         )
+
+        try:
+            rendered_text = _helm_template(
+                release=effective_release,
+                chart_dir=chart_dir,
+                namespace=namespace,
+                values_file=values_file if values_file.is_file() else None,
+                set_values=set_values,
+            )
+            (REPO_ROOT / "vllm-k8s.yaml").write_text(rendered_text, encoding="utf-8")
+        except Exception as e:
+            click.echo(f"[sweep] WARN: helm template for vllm-k8s.yaml failed: {e}")
+            (REPO_ROOT / "vllm-k8s.yaml").write_text("# helm template failed\n", encoding="utf-8")
 
         # ---- Print BooM / external gateway config for maintainer ----
         _boom_config_text = _print_boom_config(cfg, h, models_list, namespace, per_pod_endpoints)

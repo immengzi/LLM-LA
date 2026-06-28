@@ -160,8 +160,15 @@ def _iter_lmsys_pairs(
             ds = load_from_disk(dataset_name)
         except Exception as e:
             raise RuntimeError(f"Failed to load local dataset at {dataset_name}: {e}") from e
-        if split:
-            print(f"[LMSYS] NOTE: local dataset loaded; 'split={split}' is not enforced here.")
+        from datasets import DatasetDict
+        if isinstance(ds, DatasetDict):
+            effective_split = split or "train"
+            if effective_split not in ds:
+                raise RuntimeError(
+                    f"Split '{effective_split}' not found in {dataset_name}; "
+                    f"available: {list(ds.keys())}"
+                )
+            ds = ds[effective_split]
     else:
         print(
             f"[LMSYS] Loading from HF Hub: {dataset_name}:{split} (streaming={cfg.streaming})"
@@ -337,6 +344,15 @@ def _iter_lmsys_conversations(
             ds = load_from_disk(dataset_name)
         except Exception as e:
             raise RuntimeError(f"Failed to load local dataset at {dataset_name}: {e}") from e
+        from datasets import DatasetDict
+        if isinstance(ds, DatasetDict):
+            effective_split = split or "train"
+            if effective_split not in ds:
+                raise RuntimeError(
+                    f"Split '{effective_split}' not found in {dataset_name}; "
+                    f"available: {list(ds.keys())}"
+                )
+            ds = ds[effective_split]
     else:
         from datasets import load_dataset
         ds = load_dataset(dataset_name, split=split, streaming=cfg.streaming)
@@ -518,6 +534,15 @@ def _iter_codeflowbench_conversations(
             ds = load_from_disk(dataset_name)
         except Exception as e:
             raise RuntimeError(f"Failed to load local dataset at {dataset_name}: {e}") from e
+        from datasets import DatasetDict
+        if isinstance(ds, DatasetDict):
+            effective_split = cfg.split or "train"
+            if effective_split not in ds:
+                raise RuntimeError(
+                    f"Split '{effective_split}' not found in {dataset_name}; "
+                    f"available: {list(ds.keys())}"
+                )
+            ds = ds[effective_split]
     else:
         from datasets import load_dataset
         ds = load_dataset(dataset_name, split=cfg.split, streaming=cfg.streaming)
@@ -623,29 +648,71 @@ def build_conversations_from_codeflowbench(
     """
     Returns a list of Conversation objects from the CodeFlowBench dataset.
     Respects cfg.multi_turn for multi-turn conversation building.
+    Respects cfg.min_user_turns for post-construction filtering by user turn count.
     """
     import random as _random
 
     multi_turn = getattr(cfg, 'multi_turn', False)
     seed = getattr(cfg, 'seed', None)
+    min_user_turns = getattr(cfg, 'min_user_turns', None)
+    effective_min_rounds = max(min_rounds, min_user_turns or 0)
+    max_pool_size = getattr(cfg, 'max_pool_size', None)
 
     if seed is not None:
-        pool_size = max(n, n * 2)
+        if max_pool_size and max_pool_size > 0:
+            pool_size = max_pool_size
+        else:
+            pool_size = max(n, n * 20)
         pool: List[Conversation] = list(
             _iter_codeflowbench_conversations(
-                cfg, max_n=pool_size, min_rounds=min_rounds, multi_turn=multi_turn
+                cfg, max_n=pool_size, min_rounds=1, multi_turn=multi_turn
             )
         )
+        raw_pool_size = len(pool)
+
+        if effective_min_rounds > 1:
+            pool = [c for c in pool if c.num_rounds >= effective_min_rounds]
+
+        filtered_pool_size = len(pool)
+        if min_user_turns is not None and min_user_turns > 1:
+            print(
+                f"[CodeFlowBench] min_user_turns={min_user_turns}: "
+                f"raw_pool={raw_pool_size}, after_filter={filtered_pool_size}"
+            )
+
         rng = _random.Random(seed)
         rng.shuffle(pool)
         result = pool[:n]
-        print(f"[CodeFlowBench] Seeded: seed={seed}, pool={len(pool)}, selected={len(result)}, multi_turn={multi_turn}")
+
+        if len(result) < n:
+            print(
+                f"[CodeFlowBench] WARNING: filtered pool ({filtered_pool_size}) < "
+                f"requested ({n}); returning {len(result)} conversations"
+            )
+
+        print(
+            f"[CodeFlowBench] Seeded: seed={seed}, pool={filtered_pool_size}, "
+            f"selected={len(result)}, multi_turn={multi_turn}"
+        )
     else:
-        result = []
-        for conv in _iter_codeflowbench_conversations(cfg, max_n=n, min_rounds=min_rounds, multi_turn=multi_turn):
-            result.append(conv)
-            if len(result) >= n:
+        if max_pool_size and max_pool_size > 0:
+            iter_limit = max_pool_size
+        else:
+            iter_limit = n * 20
+        pool: List[Conversation] = []
+        for conv in _iter_codeflowbench_conversations(cfg, max_n=iter_limit, min_rounds=1, multi_turn=multi_turn):
+            if effective_min_rounds > 1 and conv.num_rounds < effective_min_rounds:
+                continue
+            pool.append(conv)
+            if len(pool) >= n:
                 break
+
+        result = pool
+        if min_user_turns is not None and min_user_turns > 1:
+            print(
+                f"[CodeFlowBench] min_user_turns={min_user_turns}: "
+                f"selected={len(result)} conversations"
+            )
 
     return result
 
