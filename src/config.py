@@ -6,8 +6,8 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
-from typing import List, Optional
+from pathlib import Path, PurePosixPath
+from typing import Any, List, Optional
 import yaml
 from urllib.parse import urlparse
 
@@ -510,6 +510,11 @@ class HelmConfig:
     namespace: str = ""
     port_offset: int = 0
     pin_node_name: str = ""
+
+    # ---- Raw Helm values overlay ----
+    # Optional dot-path map passed through to sweep_methods.py set_values.
+    # Empty by default so legacy configs produce identical effective values.
+    values: dict = field(default_factory=dict)
     # --------------------------------------------------------------------
 
     # ---- vLLM model config (maps to Helm chart values.modelVolume.*) ----
@@ -660,6 +665,9 @@ def migrate_legacy_helm_to_models(h: HelmConfig) -> None:
 
 @dataclass
 class ClientConfig:
+    switch_cluster: Optional[str] = None
+    experiments_root: str = "/mnt/nvme1/saeid/experiments"
+
     router_url: str = "http://127.0.0.1:30080"
     total_requests: int = 50
     prompt_source: str = "file"
@@ -728,6 +736,40 @@ def _merge_dataclass(dc_cls, data_dict: dict):
     return base
 
 
+def _deep_merge_missing(profile: dict, inline: dict) -> dict:
+    """Return profile overlaid by inline values; inline explicit values win."""
+    merged = dict(profile)
+    for key, inline_value in inline.items():
+        profile_value = merged.get(key)
+        if isinstance(profile_value, dict) and isinstance(inline_value, dict):
+            merged[key] = _deep_merge_missing(profile_value, inline_value)
+        else:
+            merged[key] = inline_value
+    return merged
+
+
+def _load_cluster_profile(config_path: str, cluster_name: str) -> dict:
+    cfg_path = Path(config_path).resolve()
+    clusters_path = cfg_path.parent / "clusters.yaml"
+    if not clusters_path.is_file():
+        raise FileNotFoundError(f"switch_cluster={cluster_name!r} requires {clusters_path}")
+
+    with open(clusters_path, "r") as f:
+        raw_profiles = yaml.safe_load(f) or {}
+
+    profiles = raw_profiles.get("clusters", raw_profiles)
+    if not isinstance(profiles, dict):
+        raise ValueError(f"Invalid cluster profiles in {clusters_path}: expected mapping")
+
+    profile = profiles.get(cluster_name)
+    if profile is None:
+        known = ", ".join(sorted(str(k) for k in profiles.keys()))
+        raise ValueError(f"Unknown switch_cluster {cluster_name!r}; known clusters: {known}")
+    if not isinstance(profile, dict):
+        raise ValueError(f"Invalid profile for switch_cluster={cluster_name!r}: expected mapping")
+    return profile
+
+
 def _derive_results_zmq_from_router_url(router_url: str) -> str:
     """
     Derive a sensible default ZMQ endpoint from router_url.
@@ -751,7 +793,17 @@ def load_config(path: str) -> ClientConfig:
     with open(path, "r") as f:
         raw = yaml.safe_load(f) or {}
 
+    switch_cluster = raw.get("switch_cluster")
+    if switch_cluster is not None:
+        switch_cluster = str(switch_cluster).strip()
+        if not switch_cluster:
+            switch_cluster = None
+    if switch_cluster:
+        profile = _load_cluster_profile(path, switch_cluster)
+        raw = _deep_merge_missing(profile, raw)
+
     router_url = raw.get("router_url", ClientConfig.router_url)
+    experiments_root = raw.get("experiments_root") or ClientConfig.experiments_root
     total_requests = int(raw.get("total_requests", ClientConfig.total_requests))
     prompt_source = raw.get("prompt_source", ClientConfig.prompt_source)
 
@@ -906,6 +958,8 @@ def load_config(path: str) -> ClientConfig:
     vllm_avoid_label = str(raw.get("vllm_avoid_label", "") or "").strip()
 
     return ClientConfig(
+        switch_cluster=switch_cluster,
+        experiments_root=experiments_root,
         router_url=router_url,
         total_requests=total_requests,
         prompt_source=prompt_source,

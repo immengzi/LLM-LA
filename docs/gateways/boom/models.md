@@ -155,7 +155,7 @@ vLLM exposes an OpenAI-compatible API.
 ```yaml
 boom:
   enabled: false              # set true to deploy the BooM pod
-  image: boom-gateway:v4  # container image
+  image: boom-gateway:v5  # container image
   masterKey: "sk-boom-master" # admin master key
   nodePort: 30401             # external access port
   databaseUrl: ""             # optional Postgres for spend persistence

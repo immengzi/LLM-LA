@@ -250,7 +250,7 @@ See [BooM overview](../gateways/boom/overview.md).
 | `directRoutingStrategy` | `round_robin` | `round_robin` \| `key_affinity` (direct mode only) |
 | `maxInflight` | `0` | Cap concurrent upstream connections (0 = unlimited) |
 | `upstreamTimeoutSeconds` | `7200` | Upstream HTTP timeout |
-| `image` | `boom-gateway:v4` | Image ([build](../gateways/boom/build.md)) |
+| `image` | `boom-gateway:v5` | Image ([build](../gateways/boom/build.md)) |
 | `imagePullPolicy` | `Always` | Pull policy (so mutable tags pick up new pushes) |
 | `masterKey` | `sk-boom-master` | Admin key (override in production) |
 | `nodePort` | `30401` | External access |

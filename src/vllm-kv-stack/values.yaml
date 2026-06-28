@@ -492,9 +492,9 @@ boom:
   # Long generations need this high or BooM returns 502 ("Upstream provider unavailable").
   upstreamTimeoutSeconds: 7200
 
-  # BooM Gateway image — built from BooMGateway-main/ and pushed to your registry.
+  # BooM Gateway image — built from the cloned boom-gateway/ repo and pushed to your registry.
   # The global.imageRegistry rewrite applies here too if set.
-  image: boom-gateway:v4
+  image: boom-gateway:v5
 
   # Always pull so tag:latest (or any mutable tag) picks up the newest image after push.
   # Set to IfNotPresent to use cached layers only (not recommended with :latest).

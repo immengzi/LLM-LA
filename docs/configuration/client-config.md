@@ -9,6 +9,14 @@ Back to overview: `README.md`.
 
 ## Top-level keys
 
+### `switch_cluster: str | null`
+
+Selects a cluster profile from the `clusters.yaml` file next to the experiment config. The selected profile supplies cluster-local defaults such as endpoints, host paths, registry settings, image names, and Mooncake/pinning values.
+
+Explicit values in the experiment config override values from the profile. See `docs/switch_cluster.md` for the full workflow. For the current BZ cluster's `reg.local:32000` registry setup and verification, see the BZ cluster registry record in `docs/operations/registry.md`.
+
+---
+
 ### `router_url: str`
 
 Base URL of the router service, e.g.:
