@@ -231,6 +231,12 @@ prod-boom-minmax-lmcache-hq:
 # 10-2-template-boom-claude-glm-stability:
 #   - pull
 
+# 1-1-boom-qwen-mooncake-bz:
+#   - pull
+
+prod-boom-minmax-mooncake-bz:
+  - pull
+
 # 11-1-template-boom-direct-multimodel:
 #   - pull
 

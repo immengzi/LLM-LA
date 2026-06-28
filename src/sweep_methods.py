@@ -40,7 +40,7 @@ import time
 import tempfile
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union, cast
 from urllib.parse import urlparse
 
 import click
@@ -55,6 +55,8 @@ EXPERIMENTS_ROOT = REPO_ROOT / "experiments"
 
 # Single release name for all modes — avoids RBAC ownership conflicts
 RELEASE = "vllm"
+
+ConfigValue = Union[None, str, int, float, bool, List["ConfigValue"], Dict[str, "ConfigValue"]]
 
 
 # ---------------------------
@@ -78,6 +80,20 @@ def _kubectl(args: List[str], *, check: bool = True, capture: bool = False) -> s
 
 def _helm(args: List[str], *, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
     return _run(["helm", *args], check=check, capture=capture)
+
+
+def _flatten_helm_values(prefix: str, value: ConfigValue) -> Dict[str, ConfigValue]:
+    """Flatten nested Helm values into --set dot paths."""
+    if not isinstance(value, dict):
+        return {prefix: value} if prefix else {}
+
+    flattened: Dict[str, ConfigValue] = {}
+    for key, child in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise click.ClickException(f"Invalid helm.values key: {key!r}")
+        path = f"{prefix}.{key}" if prefix else key
+        flattened.update(_flatten_helm_values(path, child))
+    return flattened
 
 
 # ---------------------------
@@ -169,6 +185,9 @@ def _write_temp_job_config(cfg, method: str) -> Path:
     backend=boom    -> same as litellm (label only)
     """
     cfg_dict = asdict(cfg)
+    # cfg is already resolved by load_config(). Temp files live under /tmp, so
+    # preserving switch_cluster would make main.py look for /tmp/clusters.yaml.
+    cfg_dict["switch_cluster"] = None
     backend = str(cfg_dict.get("backend", "router") or "router").strip().lower()
 
     if backend == "aibrix":
@@ -211,7 +230,7 @@ def _helm_template(
     chart_dir: Path,
     namespace: str,
     values_file: Optional[Path],
-    set_values: Dict[str, object],
+    set_values: Dict[str, ConfigValue],
 ) -> str:
     cmd: List[str] = [
         "template",
@@ -243,7 +262,7 @@ def _helm_install_or_upgrade(
     chart_dir: Path,
     namespace: str,
     values_file: Optional[Path],
-    set_values: Dict[str, object],
+    set_values: Dict[str, ConfigValue],
     timeout: str = "240m",
     extra_values_files: Optional[List[Path]] = None,
 ) -> None:
@@ -397,16 +416,16 @@ def _debug_wait_failure(namespace: str) -> None:
 # operator-mode helpers
 # ---------------------------
 
-def _flat_to_nested(flat: Dict[str, object]) -> Dict[str, object]:
+def _flat_to_nested(flat: Dict[str, ConfigValue]) -> Dict[str, ConfigValue]:
     """Convert {'a.b.c': 1, 'a.b.d': 2} to {'a': {'b': {'c': 1, 'd': 2}}}."""
-    result: Dict[str, object] = {}
+    result: Dict[str, ConfigValue] = {}
     for key, val in flat.items():
         parts = key.split(".")
         d = result
         for part in parts[:-1]:
             if part not in d or not isinstance(d[part], dict):
                 d[part] = {}
-            d = d[part]
+            d = cast(Dict[str, ConfigValue], d[part])
         d[parts[-1]] = val
     return result
 
@@ -424,7 +443,7 @@ def _operator_apply(
     *,
     cr_name: str,
     namespace: str,
-    set_values: Dict[str, object],
+    set_values: Dict[str, ConfigValue],
 ) -> None:
     """Generate a VllmKvStack CR and kubectl-apply it."""
     nested = _flat_to_nested(set_values)
@@ -822,7 +841,7 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             if not skip_vllm:
                 _helm_uninstall(release=release, namespace=namespace)
 
-        set_values: Dict[str, object] = {
+        set_values: Dict[str, ConfigValue] = {
             "backend": backend,
             "replicas.vllm": int(h.replicas),
             "batchSize": int(h.batch_size),
@@ -1198,6 +1217,17 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 f"pvc={set_values['cacheWarm.pvcName']!r} "
                 f"subPath={set_values['cacheWarm.modelSubPath']!r}"
             )
+
+        # ---- Explicit Helm dot-path overlay ----
+        # Config-local values win over generated sweep defaults. When absent,
+        # legacy configs follow the exact old set_values path.
+        raw_helm_values = getattr(h, "values", {}) or {}
+        if raw_helm_values:
+            if not isinstance(raw_helm_values, dict):
+                raise click.ClickException("helm.values must be a mapping of Helm dot-paths to values")
+            explicit_values = _flatten_helm_values("", raw_helm_values)
+            set_values.update(explicit_values)
+            click.echo(f"[sweep] applied {len(explicit_values)} explicit helm.values override(s)")
 
         click.echo(f"[sweep] backend={backend}  deploy_mode={deploy_mode}  skip_vllm={skip_vllm}")
         click.echo("[sweep] set values:")

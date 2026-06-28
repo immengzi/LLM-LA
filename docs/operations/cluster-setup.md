@@ -205,7 +205,7 @@ images must be present in the registry before deploying:
 | `kv-router` | `services/router_service/` — `docker build && docker push` |
 | `kv-sidecar` | `services/sidecar/` — `docker build && docker push` |
 | `kv-router-go`, `kv-sidecar-go` | `services/go/build.sh` |
-| `boom-gateway` | `BooMGateway-main/BooMGateway-main/build.sh` |
+| `boom-gateway` | `boom-gateway/` — `cargo build --release -p boom-main`, then package with `src/boom-integration/Dockerfile` |
 | `vllm-cpu-hash` | `services/prefix_hash/` |
 | `ascend/vllm-ascend` | Pull from `quay.io/ascend/vllm-ascend`, retag, push |
 | `redis:7-alpine` | Pull from Docker Hub, retag, push |

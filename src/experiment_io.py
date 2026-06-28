@@ -136,7 +136,7 @@ def init_experiment(
       (experiment_dir_path, ExperimentLogger)
     """
     cfgs_root = Path(configs_root)
-    exps_root = Path(experiments_root)
+    exps_root = Path(os.environ.get("EXPERIMENTS_ROOT", experiments_root) or experiments_root)
     cfgs_root.mkdir(exist_ok=True)
     exps_root.mkdir(exist_ok=True)
 

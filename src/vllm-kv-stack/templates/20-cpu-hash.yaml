@@ -1,5 +1,6 @@
 {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
 {{- if .Values.deploy.cpuHash }}
+{{- $cpuHash := default dict .Values.cpuHash }}
 {{- if not .Values.modelVolume.modelSubPath }}
 {{- fail "modelVolume.modelSubPath must be set — deploy PV/PVC once on the parent dir and pass the model subfolder name per deployment" }}
 {{- end }}
@@ -42,6 +43,9 @@ spec:
             - -c
           args:
             - |
+              {{- if $cpuHash.ascendDriverMounts }}
+              export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
+              {{- end }}
               source /opt/venv/bin/activate 2>/dev/null || true && \
               python kv_cache_aware/prefix_hash_service.py \
                 --model-path /model \
@@ -63,6 +67,9 @@ spec:
               mountPath: /model
               readOnly: true
               subPath: {{ .Values.modelVolume.modelSubPath }}
+            {{- if $cpuHash.ascendDriverMounts }}
+            {{- include "vllmkv.ascendDriverMounts" . | nindent 12 }}
+            {{- end }}
           resources:
             requests:
               cpu: "1000m"
@@ -74,6 +81,9 @@ spec:
         - name: model
           persistentVolumeClaim:
             claimName: models-nfs-pvc
+        {{- if $cpuHash.ascendDriverMounts }}
+        {{- include "vllmkv.ascendDriverVolumes" . | nindent 8 }}
+        {{- end }}
 
 ---
 apiVersion: v1

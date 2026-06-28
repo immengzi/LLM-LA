@@ -122,7 +122,7 @@ boom:
 ```yaml
 boom:
   enabled: false
-  image: boom-gateway:latest
+  image: boom-gateway:v5
   masterKey: "sk-boom-master"
   nodePort: 30401
   databaseUrl: ""
