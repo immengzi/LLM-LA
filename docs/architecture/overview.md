@@ -20,9 +20,6 @@ flowchart TB
   Sidecar -->|"ZMQ kv@ events -> Redis"| Redis
   Sidecar -->|"/result or ZMQ"| Router
   Router -->|result| Client
-
-  Hash["Prefix-Hash :9095<br/>(legacy, optional)"]
-  Router -. "compute_hashes<br/>only if KV_HASH_SOURCE=external" .-> Hash
 ```
 
 LA-Boom places a custom **router** and per-pod **sidecars** around stock vLLM, plus **Redis** for KV-aware placement. KV-block hashing runs **inside the router by default** (in-process for the Python router; in a tiny in-container hasher for the Go gateway). The standalone **prefix-hash** service is an optional legacy mode (`KV_HASH_SOURCE=external`) and is the dashed box above — see [prefix-hash.md](prefix-hash.md).

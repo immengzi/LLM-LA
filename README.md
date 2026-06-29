@@ -34,7 +34,6 @@ flowchart TB
   end
 
   Router["Router :8080 / :30080<br/>KV-aware + length-aware + SLO scheduling<br/>inline KV-block hashing<br/>(Python or Go)"]
-  Hash["Prefix-Hash :9095<br/>(legacy, optional)"]
   Redis[("Redis :6379<br/>KV block ownership")]
   Prom["Prometheus"]
 
@@ -53,7 +52,6 @@ flowchart TB
   App --> BooM --> Router
   App --> LiteLLM --> Router
   Bench --> Router
-  Router -. "compute_hashes<br/>only if KV_HASH_SOURCE=external" .-> Hash
   Router -->|"pull / push"| SA
   Router -->|"pull / push"| SB
   Router -->|"SCAN {model}:kvblock:*"| Redis
