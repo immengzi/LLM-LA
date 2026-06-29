@@ -1,415 +1,50 @@
-# ── prod: ready-to-run production configs ──
+# ── PROD master sweep config ──
+# Production MiniMax-M2.7 deployments. One active entry at a time; all run with
+# the `pull` method. Configs are prefixed by cluster: prod-bz-* (this machine)
+# and prod-yz-* (the yz/hq cluster, including its shadow pool). Non-prod /
+# benchmark plans live in non-prod/1-master_config.yaml and
+# non-prod/boom_master.yaml.
+#
+# Run:  cd src && python sweep_methods.py            # uses this file by default
+#       cd src && python sweep_methods.py --config 1-master_config
 
-# prod-boom-minmax:
-#   - pull
-
-# prod-boom-minmax-mooncake:
-#   - pull
-
-# prod-boom-minmax-lmcache:
-#   - pull
-
-prod-boom-minmax-lmcache-hq:
+# ── BZ cluster (this machine) — MiniMax-M2.7, BooM + router, DP2 + Mooncake ──
+prod-bz-boom-minmax-mooncake:
   - pull
 
-# prod-shadow-boom-minmax-lmcache-hq:
-#   - pull
-
-# KEDA autoscaling validation on the shadow pool (release/ns vllm-shadow).
+# ── BZ KEDA autoscaling validation (dense Qwen3-8B), isolated release ──
 # Requires: make monitoring && make keda. See docs/operations/autoscaling.md.
-# prod-shadow-autoscaling-qwen:
+# prod-bz-autoscaling-qwen:
 #   - pull
 
-# router:
+# ── YZ cluster — MiniMax-M2.7 variants ──
+# prod-yz-boom-minmax:
 #   - pull
-#   - push-rr
-#   - push-random
-#   - push-least-queue
 
-# router-tp2:
+# prod-yz-boom-minmax-mooncake:
 #   - pull
-  # - push-rr
-#   - push-random
-  # - push-least-queue
 
-
-# router-tp8-glm:
-#   - pull
-  # - push-rr
-#   - push-random
-  # - push-least-queue
-
-# router-tp8-qwen:
-#   - pull
-  # - push-rr
-#   - push-random
-  # - push-least-queue
-
-# aibrix:
-  # - random
-  # - prefix-cache
-  # - least-request
-  # - throughput
-  # - prefix-cache
-  # - least-busy-time
-  # - least-kv-cache
-  # - least-latency
-  # - prefix-cache-preble
-  # - vtc-basic
-  # - pd
-  # - session-affinity
-
-# litellm:
-#   - pull
-  # - push-rr
-  # - push-random
-  # - push-least-queue
-
-# boom:
-#   - pull
-  # - push-rr
-  # - push-random
-  # - push-least-queue
-
-# boom-claude:
-#   - pull
-
-# boom-claude-glm:
-#   - pull
-
-# router-tp8-glm-mooncake:
-#   - pull
-
-# boom-claude-glm:
-#   - pull
-
-# boom-claude-glm-200k:
-#   - pull
-
-# router-slo:
-#   - pull
-
-# mooncake:
-#   - pull
-
-# boom-claude-glm:
-#   - pull
-
-# boom-claude-glm-mooncake:
-#   - pull
-
-# boom-claude-glm-200k:
-#   - pull
-
-# boom-claude-glm-dp:
-#   - pull
-
-# boom-claude-glm-multi-model:
-#   - pull
-
-# boom-claude-glm-dp:
-#   - pull
-
-# boom-direct-glm-dp:
-#   - round_robin
-  # - key_affinity
-
-
-# ── BooM + our KV-aware router (pull) — sweep across replicas × batch sizes ──
-# llm-la-claude-glm-dp-r2-b8:
-#   - pull
-# llm-la-claude-glm-dp-r4-b8:
-#   - pull
-# llm-la-claude-glm-dp-r6-b8:
-#   - pull
-# llm-la-claude-glm-dp-r8-b8:
-#   - pull
-# llm-la-claude-glm-dp-r2-b8:
-#   - push-rr
-# llm-la-claude-glm-dp-r4-b8:
-#   - push-rr
-# llm-la-claude-glm-dp-r6-b8:
-#   - push-rr
-# llm-la-claude-glm-dp-r8-b8:
-#   - push-rr
-
-# ── BooM direct (no router/sidecar) — sweep across replicas × batch sizes ──
-# boom-direct-glm-dp-r2-b8:
-#   - round_robin
-# boom-direct-glm-dp-r2-b16:
-#   - round_robin
-# boom-direct-glm-dp-r2-b32:
-#   - round_robin
-# boom-direct-glm-dp-r2-5-b8:
-#   - round_robin
-# boom-direct-glm-dp-r2-5-b16:
-#   - round_robin
-# boom-direct-glm-dp-r2-5-b32:
-#   - round_robin
-
-# template-dslen-boom-direct-claude-glm:
-#   - round_robin
-
-# template-boom-claude-glm:
-#   - pull
-
-# template-boom-direct-claude-glm:
-#   - round_robin
-
-# template-llm-la:
-#   - pull
-
-
-# template-dslen-boom-claude-glm:
-#   - pull
-
-# template-dslen-boom-direct-claude-glm:
-#   - round_robin
-
-# template-dslen-llm-la:
-#   - pull
-
-# 2-1-template-boom-direct-claude-glm:
-#   - round_robin
-
-# 2-2-template-boom-claude-glm:
-#   - pull
-
-# 3-1-template-boom-direct-claude-glm:
-#   - round_robin
-
-# 3-2-template-boom-claude-glm:
-#   - pull
-
-# 4-1-template-boom-direct-claude-glm:
-#   - round_robin
-
-# 4-2-template-boom-claude-glm:
-#   - pull
-
-# 4-1-template-boom-direct-claude-glm-mooncake:
-#   - round_robin
-
-# 4-2-template-boom-claude-glm-mooncake:
-#   - pull
-
-# 5-1-template-boom-direct-claude-glm-mooncake:
-#   - round_robin
-
-# 5-2-template-boom-claude-glm-mooncake:
-#   - pull
-
-# ── 6: Streaming configs (TTFT/TPOT measurement) ──
-
-# 6-1-template-boom-direct-claude-glm-stream:
-#   - round_robin
-
-# 6-2-template-boom-claude-glm-stream:
-#   - pull
-
-# 6-3-template-boom-direct-qwen-stream:
-#   - round_robin
-
-# 6-4-template-boom-qwen-stream:
-#   - pull
-
-# 7-1-template-boom-direct-multiturn-glm:
-#   - round_robin
-
-# 7-2-template-boom-multiturn-glm:
-#   - pull
-
-# 8-1-template-boom-direct-multiturn-key-affinity:
-#   - key_affinity
-
-# 4-2-template-boom-claude-glm:
-#   - pull
-
-# 10-1-template-boom-claude-glm-stability:
-#   - pull
-
-# 10-2-template-boom-claude-glm-stability:
-#   - pull
-
-# 1-1-boom-qwen-mooncake-bz:
-#   - pull
-
-prod-boom-minmax-mooncake-bz:
-  - pull
-
-# 11-1-template-boom-direct-multimodel:
-#   - pull
-
-# 11-2-template-boom-multimodel:
-#   - pull
-
-# 12-1-template-boom-direct-multimodel-fraction:
-#   - pull
-
-# 12-2-template-boom-direct-multimodel-mirror:
-#   - pull
-
-# 13-1-template-boom-direct-qwen:
-#   - pull
-
-# 13-2-template-boom-qwen:
-#   - pull
-
-# ── 14: Qwen vanilla reproduction (LLM-LA router, 8 replicas, rps 3) ──
-# Series 35 (10k), Series 22/39 (25k), Series 40 (40k)
-
-# 14-1-template-router-qwen-10k-5r:
-#   - pull
-#   - push-rr
-#   - push-random
-#   - push-least-queue
-
-# 14-2-template-router-qwen-10k-4r:
-#   - pull
-#   - push-rr
-#   - push-random
-#   - push-least-queue
-
-# 14-3-template-router-qwen-25k-5r:
-#   - pull
-#   - push-rr
-#   - push-random
-#   - push-least-queue
-
-# 14-4-template-router-qwen-25k-4r:
-#   - pull
-#   - push-rr
-#   - push-random
-#   - push-least-queue
-
-# 14-5-template-router-qwen-40k-5r:
-#   - pull
-#   - push-rr
-#   - push-random
-#   - push-least-queue
-
-
-# 14-6-template-router-qwen-40k-4r:
-#   - pull
-#   - push-rr
-#   - push-random
-#   - push-least-queue
-
-# 14s-1-template-router-qwen-10k-5r:
-#   - pull
-#   - push-rr
-#   - push-random
-#   - push-least-queue
-
-# 14s-2-template-router-qwen-10k-4r:
-#   - pull
-#   - push-rr
-#   - push-random
-#   - push-least-queue
-
-# 14s-3-template-router-qwen-25k-5r:
-#   - pull
-#   - push-rr
-#   - push-random
-#   - push-least-queue
-
-# 14s-4-template-router-qwen-25k-4r:
-#   - pull
-#   - push-rr
-#   - push-random
-#   - push-least-queue
-
-# 14s-5-template-router-qwen-40k-5r:
-#   - pull
-#   - push-rr
-#   - push-random
-#   - push-least-queue
-
-
-# 14s-6-template-router-qwen-40k-4r:
-#   - pull
-#   - push-rr
-#   - push-random
-#   - push-least-queue
-
-# ── 15/16: Qwen3-8B — single-turn LMSYS / multi-turn CodeFlow ──
-
-# 15-1-template-boom-direct-qwen:
-#   - round_robin
-
-# 15-2-template-boom-qwen:
+# prod-yz-boom-minmax-lmcache:
 #   - pull
 
-# 15-3-template-boom-direct-key-affinity-qwen:
-#   - key_affinity
-
-# 16-1-template-boom-direct-multiturn-qwen:
-#   - round_robin
-
-# 16-2-template-boom-multiturn-qwen:
+# prod-yz-boom-minmax-lmcache-hq:
 #   - pull
-
-# 16-3-template-boom-direct-multiturn-key-affinity-qwen:
-#   - key_affinity
-
-# ── 17/18: GLM-5 — single-turn LMSYS / multi-turn CodeFlow ──
 
-# 17-1-template-boom-direct-glm:
-#   - round_robin
-
-# 17-2-template-boom-glm:
+# prod-yz-boom-minmax-lmcache-hq-affinity:
 #   - pull
-
-# 17-3-template-boom-direct-key-affinity-glm:
-#   - key_affinity
 
-# 18-1-template-boom-direct-multiturn-glm:
-#   - round_robin
-
-# 18-2-template-boom-multiturn-glm:
+# ── YZ shadow pool (parallel to prod, release/ns vllm-shadow) ──
+# prod-yz-shadow-boom-minmax-lmcache-hq:
 #   - pull
-
-# 18-3-template-boom-direct-multiturn-key-affinity-glm:
-#   - key_affinity
-
-# ── 19/20: MiniMax-M2.7 — single-turn LMSYS / multi-turn CodeFlow ──
 
-# 19-1-template-boom-direct-minmax:
-#   - round_robin
-
-# 19-2-template-boom-minmax:
+# prod-yz-shadow-boom-minmax-lmcache-hq-affinity:
 #   - pull
-
-# 19-3-template-boom-direct-key-affinity-minmax:
-#   - key_affinity
 
-# 20-1-template-boom-direct-multiturn-minmax:
-#   - round_robin
-
-# 20-2-template-boom-multiturn-minmax:
+# prod-yz-shadow-boom-minmax-lmcache-hq-go:
 #   - pull
-
-# 20-3-template-boom-direct-multiturn-key-affinity-minmax:
-#   - key_affinity
-
-# ── 21: MiniMax-M2.7 — streaming (TTFT/TPOT measurement) ──
 
-# 21-1-template-boom-direct-minmax-stream:
-#   - round_robin
-
-# 21-2-template-boom-direct-key-affinity-minmax-stream:
-#   - key_affinity
-
-# 21-3-template-boom-minmax-stream:
+# prod-yz-shadow-boom-minmax-lmcache-hq-go-affinity:
 #   - pull
-
-# ── 22: MiniMax-M2.7 — multi-turn CodeFlow + streaming (TTFT/TPOT) ──
-
-# 22-1-template-boom-direct-multiturn-minmax-stream:
-#   - round_robin
-
-# 22-2-template-boom-direct-multiturn-key-affinity-minmax-stream:
-#   - key_affinity
 
-# 22-3-template-boom-multiturn-minmax-stream:
+# prod-yz-shadow-autoscaling-qwen:
 #   - pull

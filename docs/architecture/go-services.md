@@ -118,7 +118,7 @@ Everything else — env vars, ports, probes, volumes, RBAC — is identical.
 ### Via sweep_methods.py
 
 Use any config with `helm.service_impl: "go"`, e.g.
-`configs/router-go.yaml` or `configs/prod-shadow-boom-minmax-lmcache-hq-go.yaml`:
+`configs/non-prod/router-go.yaml` or `configs/prod-yz-shadow-boom-minmax-lmcache-hq-go.yaml`:
 
 ```bash
 python sweep_methods.py --config <master_config>

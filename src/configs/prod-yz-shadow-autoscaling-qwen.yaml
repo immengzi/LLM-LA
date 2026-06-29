@@ -1,9 +1,9 @@
-# prod-shadow-autoscaling-qwen: KEDA autoscaling validation on the SHADOW pool.
+# prod-yz-shadow-autoscaling-qwen: KEDA autoscaling validation on the SHADOW pool.
 #
 # Deploys a dense Qwen3-8B (TP=1, 1 NPU/replica) as release "vllm-shadow" in
 # namespace "vllm-shadow" with portOffset=100, pinned to the shadow infra node
 # and scheduled onto the shadow vLLM pool (vllm-pool=shadow / avoid=vllm-shadow)
-# — exactly like prod-shadow-boom-minmax-lmcache-hq.yaml, so it runs inside the
+# — exactly like prod-yz-shadow-boom-minmax-lmcache-hq.yaml, so it runs inside the
 # prod cluster WITHOUT touching the prod release/namespace.
 #
 # A dense model is used on purpose: it can genuinely scale 1->N on the 2-node

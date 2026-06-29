@@ -238,7 +238,7 @@ healthy. Claude Code connects separately via `/v1/messages`. (It differs from
 ### Master configs
 
 Both the `boom` and `boom-claude` entries are present but commented out in
-`configs/1-master_config.yaml` (the active entry is a different prod-shadow config).
+`configs/non-prod/1-master_config.yaml` (the benchmark master plan).
 Uncomment it to include in sweeps:
 
 ```yaml

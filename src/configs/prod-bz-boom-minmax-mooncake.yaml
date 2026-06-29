@@ -1,6 +1,6 @@
 # prod: MiniMax-M2.7 — BooM + LLM-LA (router), DP2 + Mooncake, BZ config.
 #
-# Based on prod-boom-minmax-lmcache-hq.yaml:
+# Based on prod-yz-boom-minmax-lmcache-hq.yaml:
 #   - keeps the MiniMax/HQ vLLM runtime settings
 #   - switches deployment defaults through switch_cluster: bz
 #   - replaces the LMCache connector with the BZ Mooncake connector
