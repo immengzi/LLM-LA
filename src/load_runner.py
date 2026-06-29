@@ -300,7 +300,8 @@ def _note_last_recv(progress: Dict[str, float], progress_lock: threading.Lock) -
 
 def _replace_gen_cfg(gen_cfg: GenerationConfig, output_tokens: int) -> GenerationConfig:
     from dataclasses import replace
-    clamped = max(output_tokens, 1)
+    floor = getattr(gen_cfg, 'min_output_tokens_floor', 1024)
+    clamped = max(output_tokens, floor)
     return replace(gen_cfg, max_tokens=clamped, min_tokens=clamped)
 
 
@@ -923,6 +924,7 @@ def _request_thread_conversation(
     use_streaming: bool = False,
     api_key_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    cc_cfg: Optional[dict] = None,
 ):
     """
     Execute a multi-turn conversation sequentially.
@@ -980,6 +982,7 @@ def _request_thread_conversation(
                     label=label, messages=list(messages_history),
                     api_key_override=api_key_override,
                     model_override=model_override,
+                    cc_cfg=cc_cfg, turn_idx=turn_idx,
                 )
                 t1 = time.time()
                 end_to_end_s = t1 - t0
@@ -1615,6 +1618,7 @@ def run_open_loop_load(
     conversations: Optional[List[Conversation]] = None,
     conv_output_tokens: Optional[List[List[int]]] = None,
     multi_model: Optional[MultiModelConfig] = None,
+    claude_code_injection: Optional[dict] = None,
 ):
     """
     Execute a precomputed schedule.
@@ -1802,6 +1806,7 @@ def run_open_loop_load(
                             logger, output_log_mode, print_trace, mm_label, use_streaming,
                             conv_api_key, assigned_model,
                         ),
+                        kwargs={"cc_cfg": claude_code_injection},
                         daemon=True, name=f"mm-conv-{cid}-{assigned_model}",
                     )
                     t.start()
@@ -1841,6 +1846,7 @@ def run_open_loop_load(
                                 logger, output_log_mode, print_trace, mm_label, use_streaming,
                                 conv_api_key, tgt_model,
                             ),
+                            kwargs={"cc_cfg": claude_code_injection},
                             daemon=True, name=f"mm-conv-{cid}-{tgt_model}",
                         )
                         t.start()
@@ -2014,6 +2020,7 @@ def run_open_loop_load(
                     logger, output_log_mode, print_trace, conv_label, use_streaming,
                     conv_api_key,
                 ),
+                kwargs={"cc_cfg": claude_code_injection},
                 daemon=True,
                 name=f"conv-{cid}",
             )

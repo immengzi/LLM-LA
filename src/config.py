@@ -34,7 +34,9 @@ class HFLmsysConfig:
     max_output_tokens: Optional[int] = None
     repeat_each: int = 1
     seed: Optional[int] = None
-    multi_turn: bool = False  # Enable multi-turn conversation per problem (subproblems as turns)
+    multi_turn: bool = False
+    min_user_turns: Optional[int] = None
+    max_pool_size: Optional[int] = None
 
 
 # =========================
@@ -77,6 +79,10 @@ class GenerationConfig:
     use_dataset_output_len: bool = False
     # When None: enable ignore_eos automatically iff use_dataset_output_len (vLLM fixed-length).
     ignore_eos: Optional[bool] = None
+
+    # Minimum floor for output tokens when replaying dataset lengths.
+    # _replace_gen_cfg clamps output_tokens to at least this value.
+    min_output_tokens_floor: int = 1024
 
     # Replay output lengths from a previous experiment's logs.json.
     # Path to a logs.json (JSONL) from a previous run. Each line must have
@@ -720,6 +726,10 @@ class ClientConfig:
     vllm_node_selector: Optional[dict] = None
     vllm_avoid_label: str = ""
 
+    # Optional Claude-Code-style request injection (kept as a raw dict and read
+    # by http_client._maybe_inject_claude_code_template). None/absent => disabled.
+    claude_code_injection: Optional[dict] = None
+
 
 # =========================
 # Helpers
@@ -812,6 +822,11 @@ def load_config(path: str) -> ClientConfig:
         raise ValueError(f"Invalid backend '{backend}'. Expected 'router', 'aibrix', 'litellm', or 'boom'.")
 
     multi_turn = bool(raw.get("multi_turn", False))
+
+    # Optional Claude-Code-style injection block (passed through as a raw dict).
+    claude_code_injection = raw.get("claude_code_injection")
+    if claude_code_injection is not None and not isinstance(claude_code_injection, dict):
+        raise ValueError("claude_code_injection must be a mapping if provided")
 
     file_prompts = _merge_dataclass(FilePromptsConfig, raw.get("file_prompts", {}))
     hf_lmsys = _merge_dataclass(HFLmsysConfig, raw.get("hf_lmsys", {}))
@@ -981,4 +996,5 @@ def load_config(path: str) -> ClientConfig:
         helm=helm,
         vllm_node_selector=vllm_node_selector,
         vllm_avoid_label=vllm_avoid_label,
+        claude_code_injection=claude_code_injection,
     )

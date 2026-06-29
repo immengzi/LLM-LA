@@ -162,6 +162,39 @@ Turn N (assistant): [Model generates final solve function]
 - Ground truth solutions only exist for the final `solve` function (turn N)
 - Intermediate subproblem outputs are model-generated (no ground truth for evaluation)
 
+### System-Prompt / Claude Code Variants
+
+The `multiturn-workload-generation` branch adds CodeFlowBench configs that
+combine multi-turn conversations with the Claude Code-style injection described
+in [Multi-turn benchmarking](multi-turn.md):
+
+- `src/configs/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml`
+- `src/configs/21-2-template-boom-claude-glm-stability-system-prompts.yaml`
+
+Both use:
+
+```yaml
+prompt_source: "codeflow"
+hf_lmsys:
+  multi_turn: true
+claude_code_injection:
+  enabled: true
+  template_dir: "/home/haiting/llm-la/src/multiturn-generation"
+  inject_system_blocks: true
+  inject_system_reminders: true
+  inject_tools: true
+```
+
+`21-2-template-boom-claude-glm-system-prompts-minturns3.yaml` also sets
+`hf_lmsys.min_user_turns: 3`, which filters the sampled CodeFlowBench pool to
+deeper conversations before selecting requests. This is useful when validating
+prefix-cache behavior under sustained context growth rather than short
+two-turn cases.
+
+The template directory is part of the runtime tree (`src/multiturn-generation/`)
+so the load generator can read the system blocks, reminders, and tool schemas
+without depending on the old `debug-scripts/` location.
+
 ---
 
 ## Quick Reference
@@ -174,3 +207,4 @@ Turn N (assistant): [Model generates final solve function]
 | How to disable multi-turn? | Set `multi_turn: false` or remove from config |
 | Default max output tokens? | 1024 |
 | Default rate? | 0.3 RPS |
+| Where are Claude Code injection templates? | `src/multiturn-generation/` |
