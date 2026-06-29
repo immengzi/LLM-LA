@@ -33,8 +33,8 @@ flowchart TB
     LiteLLM["LiteLLM :30400 (Python)"]
   end
 
-  Router["Router :8080 / :30080<br/>KV-aware + length-aware + SLO scheduling<br/>(Python or Go)"]
-  Hash["Prefix-Hash :9095"]
+  Router["Router :8080 / :30080<br/>KV-aware + length-aware + SLO scheduling<br/>inline KV-block hashing<br/>(Python or Go)"]
+  Hash["Prefix-Hash :9095<br/>(legacy, optional)"]
   Redis[("Redis :6379<br/>KV block ownership")]
   Prom["Prometheus"]
 
@@ -53,7 +53,7 @@ flowchart TB
   App --> BooM --> Router
   App --> LiteLLM --> Router
   Bench --> Router
-  Router -->|compute_hashes| Hash
+  Router -. "compute_hashes<br/>only if KV_HASH_SOURCE=external" .-> Hash
   Router -->|"pull / push"| SA
   Router -->|"pull / push"| SB
   Router -->|"SCAN {model}:kvblock:*"| Redis
@@ -65,7 +65,7 @@ flowchart TB
   SA -.->|metrics| Prom
 ```
 
-The router holds a central queue and either **pulls** work to sidecars on demand (capacity-gated, the default) or **pushes** it proactively. Sidecars subscribe to vLLM's ZMQ KV events and record block ownership in Redis; the router watches Redis to build a live `block hash → replica` map used for prefix-aware placement. See [docs/architecture/overview.md](docs/architecture/overview.md).
+The router holds a central queue and either **pulls** work to sidecars on demand (capacity-gated, the default) or **pushes** it proactively. Sidecars subscribe to vLLM's ZMQ KV events and record block ownership in Redis; the router watches Redis to build a live `block hash → replica` map used for prefix-aware placement. KV-block hashing runs **inside the router by default** (in-process for Python, in a tiny in-container hasher for Go); the standalone prefix-hash service is an optional legacy mode (`KV_HASH_SOURCE=external`). See [docs/architecture/overview.md](docs/architecture/overview.md).
 
 ## Key capabilities
 
