@@ -53,14 +53,17 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
-  max_tokens: 1024
+  # Hard cap generated tokens per turn via max_tokens (NOT dataset length) so turns
+  # stay short. use_dataset_output_len:false -> ignore_eos off -> at most max_tokens
+  # per turn (stops earlier on EOS). temp=0 keeps it deterministic across strategies.
+  max_tokens: 64           # was 1024 (dataset-driven >=1024/turn ~= 40s/turn)
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null
   target_total_tokens: null
   think: false
-  use_dataset_output_len: true
-  min_output_tokens_floor: 1024
+  use_dataset_output_len: false   # was true
+  min_output_tokens_floor: 1024   # unused while use_dataset_output_len=false
   # replay_output_lengths_from: "305"
 
 output_log_mode: "summary"

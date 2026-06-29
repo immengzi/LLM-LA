@@ -1,5 +1,5 @@
 # prod: MiniMax-M2.7 - BooM + LLM-LA (router), DP2 + Mooncake, BZ multi-turn config.
-# router_strategy = affinity  (conversation key-affinity only)
+# router_strategy = none  (baseline: prefix off, affinity off)
 #
 # Workload semantics are aligned with
 # non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml:
@@ -53,9 +53,10 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
-  # Hard cap generated tokens per turn via max_tokens (NOT dataset length) so turns
-  # stay short. use_dataset_output_len:false -> ignore_eos off -> at most max_tokens
-  # per turn (stops earlier on EOS). temp=0 keeps it deterministic across strategies.
+  # Hard cap generated tokens per turn via max_tokens (NOT dataset length), so turns
+  # stay short and the run finishes fast. use_dataset_output_len:false -> ignore_eos
+  # off -> each turn generates AT MOST max_tokens (stops earlier on EOS). temp=0 keeps
+  # it deterministic across strategies for a fair compare.
   max_tokens: 64           # was 1024 (dataset-driven >=1024/turn ~= 40s/turn)
   temperature: 0.0
   length_mode: "legacy"
@@ -110,12 +111,18 @@ helm:
   #   prefix   -> KV prefix-awareness only
   #   affinity -> conversation key-affinity only
   #   both     -> prefix + affinity
-  # router_strategy: "none"
+  router_strategy: "none"
   # router_strategy: "prefix"
-  router_strategy: "affinity"
+  # router_strategy: "affinity"
   # router_strategy: "both"
   router_len_aware: true
   router_len_policy: "short_first"
+
+  # SPILL TEST: cap how many queued requests the router hands one vLLM pod per pull
+  # (router env FIXED_BATCH_SIZE). 0 = no cap (default). 2 forces the busy pod to
+  # leave the overflow for the 2nd pod -> traffic spreads across BOTH pods so
+  # router_strategy has a real placement choice. batchSize/sidecarPrefetch UNCHANGED.
+  router_fixed_batch_size: 2
 
   expose_per_pod: true
 
