@@ -220,4 +220,4 @@ from the prior `logs.json` and overrides each turn's output length.
 | `main.py` | Multi-turn loading, scheduling, and replay wiring |
 | `configs/16-1-template-boom-direct-multiturn-qwen.yaml` | Sample config |
 | `src/multiturn-generation/` | Claude Code-style system prompt, reminder, and tool templates |
-| `configs/21-2-template-boom-claude-glm-*-system-prompts*.yaml` | Claude Code injection examples |
+| `configs/non-prod/21-2-template-boom-claude-glm-*-system-prompts*.yaml` | Claude Code injection examples |
