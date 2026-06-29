@@ -74,9 +74,15 @@ spec:
             - name: KV_DISCOVERY_INTERVAL_S
               value: "5.0"
 
-            # ---- In-router KV-block hash computation ----
-            - name: KV_HASH_INLINE
-              value: "true"
+            # ---- KV-block hash source (inline | external) ----
+            - name: KV_HASH_SOURCE
+              value: {{ quote (default "inline" .Values.router.hashSource) }}
+            - name: HASH_SERVICE_URL
+              {{- if and (eq (lower (default "python" .Values.serviceImpl)) "go") (ne (lower (default "inline" .Values.router.hashSource)) "external") }}
+              value: "http://127.0.0.1:9095"
+              {{- else }}
+              value: "http://vllm-cpu-hash:9095"
+              {{- end }}
             - name: KV_TOKENIZER_PATH
               value: "/model"
             - name: KV_BLOCK_SIZE
@@ -85,6 +91,10 @@ spec:
               value: "0"
             - name: KV_CANONICALISE_TOOLS
               value: {{ if hasKey .Values.router "kvCanonicaliseTools" }}{{ quote (toString .Values.router.kvCanonicaliseTools) }}{{ else }}"1"{{ end }}
+
+            # ---- Unified routing strategy (overrides kvAware/affinityEnabled when set) ----
+            - name: ROUTER_STRATEGY
+              value: {{ if hasKey .Values.router "strategy" }}{{ quote .Values.router.strategy }}{{ else }}""{{ end }}
 
             # ---- Helm-controlled routing knobs ----
             - name: KV_AWARE
@@ -233,12 +243,24 @@ spec:
           {{- end }}
 
           resources:
+            {{- if and (eq (lower (default "python" .Values.serviceImpl)) "go") (ne (lower (default "inline" .Values.router.hashSource)) "external") }}
+            # go + inline: the container also runs the embedded Python hasher
+            # (transformers + tokenizer), so it needs more headroom than the
+            # lightweight gateway-only / external cases.
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "2560Mi"
+            {{- else }}
             requests:
               cpu: "250m"
               memory: "512Mi"
             limits:
               cpu: "1000m"
               memory: "1Gi"
+            {{- end }}
 
       volumes:
         - name: model

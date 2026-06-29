@@ -85,6 +85,12 @@ class RouterConfig:
     KV_TOKENIZER_PATH: str = "/model"
     KV_BLOCK_SIZE: int = 128
 
+    # KV-block hash source:
+    #   "inline"   -> compute in-process via prefix_hash.py (default).
+    #   "external" -> call the legacy vllm-cpu-hash service over HTTP.
+    KV_HASH_SOURCE: str = "inline"
+    HASH_SERVICE_URL: str = "http://vllm-cpu-hash:9095"
+
     # vLLM discovery (for KV watcher to map pod -> endpoint)
     NAMESPACE: str = "vllm"
     LABEL_SELECTOR: str = "app=vllm-qwen"
@@ -95,6 +101,18 @@ class RouterConfig:
     KV_WATCH_MAX_KEYS: int = 200
     KV_DISCOVERY_INTERVAL_S: float = 5.0
     KV_LOG_KEYS: str = "off"  # off | summary | full
+
+    # --------------------------------------------------------------------
+    # UNIFIED ROUTING STRATEGY (single selector for the two KV mechanisms)
+    # "" (unset) -> use the legacy KV_AWARE / AFFINITY_ENABLED flags as-is.
+    #   none      -> prefix off, affinity off
+    #   prefix    -> prefix on,  affinity off
+    #   affinity  -> prefix off, affinity on
+    #   both      -> prefix on,  affinity on
+    # When non-empty this OVERRIDES KV_AWARE / AFFINITY_ENABLED. AFFINITY_MODE
+    # (soft|hard) remains a separate modifier applied when affinity is on.
+    # --------------------------------------------------------------------
+    ROUTER_STRATEGY: str = ""
 
     # Routing knobs
     KV_AWARE: bool = True
@@ -266,12 +284,28 @@ def get_config() -> RouterConfig:
     cfg.AFFINITY_HARD_TIMEOUT_S = float(
         os.getenv("AFFINITY_HARD_TIMEOUT_S", cfg.AFFINITY_HARD_TIMEOUT_S)
     )
+
+    # Unified routing strategy: when set, derives KV_AWARE / AFFINITY_ENABLED
+    # from a single knob and overrides the individual flags above.
+    cfg.ROUTER_STRATEGY = os.getenv("ROUTER_STRATEGY", cfg.ROUTER_STRATEGY).strip().lower()
+    _strategy_map = {
+        "none": (False, False),
+        "prefix": (True, False),
+        "affinity": (False, True),
+        "both": (True, True),
+    }
+    if cfg.ROUTER_STRATEGY in _strategy_map:
+        cfg.KV_AWARE, cfg.AFFINITY_ENABLED = _strategy_map[cfg.ROUTER_STRATEGY]
     cfg.POOL_BIDIRECTIONAL = os.getenv("POOL_BIDIRECTIONAL", "false").lower() in ("1", "true", "yes")
     cfg.DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", cfg.DEFAULT_MAX_TOKENS))
 
     # Inline KV-block hash computation
     cfg.KV_TOKENIZER_PATH = os.getenv("KV_TOKENIZER_PATH", cfg.KV_TOKENIZER_PATH)
     cfg.KV_BLOCK_SIZE = int(os.getenv("KV_BLOCK_SIZE", cfg.KV_BLOCK_SIZE))
+    cfg.KV_HASH_SOURCE = os.getenv("KV_HASH_SOURCE", cfg.KV_HASH_SOURCE).strip().lower()
+    if cfg.KV_HASH_SOURCE not in ("inline", "external"):
+        cfg.KV_HASH_SOURCE = "inline"
+    cfg.HASH_SERVICE_URL = os.getenv("HASH_SERVICE_URL", cfg.HASH_SERVICE_URL)
 
     # Router operation mode
     cfg.ROUTER_MODE = os.getenv("ROUTER_MODE", cfg.ROUTER_MODE)

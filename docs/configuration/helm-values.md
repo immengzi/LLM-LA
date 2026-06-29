@@ -30,7 +30,7 @@ There are three ways values reach the chart:
 | `images.router` / `images.sidecar` | `kv-router:latest` / `kv-sidecar:latest` | Python services |
 | `images.routerGo` / `images.sidecarGo` | `kv-router-go:latest` / `kv-sidecar-go:latest` | Used when `serviceImpl=go` |
 | `images.vllm` | `docker.io/library/vllm-ascend:v0.18.0` | vLLM engine image |
-| `images.cpuHash` | `vllm-cpu-hash:latest` | Prefix-hash service |
+| `images.cpuHash` | `vllm-cpu-hash:latest` | Legacy external prefix-hash service (used only when `router.hashSource=external`) |
 | `images.redis` | `redis:7-alpine` | Redis |
 | `images.mooncakeMaster` | `docker.io/library/vllm-ascend:v0.18.0` | Mooncake master |
 
@@ -52,6 +52,8 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 |-----|---------|---------|
 | `mode` | `pull` | `pull` \| `push-rr` \| `push-random` \| `push-leastq` |
 | `apiKey` | `""` | Auth for `/v1/chat/completions` (empty = no auth) |
+| `strategy` | `""` | Unified selector: `none` \| `prefix` \| `affinity` \| `both`. When set, overrides `kvAware`/`affinityEnabled` ([details](../architecture/key-affinity.md)) |
+| `hashSource` | `inline` | KV-block hash source: `inline` (in-process/in-container `prefix_hash.py`) \| `external` (legacy `vllm-cpu-hash` pod, auto-deployed in this mode) ([details](../architecture/prefix-hash.md)) |
 | `kvAware` | `true` | KV-aware routing |
 | `lenAware` | `true` | Length-aware batching |
 | `lenPolicy` | `short_first` | `short_first` \| `long_first` |
@@ -190,7 +192,8 @@ Optional cross-node KV transfer. Gated on `mooncake.enabled` only. See [mooncake
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `deploy.vllm` | `true` | Set `false` for stack-only deploys (sweep `--skip-vllm`) |
-| `deploy.router` / `deploy.redis` / `deploy.cpuHash` | `true` | Set `false` for vLLM-only deploys (`deploy_vllm.py`) |
+| `deploy.router` / `deploy.redis` | `true` | Set `false` for vLLM-only deploys (`deploy_vllm.py`) |
+| `deploy.cpuHash` | `false` | No longer read by the chart; the legacy external hasher is auto-deployed when `router.hashSource=external` |
 | `deploy.mooncakeMaster` | `true` | Skip mooncake-master if `false` |
 
 ## Autoscaling (`autoscaling.*`)

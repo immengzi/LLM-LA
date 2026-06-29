@@ -3,8 +3,16 @@
 # IMPORTANT: pick a tag that matches your Ascend vLLM version
 FROM vllm-arm64:vllm
 
-ENV http_proxy=http://peulerosweb:EulerOS_123@172.18.100.92:8080
-ENV https_proxy=http://peulerosweb:EulerOS_123@172.18.100.92:8080
+# ---------- Proxy only for build (cluster-agnostic) ----------
+# Passed by build.sh via --build-arg; empty on clusters with direct internet
+# (e.g. bz), set to the cluster proxy where required (e.g. yz).
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ENV http_proxy=${HTTP_PROXY} \
+    https_proxy=${HTTPS_PROXY} \
+    HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY}
+# -------------------------------------------------------------
 
 # Workdir where we'll place the service code
 WORKDIR /workspace
@@ -20,6 +28,13 @@ RUN pip install --no-cache-dir \
     fastapi \
     "uvicorn[standard]" \
     cbor2
+
+# ---------- Clear proxy for runtime ----------
+ENV http_proxy="" \
+    https_proxy="" \
+    HTTP_PROXY="" \
+    HTTPS_PROXY=""
+# ---------------------------------------------
 
 # Environment defaults (override via k8s if needed)
 ENV PYTHONHASHSEED=0 \

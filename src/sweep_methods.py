@@ -845,6 +845,8 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             "replicas.vllm": int(h.replicas),
             "batchSize": int(h.batch_size),
             "tensorParallelSize": int(getattr(h, "tensor_parallel_size", 1)),
+            "router.strategy": str(getattr(h, "router_strategy", "")),
+            "router.hashSource": str(getattr(h, "router_hash_source", "inline")).strip().lower(),
             "router.kvAware": bool(getattr(h, "router_kv_aware", True)),
             "router.lenAware": bool(getattr(h, "router_len_aware", True)),
             "router.lenPolicy": str(getattr(h, "router_len_policy", "short_first")),
@@ -904,7 +906,8 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             set_values["deploy.vllm"] = vllm_running
             set_values["deploy.router"] = True
             set_values["deploy.redis"] = True
-            set_values["deploy.cpuHash"] = True
+            # cpuHash (legacy external hasher) is auto-deployed by the chart when
+            # router.hashSource=external; no explicit toggle needed here.
             if vllm_running:
                 # Check that the live deployment's routing mode matches
                 # the requested one. Mismatches would mutate the vLLM pod
@@ -927,7 +930,8 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             set_values["deploy.vllm"] = True
             set_values["deploy.router"] = True
             set_values["deploy.redis"] = True
-            set_values["deploy.cpuHash"] = True
+            # cpuHash (legacy external hasher) is auto-deployed by the chart when
+            # router.hashSource=external; no explicit toggle needed here.
 
         # ---- method interpretation per backend ----
         if backend == "router":
@@ -1411,6 +1415,8 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 "autoscaling_prometheus_server_address": str(
                     getattr(h, "autoscaling_prometheus_server_address", "")
                 ),
+                "router_strategy": str(getattr(h, "router_strategy", "")),
+                "router_hash_source": str(getattr(h, "router_hash_source", "inline")),
                 "router_kv_aware": bool(getattr(h, "router_kv_aware", True)),
                 "router_len_aware": bool(getattr(h, "router_len_aware", True)),
                 "router_len_policy": str(getattr(h, "router_len_policy", "short_first")),

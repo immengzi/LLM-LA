@@ -1,5 +1,7 @@
 {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
-{{- if .Values.deploy.cpuHash }}
+{{- /* Legacy external hasher: auto-deployed only when a router is present and
+       router.hashSource=external. inline mode needs no external pod. */ -}}
+{{- if and .Values.deploy.router (eq (lower (default "inline" .Values.router.hashSource)) "external") }}
 {{- $cpuHash := default dict .Values.cpuHash }}
 {{- if not .Values.modelVolume.modelSubPath }}
 {{- fail "modelVolume.modelSubPath must be set — deploy PV/PVC once on the parent dir and pass the model subfolder name per deployment" }}

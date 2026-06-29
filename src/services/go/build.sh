@@ -4,8 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-REGISTRY="${REGISTRY:-reg.local:32000}"
-TAG="${TAG:-latest}"
+# Shared, cluster-agnostic registry + proxy resolution (bz/yz/...).
+# Override with REGISTRY=... / PROXY_URL=... / TAG=... if needed. The resolved
+# proxy is reused for the router image's Python (pip) layer.
+source "$SCRIPT_DIR/../build-common.sh"
 
 # -------------------------------------------------------
 # Go module settings (bypass checksum/TLS issues behind proxy)
@@ -40,21 +42,27 @@ CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -o sidecar ./cmd/sidecar
 # -------------------------------------------------------
 
 echo "[4/4] Building Docker images..."
-docker build -f Dockerfile.router -t "$REGISTRY/kv-router-go:$TAG" .
-docker build -f Dockerfile.sidecar -t "$REGISTRY/kv-sidecar-go:$TAG" .
+# Stage the router's prefix_hash.py into the build context so the in-container
+# hasher runs the exact same code (single source of truth; not committed).
+mkdir -p hasher
+cp ../router_service/router/prefix_hash.py hasher/prefix_hash.py
+docker build -f Dockerfile.router \
+  "${PROXY_BUILD_ARGS[@]}" \
+  -t "$PUSH_REGISTRY/kv-router-go:$TAG" .
+docker build -f Dockerfile.sidecar -t "$PUSH_REGISTRY/kv-sidecar-go:$TAG" .
 
-# Cleanup binaries
-rm -f gateway sidecar
+# Cleanup binaries + staged source
+rm -f gateway sidecar hasher/prefix_hash.py
 
 # -------------------------------------------------------
-# Step 3: Push to registry
+# Step 3: Push to registry (PUSH_REGISTRY=localhost:32000 is insecure-allowed)
 # -------------------------------------------------------
 
-echo "[5/5] Pushing to $REGISTRY..."
-docker push "$REGISTRY/kv-router-go:$TAG"
-docker push "$REGISTRY/kv-sidecar-go:$TAG"
+echo "[5/5] Pushing to $PUSH_REGISTRY..."
+docker push "$PUSH_REGISTRY/kv-router-go:$TAG"
+docker push "$PUSH_REGISTRY/kv-sidecar-go:$TAG"
 
 echo
-echo "=== Done ==="
-echo "  $REGISTRY/kv-router-go:$TAG"
-echo "  $REGISTRY/kv-sidecar-go:$TAG"
+echo "=== Done (cluster pulls these as $REGISTRY/...) ==="
+echo "  $PUSH_REGISTRY/kv-router-go:$TAG  ->  $REGISTRY/kv-router-go:$TAG"
+echo "  $PUSH_REGISTRY/kv-sidecar-go:$TAG  ->  $REGISTRY/kv-sidecar-go:$TAG"

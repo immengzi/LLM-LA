@@ -14,9 +14,12 @@ either runtime (it falls back to `linear`); and internally the Go router keeps
 KV block hashes as decimal strings while the Python router parses them to `int`
 (equivalent for typical hashes).
 
-The Python **prefix-hash service** stays in place (Option C): the Go router
-calls it over HTTP exactly like the Python router does. The `service_impl`
-toggle never swaps the `cpuHash` image.
+**KV-block hashing**: by default (`KV_HASH_SOURCE=inline`) the Go router hashes
+in-container using the same `router/prefix_hash.py` as the Python router (shipped
+inside the gateway image, served on `127.0.0.1:9095`), so no external pod is
+needed and Go/Python hashes match. The legacy standalone `vllm-cpu-hash` service
+remains available as an opt-in (`KV_HASH_SOURCE=external`) and is auto-deployed
+only in that mode. See [prefix-hash.md](prefix-hash.md).
 
 Switching between Python and Go is a single config line:
 
@@ -48,7 +51,7 @@ services/go/
     │   ├── result_store.go    # result correlation
     │   ├── handlers.go        # HTTP handlers (chi)
     │   ├── kv_aware.go        # block-owner map + longest-prefix match
-    │   ├── hash_client.go     # HTTP client to the Python prefix-hash service
+    │   ├── hash_client.go     # KV-hash client: in-container hasher (inline) or legacy service (external)
     │   ├── kv_watcher.go      # Redis KV block scanner (per-model)
     │   ├── model_registry.go  # multi-model registry + Resolve / 404
     │   ├── predictors.go      # output-length predictors (singleton)
@@ -86,12 +89,21 @@ cd src/services/go
 `build.sh` compiles both binaries statically on the host (`CGO_ENABLED=0`),
 packages them into minimal images, and pushes them. `go mod tidy` runs inside
 the script, so transitive dependencies (e.g. `go-zeromq/zmq4`) are resolved at
-build time.
+build time. It sources the shared `../build-common.sh` for cluster-agnostic
+registry/proxy resolution.
+
+Registry naming: the cluster-facing image name is `reg.local:32000/...`, but the
+push goes to `PUSH_REGISTRY` (default `localhost:32000`) — the same registry
+exposed on every k8s node's NodePort and the only insecure (HTTP) target the
+local Docker daemon trusts. Both names address one registry, so the cluster
+still pulls `reg.local:32000/kv-router-go:latest`.
 
 Custom registry / tag:
 
 ```bash
-REGISTRY=myregistry.io TAG=v0.1 ./build.sh
+TAG=v0.1 ./build.sh                       # change the image tag
+PUSH_REGISTRY=myregistry.io:5000 ./build.sh   # push to a different registry
+REGISTRY=myregistry.io ./build.sh         # change the cluster-facing pull name
 ```
 
 ## How the Toggle Works
@@ -106,10 +118,10 @@ passes a single Helm value:
 The chart helpers `vllmkv.routerImage` / `vllmkv.sidecarImage` (in
 `templates/_helpers.tpl`) then select the image:
 
-| serviceImpl | router image          | sidecar image          | prefix hash |
-|-------------|-----------------------|------------------------|-------------|
-| `python`    | `images.router`       | `images.sidecar`       | Python      |
-| `go`        | `images.routerGo`     | `images.sidecarGo`     | Python      |
+| serviceImpl | router image          | sidecar image          | prefix hash (inline default) |
+|-------------|-----------------------|------------------------|------------------------------|
+| `python`    | `images.router`       | `images.sidecar`       | in-process `prefix_hash.py`  |
+| `go`        | `images.routerGo`     | `images.sidecarGo`     | in-container `prefix_hash.py` |
 
 Everything else — env vars, ports, probes, volumes, RBAC — is identical.
 
@@ -137,7 +149,7 @@ helm upgrade --install vllm ./src/vllm-kv-stack \
 |------|-------|
 | HTTP endpoints | `/enqueue`, `/submit`, `/pull`, `/result`, `/result_chunk`, `/v1/chat/completions`, `/health*`, `/metrics`, `/latency_log`, `/debug/slo`, `/debug/slo/{req_id}`; `/result_submit` only when `RESULT_TRANSPORT_MODE=submit_ack` |
 | Routing modes | `pull`, `push-rr`, `push-random`, `push-leastq` (both `health` and `local` modes) |
-| KV-aware routing | Redis block-owner scan + longest-prefix match via the Python hash service |
+| KV-aware routing | Redis block-owner scan + longest-prefix match; request hashes from the in-container `prefix_hash.py` (inline) or the legacy `vllm-cpu-hash` service (external) |
 | SLO-aware scheduling | slack-based sort, admission throttle, latency predictors (`linear` default, `bayesian`/`hybrid`; `piecewise` accepted but not implemented), batch/queue-wait estimators, full `/debug/slo` |
 | Length-aware batching | `short_first`, `long_first` |
 | Client transports | `sync`, `async_pubsub` (ZMQ PUB publisher). Note: `submit_ack` is a router-side `RESULT_TRANSPORT_MODE` (sidecar→router result delivery), not a client transport mode. |
@@ -172,10 +184,11 @@ defaults. See `internal/gateway/config.go` (router) and
 
 ## Notes
 
-- **Prefix hash stays Python**: porting vLLM's tokenizer + block-hashing
-  internals to Go is out of scope; the Go router calls the Python service over
-  HTTP, identical to the Python router. The `service_impl` toggle never swaps
-  the `cpuHash` image.
+- **Hashing stays Python (shared code), but in-container by default**: porting
+  the HF tokenizer + chat template + block-hashing to Go is out of scope, so the
+  Go gateway runs the router's exact `prefix_hash.py` inside its own container
+  (inline mode) for byte-identical hashes with no external pod. The legacy
+  standalone `vllm-cpu-hash` service is opt-in via `KV_HASH_SOURCE=external`.
 - **Block hashes as decimal strings**: vLLM KV block hashes can exceed
   `int64`. Both the sidecar subscriber and the router store/compare them as
   canonical decimal strings to preserve exact equality without overflow.

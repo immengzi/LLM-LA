@@ -7,8 +7,7 @@ How the LA-Boom serving platform fits together. Start here, then dive into the c
 ```mermaid
 flowchart TB
   Client["Client / Gateway"]
-  Router["Router :8080 / :30080"]
-  Hash["Prefix-Hash :9095"]
+  Router["Router :8080 / :30080<br/>(KV-block hashing inline)"]
   Redis[("Redis :6379")]
 
   subgraph pod [vLLM pod]
@@ -16,30 +15,32 @@ flowchart TB
   end
 
   Client -->|"/enqueue or /submit"| Router
-  Router -->|compute_hashes| Hash
   Router -->|"pull / push"| Sidecar
   Router -->|"SCAN {model}:kvblock:*"| Redis
   Sidecar -->|"ZMQ kv@ events -> Redis"| Redis
   Sidecar -->|"/result or ZMQ"| Router
   Router -->|result| Client
+
+  Hash["Prefix-Hash :9095<br/>(legacy, optional)"]
+  Router -. "compute_hashes<br/>only if KV_HASH_SOURCE=external" .-> Hash
 ```
 
-LA-Boom places a custom **router** and per-pod **sidecars** around stock vLLM, plus a **prefix-hash** service and **Redis** for KV-aware placement.
+LA-Boom places a custom **router** and per-pod **sidecars** around stock vLLM, plus **Redis** for KV-aware placement. KV-block hashing runs **inside the router by default** (in-process for the Python router; in a tiny in-container hasher for the Go gateway). The standalone **prefix-hash** service is an optional legacy mode (`KV_HASH_SOURCE=external`) and is the dashed box above — see [prefix-hash.md](prefix-hash.md).
 
 ## Components
 
 | Component | Role | Port (ClusterIP / NodePort) | Deep dive |
 |-----------|------|------------------------------|-----------|
-| Router | Central queue, pull/push dispatch, KV/length/SLO scheduling, OpenAI shim | 8080 / 30080 (ZMQ results 5559 / 30559) | [router.md](router.md) |
+| Router | Central queue, pull/push dispatch, KV/length/SLO scheduling, OpenAI shim, **inline KV-block hashing** | 8080 / 30080 (ZMQ results 5559 / 30559) | [router.md](router.md) |
 | Sidecar | Per-pod local queue, vLLM forwarding, KV event reporting | 9000 (in-pod) | [sidecar.md](sidecar.md) |
 | vLLM | Model inference (OpenAI-compatible API) | 8200 / 30034 (+offset) | — |
-| Prefix-Hash | Computes vLLM-compatible KV block hashes | 9095 / 30095 | [prefix-hash.md](prefix-hash.md) |
 | Redis | KV block ownership (`{MODEL}:kvblock:*`) | 6379 / 30079 | [kv-cache-flow.md](kv-cache-flow.md) |
+| Prefix-Hash *(legacy, external mode only)* | Standalone vLLM-compatible KV block hasher; deployed only when `KV_HASH_SOURCE=external` | 9095 / 30095 | [prefix-hash.md](prefix-hash.md) |
 
 ## Request lifecycle
 
 1. A client sends a request to the router via `/enqueue` (synchronous, blocks for the result) or `/submit` (asynchronous, returns a `req_id`; results arrive over ZMQ).
-2. If KV-aware routing is on, the router asks the prefix-hash service for the request's block hashes and records them in memory.
+2. If KV-aware routing is on, the router computes the request's block hashes (inline via `prefix_hash.py` by default) and records them in memory.
 3. In **pull** mode, sidecars poll `/pull` when they have capacity; the router scores and returns the best-matching queued requests. In **push** mode, the router dispatches proactively (`push-rr`, `push-random`, `push-leastq`).
 4. The sidecar forwards the request to its local vLLM and returns the result to the router (via `/result` or, for async, the router publishes over ZMQ).
 
@@ -55,7 +56,7 @@ Each sidecar subscribes to vLLM's ZMQ KV-cache events and writes block ownership
 
 ## Implementations
 
-The router and sidecar exist in both **Python** (FastAPI) and **Go** (chi), selectable via the Helm value `serviceImpl`. They are near-identical ports sharing the same APIs, Redis schema, ZMQ formats, and metric names; the prefix-hash service stays Python for both. See [go-services.md](go-services.md).
+The router and sidecar exist in both **Python** (FastAPI) and **Go** (chi), selectable via the Helm value `serviceImpl`. They are near-identical ports sharing the same APIs, Redis schema, ZMQ formats, and metric names. KV-block hashing uses the same `prefix_hash.py` in both (in-process for Python; in-container for Go) by default. See [go-services.md](go-services.md).
 
 ## Transports
 

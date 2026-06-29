@@ -62,11 +62,24 @@ router:
   kvBlockSize: 128
   kvCanonicaliseTools: "1"
 
+  # KV-block hash source (applies to both serviceImpl python and go):
+  #   inline   = in-process (python) / in-container (go) hasher using the
+  #              router's prefix_hash.py. Default; no external pod needed.
+  #   external = legacy vLLM-based vllm-cpu-hash service over HTTP. The external
+  #              pod is auto-deployed by the chart only when this is "external".
+  hashSource: inline
+
   # Claude Code client seam: strip the per-request cch attribution counter.
   stripCch: "1"
 
   # Query head+tail of the pull pool for prefix matches.
   poolBidirectional: false
+
+  # Unified routing-strategy selector. Empty = use the kvAware/affinityEnabled
+  # flags below directly. Set to one of: none | prefix | affinity | both to
+  # drive both flags from a single knob (overrides them when non-empty).
+  # affinityMode (soft|hard) still applies when the strategy includes affinity.
+  strategy: ""
 
   # Enable/disable KV-aware routing
   kvAware: true
@@ -407,7 +420,9 @@ deploy:
   vllm: true      # set false in stack-only deploys (sweep_methods --skip-vllm)
   router: true    # set false in vllm-only deploys (deploy_vllm.py)
   redis: true     # set false in vllm-only deploys (deploy_vllm.py)
-  cpuHash: true   # set false in vllm-only deploys (deploy_vllm.py)
+  # cpuHash (legacy external hasher) is auto-deployed based on router.hashSource
+  # ("external" -> deployed). This flag is no longer read by the chart.
+  cpuHash: false
   mooncakeMaster: true    # set false to skip mooncake-master
 
 # -----------------------------------------------------------------------

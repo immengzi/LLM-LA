@@ -1,18 +1,24 @@
 #!/bin/bash
 set -e
 
-# REGISTRY="7.242.102.243:32000"
-# REGISTRY="localhost:32000"
-REGISTRY="reg.local:32000"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# Shared, cluster-agnostic registry + proxy resolution (bz/yz/...).
+# Override with REGISTRY=... / PROXY_URL=... / TAG=... if needed.
+source "$SCRIPT_DIR/../build-common.sh"
+
 IMAGE="vllm-cpu-hash"
-TAG="latest"
 
 docker build \
   -f Dockerfile \
+  "${PROXY_BUILD_ARGS[@]}" \
   -t ${IMAGE}:${TAG} .
 
-docker tag ${IMAGE}:${TAG} ${REGISTRY}/${IMAGE}:${TAG}
+docker tag ${IMAGE}:${TAG} ${PUSH_REGISTRY}/${IMAGE}:${TAG}
 
-# push without proxy
+# push without proxy (PUSH_REGISTRY=localhost:32000 is insecure-allowed on nodes)
 env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u NO_PROXY -u no_proxy \
-  docker push ${REGISTRY}/${IMAGE}:${TAG}
+  docker push ${PUSH_REGISTRY}/${IMAGE}:${TAG}
+
+echo "pushed ${PUSH_REGISTRY}/${IMAGE}:${TAG}  (cluster pulls it as ${REGISTRY}/${IMAGE}:${TAG})"
