@@ -456,6 +456,40 @@ def _safe_int_list(xs: Any) -> List[int]:
     return out
 
 
+async def _compute_block_hashes_external(
+    *,
+    prompt: Optional[str],
+    messages: Optional[List[Dict[str, Any]]],
+) -> List[int]:
+    """Call the legacy external hasher (vllm-cpu-hash) over HTTP.
+
+    The legacy service accepts {prompt | messages, block_size}; it does not take
+    tools (former behavior preserved). Messages are sent when available, else the
+    flat prompt, mirroring the inline input selection.
+    """
+    payload: Dict[str, Any] = {"block_size": int(_cfg.KV_BLOCK_SIZE)}
+    if messages:
+        payload["messages"] = messages
+    elif prompt is not None:
+        payload["prompt"] = prompt
+    else:
+        return []
+
+    url = f"{_cfg.HASH_SERVICE_URL.rstrip('/')}/compute_hashes"
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.post(url, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+
+    out: List[int] = []
+    for x in (data.get("block_hashes") or []):
+        try:
+            out.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 async def _maybe_register_kv_blocks(
     req_id: str,
     prompt: str,
@@ -491,8 +525,6 @@ async def _maybe_register_kv_blocks(
 
     t0 = time.time()
     try:
-        from . import prefix_hash as _ph
-
         # Push decoupling may only pass meta; recover full chat inputs when present.
         if messages is None and isinstance(m.get("__chat_request__"), dict):
             maybe_messages = m["__chat_request__"].get("messages")
@@ -503,15 +535,24 @@ async def _maybe_register_kv_blocks(
             if isinstance(maybe_tools, list):
                 tools = maybe_tools
 
-        block_hashes = _ph.compute_request_block_hashes_int(
-            messages=messages,
-            prompt=prompt if not messages else None,
-            tools=tools,
-            block_size=int(_cfg.KV_BLOCK_SIZE),
-        )
+        if _cfg.KV_HASH_SOURCE == "external":
+            block_hashes = await _compute_block_hashes_external(
+                prompt=prompt, messages=messages
+            )
+            _hash_src = "external"
+        else:
+            from . import prefix_hash as _ph
+
+            block_hashes = _ph.compute_request_block_hashes_int(
+                messages=messages,
+                prompt=prompt if not messages else None,
+                tools=tools,
+                block_size=int(_cfg.KV_BLOCK_SIZE),
+            )
+            _hash_src = "inline"
 
         _log_kv_hash(
-            f"req_id={req_id} inline=1 "
+            f"req_id={req_id} src={_hash_src} "
             f"took_s={(time.time() - t0):.3f} "
             f"n_hashes={len(block_hashes)}",
             level="full",
@@ -823,7 +864,7 @@ async def _startup():
     print_config(_cfg)
     sys.stdout.flush()
 
-    if _cfg.KV_AWARE:
+    if _cfg.KV_AWARE and _cfg.KV_HASH_SOURCE == "inline":
         try:
             from . import prefix_hash as _ph
 
@@ -837,6 +878,12 @@ async def _startup():
             print(f"[router] FATAL: inline hash tokenizer init failed: {e!r}")
             sys.stdout.flush()
             raise
+    elif _cfg.KV_AWARE and _cfg.KV_HASH_SOURCE == "external":
+        print(
+            f"[router] KV hashing via external service: {_cfg.HASH_SERVICE_URL} "
+            f"(legacy path; no in-process tokenizer loaded)"
+        )
+        sys.stdout.flush()
 
     _install_submit_route()
     _install_result_submit_route()

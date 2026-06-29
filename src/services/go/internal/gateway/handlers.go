@@ -214,9 +214,19 @@ func (s *Server) registerKVBlocks(rid, prompt string, meta map[string]interface{
 		}
 	}
 
+	var messages, tools []interface{}
+	if cr, ok := m["__chat_request__"].(map[string]interface{}); ok {
+		if ms, ok := cr["messages"].([]interface{}); ok {
+			messages = ms
+		}
+		if ts, ok := cr["tools"].([]interface{}); ok {
+			tools = ts
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.cfg.HashTimeoutS*float64(time.Second)))
 	defer cancel()
-	hashes, err := s.hashClient.ComputeHashes(ctx, prompt)
+	hashes, err := s.hashClient.ComputeHashes(ctx, prompt, messages, tools)
 	if err != nil {
 		log.Printf("[router] WARNING: KV hash compute failed for req_id=%s: %v", rid, err)
 		if s.cfg.TraceEnabled {

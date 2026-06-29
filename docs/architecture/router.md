@@ -21,7 +21,8 @@ At a high level, the router:
 1. Receives prompts from clients via `/enqueue`.
 2. Assigns each request a unique `req_id`.
 3. If KV-awareness is enabled:
-   - asks the prefix-hash service for KV block hashes of the prompt,
+   - computes KV block hashes for the prompt (inline via `prefix_hash.py` by
+     default; the legacy external service is opt-in),
    - records which blocks the request will use.
 4. Either:
    - **pull-mode**: puts the request in a central queue, or  
@@ -95,7 +96,8 @@ The router keeps two maps:
 
 Information comes from:
 
-- **prefix-hash service** – computes block hashes for each new request.
+- **KV-block hasher** – computes block hashes for each new request; inline via
+  `prefix_hash.py` by default (legacy external service is opt-in).
 - **KV watcher** – periodically scans Redis (`scan_iter` over `{model}:kvblock:*`)
   to learn which blocks are owned by which pods. Kubernetes is used only for pod
   discovery, not for block ownership.
@@ -153,7 +155,10 @@ Most behavior is controlled via environment variables loaded into
 - `LEN_AWARE`, `LEN_POLICY` – enable length awareness and choose policy.
 - `AFFINITY_ENABLED`, `AFFINITY_MODE`, `AFFINITY_TTL_S`, `AFFINITY_HARD_TIMEOUT_S`
   – conversation key affinity (see [key-affinity.md](key-affinity.md)).
-- `HASH_SERVICE_URL` – where to call `/compute_hashes`.
+- `KV_HASH_SOURCE` – `inline` (default; hash in-process/in-container) or
+  `external` (legacy standalone `vllm-cpu-hash` service).
+- `HASH_SERVICE_URL` – `/compute_hashes` endpoint; only used by the Go gateway
+  (in-container hasher) and in `external` mode (unused by the Python router inline).
 - `REDIS_HOST`, `REDIS_PORT`, `MODEL_NAME` – KV watcher’s view of Redis keys.
 - `NAMESPACE`, `LABEL_SELECTOR`, `SIDECAR_PORT` – how to find sidecars in K8s.
 - `RESULT_TIMEOUT_S` – how long `/enqueue` will wait for a result.
@@ -171,7 +176,7 @@ At startup, the router prints the effective config and starts:
 Putting it all together:
 
 1. Client sends `/enqueue` → router.
-2. Router records metadata, optionally queries prefix-hash service.
+2. Router records metadata and computes the request's KV block hashes.
 3. Router dispatches the job (queued or pushed).
 4. Sidecar processes it and posts `/result`.
 5. Router wakes the blocked `/enqueue` call and returns the model output.

@@ -18,7 +18,9 @@
 
 ## Overview
 
-The KV cache flow spans three processes — vLLM, the sidecar, and the router — and one external service. The goal is to route each incoming request to the pod most likely to already have its prompt prefix cached in GPU memory, avoiding redundant KV recomputation.
+The KV cache flow spans three processes — vLLM, the sidecar, and the router. The goal is to route each incoming request to the pod most likely to already have its prompt prefix cached in GPU memory, avoiding redundant KV recomputation.
+
+There are two independent halves: (1) **ownership** — which pod holds which KV blocks — is learned from vLLM KV events via the sidecar and Redis; (2) **request identity** — the block hashes of an incoming prompt — is computed by the router. By default both routers compute request hashes with the same `router/prefix_hash.py` (the Python router in-process; the Go gateway via the identical code inside its own container). A legacy `KV_HASH_SOURCE=external` mode instead calls the standalone `vllm-cpu-hash` service. See [prefix-hash.md](prefix-hash.md) for the hashing details.
 
 ```
                     ┌─────────────────────────────────────────────────┐
@@ -66,10 +68,12 @@ The KV cache flow spans three processes — vLLM, the sidecar, and the router �
                     └──────────────────────────────────────────────────┘
 ```
 
-There is also a lateral flow at admit time: when a request arrives at `/enqueue`, the router calls the `prefix-hash-service` to compute the block hashes for that prompt. These are stored in `_REQ_BLOCKS` and are the basis for `prefix_len` scoring later.
+There is also a lateral flow at admit time: when a request is enqueued, the router computes the block hashes for that prompt and stores them in `_REQ_BLOCKS`, the basis for `prefix_len` scoring later. By default (`KV_HASH_SOURCE=inline`) both routers hash with the same `prefix_hash.py` — the Python router in-process, the Go gateway via the identical code shipped inside its container on `127.0.0.1`. (Legacy opt-in `KV_HASH_SOURCE=external` calls the standalone `vllm-cpu-hash` pod instead.)
 
 ```
-  client ──► /enqueue ──► prefix-hash-service ──► _REQ_BLOCKS[req_id]
+  Python router (inline):  enqueue ──► prefix_hash.py (in-process) ──────► _REQ_BLOCKS[req_id]
+  Go gateway   (inline):   enqueue ──► prefix_hash.py @127.0.0.1:9095 ───► _REQ_BLOCKS[req_id]
+  either       (external): enqueue ──► vllm-cpu-hash /compute_hashes ────► _REQ_BLOCKS[req_id]
 ```
 
 ---
@@ -82,9 +86,10 @@ There is also a lateral flow at admit time: when a request arrives at `/enqueue`
 | `KVSubscriber` (sidecar) | ZMQ SUB thread; decodes events; writes to Redis |
 | `Redis` | Shared state store for block ownership |
 | `KVWatcher` (router) | Scans Redis; maintains `_BLOCK_OWNERS` in-memory |
-| `prefix-hash-service` | Computes block hashes for incoming prompts |
+| `prefix_hash.py` (shared) | Computes request block hashes; runs in-process (Python router) and in-container on `127.0.0.1` (Go gateway) in the default `inline` mode |
+| `vllm-cpu-hash` pod (legacy) | Standalone HTTP hasher, used only when `KV_HASH_SOURCE=external`; auto-deployed in that mode |
 | `kv_aware.py` (router) | Stores `_REQ_BLOCKS`, `_BLOCK_OWNERS`; implements `prefix_len` |
-| `router_state.py` (router) | Calls `_maybe_register_kv_blocks` at admit; calls `pull_for_endpoint` |
+| `api.py` / `router_state.py` (router) | `_maybe_register_kv_blocks` at admit; `pull_for_endpoint` at dispatch |
 
 ---
 
@@ -211,28 +216,27 @@ If a pod is not yet in the discovery map when its blocks appear in Redis, those 
 
 ## Plane 3: Prefix Hash Registration
 
-When a request arrives at `/enqueue`, `_maybe_register_kv_blocks` is called before the request enters the deque:
+When a request is enqueued, `_maybe_register_kv_blocks` (in `router/api.py`) computes its block hashes before it is scheduled. In the **Python router** this is inline — no network call:
 
 ```
-POST /enqueue { prompt }
+enqueue { messages | prompt, tools }
        │
        ▼
-_maybe_register_kv_blocks(req_id, prompt)
+_maybe_register_kv_blocks(req_id, prompt, messages, tools)   # api.py
        │
-       │  POST http://prefix-hash-service:9095/compute_hashes
-       │       { "prompt": "..." }
-       │
-       ◄── { "block_hashes": [H1, H2, H3] }
+       │  prefix_hash.compute_request_block_hashes_int(...)   # inline, in-process
+       │    - render chat template (add_generation_prompt=True)
+       │    - canonicalize tools (KV_CANONICALISE_TOOLS)
+       │    - chained sha256(cbor2) block hashes, low-64-bit ints
        │
        ▼
 register_request_blocks(req_id, [H1, H2, H3])
   _REQ_BLOCKS[req_id] = [H1, H2, H3]
-       │
-       ▼
-request appended to deque
 ```
 
-The call has a hard timeout of `HASH_TIMEOUT_S` (default 2 seconds). On any failure — timeout, connection error, non-200 response — the exception is caught and the request proceeds with `_REQ_BLOCKS[req_id]` absent or empty. `prefix_len` will return 0 for all endpoints for this request, placing it in `tier kv=0`. This is the fail-open behavior: KV routing degrades gracefully to length-aware ordering.
+The **Go gateway** does the equivalent step by POSTing `{ messages | prompt, tools }` to its in-container hasher at `127.0.0.1:9095` (which runs the same `prefix_hash.py`) and registering the returned hashes. In the legacy `external` mode it POSTs a flat `{ "prompt": "..." }` to the standalone `vllm-cpu-hash` service instead.
+
+Both are fail-open: if hashing fails (inline exception, or a hasher timeout/error), the request proceeds with `_REQ_BLOCKS[req_id]` absent or empty, `prefix_len` returns 0 for all endpoints, and the request lands in `tier kv=0`. KV routing degrades gracefully to length-aware ordering.
 
 ---
 
@@ -326,17 +330,24 @@ Write ownership: sidecars write, router only reads.
 └──────────────────────────────────────────────────────┘
 ```
 
-### HTTP: router → prefix-hash-service
+### HTTP: gateway → KV hasher (`/compute_hashes`)
+
+Default (`inline`): the Go gateway calls its in-container hasher at
+`127.0.0.1:9095` (same `prefix_hash.py` as the Python router), sending structured
+inputs. The Python router skips HTTP entirely and hashes in-process.
 
 ```
 POST /compute_hashes
 Content-Type: application/json
 
-{ "prompt": "<raw prompt string>" }
+{ "messages": [...], "tools": [...] }   # inline; or { "prompt": "..." }
 
 200 OK
 { "block_hashes": [<int>, <int>, ...] }
 ```
+
+Legacy (`external`): the same call goes to the standalone `vllm-cpu-hash`
+service, with the Go gateway sending only `{ "prompt": "..." }`.
 
 ### HTTP: sidecar → router `/pull`
 
@@ -429,10 +440,10 @@ The routing benefit depends entirely on the hashes in `_REQ_BLOCKS` matching the
 
 ```
 _BLOCK_OWNERS hashes:  produced by vLLM internally, observed via BlockStored events
-_REQ_BLOCKS hashes:    produced by prefix-hash-service from the raw prompt string
+_REQ_BLOCKS hashes:    produced by the inline prefix_hash.py (default) or the legacy external service
 ```
 
-For a match to be valid, `prefix-hash-service` must replicate vLLM's internal block hashing exactly: same tokenizer, same block size, same rolling hash algorithm. If they diverge, the system produces silent routing errors in both directions.
+For a match to be valid, the request-hash producer must replicate vLLM's block hashing exactly: same **tokenizer**, same **block size** (`KV_BLOCK_SIZE` vs vLLM `--block-size`), same **`PYTHONHASHSEED`** (so `NONE_HASH` matches), same chained `sha256(cbor2)` algorithm, and the same logical request shape after normalization/tool canonicalization. If they diverge, the system produces silent routing errors in both directions.
 
 | Mismatch type | Effect |
 |---------------|--------|
@@ -449,6 +460,8 @@ Neither error is detectable at the routing layer. There is no validation or veri
 
 **No token-level granularity.** `prefix_len` counts blocks, not tokens. Whether a block represents 16 or 64 tokens is not tracked. Tier comparisons across requests with different block sizes or token densities may not accurately reflect proportional cache reuse benefit.
 
-**No session affinity.** Multi-turn requests in the same conversation are not correlated. The KV tier mechanism will naturally tend to route follow-up requests to the pod that computed previous turns (because those block hashes will match), but this is incidental. There is no explicit session tracking or sticky routing guarantee.
+**Session affinity is now explicit (optional).** The KV tier mechanism naturally tends to route follow-up turns to the pod that computed previous turns (their block hashes match), but for a stronger guarantee there is now an explicit conversation key-affinity feature (off by default). See [key-affinity.md](key-affinity.md).
 
-**Fail-open on hash service failure.** If `prefix-hash-service` is down or slow, `_REQ_BLOCKS` is never populated and all requests are routed without KV hints. This is correct behavior but means the KV cache benefit disappears silently under hash service degradation.
+**Fail-open on hashing failure.** If request hashing fails — a tokenizer error in the in-container/in-process hasher, or a down/slow legacy service in `external` mode — `_REQ_BLOCKS` is not populated and those requests route without KV hints. This is correct behavior but means the KV cache benefit disappears silently under that degradation.
+
+**Mode divergence.** `external` (legacy) uses a different hashing implementation than `inline`; the two are not guaranteed to agree. Pick one mode per cluster.

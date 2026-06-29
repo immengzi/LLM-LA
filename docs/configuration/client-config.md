@@ -304,8 +304,17 @@ environment variables on the router deployment (e.g. in Kubernetes YAML).
 
 ### Hash / KV services
 
+- `KV_HASH_SOURCE: str`  
+  KV-block hash source: `inline` (default; in-process for the Python router,
+  in-container for the Go gateway, using `prefix_hash.py`) or `external` (legacy
+  standalone `vllm-cpu-hash` service). Set via client config `router_hash_source`
+  / Helm `router.hashSource`.
+
 - `HASH_SERVICE_URL: str`  
-  Base URL of the prefix-hash service (used for `/compute_hashes`).
+  Endpoint of the `/compute_hashes` hasher. For the Go gateway in `inline` mode
+  this is the in-container hasher (`http://127.0.0.1:9095`); in `external` mode
+  it is the legacy service (`http://vllm-cpu-hash:9095`). Unused by the Python
+  router in `inline` mode.
 
 ### K8s / sidecar discovery
 
@@ -373,7 +382,7 @@ environment variables on the router deployment (e.g. in Kubernetes YAML).
   Sleep interval between checks inside `wait_for_result`.
 
 - `HASH_TIMEOUT_S: float`  
-  Timeout for calls to the prefix-hash service.
+  Timeout for HTTP calls to the hasher (Go gateway; inline or external).
 
 - `PUSH_TIMEOUT_S: float`  
   Timeout for router → sidecar `/push` calls (push modes).

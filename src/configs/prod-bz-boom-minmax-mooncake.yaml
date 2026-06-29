@@ -90,7 +90,9 @@ helm:
   autoscaling_min: 1
   autoscaling_max: 1
 
-  router_kv_aware: true
+  # Unified routing-strategy selector (overrides router_kv_aware/router_affinity_*):
+  #   none | prefix | affinity | both. "prefix" = KV prefix-awareness only.
+  router_strategy: "prefix"
   router_len_aware: true
   router_len_policy: "short_first"
 

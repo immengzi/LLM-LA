@@ -121,9 +121,13 @@ flowchart TD
 
 ## 6. Interaction with other features
 
-- **KV-aware routing:** Complementary and reinforcing. The affinity pod is also
-  the pod with the most cached blocks, so KV scoring and affinity push the same
-  way. Keep KV/prefix hashing enabled for best results.
+- **KV-aware routing:** Conceptually orthogonal but mechanically related. The
+  affinity pod is usually also the pod with the most cached blocks, so in `soft`
+  mode KV scoring and affinity reinforce each other (use `router_strategy: both`).
+  They can also run in isolation — `prefix` (KV-awareness only) or `affinity`
+  (stickiness only) — via the unified selector in §7. Note `hard` affinity can
+  intentionally override the best KV match by withholding a request for its pinned
+  pod.
 - **SLO-aware routing:** Affinity is a *within-band* tiebreak only; deadline
   slack always wins, so affinity cannot push an urgent request behind a
   non-urgent one.
@@ -137,16 +141,52 @@ flowchart TD
 
 ## 7. Configuration
 
-Helm (`router.*`, see [helm-values.md](../configuration/helm-values.md)):
+### Unified strategy selector (recommended)
+
+Prefix KV-awareness and key-affinity are two independent mechanisms. Rather than
+toggling their low-level flags separately, pick one with a single selector:
+
+| Key | Env | Client (`helm.*`) | Values |
+|-----|-----|-------------------|--------|
+| `strategy` | `ROUTER_STRATEGY` | `router_strategy` | `none` \| `prefix` \| `affinity` \| `both` |
+
+| `router_strategy` | prefix KV-awareness | key-affinity |
+|-------------------|---------------------|--------------|
+| `none` | off | off |
+| `prefix` | **on** | off |
+| `affinity` | off | **on** |
+| `both` | **on** | **on** |
+
+When set (non-empty), it **overrides** `kvAware` / `affinityEnabled`. When left
+empty (the default) those individual flags are used exactly as before, so all
+existing configs keep working untouched. `affinityMode` (`soft`/`hard`) and the
+TTL/timeout knobs below still apply whenever the strategy includes affinity.
+
+```yaml
+# client config (src/configs/*.yaml)
+helm:
+  router_strategy: "affinity"   # none | prefix | affinity | both
+  router_affinity_mode: "soft"  # soft | hard (only when affinity is on)
+```
+
+The selector is mirrored in both router implementations (Python
+`router/config.py`, Go `internal/gateway/config.go`), so it behaves identically
+regardless of `service_impl`.
+
+### Low-level flags
+
+These are what the selector derives; set them directly only if you leave
+`router_strategy` empty.
 
 | Key | Env | Default | Purpose |
 |-----|-----|---------|---------|
-| `affinityEnabled` | `AFFINITY_ENABLED` | `false` | Master switch |
+| `kvAware` | `KV_AWARE` | `true` | Prefix KV-awareness master switch |
+| `affinityEnabled` | `AFFINITY_ENABLED` | `false` | Key-affinity master switch |
 | `affinityMode` | `AFFINITY_MODE` | `soft` | `soft` \| `hard` |
 | `affinityTtlS` | `AFFINITY_TTL_S` | `300` | Mapping lifetime (s) |
 | `affinityHardTimeoutS` | `AFFINITY_HARD_TIMEOUT_S` | `5` | Hard-mode release window (s) |
 
-Enable in values:
+Enable affinity directly in values:
 
 ```yaml
 router:

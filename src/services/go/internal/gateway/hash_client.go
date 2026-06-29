@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
-// HashClient calls the (Python) prefix-hash service /compute_hashes endpoint
-// to obtain the vLLM-compatible KV block hashes for a prompt. This mirrors the
-// Python router's _maybe_register_kv_blocks: the prefix-hash service stays a
-// shared Python microservice and the Go router consumes it over HTTP.
+// HashClient calls a /compute_hashes endpoint to obtain vLLM-compatible KV
+// block hashes for a request. By default (KV_HASH_SOURCE=inline) this targets
+// the in-container Python hasher (127.0.0.1:9095) that runs the router's shared
+// prefix_hash.py, so the Go gateway and Python router produce identical hashes.
+// With KV_HASH_SOURCE=external it targets the legacy standalone vllm-cpu-hash
+// service instead.
 type HashClient struct {
 	cfg    *Config
 	client *http.Client
@@ -34,18 +37,34 @@ func NewHashClient(cfg *Config) *HashClient {
 }
 
 type hashRequest struct {
-	Prompt string `json:"prompt"`
+	Prompt   string        `json:"prompt,omitempty"`
+	Messages []interface{} `json:"messages,omitempty"`
+	Tools    []interface{} `json:"tools,omitempty"`
 }
 
 type hashResponse struct {
 	BlockHashes []json.Number `json:"block_hashes"`
 }
 
-// ComputeHashes returns the ordered block-hash chain for the prompt (as
-// canonical decimal strings), or an error. Callers treat any error as
-// "no hashes" (best-effort), matching the Python behavior.
-func (h *HashClient) ComputeHashes(ctx context.Context, prompt string) ([]string, error) {
-	body, err := json.Marshal(hashRequest{Prompt: prompt})
+// ComputeHashes returns the ordered block-hash chain (as canonical decimal
+// strings), or an error. Callers treat any error as "no hashes" (best-effort).
+//
+// Behavior depends on KV_HASH_SOURCE:
+//   - inline:   send structured messages+tools (else the flat prompt) to the
+//     in-container hasher, matching the Python router's prefix_hash.py input.
+//   - external: send only the flat prompt to the legacy vllm-cpu-hash service,
+//     preserving the former behavior exactly.
+func (h *HashClient) ComputeHashes(ctx context.Context, prompt string, messages, tools []interface{}) ([]string, error) {
+	var reqBody hashRequest
+	if strings.ToLower(h.cfg.KVHashSource) == "external" {
+		reqBody = hashRequest{Prompt: prompt}
+	} else if len(messages) > 0 {
+		reqBody = hashRequest{Messages: messages, Tools: tools}
+	} else {
+		reqBody = hashRequest{Prompt: prompt, Tools: tools}
+	}
+
+	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, err
 	}

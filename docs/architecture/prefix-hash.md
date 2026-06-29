@@ -1,304 +1,201 @@
-# Prefix Hash Service
+# Prefix Hashing and Prefix-Aware Routing
 
-This component provides a lightweight HTTP endpoint for computing **KV-cache
-block identifiers** for model prompts. These identifiers are the same type
-of hashes that the vLLM runtime uses internally to decide whether a request's
-prefix can reuse an existing KV block on a worker.
+KV-aware routing needs a **stable, vLLM-compatible identifier for every block of
+a prompt's prefix**. With those identifiers the router can ask "which pod already
+has the KV blocks for this request's prefix cached?" and bias the request toward
+that pod, turning a cold prefill into a cache hit.
 
-The service exists so that other parts of the system (router-service,
-sidecars, orchestration tools, etc.) can obtain these identifiers without
-running a full model. It produces repeatable, model-consistent block hashes
-using the same tokenization and hashing logic that vLLM expects.
+This document describes how those block identifiers are produced and how they
+drive routing.
 
----
+The identifiers are produced from a single source of truth, `router/prefix_hash.py`,
+selected by the `KV_HASH_SOURCE` knob (`inline` by default):
 
-## Purpose
+- **`inline` (default)** — both routers hash with `router/prefix_hash.py`:
+  - the **Python router** computes hashes in-process (no network hop);
+  - the **Go gateway** runs the exact same `prefix_hash.py` as a tiny hasher
+    inside its own container (`hasher/hasher_app.py`, listening on
+    `127.0.0.1:9095`), so Go and Python produce byte-identical hashes.
+- **`external` (legacy)** — both routers instead call the standalone
+  `vllm-cpu-hash` pod over HTTP. This is the former path, preserved for
+  compatibility; see [Legacy: the external hasher](#legacy-the-external-hasher).
 
-Many LLM serving systems reuse attention states (KV blocks) when multiple
-requests share the same prompt prefix. To enable this reuse, components need
-a **stable identifier** that represents the prefix at the block level.
-
-The prefix-hash service provides exactly that:
-
-- Converts user prompts or chat messages into model tokens
-- Splits those tokens into blocks of fixed size
-- Computes a deterministic hash for each block
-- Returns block-level identifiers that match the vLLM server's behavior
-
-Routers and sidecars can then use these identifiers to:
-
-- Detect when a request matches an existing cached prefix
-- Pin requests to workers holding compatible KV blocks
-- Decide when new blocks should be created
-- Coordinate block reuse across distributed components
+Whichever source is used feeds the identical KV-aware scoring path
+(`register_request_blocks` -> `_REQ_BLOCKS`, scored by `prefix_len` against
+`_BLOCK_OWNERS`). See [kv-cache-flow.md](kv-cache-flow.md) for how block
+*ownership* is learned from vLLM and how scoring/tiering then works.
 
 ---
 
-## How Inputs Are Interpreted
+## The block-hash algorithm
 
-The service accepts either:
-
-- `prompt`: a plain text string, or
-- `messages`: a list of chat-style messages (OpenAI format)
-
-It follows the same formatting behavior that vLLM uses:
-
-- If the tokenizer includes a chat template, that template is applied.
-- Otherwise, messages are combined into a simple deterministic text form.
-- The exact same tokenizer files as the model server must be available.
-
-This ensures that the token sequence, and therefore the block hashes, matches
-what the model server would generate.
-
----
-
-## How Block Hashes Are Formed
-
-Once the token IDs are produced, they are processed into fixed-size blocks:
-
-- Block size is supplied at startup (e.g., 128 IDs per block).
-- Each block is encoded internally and hashed using a consistent digest method.
-- The hash is turned into an integer suitable for routing and indexing.
-
-The hashing approach is stable across processes and machines so long as:
-
-- the tokenizer,
-- the block size, and
-- the hashing logic
-
-are kept consistent with the model servers.
-
-The intent is not cryptographic security, but **consistency and collision
-resistance** across the cluster.
-
----
-
-## API Overview
-
-Two main endpoints are exposed:
-
-### `/compute_hashes`
-
-Accepts a JSON body containing either `prompt` or `messages`.
-Returns:
-
-- `block_hashes`: identifiers for each KV block
-- `token_ids`: the tokenized sequence
-- metadata (number of tokens, number of blocks, model path, block size)
-
-This endpoint is what routers and sidecars call during KV-aware decision-making.
-
-### `/health`
-
-Simple readiness check.
-
-### `/debug_config`
-
-Reports the model path and block configuration the service is using.
-
----
-
-## Configuration and Deployment
-
-The service starts with command-line options specifying:
-
-- model path
-- block size
-- TCP host/port
-- EOS token ID
-- default max_tokens (for internal Request construction)
-
-It loads the tokenizer once, initializes the block hasher, and stays resident.
-No GPU is required.
-
-The Dockerfile builds a small CPU-only service image intended to run alongside
-model workers or router components. Typical usage:
-
-- One instance per model version
-- Model files mounted at `/model`
-- Called by router-service or sidecar before deciding how to route a request
-
----
-
-## How It Fits Into KV-Aware Routing
-
-Other components use this service to reason about KV reuse:
-
-- The router calls `/compute_hashes` to check whether a request's blocks match
-  those cached on a worker, and if so, route the request there. (Only the
-  router calls this service; sidecars report KV state over ZMQ -> Redis and do
-  not call prefix-hash.)
-- Future caching strategies (prefetching, warming, migration) can use these
-  identifiers to coordinate behavior.
-
-Consistency between this service and the model servers ensures that all
-components agree on which requests share the same prefix, enabling predictable
-and efficient KV reuse.
-
----
-
-# Prefix-Aware Routing Design
-
-This section describes an evolution of the prefix-hash idea: instead of the
-router calling an external HTTP hash service at request time, the router
-computes vLLM-compatible KV block hashes **inline** before enqueueing a request,
-and routes toward pods that already hold matching prefix KV blocks based on
-sidecar-reported ownership in Redis.
-
-## Goals
-
-- Compute prefix block identifiers without a network round-trip to an external
-  hash service on the request path.
-- Keep the identifiers bit-for-bit compatible with the block hashes vLLM emits
-  over KV events, so the router and the model servers agree on prefix identity.
-- Bias routing toward workers with cache hits while staying model-neutral and
-  confined to the router (no gateway or client changes).
-
-## Inline Hash Algorithm
-
-The router mirrors vLLM's chained block-hash semantics without importing vLLM.
-For a token sequence split into blocks of size `B`:
+The identifiers mirror vLLM's chained block hashing, reproduced without importing
+vLLM. For a token sequence split into blocks of size `B`:
 
 ```
 NONE_HASH      = sha256(cbor2.dumps(PYTHONHASHSEED))
 block_hash[i]  = sha256(cbor2.dumps((
-    parent_block_hash_or_NONE_HASH,
+    parent_block_hash_or_NONE_HASH,   # digest of block i-1 (NONE_HASH for i=0)
     tuple(token_ids[i*B : (i+1)*B]),
-    extra_keys,
+    extra_keys,                        # None here
 )))
 ```
 
-Key properties:
+Properties that matter for routing:
 
-- Each block is hashed together with the digest of the previous block, forming a
-  chain so that a block hash depends on the entire prefix preceding it.
-- Only **full** blocks are emitted; a trailing partial block is ignored.
-- The external wire value is the low 64 bits of the 32-byte digest, matching the
-  integer block-hash form observed in vLLM KV events.
+- **Chained.** Each block hash folds in the previous block's digest, so a block
+  identity depends on the entire prefix before it. This is what makes a *prefix*
+  match meaningful: identical block `i` implies identical blocks `0..i`.
+- **Full blocks only.** A trailing partial block is not emitted.
+- **64-bit wire form.** The external value is the low 64 bits of the 32-byte
+  digest, matching the integer block hashes vLLM emits in its KV events.
 
-The router must use the same tokenizer directory and block size as the vLLM
-runtime, and `PYTHONHASHSEED` must match so that `NONE_HASH` is identical.
+The hashing is not cryptographic; the goal is **consistency** with vLLM, not
+security.
 
-## Input Normalization
+---
 
-The router hashes the same logical chat input it forwards for inference:
+## Inline hashing (default, both routers)
 
-- plain prompts are tokenized directly
-- OpenAI `messages` are rendered with the model tokenizer chat template when
-  available, otherwise combined into a simple deterministic text form
-- tool message string content is expanded into a text-block list, and assistant
-  tool-call argument JSON strings are parsed into objects, matching how the chat
-  template expects these fields; model-specific field rewrites are intentionally
-  not applied here
+`router/prefix_hash.py` is the single hashing implementation. In `inline` mode:
 
-### Tool Canonicalization
+- **Python router**: loaded at startup, the tokenizer is initialized once from
+  `KV_TOKENIZER_PATH` (`/model`). For each request, `_maybe_register_kv_blocks`
+  in `router/api.py` calls `compute_request_block_hashes_int(...)` in-process.
+- **Go gateway**: the same `prefix_hash.py` is shipped inside the gateway image
+  and served by `hasher/hasher_app.py` on `127.0.0.1:9095`; the gateway's
+  `hash_client.go` posts `messages`+`tools` to it. The image entrypoint starts
+  this hasher only in `inline` mode and waits for its `/health`.
 
-Tool schemas are JSON-like objects whose key order is semantically irrelevant,
-but it can become tokenization-visible once a tokenizer chat template renders
-tools into prompt text. Routing hashes must therefore be computed from the same
-logical request shape that the model path actually serializes.
+Both register the result before the request is scheduled. Input handling matches
+what the model path actually serves so the hashes line up:
 
-To keep hashes stable, OpenAI `tools` are optionally canonicalized before
-hashing:
+- A plain `prompt` is tokenized directly.
+- OpenAI `messages` are rendered with the model's tokenizer chat template
+  (`add_generation_prompt=True`) when one is present; otherwise they fall back to
+  a simple deterministic `role: content` text join.
+- Tool/assistant message shapes are normalized to what chat templates expect:
+  tool message string content is expanded into a text-block list, and assistant
+  tool-call `arguments` JSON strings are parsed into objects. Model-specific
+  reasoning-field rewrites are intentionally **not** done here.
 
-- each outer tool object is rebuilt in a stable order: `type`, then `function`
+### Tool canonicalization
+
+Tool schemas are JSON objects whose key order is semantically irrelevant, but key
+order becomes tokenization-visible once a chat template renders the tools into
+prompt text. To keep hashes stable, OpenAI `tools` are canonicalized before
+hashing (gated by `KV_CANONICALISE_TOOLS`, default on):
+
+- each outer tool object is rebuilt in a fixed order: `type`, then `function`
 - the function object is rebuilt as `name`, optional `description`, then
   `parameters`
-- only `function.parameters` is recursively key-sorted, because JSON Schema
-  object field ordering should not change semantics but can change the rendered
-  token prefix
+- only `function.parameters` is recursively key-sorted
 
-This is gated by `KV_CANONICALISE_TOOLS` (default on). It is intentionally
-router-side: it does not modify the gateway and does not change the request body
-sent to vLLM. Its only purpose is to make the router's pre-routing block hashes
-line up with the stable tool serialization shape used by the existing
-OpenAI-compatible path. If that serialization changes later, this compatibility
-hook should be revalidated rather than assumed permanent.
+This is router-side only: it does not modify the gateway and does not change the
+body sent to vLLM. Its single purpose is to make the router's pre-routing hashes
+match the tool serialization the OpenAI-compatible path produces. If that
+serialization changes, this hook must be revalidated.
 
-## Router Integration
+---
 
-Inline hashing is part of the normal request-handling path:
+## Legacy: the external hasher
 
-- the tokenizer is initialized once at router startup
-- request block hashes are computed inline for each request
-- those block identifiers are registered through the existing KV-aware router
-  state so they participate in routing decisions
-- for chat completions, both `messages` and `tools` are passed into the hash
-  path so the computed prefix reflects the full rendered prompt
+> Opt-in only, via `KV_HASH_SOURCE=external`. The default (`inline`) needs no
+> external pod. Use this only if you specifically want to offload hashing.
 
-Block ownership is learned independently: sidecars observe vLLM KV events and
-publish block ownership to Redis. The router consults that ownership view to
-prefer pods with matching blocks, rather than calling `/compute_hashes` at
-request time.
+`src/services/prefix_hash/prefix_hash_service.py` packages a CPU-only HTTP hasher
+(the `vllm-cpu-hash` image, deployed by `templates/20-cpu-hash.yaml`). When
+`KV_HASH_SOURCE=external`, both routers call its `POST /compute_hashes` over HTTP
+and treat any error as "no hashes" (best-effort, fail-open).
 
-## Pull-Mode Scheduling
+Auto-deploy: the `vllm-cpu-hash` Deployment+Service is rendered **only** when a
+router is present and `router.hashSource=external`; in `inline` mode it is not
+deployed at all.
 
-When the router operates in pull mode, queue selection can sample from both ends
-of the central queue:
+Caveat: this legacy service uses a different (real-vLLM) hashing implementation
+than `prefix_hash.py`, and the Go gateway sends it only a flat `prompt`. So
+`external` can produce **different** hashes than `inline`; do not mix the two
+modes within one cluster if cross-pod KV ownership must agree.
 
-- the head scan remains controlled by `POOL_FACTOR`
-- when `POOL_BIDIRECTIONAL` is enabled, the router also samples up to the desired
-  number of requests from the queue tail
-- sampled requests are ranked using the existing KV-aware and length-aware logic
-- unselected head items are returned to the front, unselected tail samples are
-  returned to the back, and hard key-affinity hold-backs are returned to the
-  front before other leftovers
+---
 
-Sampling both ends helps agentic follow-up turns become visible to the router
-even when older cold requests dominate the head of the queue.
+## Prefix-aware pull scheduling
 
-## Data-Parallel Sidecar Fan-In
+Block identifiers only help if the router can surface cache-warm requests to the
+pulling pod. In pull mode the router samples a candidate pool from the central
+queue and ranks it with the existing KV-aware (and length-aware / SLO-aware)
+logic:
 
-In data-parallel (DP) deployments, a single leader sidecar aggregates KV state
-for all local DP engines so the router sees one unified ownership view. The
-leader sidecar:
+- the head scan size is `want * POOL_FACTOR`
+- when `POOL_BIDIRECTIONAL` is enabled, the router *also* samples up to `want`
+  items from the **tail** of the queue, so agentic follow-up turns stay visible
+  even when older cold requests dominate the head
+- unselected head items are returned to the front; unselected tail samples are
+  returned to the back; hard key-affinity hold-backs are returned to the front
 
-- subscribes to its local vLLM KV event stream
-- resolves worker pod DNS names derived from the LeaderWorkerSet naming pattern
-- connects to each worker rank's ZMQ endpoint, retrying DNS resolution for
-  workers not yet available at startup
-- writes all observed block ownership into Redis under the leader pod identity
+---
 
-The router still routes to the leader endpoint; it does not route directly to an
-internal DP engine. This is configured via `DP_SIZE` and `DP_SIZE_LOCAL`.
+## Data-parallel sidecar fan-in
+
+In data-parallel (DP) deployments a single **leader** sidecar aggregates KV state
+for all local DP engines so the router sees one ownership view per pod. The
+leader subscribes to its local vLLM KV stream, resolves each worker rank's ZMQ
+endpoint via the LeaderWorkerSet DNS convention (retrying DNS for ranks that are
+not ready at startup), and writes all observed ownership into Redis under the
+leader pod identity. The router routes to the leader endpoint, never directly to
+an internal DP engine. Configured via `DP_SIZE` / `DP_SIZE_LOCAL`.
+
+---
 
 ## Configuration
 
+Router-side (env, set by `templates/31-router.yaml`):
+
 | Setting | Default | Purpose |
 | --- | --- | --- |
+| `KV_AWARE` | `true` | Master switch for KV-aware scoring (and inline hashing) |
+| `KV_HASH_SOURCE` | `inline` | `inline` (in-process/in-container) or `external` (legacy `vllm-cpu-hash` pod) |
+| `HASH_SERVICE_URL` | `127.0.0.1:9095` (go inline) / `vllm-cpu-hash:9095` (external) | External hasher endpoint; unused for Python inline |
 | `KV_TOKENIZER_PATH` | `/model` | Tokenizer/model directory; must match the vLLM pods |
-| `KV_BLOCK_SIZE` | `128` | Block size; must match the vLLM pods |
+| `KV_BLOCK_SIZE` | `128` | Block size; must match the vLLM pods' `--block-size` |
 | `PYTHONHASHSEED` | `0` | Seed for `NONE_HASH`; must match the vLLM pods |
-| `KV_CANONICALISE_TOOLS` | enabled | Canonicalize OpenAI `tools` before hashing |
-| `POOL_BIDIRECTIONAL` | disabled | Sample from both ends of the pull queue |
-| `DP_SIZE`, `DP_SIZE_LOCAL` | — | DP sidecar fan-in topology |
+| `KV_CANONICALISE_TOOLS` | `1` (on) | Canonicalize OpenAI `tools` before hashing |
+| `POOL_FACTOR` | `4` | Head-scan multiple of `want` |
+| `POOL_BIDIRECTIONAL` | `false` | Also sample from the queue tail |
+| `DP_SIZE`, `DP_SIZE_LOCAL` | `1`, `1` | DP sidecar fan-in topology |
 
-The router image depends on `cbor2`, `transformers`, and `tokenizers` for inline
-tokenization and hashing. No GPU is required.
+Corresponding Helm values: `router.kvAware`, `router.hashSource`,
+`router.kvBlockSize`, `router.kvCanonicaliseTools`, `router.poolBidirectional`
+(client config: `router_hash_source`). Both router images bundle `cbor2`,
+`transformers`, and `tokenizers` for inline tokenization (the Go gateway image
+ships the same `prefix_hash.py`).
 
-## Deployment
+---
 
-The Helm chart wires the runtime path:
+## Correctness invariant
 
-- mounts the model/tokenizer directory into the router at `/model`
-- sets router environment variables for inline hashing, message normalization,
-  tool canonicalization, and bidirectional pooling
-- sets DP sidecar environment variables (`DP_SIZE`, `DP_SIZE_LOCAL`)
-- configures vLLM DP workers to emit KV events via `--kv-events-config`
-- exposes chart values such as `router.kvBlockSize`,
-  `router.kvCanonicaliseTools`, and `router.poolBidirectional`
+KV-hit routing is only as good as the agreement between the request hashes
+(`_REQ_BLOCKS`) and the ownership hashes vLLM emits (`_BLOCK_OWNERS`). For them to
+match, the producer (inline hasher, or the legacy external service) must match
+each vLLM pod on **all** of:
 
-## Invariants and Boundaries
+- the tokenizer files,
+- the block size (`KV_BLOCK_SIZE` vs vLLM `--block-size`),
+- `PYTHONHASHSEED`,
+- the logical request shape after normalization and tool canonicalization.
 
-For KV-hit routing to be accurate, the router's hash inputs must match the vLLM
-pods exactly: the tokenizer files, the block size, the `PYTHONHASHSEED`, and the
-logical request shape (after normalization and tool canonicalization). If any of
-these diverge, requests still execute correctly, but cache-hit routing becomes
-inaccurate.
+If any of these diverge the request still executes correctly, but routing either
+sends it to a pod that does not actually have the prefix (false positive ->
+recompute) or misses a warm pod (false negative -> cold prefill). There is no
+runtime validation of hash agreement, so this is the single most important thing
+to keep aligned when changing models, block size, or the gateway serialization.
 
-The design deliberately keeps the following boundaries:
+---
 
-- no gateway code changes; compatibility hooks stay router-side and model-neutral
-- no model-specific behavior in the hash implementation
-- no direct scheduling to a specific DP engine
-- no dependency on vLLM Python internals inside the router
+## Boundaries
+
+- No gateway or client code changes; compatibility hooks stay router-side and
+  model-neutral.
+- No model-specific behavior in the hash implementation.
+- No direct scheduling to a specific DP engine.
+- No dependency on vLLM Python internals inside the router.

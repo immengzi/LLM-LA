@@ -33,10 +33,13 @@ type Config struct {
 	KVWatchMaxKeys       int
 	KVDiscoveryIntervalS float64
 
+	KVHashSource         string
 	HashServiceURL       string
 	HashTimeoutS         float64
 	HashMaxKeepalive     int
 	HashKeepaliveExpiryS float64
+
+	RouterStrategy string
 
 	KVAware   bool
 	LenAware  bool
@@ -123,10 +126,13 @@ func LoadConfig() *Config {
 		KVWatchMaxKeys:       common.EnvInt("KV_WATCH_MAX_KEYS", 200),
 		KVDiscoveryIntervalS: common.EnvFloat("KV_DISCOVERY_INTERVAL_S", 5.0),
 
-		HashServiceURL:       common.EnvStr("HASH_SERVICE_URL", "http://prefix-hash-service:9095"),
+		KVHashSource:         common.EnvStr("KV_HASH_SOURCE", "inline"),
+		HashServiceURL:       common.EnvStr("HASH_SERVICE_URL", "http://127.0.0.1:9095"),
 		HashTimeoutS:         common.EnvFloat("HASH_TIMEOUT_S", 2.0),
 		HashMaxKeepalive:     common.EnvInt("HASH_MAX_KEEPALIVE", 50),
 		HashKeepaliveExpiryS: common.EnvFloat("HASH_KEEPALIVE_EXPIRY_S", 30.0),
+
+		RouterStrategy: common.EnvStr("ROUTER_STRATEGY", ""),
 
 		KVAware:   common.EnvBool("KV_AWARE", true),
 		LenAware:  common.EnvBool("LEN_AWARE", true),
@@ -234,6 +240,27 @@ func (c *Config) normalize() {
 	}
 	c.AffinityMode = am
 
+	hs := strings.TrimSpace(strings.ToLower(c.KVHashSource))
+	if hs != "inline" && hs != "external" {
+		hs = "inline"
+	}
+	c.KVHashSource = hs
+
+	// Unified routing strategy: when set, derives KVAware / AffinityEnabled from
+	// a single knob and overrides the individual flags above. Ports
+	// ROUTER_STRATEGY handling from src/services/router_service/router/config.py.
+	c.RouterStrategy = strings.TrimSpace(strings.ToLower(c.RouterStrategy))
+	switch c.RouterStrategy {
+	case "none":
+		c.KVAware, c.AffinityEnabled = false, false
+	case "prefix":
+		c.KVAware, c.AffinityEnabled = true, false
+	case "affinity":
+		c.KVAware, c.AffinityEnabled = false, true
+	case "both":
+		c.KVAware, c.AffinityEnabled = true, true
+	}
+
 	tm := strings.TrimSpace(strings.ToLower(c.TransportMode))
 	if tm != "sync" && tm != "async_pubsub" {
 		tm = "sync"
@@ -332,8 +359,10 @@ func (c *Config) PrintBanner() {
 		"KV_WATCH_INTERVAL_S":     c.KVWatchIntervalS,
 		"KV_WATCH_MAX_KEYS":       c.KVWatchMaxKeys,
 		"KV_DISCOVERY_INTERVAL_S": c.KVDiscoveryIntervalS,
+		"KV_HASH_SOURCE":          c.KVHashSource,
 		"HASH_SERVICE_URL":        c.HashServiceURL,
 		"HASH_TIMEOUT_S":          c.HashTimeoutS,
+		"ROUTER_STRATEGY":         c.RouterStrategy,
 		"KV_AWARE":                c.KVAware,
 		"LEN_AWARE":               c.LenAware,
 		"LEN_POLICY":              c.LenPolicy,

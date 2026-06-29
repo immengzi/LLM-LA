@@ -386,6 +386,16 @@ class HelmConfig:
     # older configs that set a global query string.
     autoscaling_prometheus_query: str = ""
 
+    # ---- unified routing strategy (maps to values.router.strategy) ----
+    # "" = use router_kv_aware / router_affinity_enabled below directly.
+    # One of: none | prefix | affinity | both -> overrides those flags.
+    router_strategy: str = ""
+
+    # ---- KV-block hash source (maps to values.router.hashSource) ----
+    # "inline" = in-process / in-container hasher (default); "external" = legacy
+    # vllm-cpu-hash service (the external pod is auto-deployed when external).
+    router_hash_source: str = "inline"
+
     # ---- router feature toggles (maps to Helm chart values.router.*) ----
     router_kv_aware: bool = True
     router_len_aware: bool = True

@@ -119,5 +119,5 @@ helm upgrade --install vllm ./chart \
 
 | `backend` | `mooncake.enabled` | Result |
 |-----------|-------------------|--------|
-| `router` | `false` | Router + sidecar + redis + cpu-hash. No cross-node KV cache transfer. |
+| `router` | `false` | Router (inline KV-block hashing) + sidecar + redis. No cross-node KV cache transfer. (Legacy standalone cpu-hash pod only if `router.hashSource=external`.) |
 | `router` | `true` | All of the above + mooncake-master + AscendStoreConnector on each vLLM worker. |

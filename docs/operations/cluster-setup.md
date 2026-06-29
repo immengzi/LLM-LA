@@ -197,22 +197,27 @@ curl --noproxy '*' http://reg.local:32000/v2/_catalog
 
 **Scope**: build machine with Docker + access to `reg.local:32000`.
 
-All build scripts default to `REGISTRY=reg.local:32000`. The following
+The per-service `build.sh` scripts source the shared `services/build-common.sh`,
+which resolves the registry, image tag, and any build-time pip proxy in a
+cluster-agnostic way (bz/yz/…). The cluster-facing image name defaults to
+`REGISTRY=reg.local:32000`, but the push goes to `PUSH_REGISTRY` (default
+`localhost:32000`) — the same registry reachable on every node's NodePort and
+the only insecure (HTTP) target the local Docker daemon trusts. The following
 images must be present in the registry before deploying:
 
 | Image | Build source |
 |-------|-------------|
-| `kv-router` | `services/router_service/` — `docker build && docker push` |
-| `kv-sidecar` | `services/sidecar/` — `docker build && docker push` |
+| `kv-router` | `services/router_service/build.sh` |
+| `kv-sidecar` | `services/sidecar/build.sh` |
+| `vllm-cpu-hash` (legacy external hasher) | `services/prefix_hash/build.sh` (only needed for `router.hashSource=external`) |
 | `kv-router-go`, `kv-sidecar-go` | `services/go/build.sh` |
 | `boom-gateway` | `boom-gateway/` — `cargo build --release -p boom-main`, then package with `src/boom-integration/Dockerfile` |
-| `vllm-cpu-hash` | `services/prefix_hash/` |
 | `ascend/vllm-ascend` | Pull from `quay.io/ascend/vllm-ascend`, retag, push |
 | `redis:7-alpine` | Pull from Docker Hub, retag, push |
 | `litellm:main-stable` | `services/litellm-image.sh` |
 
 **Reference**: [registry.md](registry.md) "Images in the registry",
-individual `build.sh` scripts.
+individual `build.sh` scripts and `services/build-common.sh`.
 
 ---
 
