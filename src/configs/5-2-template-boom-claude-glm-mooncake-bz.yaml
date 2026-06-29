@@ -1,0 +1,163 @@
+# 5-2-template-boom-claude-glm-mooncake-bz.yaml
+#
+# bz manual adaptation of 5-2-template-boom-claude-glm-mooncake.yaml.
+# Keeps the 5-2 BooM -> router -> vLLM mooncake deployment shape, but uses
+# bz-local node IPs, model paths, images, and mooncake master pinning.
+
+backend: "boom"
+
+experiments_root: "/home/haiting/llm-la/microservice/experiments"
+router_url: "http://192.168.0.79:30080"
+total_requests: 1
+prompt_source: "file"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_name: "/data/gateway/gateway/data/codeflowbench_conversations.jsonl"
+  split: "train"
+  tokenizer_name: "/data/models/GLM-5-w4a8-mtp-QuaRot"
+  streaming: false
+  min_input_tokens: 256
+  max_input_tokens: 10000000
+  repeat_each: 1
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 0.1
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  max_tokens: 32
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+  use_dataset_output_len: false
+  replay_output_lengths_from: null
+
+output_log_mode: "summary"
+print_trace: false
+
+metrics:
+  enabled: true
+  prometheus_base_url: "http://192.168.0.79:31190"
+  scrape_interval_s: 1.0
+  window_s: 3.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+transport:
+  mode: "async_pubsub"
+  submit_path: "/submit"
+  results_zmq: "tcp://192.168.0.79:30559"
+  topic: "results"
+  run_id: null
+  idle_timeout_s: 1000.0
+  idle_zero_running_s: 10.0
+
+boom:
+  base_url: "http://192.168.0.79:30401"
+  chat_path: "/v1/chat/completions"
+  model: "served-model"
+  api_key: "sk-boom-master"
+  timeout_s: 10000.0
+  stream: false
+
+helm:
+  boom_claude_aliases: true
+  boom_max_inflight: 1000
+  router_api_key: "ZhongRuanChuangXin!"
+
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 1
+
+  router_kv_aware: true
+  router_len_aware: true
+  router_len_policy: "short_first"
+
+  # bz model volume: local hostPath on both NPU nodes.
+  nfs_path: "/data/models/GLM-5-w4a8-mtp-QuaRot"
+  model_host_path: "/data/models"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+  sidecar_prefetch: 2
+
+  # ---- bz Helm values not represented by legacy HelmConfig fields ----
+  values:
+    global.imageRegistry: ""
+    images.router: "kv-router:vip-queue-ys"
+    images.sidecar: "kv-sidecar:latest"
+    images.vllm: "quay.io/ascend/vllm-ascend:glm5-openeuler"
+    images.cpuHash: "vllm-cpu-hash:latest"
+    images.redis: "redis:7-alpine"
+    images.mooncakeMaster: "quay.io/ascend/vllm-ascend:glm5-openeuler"
+    router.imagePullPolicy: "IfNotPresent"
+    sidecar.imagePullPolicy: "IfNotPresent"
+    boom.imagePullPolicy: "IfNotPresent"
+    cpuHash.ascendDriverMounts: true
+    pin.enabled: true
+    pin.nodeName: "k8s-master"
+
+  # ---- Mooncake KV cache transfer ----
+  mooncake_enabled: true
+  mooncake_master_port: 50088
+  mooncake_master_server_address: "192.168.0.79:50088"
+  mooncake_global_segment_size: 140000000000
+  mooncake_eviction_high_watermark: 0.9
+  mooncake_eviction_ratio: 0.1
+  mooncake_ascend_buffer_pool: "4:8"
+  mooncake_lookup_rpc_port: "10010"
+  mooncake_host_network: true
+  deploy_mooncake_master: true
+
+  # ---- Model topology — GLM-5 W4A8 MoE with DP=2, TP=8, EP=16, MTP ----
+  models:
+    - name: glm5-chat
+      servedModelName: served-model
+      replicas: 1
+      modelSubPath: GLM-5-w4a8-mtp-QuaRot
+      tensorParallelSize: 8
+      batchSize: 4
+      sidecarPrefetch: 2
+      dataParallel:
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 13389
+        hcclBuffSize: 200
+        ompNumThreads: 16
+        pairTopologyKey: roce-pair
+      vllm:
+        gpuMemoryUtilization: 0.95
+        quantization: ascend
+        enableExpertParallel: true
+        enablePrefixCaching: true
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 4096
+        seed: 1924
+        toolCallParser: glm47
+        reasoningParser: glm45
+        additionalConfig:
+          multistream_overlap_shared_expert: true

@@ -58,6 +58,16 @@ router:
   # API key for /v1/chat/completions (empty = no auth)
   apiKey: ""
 
+  # Router-side inline KV hash controls. The tokenizer path is mounted at /model.
+  kvBlockSize: 128
+  kvCanonicaliseTools: "1"
+
+  # Claude Code client seam: strip the per-request cch attribution counter.
+  stripCch: "1"
+
+  # Query head+tail of the pull pool for prefix matches.
+  poolBidirectional: false
+
   # Enable/disable KV-aware routing
   kvAware: true
 

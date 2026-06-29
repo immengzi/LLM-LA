@@ -104,6 +104,13 @@ class SidecarConfig:
     STREAMING_MODE: bool = False
 
     # ------------------------------------------------
+    # Data Parallel (DP) multi-engine subscription
+    # ------------------------------------------------
+
+    DP_SIZE: int = 1
+    DP_SIZE_LOCAL: int = 1
+
+    # ------------------------------------------------
     # Logging
     # ------------------------------------------------
 
@@ -192,6 +199,12 @@ def get_config() -> SidecarConfig:
     # Streaming
     # ------------------------------------------------
     cfg.STREAMING_MODE = os.getenv("STREAMING_MODE", "false").lower() == "true"
+
+    # ------------------------------------------------
+    # DP multi-engine
+    # ------------------------------------------------
+    cfg.DP_SIZE = int(os.getenv("DP_SIZE", cfg.DP_SIZE))
+    cfg.DP_SIZE_LOCAL = int(os.getenv("DP_SIZE_LOCAL", cfg.DP_SIZE_LOCAL))
 
     # ------------------------------------------------
     # Logging

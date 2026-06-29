@@ -80,8 +80,10 @@ class RouterConfig:
     REDIS_PORT: int = 6379
     MODEL_NAME: str = "served-model"
 
-    # Hash service
-    HASH_SERVICE_URL: str = "http://prefix-hash-service:9095"
+    # Inline KV-block hash computation.
+    # The tokenizer path must point at the same model directory vLLM uses.
+    KV_TOKENIZER_PATH: str = "/model"
+    KV_BLOCK_SIZE: int = 128
 
     # vLLM discovery (for KV watcher to map pod -> endpoint)
     NAMESPACE: str = "vllm"
@@ -111,6 +113,7 @@ class RouterConfig:
 
     # how many items to scan vs want
     POOL_FACTOR: int = 4
+    POOL_BIDIRECTIONAL: bool = False
 
     # batch size proxy: expected output tokens (for predictor)
     DEFAULT_MAX_TOKENS: int = 1024
@@ -152,15 +155,11 @@ class RouterConfig:
     # --------------------------------------------------------------------
     # HTTP timeouts
     # --------------------------------------------------------------------
-    HASH_TIMEOUT_S: float = 2.0          # hash-service compute_hashes
     PUSH_HTTP_TIMEOUT_S: float = 2.0     # push-mode health + push
 
     # --------------------------------------------------------------------
     # HTTP connection pooling / keepalive knobs (NO semantic changes)
     # --------------------------------------------------------------------
-    HASH_MAX_KEEPALIVE: int = 50
-    HASH_KEEPALIVE_EXPIRY_S: float = 30.0
-
     PUSH_MAX_KEEPALIVE: int = 200
     PUSH_KEEPALIVE_EXPIRY_S: float = 30.0
 
@@ -267,8 +266,12 @@ def get_config() -> RouterConfig:
     cfg.AFFINITY_HARD_TIMEOUT_S = float(
         os.getenv("AFFINITY_HARD_TIMEOUT_S", cfg.AFFINITY_HARD_TIMEOUT_S)
     )
+    cfg.POOL_BIDIRECTIONAL = os.getenv("POOL_BIDIRECTIONAL", "false").lower() in ("1", "true", "yes")
     cfg.DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", cfg.DEFAULT_MAX_TOKENS))
-    cfg.HASH_SERVICE_URL = os.getenv("HASH_SERVICE_URL", cfg.HASH_SERVICE_URL)
+
+    # Inline KV-block hash computation
+    cfg.KV_TOKENIZER_PATH = os.getenv("KV_TOKENIZER_PATH", cfg.KV_TOKENIZER_PATH)
+    cfg.KV_BLOCK_SIZE = int(os.getenv("KV_BLOCK_SIZE", cfg.KV_BLOCK_SIZE))
 
     # Router operation mode
     cfg.ROUTER_MODE = os.getenv("ROUTER_MODE", cfg.ROUTER_MODE)
@@ -323,15 +326,9 @@ def get_config() -> RouterConfig:
     cfg.TRANSPORT_MODE = tm
 
     # Timeouts
-    cfg.HASH_TIMEOUT_S = float(os.getenv("HASH_TIMEOUT_S", cfg.HASH_TIMEOUT_S))
     cfg.PUSH_HTTP_TIMEOUT_S = float(os.getenv("PUSH_HTTP_TIMEOUT_S", cfg.PUSH_HTTP_TIMEOUT_S))
 
     # Keepalive/pooling knobs
-    cfg.HASH_MAX_KEEPALIVE = int(os.getenv("HASH_MAX_KEEPALIVE", cfg.HASH_MAX_KEEPALIVE))
-    cfg.HASH_KEEPALIVE_EXPIRY_S = float(
-        os.getenv("HASH_KEEPALIVE_EXPIRY_S", cfg.HASH_KEEPALIVE_EXPIRY_S)
-    )
-
     cfg.PUSH_MAX_KEEPALIVE = int(os.getenv("PUSH_MAX_KEEPALIVE", cfg.PUSH_MAX_KEEPALIVE))
     cfg.PUSH_KEEPALIVE_EXPIRY_S = float(
         os.getenv("PUSH_KEEPALIVE_EXPIRY_S", cfg.PUSH_KEEPALIVE_EXPIRY_S)
@@ -401,13 +398,12 @@ def get_config() -> RouterConfig:
     cfg.RESULTS_ZMQ_HWM = max(1, int(cfg.RESULTS_ZMQ_HWM))
     cfg.RESULTS_GRACE_S = max(0.0, float(cfg.RESULTS_GRACE_S))
 
-    cfg.HASH_TIMEOUT_S = max(0.001, float(cfg.HASH_TIMEOUT_S))
     cfg.PUSH_HTTP_TIMEOUT_S = max(0.001, float(cfg.PUSH_HTTP_TIMEOUT_S))
 
-    cfg.HASH_MAX_KEEPALIVE = max(1, int(cfg.HASH_MAX_KEEPALIVE))
     cfg.PUSH_MAX_KEEPALIVE = max(1, int(cfg.PUSH_MAX_KEEPALIVE))
-    cfg.HASH_KEEPALIVE_EXPIRY_S = max(0.0, float(cfg.HASH_KEEPALIVE_EXPIRY_S))
     cfg.PUSH_KEEPALIVE_EXPIRY_S = max(0.0, float(cfg.PUSH_KEEPALIVE_EXPIRY_S))
+
+    cfg.KV_BLOCK_SIZE = max(1, int(cfg.KV_BLOCK_SIZE))
 
     cfg.PUSH_DISPATCH_QUEUE_MAX = max(1, int(cfg.PUSH_DISPATCH_QUEUE_MAX))
     cfg.PUSH_DISPATCH_WORKERS = max(1, int(cfg.PUSH_DISPATCH_WORKERS))
