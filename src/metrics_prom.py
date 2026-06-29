@@ -279,8 +279,14 @@ CPU_ONLY_METRICS_CATALOG: List[Dict[str, str]] = [
 
     # KV cache + prefix cache (ok if absent; hit_rate derived per-tick as hits_per_sec / queries_per_sec)
     {"name": "vllm:kv_cache_usage_perc",       "kind": "gauge",        "field": "kv_cache_usage_perc"},
+    # Internal (engine-local HBM) automatic prefix cache.
     {"name": "vllm:prefix_cache_hits_total",   "kind": "counter_rate", "field": "prefix_cache_hits_per_sec"},
     {"name": "vllm:prefix_cache_queries_total","kind": "counter_rate", "field": "prefix_cache_queries_per_sec"},
+    # External prefix cache = KV connector / Mooncake (cross-instance shared store).
+    # Absent when no connector is configured; hit_rate derived per-tick downstream.
+    {"name": "vllm:external_prefix_cache_hits_total",    "kind": "counter_rate", "field": "ext_prefix_cache_hits_per_sec"},
+    {"name": "vllm:external_prefix_cache_queries_total", "kind": "counter_rate", "field": "ext_prefix_cache_queries_per_sec"},
+    {"name": "vllm:prompt_tokens_cached_total",          "kind": "counter_rate", "field": "prompt_tokens_cached_per_sec"},
 
     # Latency hist avgs
     {"name": "vllm:time_to_first_token_seconds", "kind": "hist_avg", "field": "ttft_seconds_avg"},
@@ -841,6 +847,13 @@ class _MetricsSampler(threading.Thread):
                 rec["prefix_cache_hit_rate"] = hits / queries
             else:
                 rec["prefix_cache_hit_rate"] = None
+
+            ext_queries = _safe_float(rec.get("ext_prefix_cache_queries_per_sec"))
+            ext_hits = _safe_float(rec.get("ext_prefix_cache_hits_per_sec"))
+            if ext_queries is not None and ext_queries > 0.0 and ext_hits is not None:
+                rec["ext_prefix_cache_hit_rate"] = ext_hits / ext_queries
+            else:
+                rec["ext_prefix_cache_hit_rate"] = None
 
         # Broadcast aggregated router scalars into every vLLM row
         for inst in vllm_instances:

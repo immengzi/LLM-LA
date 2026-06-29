@@ -9,10 +9,22 @@
 #       cd src && python sweep_methods.py --config 1-master_config
 
 # ── BZ cluster (this machine) — MiniMax-M2.7, BooM + router, DP2 + Mooncake ──
-prod-bz-boom-minmax-mooncake:
-  - pull
+# prod-bz-boom-minmax-mooncake:
+#   - pull
 
-# ── BZ MiniMax-M2.7 multi-turn (CodeFlow + Claude Code injection, minturns3) ──
+# ── BZ MiniMax-M2.7 multi-turn router_strategy sweep (CodeFlow + Claude Code) ──
+# Runs sequentially: none -> prefix -> affinity -> both. Same seed/workload across
+# all four. Run WITHOUT --skip-vllm so each starts from a cold vLLM (fair compare).
+prod-bz-boom-minmax-mooncake-multiturn-none:
+  - pull
+# prod-bz-boom-minmax-mooncake-multiturn-prefix:
+#   - pull
+# prod-bz-boom-minmax-mooncake-multiturn-affinity:
+#   - pull
+# prod-bz-boom-minmax-mooncake-multiturn-both:
+#   - pull
+
+# Single-config variant (router_strategy chosen inline). Use for ad-hoc runs.
 # prod-bz-boom-minmax-mooncake-multiturn:
 #   - pull
 

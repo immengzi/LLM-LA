@@ -33,9 +33,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import tempfile
 from dataclasses import asdict
@@ -113,6 +115,17 @@ def _newest_experiment_dir(before: set[str]) -> Optional[Path]:
     if not new:
         return None
     return EXPERIMENTS_ROOT / new[-1]
+
+
+def _allocate_experiment_dir() -> Path:
+    """Reserve the next numeric experiment dir (max+1) up front so logs/configs can
+    start writing at deploy time. The client reuses it via FORCE_EXPERIMENT_DIR."""
+    EXPERIMENTS_ROOT.mkdir(parents=True, exist_ok=True)
+    ids = [int(p.name) for p in EXPERIMENTS_ROOT.iterdir() if p.is_dir() and p.name.isdigit()]
+    next_id = (max(ids) + 1) if ids else 1
+    exp_dir = EXPERIMENTS_ROOT / str(next_id)
+    exp_dir.mkdir(parents=True, exist_ok=False)
+    return exp_dir
 
 
 # ---------------------------
@@ -497,6 +510,139 @@ def _wait_cr_phase(cr_name: str, namespace: str, timeout_s: float = 120.0) -> No
 
 def _run_client(config_path: Path) -> None:
     _run([sys.executable, str(REPO_ROOT / "main.py"), "--config", str(config_path)], check=True)
+
+
+# ---------------------------
+# Pod log collection (cfg.collect_vllm_logs)
+# ---------------------------
+
+def _list_pods_and_containers(namespace: str) -> List[Tuple[str, List[str]]]:
+    """Return [(pod_name, [container_names...]), ...] for all pods in the namespace."""
+    try:
+        res = subprocess.run(
+            ["kubectl", "get", "pods", "-n", namespace, "-o", "json"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+        )
+        data = json.loads(res.stdout or "{}")
+    except Exception as e:
+        click.echo(f"[logs] WARN: failed to list pods in ns={namespace}: {e}")
+        return []
+
+    out: List[Tuple[str, List[str]]] = []
+    for item in data.get("items", []):
+        pod = (item.get("metadata") or {}).get("name")
+        if not pod:
+            continue
+        spec = item.get("spec") or {}
+        containers = [c.get("name") for c in spec.get("containers", []) if c.get("name")]
+        if containers:
+            out.append((pod, containers))
+    return out
+
+
+class _NamespaceLogCollector:
+    """
+    Continuously captures `kubectl logs -f` for EVERY container of EVERY pod in a
+    namespace into dest_dir/<pod>/<container>.log — independent of pod names.
+
+    A background thread re-scans the namespace every `poll_interval` seconds so pods
+    that appear or restart mid-run (autoscaling, crashes, rollouts) are also captured.
+    Logs are opened in append mode so a re-attach after a restart never clobbers what
+    was already streamed. Best-effort: never raises into the caller.
+    """
+
+    def __init__(self, namespace: str, dest_dir: Path, poll_interval: float = 5.0) -> None:
+        self.namespace = namespace
+        self.dest_dir = Path(dest_dir)
+        self.poll_interval = poll_interval
+        self._streams: Dict[Tuple[str, str], Tuple[subprocess.Popen, "object"]] = {}
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def _start_stream(self, pod: str, container: str) -> None:
+        pod_dir = self.dest_dir / pod
+        try:
+            pod_dir.mkdir(parents=True, exist_ok=True)
+            fh = open(pod_dir / f"{container}.log", "a", encoding="utf-8")
+            proc = subprocess.Popen(
+                ["kubectl", "logs", "-f", "--timestamps",
+                 f"pod/{pod}", "-c", container, "-n", self.namespace],
+                stdout=fh, stderr=subprocess.STDOUT, text=True,
+                start_new_session=True,
+            )
+            self._streams[(pod, container)] = (proc, fh)
+        except Exception as e:
+            click.echo(f"[logs] WARN: failed to start collector {pod}/{container}: {e}")
+
+    def _scan_once(self) -> None:
+        for pod, containers in _list_pods_and_containers(self.namespace):
+            for c in containers:
+                key = (pod, c)
+                existing = self._streams.get(key)
+                if existing is not None:
+                    proc, fh = existing
+                    if proc.poll() is None:
+                        continue  # still streaming
+                    # streamer died (e.g. container restart) -> re-attach (append)
+                    try:
+                        fh.close()
+                    except Exception:
+                        pass
+                    del self._streams[key]
+                self._start_stream(pod, c)
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._scan_once()
+            except Exception as e:
+                click.echo(f"[logs] WARN: namespace scan failed: {e}")
+            self._stop.wait(self.poll_interval)
+
+    def start(self) -> "_NamespaceLogCollector":
+        self._scan_once()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        click.echo(
+            f"[logs] watching ALL pods in ns={self.namespace} -> {self.dest_dir} "
+            f"(rescan every {self.poll_interval:g}s; {len(self._streams)} stream(s) so far)"
+        )
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.poll_interval + 5)
+        for proc, _ in self._streams.values():
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        for proc, fh in self._streams.values():
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                fh.flush()
+                fh.close()
+            except Exception:
+                pass
+        click.echo(f"[logs] stopped; captured {len(self._streams)} container stream(s)")
+
+
+def _start_log_collectors(namespace: str, dest_dir: Path) -> "_NamespaceLogCollector":
+    """Begin namespace-wide log capture. Returns a collector to stop later."""
+    return _NamespaceLogCollector(namespace, dest_dir).start()
+
+
+def _stop_log_collectors(collector) -> None:
+    """Stop a namespace-wide log collector. Best-effort."""
+    if collector is not None:
+        collector.stop()
 
 
 # ---------------------------
@@ -1237,6 +1383,28 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         for k in sorted(set_values):
             click.echo(f"  - {k}={_coerce_set_value(set_values[k])}")
 
+        # ---- Pre-create experiment dir + start pod-log capture BEFORE deploy ----
+        # So experiments/<id>/ and vllm-logs/ exist from the start of the sweep step,
+        # and the namespace log collector captures pods (incl. the model-load phase)
+        # as they come up. The client reuses this dir via FORCE_EXPERIMENT_DIR.
+        _collect_logs = bool(getattr(cfg, "collect_vllm_logs", False))
+        exp_dir: Optional[Path] = None
+        _log_collectors = None
+        if _collect_logs:
+            try:
+                exp_dir = _allocate_experiment_dir()
+                (exp_dir / "vllm-logs").mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copy2(cfg_path, exp_dir / "config_used.yaml")
+                except Exception:
+                    pass
+                click.echo(f"[sweep] pre-created experiment dir: {exp_dir}")
+                _log_collectors = _start_log_collectors(namespace, exp_dir / "vllm-logs")
+            except Exception as e:
+                click.echo(f"[logs] WARN: failed to pre-create experiment dir: {e}")
+                exp_dir = None
+                _log_collectors = None
+
         max_redeploy_attempts = 3
         redeploy_sleep_s = 10
 
@@ -1312,6 +1480,8 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 time.sleep(redeploy_sleep_s)
 
         if last_err is not None:
+            if _log_collectors is not None:
+                _stop_log_collectors(_log_collectors)
             raise click.ClickException(
                 f"Deployment not ready after {max_redeploy_attempts} attempts: {last_err}"
             )
@@ -1364,12 +1534,43 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         except Exception as e:
             click.echo(f"[sweep] WARN: failed to write deployment-info: {e}")
 
+        # If the experiment dir was pre-created, drop the deploy artifacts in now
+        # (before the client runs) so they're available live alongside vllm-logs/.
+        if exp_dir is not None:
+            try:
+                (exp_dir / "vllm-k8s.yaml").write_text(rendered_text, encoding="utf-8")
+                (exp_dir / "deployment-info.txt").write_text(
+                    _boom_config_text or "(no deployment info captured)", encoding="utf-8"
+                )
+                _hv_early = REPO_ROOT / "helm-effective-values.yaml"
+                if _hv_early.is_file():
+                    shutil.copy2(_hv_early, exp_dir / "helm-effective-values.yaml")
+            except Exception as e:
+                click.echo(f"[sweep] WARN: early artifact write failed: {e}")
+
         tmp_cfg_path = _write_temp_job_config(cfg, method)
 
+        # ---- Run the client ----
+        # When exp_dir was pre-created, the client reuses it via FORCE_EXPERIMENT_DIR
+        # (so config.json/logs.json land in the same folder that already holds
+        # vllm-logs/). Otherwise the client allocates the dir and we detect it after.
         before = _snapshot_existing_experiments()
+        _client_env = dict(os.environ)
+        if exp_dir is not None:
+            _client_env["FORCE_EXPERIMENT_DIR"] = str(exp_dir)
+
+        client_proc = subprocess.Popen(
+            [sys.executable, str(REPO_ROOT / "main.py"), "--config", str(tmp_cfg_path)],
+            text=True, env=_client_env,
+        )
+        click.echo(
+            f"[cmd] {sys.executable} main.py --config {tmp_cfg_path} (pid={client_proc.pid})"
+        )
         try:
-            _run_client(tmp_cfg_path)
+            client_proc.wait()
         finally:
+            if _log_collectors is not None:
+                _stop_log_collectors(_log_collectors)
             try:
                 tmp_cfg_path.unlink(missing_ok=True)
             except Exception:
@@ -1380,7 +1581,11 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 except Exception:
                     pass
 
-        exp_dir = _newest_experiment_dir(before)
+        if client_proc.returncode not in (0, None):
+            raise click.ClickException(f"client run failed (exit={client_proc.returncode})")
+
+        if exp_dir is None:
+            exp_dir = _newest_experiment_dir(before)
 
         if exp_dir is None:
             click.echo("[warn] could not detect new experiment dir; skipping artifact snapshot")

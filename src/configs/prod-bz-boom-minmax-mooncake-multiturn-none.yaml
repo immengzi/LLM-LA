@@ -1,37 +1,43 @@
-# prod: MiniMax-M2.7 — BooM + LLM-LA (router), DP2 + Mooncake, BZ config.
+# prod: MiniMax-M2.7 - BooM + LLM-LA (router), DP2 + Mooncake, BZ multi-turn config.
+# router_strategy = none  (baseline: prefix off, affinity off)
 #
-# Based on prod-yz-boom-minmax-lmcache-hq.yaml:
-#   - keeps the MiniMax/HQ vLLM runtime settings
-#   - switches deployment defaults through switch_cluster: bz
-#   - replaces the LMCache connector with the BZ Mooncake connector
+# Workload semantics are aligned with
+# non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml:
+#   - CodeFlowBench multi-turn conversations
+#   - min_user_turns=3
+#   - Claude Code-style system blocks/reminders/tools injection
 #
-# Pre-requisite: run on each worker node before deploying:
-#   sysctl -w vm.swappiness=0
-#   sysctl -w kernel.numa_balancing=0
+# Deployment semantics are aligned with prod-bz-boom-minmax-mooncake.yaml:
+#   - MiniMax-M2.7 served as served-model-minmax
+#   - BooM -> router -> vLLM sidecars
+#   - DP2 + Mooncake KV cache transfer on BZ
 
 switch_cluster: bz
 backend: "boom"
 
-total_requests: 10
-prompt_source: "hf-lmsys"
+total_requests: 10   # = number of multi-turn conversations (each >= min_user_turns)
+prompt_source: "codeflow"
 
 file_prompts:
   path: "prompts.json"
   variant: "short"
 
 hf_lmsys:
-  dataset_name: "/data/gateway/gateway/data/lmsys_conversations_hf"
+  dataset_profile: codeflowbench
   split: "train"
-  tokenizer_name: "/data/models/MiniMax-M2.7-w8a8-QuaRot"
-  streaming: true
+  streaming: false
   min_input_tokens: 1
-  max_input_tokens: 10000000
+  max_input_tokens: 3000
   repeat_each: 1
+  seed: 314
+  multi_turn: true
+  min_user_turns: 3
+  max_pool_size: 99999
 
 load_pattern:
   pattern: "det"
-  rate_rps: 3
-  duration_s: 1000000000.0
+  rate_rps: 1.0   # conversations/sec arrival -> some concurrency so routing choice matters
+  duration_s: 3000.0
   warmup_reqs: 0
 
   burst_on_s: 2.0
@@ -47,16 +53,21 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
-  max_tokens: 8192
+  max_tokens: 1024
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null
   target_total_tokens: null
   think: false
-  use_dataset_output_len: false
+  use_dataset_output_len: true
+  min_output_tokens_floor: 1024
+  # replay_output_lengths_from: "305"
 
 output_log_mode: "summary"
 print_trace: false
+
+# Stream kubectl logs of every pod/container into <exp_dir>/vllm-logs/<pod>/<container>.log
+collect_vllm_logs: true
 
 metrics:
   enabled: true
@@ -72,7 +83,7 @@ transport:
   topic: "results"
   run_id: null
   idle_timeout_s: 1000.0
-  idle_zero_running_s: 10.0
+  idle_zero_running_s: 300.0
 
 boom:
   chat_path: "/v1/chat/completions"
@@ -96,10 +107,10 @@ helm:
   #   prefix   -> KV prefix-awareness only
   #   affinity -> conversation key-affinity only
   #   both     -> prefix + affinity
-  # router_strategy: "none"
+  router_strategy: "none"
   # router_strategy: "prefix"
   # router_strategy: "affinity"
-  router_strategy: "both"
+  # router_strategy: "both"
   router_len_aware: true
   router_len_policy: "short_first"
 
@@ -167,3 +178,19 @@ helm:
 
   values:
     pin.nodeName: "k8s-worker1"
+
+# Claude-Code-style request injection (Phase 3 feature toggle).
+# Injects a realistic Claude Code CLI prefix (system blocks + system-reminders +
+# 23 tools) into the FIRST user turn of each conversation. On the wired OpenAI
+# /v1/chat/completions path the Anthropic templates are mechanically converted to
+# OpenAI shape (system message + reminder-prepended user content + function tools);
+# cache_control is always stripped. cch stays at the XXXXX placeholder (drift is
+# handled router-side by STRIP_CCH). Absent/disabled => behavior identical to the
+# original yaml.
+claude_code_injection:
+  enabled: true
+  template_dir: "multiturn-generation"
+  inject_system_blocks: true
+  inject_system_reminders: true
+  inject_tools: true
+  preserve_cache_control: true  # no-op on OpenAI path (cache_control always stripped); kept for future Anthropic wire path
