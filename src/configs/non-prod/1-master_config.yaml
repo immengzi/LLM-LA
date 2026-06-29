@@ -413,3 +413,11 @@ prod-bz-boom-minmax-mooncake:
 
 # 22-3-template-boom-multiturn-minmax-stream:
 #   - pull
+
+# ── 21-2 (system prompts): GLM-5 CodeFlow + Claude Code-style injection ──
+
+# 21-2-template-boom-claude-glm-stability-system-prompts:
+#   - pull
+
+# 21-2-template-boom-claude-glm-system-prompts-minturns3:
+#   - pull
