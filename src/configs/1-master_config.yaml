@@ -12,6 +12,10 @@
 prod-bz-boom-minmax-mooncake:
   - pull
 
+# ── BZ MiniMax-M2.7 multi-turn (CodeFlow + Claude Code injection, minturns3) ──
+# prod-bz-boom-minmax-mooncake-multiturn:
+#   - pull
+
 # ── BZ KEDA autoscaling validation (dense Qwen3-8B), isolated release ──
 # Requires: make monitoring && make keda. See docs/operations/autoscaling.md.
 # prod-bz-autoscaling-qwen:

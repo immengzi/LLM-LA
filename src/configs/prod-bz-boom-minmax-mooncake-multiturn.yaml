@@ -1,12 +1,12 @@
 # prod: MiniMax-M2.7 - BooM + LLM-LA (router), DP2 + Mooncake, BZ multi-turn config.
 #
 # Workload semantics are aligned with
-# 21-2-template-boom-claude-glm-system-prompts-minturns3.yaml:
+# non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml:
 #   - CodeFlowBench multi-turn conversations
 #   - min_user_turns=3
 #   - Claude Code-style system blocks/reminders/tools injection
 #
-# Deployment semantics are aligned with prod-boom-minmax-mooncake-bz.yaml:
+# Deployment semantics are aligned with prod-bz-boom-minmax-mooncake.yaml:
 #   - MiniMax-M2.7 served as served-model-minmax
 #   - BooM -> router -> vLLM sidecars
 #   - DP2 + Mooncake KV cache transfer on BZ
