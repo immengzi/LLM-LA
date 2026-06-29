@@ -97,6 +97,44 @@ The standard `hf_lmsys` token filters apply per-turn:
 
 Conversations where any turn fails the filter are excluded.
 
+### Claude Code-Style Injection
+
+The `multiturn-workload-generation` branch also supports an optional
+`claude_code_injection` block for Boom/LiteLLM OpenAI-compatible requests. This
+injects a realistic Claude Code CLI prefix into each outgoing turn so prefix
+caching and KV-aware routing can be tested with the large, stable system context
+that real Claude Code sessions carry.
+
+Template assets live under `src/multiturn-generation/`:
+
+- `system_blocks.json` — system prompt blocks, joined into one OpenAI
+  `role: system` message.
+- `system_reminders.json` — reminder blocks prepended to the first user message.
+- `tools.json` — Anthropic tool definitions converted to OpenAI function tools.
+- `request_body_template.json` — reference capture for debugging; not loaded at
+  runtime.
+
+Example config:
+
+```yaml
+claude_code_injection:
+  enabled: true
+  template_dir: "/home/haiting/llm-la/src/multiturn-generation"
+  inject_system_blocks: true
+  inject_system_reminders: true
+  inject_tools: true
+  preserve_cache_control: true
+```
+
+Runtime behavior:
+
+- The section is optional; when absent or `enabled: false`, behavior is unchanged.
+- Injection runs in `http_client.py` before the request is sent.
+- The OpenAI path always strips `cache_control` fields because vLLM/Boom do not
+  consume Anthropic cache-control metadata.
+- The `cch` placeholder is left stable in the template; router-side `STRIP_CCH`
+  handles per-request Claude Code attribution drift when enabled.
+
 ---
 
 ## Output Format
@@ -181,3 +219,5 @@ from the prior `logs.json` and overrides each turn's output length.
 | `load_runner.py` | `ConversationTask` dataclass, `_request_thread_conversation()`, multi-turn dispatch |
 | `main.py` | Multi-turn loading, scheduling, and replay wiring |
 | `configs/16-1-template-boom-direct-multiturn-qwen.yaml` | Sample config |
+| `src/multiturn-generation/` | Claude Code-style system prompt, reminder, and tool templates |
+| `configs/21-2-template-boom-claude-glm-*-system-prompts*.yaml` | Claude Code injection examples |

@@ -8,6 +8,9 @@
 from __future__ import annotations
 
 from typing import Dict, Any, List, Tuple, Optional
+import copy
+import json
+import os
 import time
 import uuid
 
@@ -21,6 +24,153 @@ from config import (
     BooMConfig,
     generation_effective_ignore_eos,
 )
+
+
+# ============================================================
+# Claude-Code-style template injection
+#
+# Derives a realistic Claude Code CLI request prefix (system blocks +
+# system-reminders + tools) from on-disk JSON templates and merges it into the
+# outgoing request body. The wired BooM/LiteLLM path is OpenAI Chat Completions
+# (/v1/chat/completions), so the Anthropic-format templates are mechanically
+# converted to OpenAI shape here (see _maybe_inject_claude_code_template).
+#
+# Disabled by default: when cc_cfg is None / falsy / not enabled, every helper
+# is a strict no-op, so existing callers are bit-for-bit unchanged.
+#
+# cch / cc_version drift is intentionally NOT handled here: the templates keep
+# their placeholder values (cch=XXXXX, cc_version=X.Y.Z.XXX), giving a byte-stable
+# prefix across requests. Per-request drift is the router's STRIP_CCH job.
+# ============================================================
+
+# Loaded-once cache of template JSON, keyed by template_dir.
+_CC_TEMPLATE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _load_cc_templates(template_dir: str) -> Dict[str, Any]:
+    """Load system_blocks.json / system_reminders.json / tools.json once per dir.
+
+    Cached in-memory so each conversation reuses the same parsed objects instead
+    of re-reading from disk. Returns deep-copyable plain JSON structures.
+    """
+    cached = _CC_TEMPLATE_CACHE.get(template_dir)
+    if cached is not None:
+        return cached
+
+    def _read(name: str) -> Any:
+        with open(os.path.join(template_dir, name), "r") as f:
+            return json.load(f)
+
+    templates = {
+        "system_blocks": _read("system_blocks.json"),
+        "system_reminders": _read("system_reminders.json"),
+        "tools": _read("tools.json"),
+    }
+    _CC_TEMPLATE_CACHE[template_dir] = templates
+    return templates
+
+
+def _strip_cache_control(obj: Any) -> Any:
+    """Recursively drop every 'cache_control' key from dicts/lists in place."""
+    if isinstance(obj, dict):
+        obj.pop("cache_control", None)
+        for v in obj.values():
+            _strip_cache_control(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            _strip_cache_control(v)
+    return obj
+
+
+def _maybe_inject_claude_code_template(
+    body: Dict[str, Any],
+    cc_cfg: Optional[Dict[str, Any]],
+    turn_idx: int,
+) -> Dict[str, Any]:
+    """Inject a Claude-Code-style prefix into an OpenAI-format request body.
+
+    - body: dict, the OpenAI Chat Completions payload about to be sent.
+    - cc_cfg: dict, the 'claude_code_injection' subsection of the experiment
+      config (or None).
+    - turn_idx: int, 0 for the first turn of a conversation, > 0 otherwise.
+
+    Returns the (possibly modified) body. When cc_cfg is missing/disabled,
+    returns the original body unchanged (strict no-op).
+
+    The on-disk templates are Anthropic-format; the wired backend is OpenAI
+    /v1/chat/completions, so we mechanically convert:
+      - system blocks  -> a single {"role":"system","content": "\\n".join(texts)}
+                          message prepended to messages.
+      - system reminders -> the joined reminder text prepended to the first user
+                          message's content (mirrors how Claude Code injects
+                          system-reminders as leading user content).
+      - tools          -> OpenAI function tools: {"type":"function","function":
+                          {"name","description","parameters": <input_schema>}}.
+      - cache_control  -> force-stripped (OpenAI/vLLM does not use it); the
+                          preserve_cache_control knob is therefore a no-op in
+                          this OpenAI-conversion path and kept only for forward
+                          compatibility with a future Anthropic wire path.
+
+    Note: cch/cc_version in the templates are kept as-is (placeholder strings);
+    per-request drift handling is the router's STRIP_CCH responsibility.
+    """
+    if not cc_cfg or not cc_cfg.get("enabled"):
+        return body
+
+    template_dir = cc_cfg.get("template_dir")
+    if not template_dir:
+        raise ValueError(
+            "claude_code_injection.enabled is true but template_dir is not set"
+        )
+
+    templates = _load_cc_templates(template_dir)
+
+    raw_messages = body.get("messages")
+    if not isinstance(raw_messages, list):
+        return body
+
+    messages = copy.deepcopy(raw_messages)
+    body["messages"] = messages
+
+    # 1) system blocks -> single prepended system message
+    if cc_cfg.get("inject_system_blocks"):
+        blocks = templates["system_blocks"]
+        joined = "\n".join(b.get("text", "") for b in blocks)
+        messages.insert(0, {"role": "system", "content": joined})
+
+    # 2) system reminders -> prepend to first user message content
+    if cc_cfg.get("inject_system_reminders"):
+        reminders = templates["system_reminders"]
+        reminder_text = "\n".join(r.get("text", "") for r in reminders)
+        for m in messages:
+            if m.get("role") == "user":
+                content = m.get("content")
+                if isinstance(content, str):
+                    m["content"] = reminder_text + "\n" + content
+                elif isinstance(content, list):
+                    m["content"] = [{"type": "text", "text": reminder_text}] + content
+                else:
+                    m["content"] = reminder_text
+                break
+
+    # 3) tools -> OpenAI function tools (rename input_schema -> parameters)
+    if cc_cfg.get("inject_tools"):
+        oai_tools = []
+        for t in templates["tools"]:
+            oai_tools.append({
+                "type": "function",
+                "function": {
+                    "name": t.get("name"),
+                    "description": t.get("description"),
+                    "parameters": t.get("input_schema"),
+                },
+            })
+        body["tools"] = oai_tools
+
+    # 4) cache_control is meaningless on the OpenAI path; always strip it.
+    _strip_cache_control(body)
+
+    return body
 
 
 def _build_aibrix_extra_generation_fields(gen_cfg: GenerationConfig) -> Dict[str, Any]:
@@ -374,6 +524,8 @@ def send_one_litellm_stream(
     messages: Optional[List[Dict[str, str]]] = None,
     api_key_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    cc_cfg: Optional[Dict[str, Any]] = None,
+    turn_idx: int = 0,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
     Streaming variant of send_one_litellm.
@@ -404,6 +556,9 @@ def send_one_litellm_stream(
         payload["min_tokens"] = int(gen_cfg.min_tokens)
 
     payload.update(_build_aibrix_extra_generation_fields(gen_cfg))
+
+    # Optional Claude-Code-style prefix injection (no-op unless cc_cfg enabled).
+    payload = _maybe_inject_claude_code_template(payload, cc_cfg, turn_idx)
 
     effective_key = api_key_override or litellm_cfg.api_key
     headers = {
@@ -556,6 +711,8 @@ def send_one_litellm(
     messages: Optional[List[Dict[str, str]]] = None,
     api_key_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    cc_cfg: Optional[Dict[str, Any]] = None,
+    turn_idx: int = 0,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
     Send one request to an OpenAI-compatible proxy (LiteLLM or BooM Gateway).
@@ -595,6 +752,9 @@ def send_one_litellm(
 
     # Match send_one_aibrix(): length_mode, targets, ignore_eos, thinking kwargs.
     payload.update(_build_aibrix_extra_generation_fields(gen_cfg))
+
+    # Optional Claude-Code-style prefix injection (no-op unless cc_cfg enabled).
+    payload = _maybe_inject_claude_code_template(payload, cc_cfg, turn_idx)
 
     effective_key = api_key_override or litellm_cfg.api_key
     headers = {
