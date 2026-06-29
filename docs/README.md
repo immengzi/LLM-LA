@@ -55,6 +55,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | Doc | Description |
 |-----|-------------|
 | [cluster-setup.md](operations/cluster-setup.md) | Post-Kubernetes prep checklist (NFS, registry, RoCE, LWS) |
+| [bz-dashboard-access.md](operations/bz-dashboard-access.md) | Reach BZ dashboards/notebooks (Prometheus, Grafana, Jupyter) over SSH tunnels |
 | [autoscaling.md](operations/autoscaling.md) | Per-model KEDA autoscaling (dense, multi-model, data-parallel) |
 | [infra/](../infra/README.md) | Ansible automation of the cluster-setup checklist (`make prep` / `make verify`) |
 | [multi-node-setup-guide.md](operations/multi-node-setup-guide.md) | Deep multi-node infra reference (NFS, PV, registry, RoCE) |

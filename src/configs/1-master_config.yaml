@@ -12,11 +12,17 @@
 # prod-bz-boom-minmax-mooncake:
 #   - pull
 
-# ── BZ MiniMax-M2.7 multi-turn router_strategy sweep (CodeFlow + Claude Code) ──
-# Runs sequentially: none -> prefix -> affinity -> both. Same seed/workload across
-# all four. Run WITHOUT --skip-vllm so each starts from a cold vLLM (fair compare).
-prod-bz-boom-minmax-mooncake-multiturn-none:
+# ── BZ SPILL TEST: force traffic across BOTH vLLM pods (router-side cap) ──
+# Lever = router_fixed_batch_size: 2 (caps per-pull assignment per pod). batchSize
+# UNCHANGED (stable 32). Compare baseline (none) vs prefix; run WITHOUT --skip-vllm.
+prod-bz-boom-minmax-mooncake-multiturn-none-cap2:
   - pull
+prod-bz-boom-minmax-mooncake-multiturn-prefix-cap2:
+  - pull
+
+# ── Full multi-turn router_strategy sweep (none -> prefix -> affinity -> both) ──
+# prod-bz-boom-minmax-mooncake-multiturn-none:
+#   - pull
 # prod-bz-boom-minmax-mooncake-multiturn-prefix:
 #   - pull
 # prod-bz-boom-minmax-mooncake-multiturn-affinity:
