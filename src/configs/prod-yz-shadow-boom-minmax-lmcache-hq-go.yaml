@@ -1,6 +1,6 @@
-# prod-shadow (GO services): Shadow deployment of MiniMax-M2.7 on node3+node4.
+# prod-yz-shadow (GO services): Shadow deployment of MiniMax-M2.7 on node3+node4.
 #
-# Identical to prod-shadow-boom-minmax-lmcache-hq.yaml, but runs the Go
+# Identical to prod-yz-shadow-boom-minmax-lmcache-hq.yaml, but runs the Go
 # implementations of the router + sidecar (helm.service_impl: "go"). The
 # prefix-hash service stays Python (cpuHash image is never swapped). Everything
 # else — endpoints, env, metrics, ports, behavior — is identical, since the Go

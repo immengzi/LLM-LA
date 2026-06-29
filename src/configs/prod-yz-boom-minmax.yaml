@@ -5,8 +5,8 @@
 # Claude-compatible API enabled (boom_claude_aliases: true).
 #
 # Variants:
-#   prod-boom-minmax-mooncake.yaml  — adds Mooncake KV cache transfer
-#   prod-boom-minmax-lmcache.yaml   — adds LMCache (wraps Mooncake) + DP2
+#   prod-yz-boom-minmax-mooncake.yaml  — adds Mooncake KV cache transfer
+#   prod-yz-boom-minmax-lmcache.yaml   — adds LMCache (wraps Mooncake) + DP2
 
 backend: "boom"
 

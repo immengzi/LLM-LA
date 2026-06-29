@@ -1,15 +1,7 @@
-# prod-shadow + ROUTER KEY AFFINITY (GO services): Shadow deployment of
-# MiniMax-M2.7 on node3+node4, identical to
-# prod-shadow-boom-minmax-lmcache-hq-go.yaml but with the router's conversation
-# key-affinity enabled (helm.router_affinity_*). Use it as the A/B counterpart
-# of the plain shadow config to measure prefix-cache reuse from conversation
-# stickiness.
+# prod-yz-shadow: Shadow deployment of MiniMax-M2.7 on node3+node4.
 #
-# This is the ROUTER-SIDE affinity (router/affinity.py + queue.go): the router
-# derives conversation identity itself and keeps each chat on the same pod. It
-# is independent of BooM's key_affinity routing (no API-key rotation, no
-# boom_key_affinity_bench) and works whether traffic arrives via BooM or direct.
-# See docs/architecture/key-affinity.md.
+# Identical model config to prod-yz-boom-minmax-lmcache-hq.yaml, deployed as
+# release "vllm-shadow" in namespace "vllm-shadow" with portOffset=100.
 #
 # Node layout:
 #   node3: prod infra (unchanged) + shadow vLLM (DP2 pod)
@@ -20,9 +12,6 @@
 #   kubectl label node node3 node4 vllm-pool=shadow --overwrite
 #   kubectl label node node1 node2 node7 node8 avoid=vllm-shadow --overwrite
 #   Pre-pull images on node4: ctr -n k8s.io images pull reg.local:32000/minimax27:selfcontained
-#   Pre-pull Go images on node4:
-#     ctr -n k8s.io images pull reg.local:32000/kv-router-go:latest
-#     ctr -n k8s.io images pull reg.local:32000/kv-sidecar-go:latest
 #   sysctl -w vm.swappiness=0 && sysctl -w kernel.numa_balancing=0  (on node3/4)
 
 backend: "boom"
@@ -112,9 +101,6 @@ helm:
   port_offset: 100
   pin_node_name: node4
 
-  # ===== Go services toggle (router + sidecar) =====
-  service_impl: "go"
-
   boom_claude_aliases: true
   boom_max_inflight: 1000
   router_api_key: "ZhongRuanChuangXin!"
@@ -126,14 +112,6 @@ helm:
   router_kv_aware: true
   router_len_aware: true
   router_len_policy: "short_first"
-
-  # ===== Conversation key affinity (router-side) =====
-  # soft = preference (any pod may still serve); switch to "hard" for a
-  # time-bounded pin. Keep KV-aware on so KV scoring reinforces affinity.
-  router_affinity_enabled: true
-  router_affinity_mode: "soft"
-  router_affinity_ttl_s: 300
-  router_affinity_hard_timeout_s: 5
 
   expose_per_pod: true
 

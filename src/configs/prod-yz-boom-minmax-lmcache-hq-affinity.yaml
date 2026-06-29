@@ -1,5 +1,5 @@
 # prod + ROUTER KEY AFFINITY: MiniMax-M2.7 — BooM + LLM-LA (router), DP2 +
-# LMCache, HQ-matching config. Identical to prod-boom-minmax-lmcache-hq.yaml but
+# LMCache, HQ-matching config. Identical to prod-yz-boom-minmax-lmcache-hq.yaml but
 # with the router's conversation key-affinity enabled (helm.router_affinity_*),
 # so all turns of a chat stay on the same vLLM pod for prefix-cache reuse.
 #
