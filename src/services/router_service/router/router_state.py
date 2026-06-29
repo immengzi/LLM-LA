@@ -224,11 +224,27 @@ class RouterState:
             pool_factor = max(1, int(_cfg.POOL_FACTOR))
             max_scan = min(len(q), want * pool_factor)
 
-            # 1) Build pool
-            pool: List[Tuple[str, str, float, dict]] = []
+            # 1) Build head pool (existing logic: take from the front).
+            head_pool: List[Tuple[str, str, float, dict]] = []
             for _ in range(max_scan):
                 rid, prompt, ts, meta = q.popleft()
-                pool.append((rid, prompt, ts, meta))
+                head_pool.append((rid, prompt, ts, meta))
+
+            # 1b) Bidirectional pool: additionally sample `want` items from the
+            #     tail of the remaining queue. This keeps recently-arrived
+            #     agentic follow-up requests visible even when the head pool is
+            #     dominated by cold requests.
+            tail_pool: List[Tuple[str, str, float, dict]] = []
+            if _cfg.POOL_BIDIRECTIONAL and len(q) > 0:
+                tail_count = min(want, len(q))
+                tail_raw: List[Tuple[str, str, float, dict]] = []
+                for _ in range(tail_count):
+                    rid, prompt, ts, meta = q.pop()
+                    tail_raw.append((rid, prompt, ts, meta))
+                tail_pool = list(reversed(tail_raw))
+
+            pool: List[Tuple[str, str, float, dict]] = head_pool + tail_pool
+            head_ids = {rid for rid, *_ in head_pool}
 
             # queue length changed after draining pool
             self._publish_queue_metrics()
@@ -240,7 +256,9 @@ class RouterState:
                 pool, held_back = self._affinity_filter_hard(pool, endpoint)
 
             _log_req(
-                f"endpoint={endpoint} want={want} pool_size={len(pool)} "
+                f"endpoint={endpoint} want={want} "
+                f"head_pool={len(head_pool)} tail_pool={len(tail_pool)} "
+                f"total_pool={len(pool)} "
                 f"queue_remaining={len(self._queue)}",
                 level="full",
             )
@@ -279,7 +297,12 @@ class RouterState:
 
             _log_req(
                 f"chosen endpoint={endpoint}: {chosen_ids} kv_hits={chosen_kv_hits}"
-                + (f" effective_want={effective_want}" if effective_want != want else ""),
+                + (f" effective_want={effective_want}" if effective_want != want else "")
+                + (
+                    f" [bidir head={len(head_pool)} tail={len(tail_pool)}]"
+                    if _cfg.POOL_BIDIRECTIONAL
+                    else ""
+                ),
                 level="summary",
             )
 
@@ -366,9 +389,18 @@ class RouterState:
             # 6) Requeue held-back (hard-mode affinity) items + leftovers at the
             # front, order-preserving (extendleft reverses, so reverse input).
             leftovers = ordered[effective_want:]
-            requeue_front = held_back + leftovers
-            if requeue_front:
-                q.extendleft(reversed(requeue_front))
+            if _cfg.POOL_BIDIRECTIONAL:
+                head_leftovers = [(rid, p, t, m) for rid, p, t, m in leftovers if rid in head_ids]
+                tail_leftovers = [(rid, p, t, m) for rid, p, t, m in leftovers if rid not in head_ids]
+                requeue_front = held_back + head_leftovers
+                if requeue_front:
+                    q.extendleft(reversed(requeue_front))
+                for rid, prompt, ts, meta in tail_leftovers:
+                    q.append((rid, prompt, ts, meta))
+            else:
+                requeue_front = held_back + leftovers
+                if requeue_front:
+                    q.extendleft(reversed(requeue_front))
 
             # queue length changed after requeue
             self._publish_queue_metrics()

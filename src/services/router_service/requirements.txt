@@ -5,3 +5,7 @@ redis
 kubernetes
 prometheus_client
 pyzmq>=25.0.0
+cbor2
+transformers
+tokenizers
+jinja2

@@ -213,6 +213,9 @@ spec:
                   --middleware _fp_mw.HostnameFingerprint \
 {{ include "vllmkv.vllmRuntimeFlags" $flagCtx | trim | indent 18 }}
                   --host 0.0.0.0
+                  {{- if $needsSidecar }} \
+                  --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@{{ $servedModelName }}"}'
+                  {{- end }}
                   {{- if $.Values.lmcache.enabled }} \
                   --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
                   {{- else if $.Values.mooncake.enabled }} \
@@ -349,6 +352,10 @@ spec:
                 value: "127.0.0.1"
               - name: VLLM_SUB_PORT
                 value: "5557"
+              - name: DP_SIZE
+                value: {{ $isDP | ternary ($dp.size | default 2) 1 | quote }}
+              - name: DP_SIZE_LOCAL
+                value: {{ $isDP | ternary ($dp.sizeLocal | default 1) 1 | quote }}
               - name: REDIS_HOST
                 value: "redis"
               - name: REDIS_PORT
@@ -587,6 +594,9 @@ spec:
                   --data-parallel-rpc-port {{ $dp.rpcPort | default 13389 }} \
                   --data-parallel-start-rank ${START_RANK} \
 {{ include "vllmkv.vllmRuntimeFlags" $flagCtx | trim | indent 18 }}
+                  {{- if $needsSidecar }}
+                  --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@{{ $servedModelName }}"}' \
+                  {{- end }}
                   {{- if $.Values.lmcache.enabled }}
                   --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
                   {{- else if $.Values.mooncake.enabled }}
@@ -1013,6 +1023,10 @@ spec:
               value: "127.0.0.1"
             - name: VLLM_SUB_PORT
               value: "5557"
+            - name: DP_SIZE
+              value: "1"
+            - name: DP_SIZE_LOCAL
+              value: "1"
             - name: REDIS_HOST
               value: "redis"
             - name: REDIS_PORT

@@ -81,7 +81,6 @@ def _kubectl(args: List[str], *, check: bool = True, capture: bool = False) -> s
 def _helm(args: List[str], *, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
     return _run(["helm", *args], check=check, capture=capture)
 
-
 def _flatten_helm_values(prefix: str, value: ConfigValue) -> Dict[str, ConfigValue]:
     """Flatten nested Helm values into --set dot paths."""
     if not isinstance(value, dict):

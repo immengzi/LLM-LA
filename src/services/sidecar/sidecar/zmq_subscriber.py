@@ -14,6 +14,7 @@ Redis schema (per MODEL_NAME_REDIS):
 """
 
 import os
+import socket
 import time
 import threading
 from typing import Any, Optional, Union, NewType
@@ -64,6 +65,49 @@ class KVEventBatch(EventBatch):
 
 
 # ------------------------------
+# Helpers
+# ------------------------------
+
+def _resolve_zmq_endpoints(
+    leader_name: str,
+    base_host: str,
+    base_port: int,
+    dp_size: int,
+    dp_size_local: int,
+    namespace: str = "vllm",
+) -> tuple[list[str], list[tuple[int, str, int]]]:
+    """Build ZMQ endpoints for leader-sidecar DP fan-in.
+
+    Rank 0 is local. Worker ranks are resolved through the LWS headless-service
+    DNS convention and retried later if they are not ready at startup.
+    """
+    resolved: list[str] = [f"tcp://{base_host}:{base_port}"]
+    pending: list[tuple[int, str, int]] = []
+
+    if dp_size <= 1:
+        return resolved, pending
+
+    svc_name = leader_name.rsplit("-", 1)[0] if "-" in leader_name else leader_name
+    for rank in range(1, dp_size):
+        worker_name = f"{leader_name}-{rank}"
+        fqdn = f"{worker_name}.{svc_name}.{namespace}.svc.cluster.local"
+        zmq_port = base_port + rank * dp_size_local
+        try:
+            worker_ip = socket.gethostbyname(fqdn)
+            ep = f"tcp://{worker_ip}:{zmq_port}"
+            resolved.append(ep)
+            print(f"[KV-SUB] resolved worker rank {rank}: {fqdn} -> {ep}")
+        except socket.gaierror:
+            print(
+                f"[KV-SUB] WARNING: cannot resolve {fqdn} at startup — "
+                f"will retry in background (rank {rank}, port {zmq_port})"
+            )
+            pending.append((rank, fqdn, zmq_port))
+
+    return resolved, pending
+
+
+# ------------------------------
 # Subscriber
 # ------------------------------
 
@@ -78,6 +122,8 @@ class KVSubscriber:
         )
         self.model = _cfg.MODEL_NAME_REDIS
         self.pod_name = _cfg.CONTAINER_NAME
+        self.dp_size = _cfg.DP_SIZE
+        self.dp_size_local = _cfg.DP_SIZE_LOCAL
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -95,7 +141,8 @@ class KVSubscriber:
         self._thread.start()
         print(
             f"[KV-SUB] started (host={self.vllm_host}, port={self.vllm_port}, "
-            f"pod={self.pod_name}, model={self.model})"
+            f"pod={self.pod_name}, model={self.model}, "
+            f"dp_size={self.dp_size}, dp_size_local={self.dp_size_local})"
         )
 
     def stop(self):
@@ -107,15 +154,37 @@ class KVSubscriber:
 
     # ------------- core loop -------------
 
+    _RETRY_INTERVAL_S: float = 10.0
+    _RETRY_MAX: int = 90
+
     def _loop(self):
         ctx = zmq.Context()
         sub = ctx.socket(zmq.SUB)
-        sub.connect(f"tcp://{self.vllm_host}:{self.vllm_port}")
+
+        resolved, pending = _resolve_zmq_endpoints(
+            leader_name=self.pod_name,
+            base_host=self.vllm_host,
+            base_port=self.vllm_port,
+            dp_size=self.dp_size,
+            dp_size_local=self.dp_size_local,
+        )
+
+        for ep in resolved:
+            sub.connect(ep)
+            print(f"[KV-SUB] connected to {ep}")
 
         # Match old listener: subscribe only to KV topic prefix
         sub.setsockopt_string(zmq.SUBSCRIBE, "kv@")
 
-        print("[KV-SUB] connected to vLLM publisher (topic prefix 'kv@')")
+        pending_note = f", {len(pending)} pending DNS retry" if pending else ""
+        print(
+            f"[KV-SUB] subscribed to {len(resolved)} endpoint(s) "
+            f"(topic prefix 'kv@'){pending_note}"
+        )
+
+        retry_pending = list(pending)
+        retry_attempt = 0
+        retry_last_t = time.monotonic()
 
         try:
             while not self._stop.is_set():
@@ -123,6 +192,35 @@ class KVSubscriber:
                     # Publisher: [topic, seq_bytes, payload]
                     frames = sub.recv_multipart(flags=zmq.NOBLOCK)
                 except zmq.Again:
+                    if retry_pending and retry_attempt < self._RETRY_MAX:
+                        now = time.monotonic()
+                        if now - retry_last_t >= self._RETRY_INTERVAL_S:
+                            retry_last_t = now
+                            retry_attempt += 1
+                            still_pending: list[tuple[int, str, int]] = []
+                            for rank, fqdn, zmq_port in retry_pending:
+                                try:
+                                    worker_ip = socket.gethostbyname(fqdn)
+                                    ep = f"tcp://{worker_ip}:{zmq_port}"
+                                    sub.connect(ep)
+                                    print(
+                                        f"[KV-SUB] rank {rank} resolved after "
+                                        f"{retry_attempt} retries: {fqdn} -> {ep}, connected"
+                                    )
+                                except socket.gaierror:
+                                    still_pending.append((rank, fqdn, zmq_port))
+                            retry_pending = still_pending
+                            if not retry_pending:
+                                print("[KV-SUB] all pending worker endpoints resolved")
+                    elif retry_pending and retry_attempt >= self._RETRY_MAX:
+                        for rank, fqdn, _ in retry_pending:
+                            print(
+                                f"[KV-SUB] WARNING: gave up resolving rank {rank} "
+                                f"({fqdn}) after {self._RETRY_MAX} retries "
+                                f"(~{self._RETRY_MAX * self._RETRY_INTERVAL_S / 60:.0f} min) "
+                                f"— rank {rank} ZMQ events will be missed"
+                            )
+                        retry_pending = []
                     time.sleep(0.01)
                     continue
                 except Exception as e:
@@ -160,6 +258,9 @@ class KVSubscriber:
     def _handle_batch(self, event_batch: KVEventBatch) -> None:
         """
         Update Redis for KV cache events.
+
+        In DP mode, all ranks' blocks are registered under `self.pod_name`
+        (the leader sidecar identity), so the router sees one endpoint.
 
         Redis schema:
           - {model}:kvblocks               -> HSET(block_hash -> "kvblock:{block_hash}")

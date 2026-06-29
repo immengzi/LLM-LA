@@ -24,6 +24,7 @@ class FilePromptsConfig:
 
 @dataclass
 class HFLmsysConfig:
+    dataset_profile: Optional[str] = None
     dataset_name: str = "/home/data/saeid/datasets/lmsys_chat_1m"
     split: str = "train"
     tokenizer_name: str = "/home/models/qwen3-8b"
@@ -829,7 +830,38 @@ def load_config(path: str) -> ClientConfig:
         raise ValueError("claude_code_injection must be a mapping if provided")
 
     file_prompts = _merge_dataclass(FilePromptsConfig, raw.get("file_prompts", {}))
-    hf_lmsys = _merge_dataclass(HFLmsysConfig, raw.get("hf_lmsys", {}))
+    hf_lmsys_raw = raw.get("hf_lmsys", {}) or {}
+    if not isinstance(hf_lmsys_raw, dict):
+        raise ValueError("hf_lmsys must be a mapping if provided")
+    dataset_profile = hf_lmsys_raw.get("dataset_profile")
+    if dataset_profile is not None:
+        dataset_profile = str(dataset_profile).strip()
+        if not dataset_profile:
+            raise ValueError("hf_lmsys.dataset_profile must be non-empty if provided")
+        datasets = raw.get("datasets", {}) or {}
+        if not isinstance(datasets, dict):
+            raise ValueError("datasets must be a mapping if provided")
+        dataset_entry = datasets.get(dataset_profile)
+        if not isinstance(dataset_entry, dict):
+            known = ", ".join(sorted(str(k) for k in datasets.keys()))
+            raise ValueError(
+                f"Unknown hf_lmsys.dataset_profile {dataset_profile!r}; "
+                f"known profiles: {known or '<none>'}"
+            )
+        for field_name in ("dataset_name", "tokenizer_name"):
+            value = dataset_entry.get(field_name)
+            if not value:
+                raise ValueError(
+                    f"datasets.{dataset_profile}.{field_name} is required "
+                    f"when hf_lmsys.dataset_profile is used"
+                )
+            hf_lmsys_raw[field_name] = str(value)
+        # Resolution is idempotent: once dataset_name/tokenizer_name are filled
+        # from the profile, drop dataset_profile so re-loading an already-resolved
+        # config (e.g. sweep_methods writes a temp config without switch_cluster /
+        # datasets) does not try to re-resolve a now-absent profile.
+        hf_lmsys_raw["dataset_profile"] = None
+    hf_lmsys = _merge_dataclass(HFLmsysConfig, hf_lmsys_raw)
     load_pattern = _merge_dataclass(LoadPatternConfig, raw.get("load_pattern", {}))
     generation = _merge_dataclass(GenerationConfig, raw.get("generation", {}))
     metrics = _merge_dataclass(PrometheusMetricsConfig, raw.get("metrics", {}))

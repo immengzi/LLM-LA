@@ -12,6 +12,8 @@ import collections
 import httpx
 import json
 import logging
+import os
+import re
 import time
 import sys
 import asyncio
@@ -148,9 +150,6 @@ _push_router: PushRouter | None = None
 
 # PubSub publisher (optional; enabled when TRANSPORT_MODE=async_pubsub)
 _publisher: Optional[ResultPublisher] = None
-
-# Long-lived hash client (avoid creating AsyncClient per request)
-_hash_client: Optional[httpx.AsyncClient] = None
 
 # Map req_id -> run_id (so results publish can include run_id filtering)
 _rid_runid_lock = RLock()
@@ -457,20 +456,17 @@ def _safe_int_list(xs: Any) -> List[int]:
     return out
 
 
-def _get_hash_client() -> Optional[httpx.AsyncClient]:
-    # Best-effort: might be None during early startup or if creation failed.
-    return _hash_client
-
-
 async def _maybe_register_kv_blocks(
     req_id: str,
     prompt: str,
     *,
     meta: Optional[Dict[str, Any]] = None,
     is_pull_mode: bool,
+    messages: Optional[List[Dict[str, Any]]] = None,
+    tools: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Best-effort KV-block computation.
+    Best-effort inline KV-block computation.
 
     Side effects:
     - register_request_blocks(req_id, block_hashes)
@@ -495,39 +491,27 @@ async def _maybe_register_kv_blocks(
 
     t0 = time.time()
     try:
-        client = _get_hash_client()
-        close_after = False
-        if client is None:
-            # Fallback (should be rare): create a short-lived client.
-            t = float(getattr(_cfg, "HASH_TIMEOUT_S", 2.0))
-            timeout = httpx.Timeout(connect=t, read=t, write=t, pool=t)
-            limits = httpx.Limits(
-                max_keepalive_connections=int(getattr(_cfg, "HASH_MAX_KEEPALIVE", 50)),
-                max_connections=int(getattr(_cfg, "HASH_MAX_KEEPALIVE", 50)),
-                keepalive_expiry=float(getattr(_cfg, "HASH_KEEPALIVE_EXPIRY_S", 30.0)),
-            )
-            client = httpx.AsyncClient(timeout=timeout, limits=limits)
-            close_after = True
+        from . import prefix_hash as _ph
 
-        try:
-            resp = await client.post(
-                f"{_cfg.HASH_SERVICE_URL}/compute_hashes",
-                json={"prompt": prompt},
-                timeout=_cfg.HASH_TIMEOUT_S,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        finally:
-            if close_after:
-                try:
-                    await client.aclose()
-                except Exception:
-                    pass
+        # Push decoupling may only pass meta; recover full chat inputs when present.
+        if messages is None and isinstance(m.get("__chat_request__"), dict):
+            maybe_messages = m["__chat_request__"].get("messages")
+            if isinstance(maybe_messages, list):
+                messages = maybe_messages
+        if tools is None and isinstance(m.get("__chat_request__"), dict):
+            maybe_tools = m["__chat_request__"].get("tools")
+            if isinstance(maybe_tools, list):
+                tools = maybe_tools
 
-        block_hashes = _safe_int_list(data.get("block_hashes") or [])
+        block_hashes = _ph.compute_request_block_hashes_int(
+            messages=messages,
+            prompt=prompt if not messages else None,
+            tools=tools,
+            block_size=int(_cfg.KV_BLOCK_SIZE),
+        )
 
         _log_kv_hash(
-            f"req_id={req_id} status={resp.status_code} "
+            f"req_id={req_id} inline=1 "
             f"took_s={(time.time() - t0):.3f} "
             f"n_hashes={len(block_hashes)}",
             level="full",
@@ -833,29 +817,29 @@ def _ingest_result_payload(payload: dict) -> None:
 
 @app.on_event("startup")
 async def _startup():
-    global _kv_watcher, _push_router, _publisher, _push_dispatcher, _hash_client
+    global _kv_watcher, _push_router, _publisher, _push_dispatcher
 
     print(f"[router] api.py version={_API_VERSION}")
     print_config(_cfg)
     sys.stdout.flush()
 
+    if _cfg.KV_AWARE:
+        try:
+            from . import prefix_hash as _ph
+
+            _ph.init_tokenizer(_cfg.KV_TOKENIZER_PATH)
+            print(
+                f"[router] inline hash ready: tokenizer={_cfg.KV_TOKENIZER_PATH} "
+                f"block_size={_cfg.KV_BLOCK_SIZE}"
+            )
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"[router] FATAL: inline hash tokenizer init failed: {e!r}")
+            sys.stdout.flush()
+            raise
+
     _install_submit_route()
     _install_result_submit_route()
-
-    # Long-lived hash client (used by _maybe_register_kv_blocks)
-    try:
-        t = float(getattr(_cfg, "HASH_TIMEOUT_S", 2.0))
-        timeout = httpx.Timeout(connect=t, read=t, write=t, pool=t)
-        limits = httpx.Limits(
-            max_keepalive_connections=int(getattr(_cfg, "HASH_MAX_KEEPALIVE", 50)),
-            max_connections=int(getattr(_cfg, "HASH_MAX_KEEPALIVE", 50)),
-            keepalive_expiry=float(getattr(_cfg, "HASH_KEEPALIVE_EXPIRY_S", 30.0)),
-        )
-        _hash_client = httpx.AsyncClient(timeout=timeout, limits=limits)
-    except Exception as e:
-        _hash_client = None
-        print(f"[router] WARNING: failed to init hash AsyncClient: {e}")
-        sys.stdout.flush()
 
     _kv_watcher = KVWatcher()
     _kv_watcher.start()
@@ -913,7 +897,7 @@ async def _startup():
 
 @app.on_event("shutdown")
 async def _shutdown():
-    global _kv_watcher, _push_router, _publisher, _push_dispatcher, _hash_client
+    global _kv_watcher, _push_router, _publisher, _push_dispatcher
 
     if _kv_watcher:
         _kv_watcher.stop()
@@ -943,14 +927,6 @@ async def _shutdown():
             pass
         _publisher = None
         print("[router] PubSub publisher stopped.")
-
-    if _hash_client is not None:
-        try:
-            await _hash_client.aclose()
-        except Exception:
-            pass
-        _hash_client = None
-        print("[router] Hash client closed.")
 
     sys.stdout.flush()
 
@@ -1448,6 +1424,32 @@ async def pull(req: PullRequest):
 # /result) are completely untouched — fully backward compatible.
 # ============================================================
 
+_CCH_RE = re.compile(r"; cch=[0-9a-f]+")
+
+
+def _strip_cch_inplace(req: "_ChatCompletionRequest") -> None:
+    """Strip Claude Code's per-request `cch=<hex>` counter from system text.
+
+    This is a router-side client compatibility seam. It is gated by
+    `STRIP_CCH=1` and intentionally does not modify BooM Gateway.
+    """
+    for msg in req.messages:
+        if msg.role.strip().lower() != "system":
+            continue
+        c = msg.content
+        if isinstance(c, str):
+            new_c = _CCH_RE.sub("", c)
+            if new_c != c:
+                msg.content = new_c
+        elif isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    t = part.get("text", "")
+                    nt = _CCH_RE.sub("", t)
+                    if nt != t:
+                        part["text"] = nt
+
+
 def _messages_to_prompt(messages: List[_ChatMessage]) -> str:
     """
     Flatten OpenAI messages list into a single prompt string.
@@ -1476,6 +1478,8 @@ async def _enqueue_and_wait(
     model: str,
     source: str = "litellm",
     chat_request_body: Optional[Dict[str, Any]] = None,
+    chat_messages: Optional[List[Dict[str, Any]]] = None,
+    chat_tools: Optional[List[Any]] = None,
 ) -> tuple:
     """Shared enqueue-wait logic for both streaming and non-streaming chat completions."""
     t_start = time.time()
@@ -1513,6 +1517,8 @@ async def _enqueue_and_wait(
             prompt,
             meta=meta,
             is_pull_mode=is_pull_mode,
+            messages=chat_messages,
+            tools=chat_tools,
         )
         if _is_push_mode():
             if _push_router is None:
@@ -1777,12 +1783,14 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
     """
     _check_api_key(request)
 
+    if os.environ.get("STRIP_CCH") == "1":
+        _strip_cch_inplace(req)
+
     prompt = _messages_to_prompt(req.messages)
 
-    has_tools = bool(req.tools)
-    has_tool_messages = any(m.role == "tool" for m in req.messages)
-
     chat_request_body = _build_chat_request_body(req)
+    chat_messages = chat_request_body.get("messages") if isinstance(chat_request_body, dict) else None
+    chat_tools = chat_request_body.get("tools") if isinstance(chat_request_body, dict) else None
 
     # ---- real-time streaming path (Phase 2B) ----
     if req.stream:
@@ -1822,6 +1830,8 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
             meta = await _maybe_register_kv_blocks(
                 rid, prompt, meta=meta,
                 is_pull_mode=not _is_push_mode(),
+                messages=chat_messages,
+                tools=chat_tools,
             )
             if _is_push_mode():
                 if _push_router is None:
@@ -2024,7 +2034,11 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
 
     # --- non-streaming path ---
     rid, t_start, result = await _enqueue_and_wait(
-        prompt, req.model, chat_request_body=chat_request_body,
+        prompt,
+        req.model,
+        chat_request_body=chat_request_body,
+        chat_messages=chat_messages,
+        chat_tools=chat_tools,
     )
 
     t_done = time.time()

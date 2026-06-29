@@ -1,0 +1,127 @@
+# 5-2 mooncake smoke config using centralized cluster profile.
+
+switch_cluster: bz
+backend: "boom"
+
+total_requests: 1
+prompt_source: "file"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  split: "train"
+  streaming: false
+  min_input_tokens: 256
+  max_input_tokens: 10000000
+  repeat_each: 1
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 0.1
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+  step_schedule: "0:5,30:15,60:3"
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  max_tokens: 32
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+  use_dataset_output_len: false
+  replay_output_lengths_from: null
+
+output_log_mode: "summary"
+print_trace: false
+
+metrics:
+  enabled: true
+  scrape_interval_s: 1.0
+  window_s: 3.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+transport:
+  mode: "async_pubsub"
+  submit_path: "/submit"
+  topic: "results"
+  run_id: null
+  idle_timeout_s: 1000.0
+  idle_zero_running_s: 10.0
+
+boom:
+  chat_path: "/v1/chat/completions"
+  model: "served-model"
+  api_key: "sk-boom-master"
+  timeout_s: 10000.0
+  stream: false
+
+helm:
+  boom_claude_aliases: true
+  boom_max_inflight: 1000
+  router_api_key: "ZhongRuanChuangXin!"
+
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 1
+
+  router_kv_aware: true
+  router_len_aware: true
+  router_len_policy: "short_first"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+  sidecar_prefetch: 2
+
+  mooncake_enabled: true
+  mooncake_master_port: 50088
+  mooncake_global_segment_size: 140000000000
+  mooncake_eviction_high_watermark: 0.9
+  mooncake_eviction_ratio: 0.1
+  mooncake_ascend_buffer_pool: "4:8"
+  mooncake_lookup_rpc_port: "10010"
+  mooncake_host_network: true
+  deploy_mooncake_master: true
+
+  models:
+    - name: glm5-chat
+      servedModelName: served-model
+      replicas: 1
+      modelSubPath: GLM-5-w4a8-mtp-QuaRot
+      tensorParallelSize: 8
+      batchSize: 4
+      sidecarPrefetch: 2
+      dataParallel:
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 13389
+        hcclBuffSize: 200
+        ompNumThreads: 16
+        pairTopologyKey: roce-pair
+      vllm:
+        gpuMemoryUtilization: 0.95
+        quantization: ascend
+        enableExpertParallel: true
+        enablePrefixCaching: true
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 4096
+        seed: 1924
+        toolCallParser: glm47
+        reasoningParser: glm45
+        additionalConfig:
+          multistream_overlap_shared_expert: true

@@ -35,7 +35,7 @@ spec:
         - name: router
           image: {{ include "vllmkv.routerImage" . }}
           # imagePullPolicy: IfNotPresent
-          imagePullPolicy: Always
+          imagePullPolicy: {{ .Values.router.imagePullPolicy | default "Always" }}
           env:
             - name: HOST
               value: "0.0.0.0"
@@ -74,10 +74,17 @@ spec:
             - name: KV_DISCOVERY_INTERVAL_S
               value: "5.0"
 
-            - name: HASH_SERVICE_URL
-              value: "http://vllm-cpu-hash:9095"
-            - name: HASH_TIMEOUT_S
-              value: "2.0"
+            # ---- In-router KV-block hash computation ----
+            - name: KV_HASH_INLINE
+              value: "true"
+            - name: KV_TOKENIZER_PATH
+              value: "/model"
+            - name: KV_BLOCK_SIZE
+              value: {{ quote (toString (.Values.router.kvBlockSize | default 128)) }}
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: KV_CANONICALISE_TOOLS
+              value: {{ if hasKey .Values.router "kvCanonicaliseTools" }}{{ quote (toString .Values.router.kvCanonicaliseTools) }}{{ else }}"1"{{ end }}
 
             # ---- Helm-controlled routing knobs ----
             - name: KV_AWARE
@@ -134,6 +141,10 @@ spec:
 
             - name: POOL_FACTOR
               value: "4"
+            - name: STRIP_CCH
+              value: {{ quote (toString (.Values.router.stripCch | default "1")) }}
+            - name: POOL_BIDIRECTIONAL
+              value: {{ ternary "true" "false" (.Values.router.poolBidirectional | default false) | quote }}
             - name: DEFAULT_MAX_TOKENS
               value: "1024"
 
@@ -205,8 +216,16 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 20
 
-          {{- if .Values.models }}
           volumeMounts:
+            - name: model
+              mountPath: /model
+              readOnly: true
+              {{- if .Values.models }}
+              subPath: {{ ((index .Values.models 0).modelSubPath | default .Values.modelVolume.modelSubPath) }}
+              {{- else }}
+              subPath: {{ .Values.modelVolume.modelSubPath }}
+              {{- end }}
+          {{- if .Values.models }}
             - name: model-registry
               mountPath: /etc/model-registry/models.yaml
               subPath: models.yaml
@@ -221,8 +240,17 @@ spec:
               cpu: "1000m"
               memory: "1Gi"
 
-      {{- if .Values.models }}
       volumes:
+        - name: model
+          {{- if .Values.modelVolume.hostPath }}
+          hostPath:
+            path: {{ .Values.modelVolume.hostPath }}
+            type: Directory
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.modelVolume.pvcName | default "models-nfs-pvc" }}
+          {{- end }}
+      {{- if .Values.models }}
         - name: model-registry
           configMap:
             name: model-registry
