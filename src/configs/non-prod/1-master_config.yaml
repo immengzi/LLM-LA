@@ -199,6 +199,12 @@ prod-yz-boom-minmax-lmcache-hq:
 # 5-2-template-boom-claude-glm-mooncake:
 #   - pull
 
+# 5-2-template-boom-claude-glm-mooncake-bz:
+#   - pull
+
+# 5-2-template-boom-claude-glm-mooncake-switch-bz:
+#   - pull
+
 # ── 6: Streaming configs (TTFT/TPOT measurement) ──
 
 # 6-1-template-boom-direct-claude-glm-stream:
