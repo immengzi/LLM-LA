@@ -140,7 +140,14 @@ def init_experiment(
     cfgs_root.mkdir(exist_ok=True)
     exps_root.mkdir(exist_ok=True)
 
-    exp_dir = _next_experiment_dir(exps_root)
+    # Allow the sweeper to pre-create the experiment dir (so pod-log capture and
+    # config snapshots can start at deploy time) and have the client reuse it.
+    _forced = os.environ.get("FORCE_EXPERIMENT_DIR")
+    if _forced:
+        exp_dir = Path(_forced)
+        exp_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        exp_dir = _next_experiment_dir(exps_root)
 
     # --- Measure node clock offsets at run start (best-effort) ---
     # We assume the client runs on the master node and treat the local clock as reference.

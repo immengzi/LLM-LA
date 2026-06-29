@@ -708,6 +708,10 @@ class ClientConfig:
     output_log_mode: str = "full"
     print_trace: bool = False
 
+    # When true (sweep_methods only): stream `kubectl logs` of every pod/container
+    # in the deploy namespace into <exp_dir>/vllm-logs/<pod>/<container>.log.
+    collect_vllm_logs: bool = False
+
     # Metrics
     metrics: PrometheusMetricsConfig = field(default_factory=PrometheusMetricsConfig)
 
@@ -911,6 +915,7 @@ def load_config(path: str) -> ClientConfig:
 
     output_log_mode = raw.get("output_log_mode", ClientConfig.output_log_mode)
     print_trace = raw.get("print_trace", ClientConfig.print_trace)
+    collect_vllm_logs = bool(raw.get("collect_vllm_logs", ClientConfig.collect_vllm_logs))
 
     # -----------------------------
     # Normalize router transport
@@ -1028,6 +1033,7 @@ def load_config(path: str) -> ClientConfig:
         generation=generation,
         output_log_mode=output_log_mode,
         print_trace=print_trace,
+        collect_vllm_logs=collect_vllm_logs,
         metrics=metrics,
         transport=transport,
         aibrix=aibrix,

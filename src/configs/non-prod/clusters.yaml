@@ -38,7 +38,10 @@ clusters:
 
   bz:
     router_url: "http://192.168.0.79:30080"
-    experiments_root: "/home/haiting/llm-la/microservice/experiments"
+    # Shared, group-writable (wheel) dir so saeid and haiting both write runs to
+    # one place. Each user symlinks their <repo>/src/experiments -> this path so
+    # sweep artifacts co-locate with client logs.
+    experiments_root: "/data/experiments"
 
     hf_lmsys:
       dataset_name: "/data/gateway/gateway/data/codeflowbench_conversations.jsonl"

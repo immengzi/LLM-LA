@@ -14,7 +14,7 @@
 switch_cluster: bz
 backend: "boom"
 
-total_requests: 10
+total_requests: 10   # = number of multi-turn conversations (each >= min_user_turns)
 prompt_source: "codeflow"
 
 file_prompts:
@@ -35,7 +35,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 0.1
+  rate_rps: 1.0   # conversations/sec arrival -> some concurrency so routing choice matters
   duration_s: 3000.0
   warmup_reqs: 0
 
@@ -64,6 +64,9 @@ generation:
 
 output_log_mode: "summary"
 print_trace: false
+
+# Stream kubectl logs of every pod/container into <exp_dir>/vllm-logs/<pod>/<container>.log
+collect_vllm_logs: true
 
 metrics:
   enabled: true
@@ -97,7 +100,16 @@ helm:
   autoscaling_min: 1
   autoscaling_max: 1
 
-  router_kv_aware: true
+  # Unified routing-strategy selector (overrides router_kv_aware/router_affinity_*).
+  # Uncomment exactly ONE to switch modes:
+  #   none     -> prefix off, affinity off (baseline)
+  #   prefix   -> KV prefix-awareness only
+  #   affinity -> conversation key-affinity only
+  #   both     -> prefix + affinity
+  # router_strategy: "none"
+  # router_strategy: "prefix"
+  # router_strategy: "affinity"
+  router_strategy: "both"
   router_len_aware: true
   router_len_policy: "short_first"
 
@@ -176,7 +188,7 @@ helm:
 # original yaml.
 claude_code_injection:
   enabled: true
-  template_dir: "/home/haiting/llm-la/src/multiturn-generation"
+  template_dir: "multiturn-generation"
   inject_system_blocks: true
   inject_system_reminders: true
   inject_tools: true
