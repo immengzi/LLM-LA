@@ -22,6 +22,20 @@ from load_runner import run_open_loop_load
 from experiment_io import init_experiment
 from trace_utils import summarize_endpoint_tokens
 
+# Optional router /latency_log collector (BooM-proof endpoint + prefix/KV logging)
+try:
+    from router_log_collector import (
+        RouterLogCollector,
+        EnrichingLogger,
+        join_logs_with_router,
+        summarize_routing,
+    )
+except Exception:
+    RouterLogCollector = None  # type: ignore
+    EnrichingLogger = None     # type: ignore
+    join_logs_with_router = None  # type: ignore
+    summarize_routing = None      # type: ignore
+
 # event-driven pod->node mapping snapshots (autoscaler / churn)
 from k8s_event_podmap import EventDrivenPodMapLogger
 
@@ -251,6 +265,29 @@ def main():
     )
     print(f"[client] experiment_dir={exp_dir}")
 
+    # Optional router /latency_log collector: persists router_logs.json and
+    # live-enriches each request record with the serving endpoint + prefix/KV
+    # fields (works through BooM since it reads the router directly).
+    router_collector = None
+    run_logger = exp_logger
+    if getattr(cfg, "collect_router_log", False):
+        if RouterLogCollector is None:
+            print("[router-log] enabled but router_log_collector.py not available; skipping.")
+        else:
+            try:
+                router_log_url = (getattr(cfg, "router_log_url", "") or cfg.router_url)
+                router_collector = RouterLogCollector(
+                    router_url=router_log_url,
+                    out_path=Path(exp_dir) / "router_logs.json",
+                )
+                router_collector.start()
+                run_logger = EnrichingLogger(exp_logger, router_collector)
+                print(f"[router-log] collector started -> {Path(exp_dir) / 'router_logs.json'}")
+            except Exception as e:
+                print(f"[router-log] failed to start collector: {e}")
+                router_collector = None
+                run_logger = exp_logger
+
     # start event-driven pod->node mapping watcher (writes JSONL beside other logs)
     podmap_logger = None
     try:
@@ -328,7 +365,7 @@ def main():
             gen_cfg=cfg.generation,
             output_tokens_per_request=output_tokens_per_request,
             warmup_reqs=cfg.load_pattern.warmup_reqs,
-            logger=exp_logger,
+            logger=run_logger,
             output_log_mode=cfg.output_log_mode,
             print_trace=cfg.print_trace,
             transport=getattr(cfg, "transport", None),
@@ -361,9 +398,33 @@ def main():
             except Exception:
                 pass
 
+        # Stop router-log collector (does a final poll) before closing logs.json.
+        if router_collector is not None:
+            try:
+                router_collector.stop()
+                print(f"[router-log] collector stopped ({router_collector.count} records)")
+            except Exception as e:
+                print(f"[router-log] failed to stop collector: {e}")
+
         exp_logger.close()
 
     logs_path = str(Path(exp_dir) / "logs.json")
+
+    # Authoritative end-of-run join: rewrite logs.json so every record carries
+    # the serving endpoint + prefix/KV fields recorded by the router.
+    routing_summary = None
+    if router_collector is not None and join_logs_with_router is not None:
+        router_logs_path = str(Path(exp_dir) / "router_logs.json")
+        try:
+            stats = join_logs_with_router(logs_path, router_logs_path)
+            print(
+                f"[router-log] joined logs.json: matched={stats['matched']}/"
+                f"{stats['total']} (missing={stats['missing']})"
+            )
+            routing_summary = summarize_routing(logs_path)
+        except Exception as e:
+            print(f"[router-log] WARN: end-of-run join failed: {e}")
+
     token_summary_path = str(Path(exp_dir) / "endpoint_tokens.json")
     summarize_endpoint_tokens(logs_path, save_path=token_summary_path)
 
@@ -405,6 +466,8 @@ def main():
             for t in cfg.multi_model.targets
         ] if cfg.multi_model else None,
     }
+    if routing_summary is not None:
+        run_summary["routing"] = routing_summary
     try:
         with (Path(exp_dir) / "run_summary.json").open("w", encoding="utf-8") as f:
             json.dump(run_summary, f, indent=2, sort_keys=True)

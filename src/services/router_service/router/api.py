@@ -31,7 +31,7 @@ from .models import (
 )
 from .router_state import router_state
 from .kv_watcher import KVWatcher
-from .kv_aware import register_request_blocks
+from .kv_aware import register_request_blocks, pop_routing
 from .affinity import derive_affinity_key
 from .push_router import PushRouter
 from .metrics import (
@@ -84,6 +84,31 @@ _latency_logger = logging.getLogger("router.latency")
 _LATENCY_LOG_MAX = 2000
 _latency_ring: collections.deque = collections.deque(maxlen=_LATENCY_LOG_MAX)
 _latency_ring_lock = RLock()
+
+
+def _routing_fields(rid: str) -> Dict[str, Any]:
+    """Per-request prefix/kv routing fields for the /latency_log ring.
+
+    Pulls the decision captured at dispatch time (independent of the TRACE
+    system) and derives the kv-hit counts. Returns an empty dict when no
+    routing info was recorded (e.g. /enqueue-only paths).
+    """
+    info = pop_routing(rid)
+    if not info:
+        return {}
+    kv_hits_len = int(info.get("kv_hits_len", 0))
+    total_blocks = int(info.get("total_blocks", 0))
+    fields: Dict[str, Any] = {
+        "kv_hits_len": kv_hits_len,
+        "total_blocks": total_blocks,
+        "matched_tokens": kv_hits_len * int(_cfg.KV_BLOCK_SIZE),
+        "kv_hit": kv_hits_len > 0,
+    }
+    if info.get("affinity_key") is not None:
+        fields["affinity_key"] = info["affinity_key"]
+    if "block_hashes" in info:
+        fields["block_hashes"] = info["block_hashes"]
+    return fields
 
 
 def _record_latency(entry: Dict[str, Any]) -> None:
@@ -1924,6 +1949,7 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
                     "prompt_tokens": int(u.get("prompt_tokens", 0)) if u else 0,
                     "completion_tokens": int(u.get("completion_tokens", 0)) if u else 0,
                     **x_lat,
+                    **_routing_fields(rid),
                 })
                 return x_lat
 
@@ -2125,6 +2151,7 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
         "prompt_tokens": int(usage.get("prompt_tokens", 0)),
         "completion_tokens": completion_tokens,
         **x_latency,
+        **_routing_fields(rid),
     })
 
     message: Dict[str, Any] = {

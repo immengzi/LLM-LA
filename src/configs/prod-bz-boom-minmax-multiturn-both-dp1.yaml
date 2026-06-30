@@ -74,6 +74,11 @@ print_trace: false
 # Stream kubectl logs of every pod/container into <exp_dir>/vllm-logs/<pod>/<container>.log
 collect_vllm_logs: true
 
+# Poll the router /latency_log ring -> router_logs.json, live-enrich logs.json with
+# the serving endpoint + prefix/KV-hit fields, and join authoritatively at shutdown.
+# BooM-proof (reads the router directly). router_log_url empty -> derived from router_url.
+collect_router_log: true
+
 metrics:
   enabled: true
   scrape_interval_s: 1.0

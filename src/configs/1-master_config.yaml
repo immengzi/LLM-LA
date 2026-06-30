@@ -20,12 +20,12 @@
 # UNCHANGED. Sweep none -> prefix -> affinity -> both back-to-back.
 prod-bz-boom-minmax-multiturn-none-dp1:
   - pull
-# prod-bz-boom-minmax-multiturn-prefix-dp1:
-#   - pull
-# prod-bz-boom-minmax-multiturn-affinity-dp1:
-#   - pull
-# prod-bz-boom-minmax-multiturn-both-dp1:
-#   - pull
+prod-bz-boom-minmax-multiturn-prefix-dp1:
+  - pull
+prod-bz-boom-minmax-multiturn-affinity-dp1:
+  - pull
+prod-bz-boom-minmax-multiturn-both-dp1:
+  - pull
 
 # ── Full multi-turn router_strategy sweep (DP2 + Mooncake) ──
 # Re-enable once k8s-worker2 networking is fixed and the node is un-tainted:

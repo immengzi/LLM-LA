@@ -14,6 +14,7 @@ Each run is written to a numbered directory under the experiments root. The run 
 ├── config_used.yaml               # exact input YAML
 ├── vllm-k8s.yaml                  # Helm snapshot (real on sweeps; placeholder stub on standalone runs)
 ├── logs.json                      # per-request NDJSON (the primary data)
+├── router_logs.json               # router /latency_log truth (if collect_router_log)
 ├── run_summary.json               # aggregate throughput/latency
 ├── endpoint_tokens.json           # per-endpoint token rollup
 ├── metrics.jsonl                  # Prometheus samples per tick (if enabled)
@@ -39,10 +40,29 @@ Each run is written to a numbered directory under the experiments root. The run 
 | `finish_reason` | `stop` / `length` / ... |
 | `prompt_tokens`, `completion_tokens` | Token counts |
 | `endpoint_id` | Serving pod/replica |
+| `kv_hits_len`, `total_blocks`, `matched_tokens`, `kv_hit` | Router prefix/KV-hit decision (when `collect_router_log` is on) |
+| `affinity_key` | Conversation key the router pinned on (when affinity is active) |
 | `trace`, `trace_metrics` | Stage timestamps + derived stage latencies (when tracing is on) |
 | `output` | Generated text (when logged) |
 
 Multi-turn runs add `conversation_id`, `turn_idx`, and streaming runs add `ttft_s` / `tpot_avg_s`. Failed requests carry `error`, `send_failed`, or `lost (...)` markers.
+
+## Router request log (`collect_router_log`)
+
+Set `collect_router_log: true` in the client config to capture the router's own
+per-request routing decision independent of the response body (so it survives the
+BooM hop). During the run, [`router_log_collector.py`](../../src/router_log_collector.py)
+polls the router's `/latency_log` ring and writes `router_logs.json` (the router
+truth), while live-enriching `logs.json` records with `endpoint_id` and the
+prefix/KV fields above. At shutdown an authoritative join rewrites `logs.json`
+from `router_logs.json` (covering any records the live path missed) and adds a
+`routing` rollup to `run_summary.json` (per-endpoint request/KV counts plus
+conversation stickiness grouped by `conversation_id`, else `affinity_key`).
+
+The same module powers the external observer `prod_latency_collector.py`, so a
+prod capture emits the identical `router_logs.json` + enriched `logs.json`. Set
+`ROUTER_LOG_BLOCK_HASHES=true` on the router to also include the raw prefix
+`block_hashes` list per request (bulky; off by default).
 
 ## Trace metrics
 

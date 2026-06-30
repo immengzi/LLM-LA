@@ -13,7 +13,7 @@ from kubernetes import client as k8s_client, config as k8s_config
 
 from .config import get_config
 from .metrics import inc_dispatch
-from .kv_aware import get_request_blocks
+from .kv_aware import get_request_blocks, prefix_len, record_routing
 
 _cfg = get_config()
 
@@ -295,6 +295,18 @@ class PushRouter:
                     self._logical_inflight[ep] = logical_before + 1
 
             dispatch_ts = time.time()
+
+            # Capture routing decision per request (independent of TRACE) so the
+            # /latency_log ring can be enriched at completion time.
+            _blocks = get_request_blocks(req_id)
+            record_routing(
+                req_id,
+                endpoint=ep,
+                kv_hits_len=prefix_len(ep, req_id) if _cfg.KV_AWARE else 0,
+                total_blocks=len(_blocks),
+                affinity_key=(meta or {}).get("__affinity_key__"),
+                block_hashes=_blocks if getattr(_cfg, "ROUTER_LOG_BLOCK_HASHES", False) else None,
+            )
 
             # ---------------------------------------------------------
             # Inject trace into meta["__trace__"]
