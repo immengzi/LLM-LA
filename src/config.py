@@ -396,6 +396,19 @@ class HelmConfig:
     # vllm-cpu-hash service (the external pod is auto-deployed when external).
     router_hash_source: str = "inline"
 
+    # ---- full prefix block-hash logging (maps to values.router.logBlockHashes) ----
+    # When true, the router emits each request's full block-hash list into
+    # /latency_log; with collect_router_log on, it lands in router_logs.json and
+    # logs.json. Bulky; off by default. Hit counts are always logged regardless.
+    router_log_block_hashes: bool = False
+
+    # ---- prefix measurement-only (maps to values.router.measurePrefix) ----
+    # When true, the router computes per-request prefix blocks + the chosen
+    # endpoint's hit count for LOGGING even when KV routing is off (affinity-only
+    # / none). Makes kv_hits_len/total_blocks/kv_hit comparable across the four
+    # strategies. Routing is unaffected.
+    router_measure_prefix: bool = False
+
     # ---- router feature toggles (maps to Helm chart values.router.*) ----
     router_kv_aware: bool = True
     router_len_aware: bool = True

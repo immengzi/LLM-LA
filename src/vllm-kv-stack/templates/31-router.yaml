@@ -87,6 +87,10 @@ spec:
               value: "/model"
             - name: KV_BLOCK_SIZE
               value: {{ quote (toString (.Values.router.kvBlockSize | default 128)) }}
+            - name: ROUTER_LOG_BLOCK_HASHES
+              value: {{ ternary "true" "false" (.Values.router.logBlockHashes | default false) | quote }}
+            - name: ROUTER_MEASURE_PREFIX
+              value: {{ ternary "true" "false" (.Values.router.measurePrefix | default false) | quote }}
             - name: PYTHONHASHSEED
               value: "0"
             - name: KV_CANONICALISE_TOOLS

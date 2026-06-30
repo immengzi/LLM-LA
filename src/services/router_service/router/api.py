@@ -533,7 +533,17 @@ async def _maybe_register_kv_blocks(
     """
     m: Dict[str, Any] = dict(meta or {})
 
-    if not _cfg.KV_AWARE:
+    # Compute/register prefix blocks when routing needs them (KV_AWARE) OR when
+    # measurement-only logging is requested (ROUTER_MEASURE_PREFIX) OR when the
+    # full block-hash list is being logged (ROUTER_LOG_BLOCK_HASHES). This lets
+    # affinity-only / none strategies still report kv_hits_len/total_blocks
+    # without using prefix data for the routing decision.
+    _measure_prefix = (
+        _cfg.KV_AWARE
+        or getattr(_cfg, "ROUTER_MEASURE_PREFIX", False)
+        or getattr(_cfg, "ROUTER_LOG_BLOCK_HASHES", False)
+    )
+    if not _measure_prefix:
         return m
 
     # If tracing is on, pre-seed trace keys so "missing" is meaningful.
@@ -889,13 +899,22 @@ async def _startup():
     print_config(_cfg)
     sys.stdout.flush()
 
-    if _cfg.KV_AWARE and _cfg.KV_HASH_SOURCE == "inline":
+    _need_inline_hash = (
+        _cfg.KV_HASH_SOURCE == "inline"
+        and (
+            _cfg.KV_AWARE
+            or getattr(_cfg, "ROUTER_MEASURE_PREFIX", False)
+            or getattr(_cfg, "ROUTER_LOG_BLOCK_HASHES", False)
+        )
+    )
+    if _need_inline_hash:
         try:
             from . import prefix_hash as _ph
 
             _ph.init_tokenizer(_cfg.KV_TOKENIZER_PATH)
+            _reason = "KV_AWARE" if _cfg.KV_AWARE else "MEASURE_PREFIX/LOG_BLOCK_HASHES"
             print(
-                f"[router] inline hash ready: tokenizer={_cfg.KV_TOKENIZER_PATH} "
+                f"[router] inline hash ready ({_reason}): tokenizer={_cfg.KV_TOKENIZER_PATH} "
                 f"block_size={_cfg.KV_BLOCK_SIZE}"
             )
             sys.stdout.flush()

@@ -300,10 +300,19 @@ class RouterState:
             _log_block_hashes = bool(getattr(_cfg, "ROUTER_LOG_BLOCK_HASHES", False))
             for rid, _p, _t, _m in chosen_raw:
                 blocks = get_request_blocks(rid)
+                # When KV routing is on, reuse the sort's kv_hits_map. Otherwise
+                # (affinity-only / none with measurement on) compute prefix_len
+                # directly for logging; prefix_len() returns 0 when no blocks
+                # were registered, so this is a no-op when measurement is off.
+                _hits = (
+                    int(kv_hits_map.get(rid, 0))
+                    if kv_enabled
+                    else prefix_len(endpoint, rid)
+                )
                 record_routing(
                     rid,
                     endpoint=endpoint,
-                    kv_hits_len=int(kv_hits_map.get(rid, 0)) if kv_enabled else 0,
+                    kv_hits_len=_hits,
                     total_blocks=len(blocks),
                     affinity_key=(_m or {}).get("__affinity_key__"),
                     block_hashes=blocks if _log_block_hashes else None,

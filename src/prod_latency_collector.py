@@ -22,7 +22,10 @@ Usage:
 
 Output (in <experiments_root>/<N>/):
     config.json           - collector settings + start time
-    logs.json             - NDJSON, one line per request (same schema as load_runner)
+    logs.json             - NDJSON, one line per request (same schema as load_runner);
+                            streamed LIVE during the run (standard primary artifact)
+    router_logs.json      - router /latency_log truth; mirrored from logs.json at
+                            shutdown for backward-compat (client runs ship both)
     run_summary.json      - written on shutdown with total counts and wall time
     metrics.jsonl         - optional: periodic Prometheus histogram snapshots
     endpoint_tokens.json  - per-endpoint token rollup (written on shutdown)
@@ -359,12 +362,16 @@ def main():
     with (exp_dir / "config.json").open("w") as f:
         json.dump(config_out, f, indent=2, sort_keys=True)
 
-    # Shared router /latency_log collector -> router_logs.json (the router truth,
-    # including endpoint + prefix/KV fields). Identical artifacts to the client.
+    # Shared router /latency_log collector streamed straight into logs.json -- the
+    # standard, primary artifact (same filename/schema as load_runner). In pure-
+    # observation mode logs.json IS the router truth (endpoint + prefix/KV fields),
+    # so it exists LIVE during the run, just like client sweeps. router_logs.json
+    # is mirrored at shutdown for backward-compat (client runs ship both).
+    logs_path = exp_dir / "logs.json"
     router_logs_path = exp_dir / "router_logs.json"
     collector = RouterLogCollector(
         router_url=router_url,
-        out_path=router_logs_path,
+        out_path=logs_path,
         poll_interval_s=args.poll_interval,
         batch_size=args.batch_size,
     )
@@ -409,14 +416,14 @@ def main():
 
     dt_wall = time.time() - t_start
 
-    # logs.json == router truth in pure-observation mode. Build it from
-    # router_logs.json and run the same authoritative join (idempotent: it just
-    # re-attaches the router fields), so external runs match client runs.
-    logs_path = exp_dir / "logs.json"
+    # logs.json is the live router truth (pure-observation mode). Mirror it to
+    # router_logs.json for backward-compat (client runs ship both), then run the
+    # authoritative join (idempotent: it just re-attaches the router fields), so
+    # external runs match client runs.
     all_records: List[Dict[str, Any]] = []
     try:
-        with router_logs_path.open("r", encoding="utf-8") as fin, \
-                logs_path.open("w", encoding="utf-8") as fout:
+        with logs_path.open("r", encoding="utf-8") as fin, \
+                router_logs_path.open("w", encoding="utf-8") as fout:
             for line in fin:
                 line = line.rstrip("\n")
                 if not line.strip():
@@ -428,6 +435,7 @@ def main():
                     continue
     except FileNotFoundError:
         logs_path.write_text("", encoding="utf-8")
+        router_logs_path.write_text("", encoding="utf-8")
 
     routing_summary = None
     try:

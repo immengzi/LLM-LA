@@ -4,12 +4,18 @@ aibrix:
   modelName: served-model
   port: 8200
 autoscaling:
+  cooldownPeriod: 300
   enabled: false
   maxReplicaCount: 16
   minReplicaCount: null
-  prometheusQuery: |
-    max(router_central_queue_length{namespace="vllm"})
+  perModel: {}
+  pollingInterval: 10
+  prometheusQuery: ""
+  prometheusServerAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+  signal: queue
   threshold: "16"
+  vllmQuery: ""
+  vllmThreshold: "0.8"
 backend: boom
 batchSize: 32
 boom:
@@ -18,7 +24,7 @@ boom:
   directRoutingStrategy: round_robin
   enabled: true
   extraModelAliases: []
-  image: boom-gateway:v4
+  image: boom-gateway:v5
   imagePullPolicy: Always
   keyAffinityBench: false
   masterKey: sk-boom-master
@@ -39,6 +45,8 @@ cacheWarm:
   modelSubPath: GLM-5-w4a8-mtp-QuaRot
   pvcName: models-nfs-pvc
   ttlSeconds: 120
+cpuHash:
+  ascendDriverMounts: true
 dataParallel:
   enabled: false
   groups: 1
@@ -50,7 +58,7 @@ dataParallel:
   size: 2
   sizeLocal: 1
 deploy:
-  cpuHash: true
+  cpuHash: false
   mooncakeMaster: true
   redis: true
   router: true
@@ -59,14 +67,13 @@ global:
   imageRegistry: reg.local:32000
 images:
   cpuHash: vllm-cpu-hash:latest
-  mooncakeMaster: docker.io/library/vllm-ascend:v0.18.0
-  mooncakeMasterRaw: reg.local:32000/minimax27:selfcontained
+  mooncakeMaster: quay.io/ascend/vllm-ascend:glm5-openeuler
   redis: redis:7-alpine
   router: kv-router:latest
   routerGo: kv-router-go:latest
   sidecar: kv-sidecar:latest
   sidecarGo: kv-sidecar-go:latest
-  vllm: docker.io/library/vllm-ascend:v0.18.0
+  vllm: quay.io/ascend/vllm-ascend:glm5-openeuler
 litellm:
   databaseUrl: ""
   enabled: false
@@ -83,7 +90,7 @@ litellm:
 lmcache:
   chunkSize: 512
   enableAsyncLoading: false
-  enabled: true
+  enabled: false
   extraConfig:
     globalSegmentSize: 80530636800
     localBufferSize: 0
@@ -99,14 +106,14 @@ lmcache:
   maxLocalCpuSize: 50
   nds:
     dev: /dev/md0
-    enabled: true
+    enabled: false
     path: /workspace/nds_kvcache
-    size: 1024
+    size: 2048
     xdsPath: /workspace/qyf/xds/xds/file_p2p
   useLayerwise: false
 modelVolume:
   create: false
-  hostPath: /home/models
+  hostPath: /data/models
   modelSubPath: MiniMax-M2.7-w8a8-QuaRot
   nfsPath: /home/models/
   nfsServer: nfs.local
@@ -121,7 +128,7 @@ models:
     rpcPort: 8888
     size: 2
     sizeLocal: 1
-  image: reg.local:32000/minimax27:selfcontained
+  image: reg.local:32000/ascend/vllm-ascend:v0.18.0rc1-openeuler
   modelSubPath: MiniMax-M2.7-w8a8-QuaRot
   name: minimax-m2
   replicas: 2
@@ -140,21 +147,20 @@ models:
     maxNumBatchedTokens: 32768
     modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
     reasoningParser: minimax_m2_append_think
-    schedulerCls: lsched.lsched_vllm.LSchedVLLMAdapter
     toolCallParser: minimax_m2
     trustRemoteCode: true
 mooncake:
   ascendBufferPool: "4:8"
-  enabled: true
-  evictionHighWatermark: "0.9"
-  evictionRatio: "0.1"
+  enabled: false
+  evictionHighWatermark: 0.9
+  evictionRatio: 0.1
   globalSegmentSize: 140000000000
-  lookupRpcPort: 10010
+  lookupRpcPort: "10010"
   masterPort: 50088
-  masterServerAddress: 10.50.156.65:50088
+  masterServerAddress: 10.50.156.106:50088
 pin:
   enabled: true
-  nodeName: node3
+  nodeName: k8s-master
   tolerations:
   - effect: NoSchedule
     key: node-role.kubernetes.io/control-plane
@@ -168,27 +174,41 @@ replicas:
   vllm: 2
 router:
   admissionThrottle: false
+  affinityEnabled: false
+  affinityHardTimeoutS: "5.0"
+  affinityMode: hard
+  affinityTtlS: "300.0"
   apiKey: ZhongRuanChuangXin!
   batchSizeEstimate: fixed
   chunkedPrefillAware: false
   fixedBatchEstimate: 8
   fixedBatchSize: 0
+  hashSource: inline
+  imagePullPolicy: Always
   kvAware: true
+  kvBlockSize: 128
+  kvCanonicaliseTools: "1"
   latencyOnlineUpdate: false
   latencyPredictor: linear
   latencyProfilePath: ""
   lenAware: true
   lenPolicy: short_first
+  logBlockHashes: true
   maxNumBatchedTokens: 0
+  measurePrefix: true
   mode: pull
   outputLenPredictor: simple
+  poolBidirectional: false
   queueWaitModel: none
   sloAware: false
   sloWithKv: true
+  strategy: affinity
+  stripCch: "1"
 serviceImpl: python
 sidecar:
   enabled: true
   forceIgnoreEos: false
+  imagePullPolicy: IfNotPresent
   logLevel: info
   prefetch: 2
   streamingMode: true
@@ -206,7 +226,7 @@ vllm:
   enablePrefixCaching: false
   generationConfig: null
   gpuMemoryUtilization: null
-  hostNetwork: true
+  hostNetwork: false
   kvCacheDtype: auto
   maxModelLen: null
   maxNumBatchedTokens: null
@@ -215,7 +235,7 @@ vllm:
   - '"num_threads":16'
   quantization: null
   reasoningParser: null
-  schedulerCls: lsched.lsched_vllm.LSchedVLLMAdapter
+  schedulerCls: ""
   seed: null
   speculativeConfig: {}
   toolCallParser: null

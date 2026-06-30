@@ -18,13 +18,19 @@
 # now takes traffic. DP1 single TP=8 pod each; Mooncake off (external KV not
 # needed to validate routing). batchSize (32) and central router settings
 # UNCHANGED. Sweep none -> prefix -> affinity -> both back-to-back.
-prod-bz-boom-minmax-multiturn-none-dp1:
-  - pull
-prod-bz-boom-minmax-multiturn-prefix-dp1:
-  - pull
-prod-bz-boom-minmax-multiturn-affinity-dp1:
-  - pull
-prod-bz-boom-minmax-multiturn-both-dp1:
+# prod-bz-boom-minmax-multiturn-none-dp1:
+#   - pull
+# prod-bz-boom-minmax-multiturn-prefix-dp1:
+#   - pull
+# prod-bz-boom-minmax-multiturn-affinity-dp1:
+#   - pull
+# prod-bz-boom-minmax-multiturn-both-dp1:
+#   - pull
+
+# ── BZ 4-NODE DP2 AFFINITY CHECK: DP2 x 2 replicas, NO Mooncake ──
+# dataParallel enabled (2 DP ranks/replica, sizeLocal=1, RoCE-paired); replicas: 2
+# -> 2 replicas x 2 ranks = 4 nodes. Mooncake off; hard conversation affinity.
+prod-bz-boom-minmax-multiturn-affinity-dp2:
   - pull
 
 # ── Full multi-turn router_strategy sweep (DP2 + Mooncake) ──
@@ -56,6 +62,10 @@ prod-bz-boom-minmax-multiturn-both-dp1:
 #   - pull
 
 # prod-yz-boom-minmax-lmcache:
+#   - pull
+
+# Same as lmcache above + router affinity (hard) + prefix-hit logging knobs.
+# prod-yz-boom-minmax-lmcache-affinity:
 #   - pull
 
 # prod-yz-boom-minmax-lmcache-hq:

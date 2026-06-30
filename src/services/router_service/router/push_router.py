@@ -299,10 +299,14 @@ class PushRouter:
             # Capture routing decision per request (independent of TRACE) so the
             # /latency_log ring can be enriched at completion time.
             _blocks = get_request_blocks(req_id)
+            # prefix_len() returns 0 when no blocks were registered (measurement
+            # off), so this reports real hit counts whenever blocks exist —
+            # including affinity-only / none runs with ROUTER_MEASURE_PREFIX on —
+            # without coupling the measurement to the KV routing decision.
             record_routing(
                 req_id,
                 endpoint=ep,
-                kv_hits_len=prefix_len(ep, req_id) if _cfg.KV_AWARE else 0,
+                kv_hits_len=prefix_len(ep, req_id),
                 total_blocks=len(_blocks),
                 affinity_key=(meta or {}).get("__affinity_key__"),
                 block_hashes=_blocks if getattr(_cfg, "ROUTER_LOG_BLOCK_HASHES", False) else None,

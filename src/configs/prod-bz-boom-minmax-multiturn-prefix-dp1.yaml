@@ -17,7 +17,7 @@
 switch_cluster: bz
 backend: "boom"
 
-total_requests: 100   # multi-turn conversations; enough to keep all 3 pods busy in steady state
+total_requests: 10   # multi-turn conversations; enough to keep all 3 pods busy in steady state
 prompt_source: "codeflow"
 
 file_prompts:
@@ -123,6 +123,13 @@ helm:
   # router_strategy: "both"
   router_len_aware: true
   router_len_policy: "short_first"
+  # Log the FULL per-request prefix block-hash list into /latency_log ->
+  # router_logs.json + logs.json (block_hashes field). Bulky; on here to test
+  # block-level prefix overlap. Hit counts are always logged regardless.
+  router_log_block_hashes: true
+  # Measure prefix-hit counts for logging even though KV routing is off here, so
+  # kv_hits_len/total_blocks/kv_hit are comparable across all four strategies.
+  router_measure_prefix: true
 
   expose_per_pod: true
 

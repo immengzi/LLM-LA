@@ -210,6 +210,14 @@ class RouterConfig:
     # included; this only controls the raw hash list.
     ROUTER_LOG_BLOCK_HASHES: bool = False
 
+    # When true, compute per-request prefix blocks and the chosen endpoint's
+    # prefix-hit count FOR LOGGING ONLY, even when KV_AWARE is off (e.g. the
+    # affinity-only / none strategies). Decouples measurement from the routing
+    # decision so kv_hits_len/total_blocks/kv_hit are comparable across all
+    # strategies. The block-owner map is always tracked (KVWatcher), so this
+    # only adds per-request hash computation; routing itself is unaffected.
+    ROUTER_MEASURE_PREFIX: bool = False
+
     # --------------------------------------------------------------------
     # SLO-AWARE ROUTING
     # --------------------------------------------------------------------
@@ -493,6 +501,9 @@ def get_config() -> RouterConfig:
 
     if "ROUTER_LOG_BLOCK_HASHES" in os.environ:
         cfg.ROUTER_LOG_BLOCK_HASHES = os.getenv("ROUTER_LOG_BLOCK_HASHES", "false").lower() == "true"
+
+    if "ROUTER_MEASURE_PREFIX" in os.environ:
+        cfg.ROUTER_MEASURE_PREFIX = os.getenv("ROUTER_MEASURE_PREFIX", "false").lower() == "true"
 
     if "TRACE_SAMPLING_RATE" in os.environ:
         try:
