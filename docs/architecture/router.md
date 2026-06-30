@@ -87,6 +87,9 @@ is the same.
 
 ## 4. KV Awareness (Conceptual)
 
+> For the four routing strategies (`none | prefix | affinity | both`) with
+> figures, see [router-strategies.md](router-strategies.md).
+
 KV-awareness is about **reusing model KV cache blocks** when possible.
 
 The router keeps two maps:
@@ -140,8 +143,9 @@ turn — and remembers which pod last served it. On a pull it either *prefers*
 (soft mode) or *pins* (hard mode, time-bounded) that conversation to its pod.
 It requires no client/BooM/sidecar changes.
 
-See [key-affinity.md](key-affinity.md) for the full reference (modes, metrics,
-interactions, and source map).
+See [router-strategies.md](router-strategies.md) for where affinity fits among
+the four strategies, and [key-affinity.md](key-affinity.md) for the full
+reference (modes, metrics, interactions, and source map).
 
 ---
 

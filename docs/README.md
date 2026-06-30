@@ -22,6 +22,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | Doc | Description |
 |-----|-------------|
 | [overview.md](architecture/overview.md) | How the serving platform fits together (start here) |
+| [router-strategies.md](architecture/router-strategies.md) | Routing strategies overview with figures (`none/prefix/affinity/both`) |
 | [router.md](architecture/router.md) | Central queue, pull/push dispatch, HTTP/ZMQ APIs |
 | [sidecar.md](architecture/sidecar.md) | Local queue, vLLM forwarding, KV event reporting |
 | [kv-cache-flow.md](architecture/kv-cache-flow.md) | KV-aware routing deep dive (Redis schema, scoring) |
@@ -55,6 +56,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | Doc | Description |
 |-----|-------------|
 | [cluster-setup.md](operations/cluster-setup.md) | Post-Kubernetes prep checklist (NFS, registry, RoCE, LWS) |
+| [bz-cluster-nodes.md](operations/bz-cluster-nodes.md) | BZ cluster node inventory: public/private IPs, SSH aliases, NPU, schematic |
 | [bz-dashboard-access.md](operations/bz-dashboard-access.md) | Reach BZ dashboards/notebooks (Prometheus, Grafana, Jupyter) over SSH tunnels |
 | [autoscaling.md](operations/autoscaling.md) | Per-model KEDA autoscaling (dense, multi-model, data-parallel) |
 | [infra/](../infra/README.md) | Ansible automation of the cluster-setup checklist (`make prep` / `make verify`) |

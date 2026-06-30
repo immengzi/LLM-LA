@@ -264,8 +264,45 @@ def _helm_template(
     return proc.stdout or ""
 
 
-def _helm_uninstall(*, release: str, namespace: str) -> None:
-    _helm(["uninstall", release, "-n", namespace], check=False, capture=True)
+def _wait_pods_terminated(namespace: str, timeout_s: float = 300.0, poll_s: float = 3.0) -> None:
+    """Block until no pod in the namespace is Terminating (deletionTimestamp set).
+
+    Run right after `helm uninstall` so the previous release's pods are fully gone
+    before the next deploy + log capture. This prevents stale/terminating pods from
+    the prior sweep step leaking into the new experiment's vllm-logs/.
+    """
+    deadline = time.time() + float(timeout_s)
+    while time.time() < deadline:
+        try:
+            res = subprocess.run(
+                ["kubectl", "get", "pods", "-n", namespace, "-o", "json"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            )
+            data = json.loads(res.stdout or "{}")
+        except Exception:
+            return  # namespace gone / kubectl error -> nothing to wait for
+        terminating = [
+            (i.get("metadata") or {}).get("name")
+            for i in data.get("items", [])
+            if (i.get("metadata") or {}).get("deletionTimestamp")
+        ]
+        if not terminating:
+            return
+        click.echo(f"[deploy] waiting for {len(terminating)} terminating pod(s) to clear...")
+        time.sleep(poll_s)
+    click.echo(f"[deploy] WARN: pods still terminating in ns={namespace} after {timeout_s:g}s; continuing")
+
+
+def _helm_uninstall(*, release: str, namespace: str, wait: bool = True, timeout_s: float = 300.0) -> None:
+    cmd = ["uninstall", release, "-n", namespace]
+    if wait:
+        # --wait makes helm block until it considers the release's resources deleted.
+        cmd += ["--wait", "--timeout", f"{int(timeout_s)}s"]
+    _helm(cmd, check=False, capture=True)
+    if wait:
+        # Belt-and-suspenders: CRD/controller-managed pods (e.g. LWS) can outlive
+        # helm's own wait, so explicitly poll until nothing is Terminating.
+        _wait_pods_terminated(namespace, timeout_s=timeout_s)
 
 
 def _helm_install_or_upgrade(
@@ -530,8 +567,14 @@ def _list_pods_and_containers(namespace: str) -> List[Tuple[str, List[str]]]:
 
     out: List[Tuple[str, List[str]]] = []
     for item in data.get("items", []):
-        pod = (item.get("metadata") or {}).get("name")
+        meta = item.get("metadata") or {}
+        pod = meta.get("name")
         if not pod:
+            continue
+        # Skip pods that are Terminating (deletionTimestamp set). These are leftovers
+        # from the previous sweep step being torn down by the new deploy; capturing
+        # them would pollute this experiment's vllm-logs/ with stale pod logs.
+        if meta.get("deletionTimestamp"):
             continue
         spec = item.get("spec") or {}
         containers = [c.get("name") for c in spec.get("containers", []) if c.get("name")]
@@ -1384,9 +1427,12 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             click.echo(f"  - {k}={_coerce_set_value(set_values[k])}")
 
         # ---- Pre-create experiment dir + start pod-log capture BEFORE deploy ----
-        # So experiments/<id>/ and vllm-logs/ exist from the start of the sweep step,
-        # and the namespace log collector captures pods (incl. the model-load phase)
-        # as they come up. The client reuses this dir via FORCE_EXPERIMENT_DIR.
+        # So experiments/<id>/ and vllm-logs/ exist from the start of the sweep step
+        # and the collector streams the new pods' model-load phase live. This is safe
+        # because the pre-deploy `helm uninstall` above waits for the previous step's
+        # pods to fully terminate, so the namespace is clean before we attach. The pod
+        # lister also skips any Terminating straggler as a safety net. The client reuses
+        # this dir via FORCE_EXPERIMENT_DIR.
         _collect_logs = bool(getattr(cfg, "collect_vllm_logs", False))
         exp_dir: Optional[Path] = None
         _log_collectors = None

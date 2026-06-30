@@ -12,15 +12,24 @@
 # prod-bz-boom-minmax-mooncake:
 #   - pull
 
-# ── BZ SPILL TEST: force traffic across BOTH vLLM pods (router-side cap) ──
-# Lever = router_fixed_batch_size: 2 (caps per-pull assignment per pod). batchSize
-# UNCHANGED (stable 32). Compare baseline (none) vs prefix; run WITHOUT --skip-vllm.
-prod-bz-boom-minmax-mooncake-multiturn-none-cap2:
+# ── BZ 3-NODE AFFINITY CHECK: DP1 x 3 replicas, NO Mooncake (worker2 tainted) ──
+# k8s-worker2 is tainted (network-broken=true:NoSchedule) until its VPC security
+# group is fixed, so the 3 replicas land one-per-healthy-node (master, worker,
+# worker1). DP1 single TP=8 pod each; Mooncake off (external KV not needed to
+# validate routing). batchSize (32) and central router settings UNCHANGED.
+# Sweep none -> prefix -> affinity -> both back-to-back.
+prod-bz-boom-minmax-multiturn-none-dp1:
   - pull
-prod-bz-boom-minmax-mooncake-multiturn-prefix-cap2:
+prod-bz-boom-minmax-multiturn-prefix-dp1:
+  - pull
+prod-bz-boom-minmax-multiturn-affinity-dp1:
+  - pull
+prod-bz-boom-minmax-multiturn-both-dp1:
   - pull
 
-# ── Full multi-turn router_strategy sweep (none -> prefix -> affinity -> both) ──
+# ── Full multi-turn router_strategy sweep (DP2 + Mooncake) ──
+# Re-enable once k8s-worker2 networking is fixed and the node is un-tainted:
+#   kubectl taint nodes k8s-worker2 network-broken:NoSchedule-
 # prod-bz-boom-minmax-mooncake-multiturn-none:
 #   - pull
 # prod-bz-boom-minmax-mooncake-multiturn-prefix:

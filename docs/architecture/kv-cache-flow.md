@@ -1,5 +1,8 @@
 # KV Cache Flow
 
+> For a high-level overview of the routing strategies, see
+> [router-strategies.md](router-strategies.md).
+
 ## Table of Contents
 
 1. [Overview](#overview)

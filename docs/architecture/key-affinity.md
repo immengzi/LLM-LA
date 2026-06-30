@@ -1,5 +1,8 @@
 # Conversation Key Affinity
 
+> For a high-level overview of the routing strategies and where affinity fits,
+> see [router-strategies.md](router-strategies.md).
+
 Key affinity keeps **all turns of a single chat conversation on the same vLLM
 pod**, so the engine's internal prefix cache (and any KV blocks the router
 already tracks) are reused turn-to-turn instead of being recomputed on a
@@ -143,24 +146,13 @@ flowchart TD
 
 ### Unified strategy selector (recommended)
 
-Prefix KV-awareness and key-affinity are two independent mechanisms. Rather than
-toggling their low-level flags separately, pick one with a single selector:
-
-| Key | Env | Client (`helm.*`) | Values |
-|-----|-----|-------------------|--------|
-| `strategy` | `ROUTER_STRATEGY` | `router_strategy` | `none` \| `prefix` \| `affinity` \| `both` |
-
-| `router_strategy` | prefix KV-awareness | key-affinity |
-|-------------------|---------------------|--------------|
-| `none` | off | off |
-| `prefix` | **on** | off |
-| `affinity` | off | **on** |
-| `both` | **on** | **on** |
-
-When set (non-empty), it **overrides** `kvAware` / `affinityEnabled`. When left
-empty (the default) those individual flags are used exactly as before, so all
-existing configs keep working untouched. `affinityMode` (`soft`/`hard`) and the
-TTL/timeout knobs below still apply whenever the strategy includes affinity.
+Affinity and prefix KV-awareness are toggled together with the single
+`router_strategy` selector (`none | prefix | affinity | both`). The selector and
+its four-way table are documented once in
+[router-strategies.md](router-strategies.md#configuration); when set it
+**overrides** the low-level `kvAware` / `affinityEnabled` flags below. The
+`affinityMode` (`soft`/`hard`) and TTL/timeout knobs in this section still apply
+whenever the chosen strategy includes affinity.
 
 ```yaml
 # client config (src/configs/*.yaml)

@@ -43,7 +43,7 @@ LA-Boom places a custom **router** and per-pod **sidecars** around stock vLLM, p
 
 ## KV-aware routing in one paragraph
 
-Each sidecar subscribes to vLLM's ZMQ KV-cache events and writes block ownership to Redis. The router runs a background watcher that scans Redis to build a live `block hash -> replica` map. At dispatch time the router scores each queued request by how many of its leading block hashes are already cached on a given replica, groups requests into KV-hit tiers, and (when length-aware routing is enabled) orders within each tier by predicted output length. Full detail: [kv-cache-flow.md](kv-cache-flow.md).
+Each sidecar subscribes to vLLM's ZMQ KV-cache events and writes block ownership to Redis. The router runs a background watcher that scans Redis to build a live `block hash -> replica` map. At dispatch time the router scores each queued request by how many of its leading block hashes are already cached on a given replica, groups requests into KV-hit tiers, and (when length-aware routing is enabled) orders within each tier by predicted output length. Full detail: [kv-cache-flow.md](kv-cache-flow.md). For the four selectable routing strategies (`none/prefix/affinity/both`) with figures, see [router-strategies.md](router-strategies.md).
 
 ## Routing modes and policies
 
