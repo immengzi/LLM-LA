@@ -12,20 +12,20 @@
 # prod-bz-boom-minmax-mooncake:
 #   - pull
 
-# ── BZ 3-NODE AFFINITY CHECK: DP1 x 3 replicas, NO Mooncake (worker2 tainted) ──
-# k8s-worker2 is tainted (network-broken=true:NoSchedule) until its VPC security
-# group is fixed, so the 3 replicas land one-per-healthy-node (master, worker,
-# worker1). DP1 single TP=8 pod each; Mooncake off (external KV not needed to
-# validate routing). batchSize (32) and central router settings UNCHANGED.
-# Sweep none -> prefix -> affinity -> both back-to-back.
+# ── BZ 4-NODE AFFINITY CHECK: DP1 x 4 replicas, NO Mooncake (worker2 back) ──
+# k8s-worker2 networking is fixed and the node is un-tainted, so the 4 replicas
+# land one-per-node (master, worker, worker1, worker2) — quick test that worker2
+# now takes traffic. DP1 single TP=8 pod each; Mooncake off (external KV not
+# needed to validate routing). batchSize (32) and central router settings
+# UNCHANGED. Sweep none -> prefix -> affinity -> both back-to-back.
 prod-bz-boom-minmax-multiturn-none-dp1:
   - pull
-prod-bz-boom-minmax-multiturn-prefix-dp1:
-  - pull
-prod-bz-boom-minmax-multiturn-affinity-dp1:
-  - pull
-prod-bz-boom-minmax-multiturn-both-dp1:
-  - pull
+# prod-bz-boom-minmax-multiturn-prefix-dp1:
+#   - pull
+# prod-bz-boom-minmax-multiturn-affinity-dp1:
+#   - pull
+# prod-bz-boom-minmax-multiturn-both-dp1:
+#   - pull
 
 # ── Full multi-turn router_strategy sweep (DP2 + Mooncake) ──
 # Re-enable once k8s-worker2 networking is fixed and the node is un-tainted:

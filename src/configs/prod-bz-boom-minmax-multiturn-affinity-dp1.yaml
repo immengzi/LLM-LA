@@ -1,9 +1,9 @@
 # prod: MiniMax-M2.7 - BooM + LLM-LA (router), DP1, NO Mooncake, BZ multi-turn config.
 # router_strategy = affinity  (conversation key-affinity only)
 #
-# 3-NODE AFFINITY-CHECK variant (k8s-worker2 tainted/network-broken):
+# 4-NODE AFFINITY-CHECK variant (k8s-worker2 back/untainted):
 #   - dataParallel disabled (DP1): each replica is a single TP=8 pod on one node
-#   - replicas: 3 -> one pod per healthy node (master, k8s-worker, k8s-worker1)
+#   - replicas: 4 -> one pod per node (master, k8s-worker, k8s-worker1, k8s-worker2)
 #   - Mooncake DISABLED (external KV off); internal prefix caching + router
 #     prefix/affinity routing still active, so router_strategy stays meaningful.
 #   - batchSize (32) and central router settings UNCHANGED vs the mooncake variants.
@@ -147,7 +147,7 @@ helm:
   models:
     - name: minimax-m2
       servedModelName: served-model-minmax
-      replicas: 3                # one TP=8 pod per healthy node (worker2 tainted)
+      replicas: 4                # one TP=8 pod per node (worker2 back/untainted)
       streamingMode: true
       modelSubPath: MiniMax-M2.7-w8a8-QuaRot
       tensorParallelSize: 8
