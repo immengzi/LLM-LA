@@ -39,6 +39,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | [client-config.md](configuration/client-config.md) | Load-client YAML reference (`config.py`) |
 | [helm-values.md](configuration/helm-values.md) | `vllm-kv-stack` Helm values reference |
 | [experiment-configs.md](configuration/experiment-configs.md) | Config naming, `1-master_config.yaml`, sweep matrix |
+| [switch_cluster.md](operations/switch_cluster.md) | `switch_cluster` knob: per-cluster profile defaults (`yz`/`bz`) |
 
 ## Deployment
 
@@ -66,6 +67,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | [disaster-recovery.md](operations/disaster-recovery.md) | Incident runbook: disk pressure, NPU/scheduling, node loss, OOM, stuck routing |
 | [docker-proxy-fix.md](operations/docker-proxy-fix.md) | Docker pulls behind an SSL-inspecting proxy |
 | [aibrix-long-running-requests.md](operations/aibrix-long-running-requests.md) | AIBrix Envoy stream timeout fix |
+| [claude-code-setup.md](operations/claude-code-setup.md) | Claude Code install/setup record (Node, npm, pinned version) |
 
 ## Gateways
 
@@ -74,6 +76,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | [boom/overview.md](gateways/boom/overview.md) | BooM Gateway (Rust): auth, virtual keys, spend |
 | [boom/models.md](gateways/boom/models.md) | Model-name routing chain and multi-model |
 | [boom/build.md](gateways/boom/build.md) | Building and pushing the BooM image |
+| [boom/boom-gateway-openeuler-walkthrough.zh.md](gateways/boom/boom-gateway-openeuler-walkthrough.zh.md) | openEuler BooM Gateway source walkthrough (Chinese) |
 | [boom/claude-code.md](gateways/boom/claude-code.md) | Claude Code via BooM |
 | [litellm/claude-code.md](gateways/litellm/claude-code.md) | Claude Code via LiteLLM (legacy path) |
 

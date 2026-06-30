@@ -98,7 +98,7 @@ Full walkthrough: [docs/getting-started/quickstart.md](docs/getting-started/quic
 Start at the **[documentation index](docs/README.md)**. Highlights:
 
 - New here → [Getting Started](docs/getting-started/quickstart.md)
-- How it works → [Architecture overview](docs/architecture/overview.md) and [KV cache flow](docs/architecture/kv-cache-flow.md)
+- How it works → [Architecture overview](docs/architecture/overview.md), [Router strategies](docs/architecture/router-strategies.md), and [KV cache flow](docs/architecture/kv-cache-flow.md)
 - Configure → [Client config](docs/configuration/client-config.md) and [Helm values](docs/configuration/helm-values.md)
 - Production path → [BooM Gateway](docs/gateways/boom/overview.md)
 - Deploy → [Multi-model serving](docs/deployment/multi-model.md) and the bare-Docker [GLM-5 reference ("HQ") deployment](docs/deployment/docker-reference/glm5-dp-docker.md) that the Helm/LWS path mirrors
