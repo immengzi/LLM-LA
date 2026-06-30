@@ -62,6 +62,17 @@ router:
   kvBlockSize: 128
   kvCanonicaliseTools: "1"
 
+  # When true, the /latency_log ring (and thus router_logs.json + logs.json when
+  # collect_router_log is on) includes the full per-request prefix block-hash
+  # list. Bulky; the kv-hit counts are always logged regardless of this flag.
+  logBlockHashes: false
+
+  # When true, compute per-request prefix blocks + the chosen endpoint's
+  # prefix-hit count FOR LOGGING ONLY, even when kvAware is off (affinity-only
+  # or none strategies). Makes kv_hits_len/total_blocks/kv_hit comparable across
+  # all strategies. Routing is unaffected; only adds per-request hash compute.
+  measurePrefix: false
+
   # KV-block hash source (applies to both serviceImpl python and go):
   #   inline   = in-process (python) / in-container (go) hasher using the
   #              router's prefix_hash.py. Default; no external pod needed.

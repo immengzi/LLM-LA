@@ -1,12 +1,12 @@
-# prod: MiniMax-M2.7 - BooM + LLM-LA (router), DP1, NO Mooncake, BZ multi-turn config.
-# router_strategy = none  (baseline: prefix off, affinity off)
+# prod: MiniMax-M2.7 - BooM + LLM-LA (router), DP2, NO Mooncake, BZ multi-turn config.
+# router_strategy = affinity  (conversation key-affinity only), HARD affinity mode.
 #
-# 4-NODE AFFINITY-CHECK variant (k8s-worker2 back/untainted):
-#   - dataParallel disabled (DP1): each replica is a single TP=8 pod on one node
-#   - replicas: 4 -> one pod per node (master, k8s-worker, k8s-worker1, k8s-worker2)
+# 4-NODE DP2 AFFINITY-CHECK variant:
+#   - dataParallel ENABLED (DP2): each replica is 2 DP ranks (sizeLocal=1) RoCE-paired
+#     across 2 nodes, so replicas: 2 -> 2 replicas x 2 ranks = 4 nodes used.
 #   - Mooncake DISABLED (external KV off); internal prefix caching + router
 #     prefix/affinity routing still active, so router_strategy stays meaningful.
-#   - batchSize (32) and central router settings UNCHANGED vs the mooncake variants.
+#   - batchSize (32) and central router settings UNCHANGED vs the dp1 variant.
 #
 # Workload semantics are aligned with
 # non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml:
@@ -17,7 +17,7 @@
 switch_cluster: bz
 backend: "boom"
 
-total_requests: 10   # multi-turn conversations; enough to keep all 3 pods busy in steady state
+total_requests: 10   # multi-turn conversations; enough to keep all pods busy in steady state
 prompt_source: "codeflow"
 
 file_prompts:
@@ -117,9 +117,9 @@ helm:
   #   prefix   -> KV prefix-awareness only
   #   affinity -> conversation key-affinity only
   #   both     -> prefix + affinity
-  router_strategy: "none"
+  # router_strategy: "none"
   # router_strategy: "prefix"
-  # router_strategy: "affinity"
+  router_strategy: "affinity"
   # router_strategy: "both"
   router_len_aware: true
   router_len_policy: "short_first"
@@ -130,6 +130,9 @@ helm:
   # Measure prefix-hit counts for logging even though KV routing is off here, so
   # kv_hits_len/total_blocks/kv_hit are comparable across all four strategies.
   router_measure_prefix: true
+  # Hard affinity = time-bounded pin (not just a preference), so conversation turns
+  # stay on one pod even under load. soft was overridden by load balancing at this rps.
+  router_affinity_mode: "hard"
 
   expose_per_pod: true
 
@@ -140,9 +143,9 @@ helm:
   cache_warm_enabled: false
   sidecar_prefetch: 2
 
-  # --- Mooncake KV cache transfer: DISABLED for the 3-node affinity check ---
-  # (worker2 networking is broken; external cross-instance KV is not needed to
-  #  validate router prefix/affinity decisions. Re-enable with the mooncake variants.)
+  # --- Mooncake KV cache transfer: DISABLED for the DP2 affinity check ---
+  # (external cross-instance KV is not needed to validate router prefix/affinity
+  #  decisions. Re-enable with the mooncake variants.)
   mooncake_enabled: false
   deploy_mooncake_master: false
 
@@ -156,14 +159,20 @@ helm:
   models:
     - name: minimax-m2
       servedModelName: served-model-minmax
-      replicas: 4                # one TP=8 pod per node (worker2 back/untainted)
+      replicas: 2                # DP2: 2 replicas x 2 DP ranks (sizeLocal=1) = 4 nodes
       streamingMode: true
       modelSubPath: MiniMax-M2.7-w8a8-QuaRot
       tensorParallelSize: 8
       batchSize: 32              # UNCHANGED
       sidecarPrefetch: 2
       dataParallel:
-        enabled: false           # DP1: single TP=8 rank per replica (was DP2)
+        enabled: true            # DP2: 2 DP ranks per replica (was DP1 single TP=8)
+        size: 2
+        sizeLocal: 1
+        rpcPort: 8888
+        pairTopologyKey: roce-pair
+        hcclBuffSize: 1024
+        ompNumThreads: 16
       vllm:
         gpuMemoryUtilization: 0.92
         dtype: bfloat16

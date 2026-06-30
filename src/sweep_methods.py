@@ -1036,6 +1036,8 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             "tensorParallelSize": int(getattr(h, "tensor_parallel_size", 1)),
             "router.strategy": str(getattr(h, "router_strategy", "")),
             "router.hashSource": str(getattr(h, "router_hash_source", "inline")).strip().lower(),
+            "router.logBlockHashes": bool(getattr(h, "router_log_block_hashes", False)),
+            "router.measurePrefix": bool(getattr(h, "router_measure_prefix", False)),
             "router.kvAware": bool(getattr(h, "router_kv_aware", True)),
             "router.lenAware": bool(getattr(h, "router_len_aware", True)),
             "router.lenPolicy": str(getattr(h, "router_len_policy", "short_first")),
