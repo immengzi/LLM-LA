@@ -1,5 +1,8 @@
 # Prefix Hashing and Prefix-Aware Routing
 
+> For a high-level overview of the routing strategies, see
+> [router-strategies.md](router-strategies.md).
+
 KV-aware routing needs a **stable, vLLM-compatible identifier for every block of
 a prompt's prefix**. With those identifiers the router can ask "which pod already
 has the KV blocks for this request's prefix cached?" and bias the request toward

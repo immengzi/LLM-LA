@@ -1,21 +1,23 @@
-# prod: MiniMax-M2.7 - BooM + LLM-LA (router), DP2 + Mooncake, BZ multi-turn config.
-# router_strategy = prefix  (KV prefix-awareness only)
+# prod: MiniMax-M2.7 - BooM + LLM-LA (router), DP1, NO Mooncake, BZ multi-turn config.
+# router_strategy = both  (prefix KV-awareness + conversation key-affinity)
+#
+# 3-NODE AFFINITY-CHECK variant (k8s-worker2 tainted/network-broken):
+#   - dataParallel disabled (DP1): each replica is a single TP=8 pod on one node
+#   - replicas: 3 -> one pod per healthy node (master, k8s-worker, k8s-worker1)
+#   - Mooncake DISABLED (external KV off); internal prefix caching + router
+#     prefix/affinity routing still active, so router_strategy stays meaningful.
+#   - batchSize (32) and central router settings UNCHANGED vs the mooncake variants.
 #
 # Workload semantics are aligned with
 # non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml:
 #   - CodeFlowBench multi-turn conversations
 #   - min_user_turns=3
 #   - Claude Code-style system blocks/reminders/tools injection
-#
-# Deployment semantics are aligned with prod-bz-boom-minmax-mooncake.yaml:
-#   - MiniMax-M2.7 served as served-model-minmax
-#   - BooM -> router -> vLLM sidecars
-#   - DP2 + Mooncake KV cache transfer on BZ
 
 switch_cluster: bz
 backend: "boom"
 
-total_requests: 10   # = number of multi-turn conversations (each >= min_user_turns)
+total_requests: 100   # multi-turn conversations; enough to keep all 3 pods busy in steady state
 prompt_source: "codeflow"
 
 file_prompts:
@@ -36,7 +38,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 1.0   # conversations/sec arrival -> some concurrency so routing choice matters
+  rate_rps: 5.0   # conversations/sec; pushes in-flight past a single pod (~34) so traffic spreads
   duration_s: 3000.0
   warmup_reqs: 0
 
@@ -53,10 +55,9 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
-  # Hard cap generated tokens per turn via max_tokens (NOT dataset length), so turns
-  # stay short and the run finishes fast. use_dataset_output_len:false -> ignore_eos
-  # off -> each turn generates AT MOST max_tokens (stops earlier on EOS). temp=0 keeps
-  # it deterministic across strategies for a fair compare.
+  # Hard cap generated tokens per turn via max_tokens (NOT dataset length) so turns
+  # stay short. use_dataset_output_len:false -> ignore_eos off -> at most max_tokens
+  # per turn (stops earlier on EOS). temp=0 keeps it deterministic across strategies.
   max_tokens: 64           # was 1024 (dataset-driven >=1024/turn ~= 40s/turn)
   temperature: 0.0
   length_mode: "legacy"
@@ -112,17 +113,14 @@ helm:
   #   affinity -> conversation key-affinity only
   #   both     -> prefix + affinity
   # router_strategy: "none"
-  router_strategy: "prefix"
+  # router_strategy: "prefix"
   # router_strategy: "affinity"
-  # router_strategy: "both"
+  router_strategy: "both"
   router_len_aware: true
   router_len_policy: "short_first"
-
-  # SPILL TEST: cap how many queued requests the router hands one vLLM pod per pull
-  # (router env FIXED_BATCH_SIZE). 0 = no cap (default). 2 forces the busy pod to
-  # leave the overflow for the 2nd pod -> traffic spreads across BOTH pods so
-  # router_strategy has a real placement choice. batchSize/sidecarPrefetch UNCHANGED.
-  router_fixed_batch_size: 2
+  # Hard affinity = time-bounded pin (not just a preference), so conversation turns
+  # stay on one pod even under load. soft was overridden by load balancing at this rps.
+  router_affinity_mode: "hard"
 
   expose_per_pod: true
 
@@ -133,17 +131,11 @@ helm:
   cache_warm_enabled: false
   sidecar_prefetch: 2
 
-  # --- Mooncake KV cache transfer ---
-  mooncake_enabled: true
-  mooncake_master_port: 50088
-  mooncake_master_server_address: "192.168.0.42:50088"
-  mooncake_global_segment_size: 140000000000
-  mooncake_eviction_high_watermark: 0.9
-  mooncake_eviction_ratio: 0.1
-  mooncake_ascend_buffer_pool: "4:8"
-  mooncake_lookup_rpc_port: "10010"
-  mooncake_host_network: true
-  deploy_mooncake_master: true
+  # --- Mooncake KV cache transfer: DISABLED for the 3-node affinity check ---
+  # (worker2 networking is broken; external cross-instance KV is not needed to
+  #  validate router prefix/affinity decisions. Re-enable with the mooncake variants.)
+  mooncake_enabled: false
+  deploy_mooncake_master: false
 
   # --- vLLM flags retained from the MiniMax/HQ template ---
   dtype: "bfloat16"
@@ -151,25 +143,18 @@ helm:
   model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":16}'
 
   vllm_image: "reg.local:32000/ascend/vllm-ascend:v0.18.0rc1-openeuler"
-  mooncake_master_image: "reg.local:32000/ascend/vllm-ascend:v0.18.0rc1-openeuler"
 
   models:
     - name: minimax-m2
       servedModelName: served-model-minmax
-      replicas: 2
+      replicas: 3                # one TP=8 pod per healthy node (worker2 tainted)
       streamingMode: true
       modelSubPath: MiniMax-M2.7-w8a8-QuaRot
       tensorParallelSize: 8
-      batchSize: 32
+      batchSize: 32              # UNCHANGED
       sidecarPrefetch: 2
       dataParallel:
-        enabled: true
-        size: 2
-        sizeLocal: 1
-        rpcPort: 8888
-        pairTopologyKey: roce-pair
-        hcclBuffSize: 1024
-        ompNumThreads: 16
+        enabled: false           # DP1: single TP=8 rank per replica (was DP2)
       vllm:
         gpuMemoryUtilization: 0.92
         dtype: bfloat16
@@ -185,9 +170,6 @@ helm:
         reasoningParser: minimax_m2_append_think
         modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
         ascendEnableFlashcomm1: true
-
-  values:
-    pin.nodeName: "k8s-worker1"
 
 # Claude-Code-style request injection (Phase 3 feature toggle).
 # Injects a realistic Claude Code CLI prefix (system blocks + system-reminders +

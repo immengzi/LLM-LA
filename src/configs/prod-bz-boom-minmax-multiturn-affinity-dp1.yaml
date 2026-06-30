@@ -1,0 +1,188 @@
+# prod: MiniMax-M2.7 - BooM + LLM-LA (router), DP1, NO Mooncake, BZ multi-turn config.
+# router_strategy = affinity  (conversation key-affinity only)
+#
+# 3-NODE AFFINITY-CHECK variant (k8s-worker2 tainted/network-broken):
+#   - dataParallel disabled (DP1): each replica is a single TP=8 pod on one node
+#   - replicas: 3 -> one pod per healthy node (master, k8s-worker, k8s-worker1)
+#   - Mooncake DISABLED (external KV off); internal prefix caching + router
+#     prefix/affinity routing still active, so router_strategy stays meaningful.
+#   - batchSize (32) and central router settings UNCHANGED vs the mooncake variants.
+#
+# Workload semantics are aligned with
+# non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml:
+#   - CodeFlowBench multi-turn conversations
+#   - min_user_turns=3
+#   - Claude Code-style system blocks/reminders/tools injection
+
+switch_cluster: bz
+backend: "boom"
+
+total_requests: 100   # multi-turn conversations; enough to keep all 3 pods busy in steady state
+prompt_source: "codeflow"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_profile: codeflowbench
+  split: "train"
+  streaming: false
+  min_input_tokens: 1
+  max_input_tokens: 3000
+  repeat_each: 1
+  seed: 314
+  multi_turn: true
+  min_user_turns: 3
+  max_pool_size: 99999
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 5.0   # conversations/sec; pushes in-flight past a single pod (~34) so traffic spreads
+  duration_s: 3000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  # Hard cap generated tokens per turn via max_tokens (NOT dataset length) so turns
+  # stay short. use_dataset_output_len:false -> ignore_eos off -> at most max_tokens
+  # per turn (stops earlier on EOS). temp=0 keeps it deterministic across strategies.
+  max_tokens: 64           # was 1024 (dataset-driven >=1024/turn ~= 40s/turn)
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+  use_dataset_output_len: false   # was true
+  min_output_tokens_floor: 1024   # unused while use_dataset_output_len=false
+  # replay_output_lengths_from: "305"
+
+output_log_mode: "summary"
+print_trace: false
+
+# Stream kubectl logs of every pod/container into <exp_dir>/vllm-logs/<pod>/<container>.log
+collect_vllm_logs: true
+
+metrics:
+  enabled: true
+  scrape_interval_s: 1.0
+  window_s: 3.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+transport:
+  mode: "async_pubsub"
+  submit_path: "/submit"
+  topic: "results"
+  run_id: null
+  idle_timeout_s: 1000.0
+  idle_zero_running_s: 300.0
+
+boom:
+  chat_path: "/v1/chat/completions"
+  model: "served-model-minmax"
+  api_key: "sk-boom-master"
+  timeout_s: 10000.0
+  stream: true
+
+helm:
+  boom_claude_aliases: true
+  boom_max_inflight: 1000
+  router_api_key: "ZhongRuanChuangXin!"
+
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 1
+
+  # Unified routing-strategy selector (overrides router_kv_aware/router_affinity_*).
+  # Uncomment exactly ONE to switch modes:
+  #   none     -> prefix off, affinity off (baseline)
+  #   prefix   -> KV prefix-awareness only
+  #   affinity -> conversation key-affinity only
+  #   both     -> prefix + affinity
+  # router_strategy: "none"
+  # router_strategy: "prefix"
+  router_strategy: "affinity"
+  # router_strategy: "both"
+  router_len_aware: true
+  router_len_policy: "short_first"
+  # Hard affinity = time-bounded pin (not just a preference), so conversation turns
+  # stay on one pod even under load. soft was overridden by load balancing at this rps.
+  router_affinity_mode: "hard"
+
+  expose_per_pod: true
+
+  nfs_path: "/data/models/MiniMax-M2.7-w8a8-QuaRot"
+  model_host_path: "/data/models"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+  sidecar_prefetch: 2
+
+  # --- Mooncake KV cache transfer: DISABLED for the 3-node affinity check ---
+  # (worker2 networking is broken; external cross-instance KV is not needed to
+  #  validate router prefix/affinity decisions. Re-enable with the mooncake variants.)
+  mooncake_enabled: false
+  deploy_mooncake_master: false
+
+  # --- vLLM flags retained from the MiniMax/HQ template ---
+  dtype: "bfloat16"
+  ascend_enable_flashcomm1: true
+  model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":16}'
+
+  vllm_image: "reg.local:32000/ascend/vllm-ascend:v0.18.0rc1-openeuler"
+
+  models:
+    - name: minimax-m2
+      servedModelName: served-model-minmax
+      replicas: 3                # one TP=8 pod per healthy node (worker2 tainted)
+      streamingMode: true
+      modelSubPath: MiniMax-M2.7-w8a8-QuaRot
+      tensorParallelSize: 8
+      batchSize: 32              # UNCHANGED
+      sidecarPrefetch: 2
+      dataParallel:
+        enabled: false           # DP1: single TP=8 rank per replica (was DP2)
+      vllm:
+        gpuMemoryUtilization: 0.92
+        dtype: bfloat16
+        enableExpertParallel: true
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 32768
+        # V1 enables prefix caching by default with near-zero overhead.
+        # Omitting or setting true matches HQ behavior.
+        enablePrefixCaching: true
+        toolCallParser: minimax_m2
+        reasoningParser: minimax_m2_append_think
+        modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
+        ascendEnableFlashcomm1: true
+
+# Claude-Code-style request injection (Phase 3 feature toggle).
+# Injects a realistic Claude Code CLI prefix (system blocks + system-reminders +
+# 23 tools) into the FIRST user turn of each conversation. On the wired OpenAI
+# /v1/chat/completions path the Anthropic templates are mechanically converted to
+# OpenAI shape (system message + reminder-prepended user content + function tools);
+# cache_control is always stripped. cch stays at the XXXXX placeholder (drift is
+# handled router-side by STRIP_CCH). Absent/disabled => behavior identical to the
+# original yaml.
+claude_code_injection:
+  enabled: true
+  template_dir: "multiturn-generation"
+  inject_system_blocks: true
+  inject_system_reminders: true
+  inject_tools: true
+  preserve_cache_control: true  # no-op on OpenAI path (cache_control always stripped); kept for future Anthropic wire path
