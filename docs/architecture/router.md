@@ -55,6 +55,16 @@ inside the router.
   - router unblocks the waiting `/enqueue` call and returns the result
     to the client.
 
+- `GET /latency_log?last=N` (observer → router)  
+  Returns the most recent completed requests from an in-memory ring buffer
+  (server-side, so it survives a BooM/proxy hop). Each entry carries
+  `rid`, `endpoint`, token counts, and latencies, plus the routing decision
+  captured at dispatch: `kv_hits_len`, `total_blocks`, `matched_tokens`,
+  `kv_hit`, and `affinity_key` (and the raw `block_hashes` list when
+  `ROUTER_LOG_BLOCK_HASHES=true`). This is the source of truth for
+  `router_logs.json` and the `logs.json` endpoint/KV enrichment described in
+  [artifacts and analysis](../benchmarking/artifacts-and-analysis.md#router-request-log-collect_router_log).
+
 ---
 
 ## 3. Routing Modes

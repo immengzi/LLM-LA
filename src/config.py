@@ -712,6 +712,14 @@ class ClientConfig:
     # in the deploy namespace into <exp_dir>/vllm-logs/<pod>/<container>.log.
     collect_vllm_logs: bool = False
 
+    # When true: poll the router's /latency_log ring during the run, persist it to
+    # <exp_dir>/router_logs.json, live-enrich logs.json with the serving endpoint +
+    # prefix/KV-hit fields, and run an authoritative join at shutdown. BooM-proof
+    # (reads the router directly, not the response body). router_log_url is the
+    # router base URL for /latency_log; empty -> derived from router_url.
+    collect_router_log: bool = False
+    router_log_url: str = ""
+
     # Metrics
     metrics: PrometheusMetricsConfig = field(default_factory=PrometheusMetricsConfig)
 
@@ -916,6 +924,8 @@ def load_config(path: str) -> ClientConfig:
     output_log_mode = raw.get("output_log_mode", ClientConfig.output_log_mode)
     print_trace = raw.get("print_trace", ClientConfig.print_trace)
     collect_vllm_logs = bool(raw.get("collect_vllm_logs", ClientConfig.collect_vllm_logs))
+    collect_router_log = bool(raw.get("collect_router_log", ClientConfig.collect_router_log))
+    router_log_url = str(raw.get("router_log_url", ClientConfig.router_log_url) or "")
 
     # -----------------------------
     # Normalize router transport
@@ -1034,6 +1044,8 @@ def load_config(path: str) -> ClientConfig:
         output_log_mode=output_log_mode,
         print_trace=print_trace,
         collect_vllm_logs=collect_vllm_logs,
+        collect_router_log=collect_router_log,
+        router_log_url=router_log_url,
         metrics=metrics,
         transport=transport,
         aibrix=aibrix,

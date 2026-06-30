@@ -205,6 +205,11 @@ class RouterConfig:
     TRACE_ENABLED: bool = False
     TRACE_SAMPLING_RATE: float = 1.0
 
+    # When true, the /latency_log ring includes the full per-request prefix
+    # block-hash list (bulky). Counts (kv_hits_len/total_blocks) are always
+    # included; this only controls the raw hash list.
+    ROUTER_LOG_BLOCK_HASHES: bool = False
+
     # --------------------------------------------------------------------
     # SLO-AWARE ROUTING
     # --------------------------------------------------------------------
@@ -485,6 +490,9 @@ def get_config() -> RouterConfig:
     # TRACE overrides
     if "TRACE_ENABLED" in os.environ:
         cfg.TRACE_ENABLED = os.getenv("TRACE_ENABLED", "false").lower() == "true"
+
+    if "ROUTER_LOG_BLOCK_HASHES" in os.environ:
+        cfg.ROUTER_LOG_BLOCK_HASHES = os.getenv("ROUTER_LOG_BLOCK_HASHES", "false").lower() == "true"
 
     if "TRACE_SAMPLING_RATE" in os.environ:
         try:

@@ -12,7 +12,7 @@ import asyncio
 import time
 
 from .config import get_config, get_model_registry
-from .kv_aware import prefix_len
+from .kv_aware import prefix_len, get_request_blocks, record_routing
 from .predictors import get_length_predictor
 from .len_select import select_len_aware
 from .models import JobItem, now_s
@@ -294,6 +294,20 @@ class RouterState:
             chosen_raw = ordered[:effective_want]
             chosen_ids = [rid for (rid, _p, _t, _m) in chosen_raw]
             chosen_kv_hits = [(rid, prefix_len(endpoint, rid)) for rid in chosen_ids] if kv_enabled else []
+
+            # Capture the routing decision per request (independent of TRACE) so
+            # the /latency_log ring can be enriched at completion time.
+            _log_block_hashes = bool(getattr(_cfg, "ROUTER_LOG_BLOCK_HASHES", False))
+            for rid, _p, _t, _m in chosen_raw:
+                blocks = get_request_blocks(rid)
+                record_routing(
+                    rid,
+                    endpoint=endpoint,
+                    kv_hits_len=int(kv_hits_map.get(rid, 0)) if kv_enabled else 0,
+                    total_blocks=len(blocks),
+                    affinity_key=(_m or {}).get("__affinity_key__"),
+                    block_hashes=blocks if _log_block_hashes else None,
+                )
 
             _log_req(
                 f"chosen endpoint={endpoint}: {chosen_ids} kv_hits={chosen_kv_hits}"

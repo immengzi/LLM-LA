@@ -10,7 +10,8 @@ Debug helpers:
 - get_request_blocks(req_id) -> List[int]
 """
 
-from typing import Dict, List, Iterable
+from collections import OrderedDict
+from typing import Dict, List, Iterable, Optional
 from threading import RLock
 
 # req_id -> [block_hashes...]
@@ -18,7 +19,46 @@ _REQ_BLOCKS: Dict[str, List[int]] = {}
 # block_hash -> { endpoint_url: True }
 _BLOCK_OWNERS: Dict[int, Dict[str, bool]] = {}
 
+# req_id -> routing decision captured at dispatch time (independent of the
+# TRACE system). Read once at completion to enrich the /latency_log ring.
+# Bounded so timed-out / never-completed requests cannot leak memory.
+_REQ_ROUTING: "OrderedDict[str, Dict]" = OrderedDict()
+_ROUTING_MAX = 8192
+
 _LOCK = RLock()
+
+
+def record_routing(
+    req_id: str,
+    *,
+    endpoint: str,
+    kv_hits_len: int,
+    total_blocks: int,
+    affinity_key: Optional[str] = None,
+    block_hashes: Optional[List[int]] = None,
+) -> None:
+    """Capture the router's per-request decision at dispatch time."""
+    with _LOCK:
+        info: Dict = {
+            "endpoint": endpoint,
+            "kv_hits_len": int(kv_hits_len),
+            "total_blocks": int(total_blocks),
+        }
+        if affinity_key is not None:
+            info["affinity_key"] = affinity_key
+        if block_hashes is not None:
+            info["block_hashes"] = list(block_hashes)
+        _REQ_ROUTING[req_id] = info
+        _REQ_ROUTING.move_to_end(req_id)
+        while len(_REQ_ROUTING) > _ROUTING_MAX:
+            _REQ_ROUTING.popitem(last=False)
+
+
+def pop_routing(req_id: str) -> Optional[Dict]:
+    """Return and remove the routing decision recorded for *req_id*."""
+    with _LOCK:
+        info = _REQ_ROUTING.pop(req_id, None)
+        return dict(info) if info else None
 
 
 def register_request_blocks(req_id: str, block_hashes: Iterable[int]) -> None:

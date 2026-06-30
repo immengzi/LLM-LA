@@ -31,7 +31,6 @@ Output (in <experiments_root>/<N>/):
 from __future__ import annotations
 
 import argparse
-import collections
 import json
 import signal
 import sys
@@ -42,6 +41,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 import requests
+
+from router_log_collector import (
+    RouterLogCollector,
+    join_logs_with_router,
+    summarize_routing,
+)
 
 
 # ============================================================
@@ -61,48 +66,6 @@ def _next_experiment_dir(root: Path) -> Path:
     exp_dir = root / str(next_id)
     exp_dir.mkdir(parents=True, exist_ok=False)
     return exp_dir
-
-
-class NdjsonLogger:
-    """Thread-safe NDJSON writer with automatic file rotation."""
-
-    _MAX_BYTES = 100 * 1024 * 1024  # 100 MB per file
-
-    def __init__(self, path: Path):
-        self._base_path = path
-        self._dir = path.parent
-        self._lock = threading.Lock()
-        self._fh = open(path, "a", encoding="utf-8")
-        self._count = 0
-        self._file_bytes = 0
-        self._file_idx = 0
-
-    def _rotate(self) -> None:
-        self._fh.close()
-        self._file_idx += 1
-        rotated = self._dir / f"logs_{self._file_idx}.json"
-        self._fh = open(rotated, "a", encoding="utf-8")
-        self._file_bytes = 0
-
-    def append(self, record: dict) -> None:
-        line = json.dumps(record, ensure_ascii=False, default=str)
-        encoded = (line + "\n").encode("utf-8")
-        with self._lock:
-            self._fh.write(line + "\n")
-            self._fh.flush()
-            self._count += 1
-            self._file_bytes += len(encoded)
-            if self._file_bytes >= self._MAX_BYTES:
-                self._rotate()
-
-    @property
-    def count(self) -> int:
-        with self._lock:
-            return self._count
-
-    def close(self) -> None:
-        with self._lock:
-            self._fh.close()
 
 
 # ============================================================
@@ -396,18 +359,21 @@ def main():
     with (exp_dir / "config.json").open("w") as f:
         json.dump(config_out, f, indent=2, sort_keys=True)
 
-    # Open logs.json
-    logger = NdjsonLogger(exp_dir / "logs.json")
+    # Shared router /latency_log collector -> router_logs.json (the router truth,
+    # including endpoint + prefix/KV fields). Identical artifacts to the client.
+    router_logs_path = exp_dir / "router_logs.json"
+    collector = RouterLogCollector(
+        router_url=router_url,
+        out_path=router_logs_path,
+        poll_interval_s=args.poll_interval,
+        batch_size=args.batch_size,
+    )
 
     # Optional metrics.jsonl
     metrics_fh = None
     if args.prometheus_url:
         metrics_fh = open(exp_dir / "metrics.jsonl", "a", encoding="utf-8")
 
-    # Bounded dedup window -- keeps last 10k keys to cap memory
-    _DEDUP_MAX = 10_000
-    seen_rids: collections.OrderedDict = collections.OrderedDict()
-    all_records: List[Dict[str, Any]] = []
     shutdown = threading.Event()
     last_prom_scrape = 0.0
 
@@ -418,71 +384,13 @@ def main():
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    collector.start()
     print(f"[collector] polling {latency_url} every {args.poll_interval}s")
     print(f"[collector] press Ctrl+C to stop and write summary")
 
     poll_count = 0
     while not shutdown.is_set():
-        # --- Poll /latency_log ---
-        try:
-            resp = requests.get(latency_url, timeout=10)
-            resp.raise_for_status()
-            entries: List[Dict[str, Any]] = resp.json()
-        except Exception as e:
-            print(f"[collector] poll error: {e}")
-            shutdown.wait(args.poll_interval)
-            continue
-
-        new_count = 0
-        for entry in entries:
-            rid = entry.get("rid", "")
-            ts = entry.get("ts", 0)
-            dedup_key = f"{rid}:{ts}"
-            if dedup_key in seen_rids:
-                continue
-            seen_rids[dedup_key] = None
-            if len(seen_rids) > _DEDUP_MAX:
-                seen_rids.popitem(last=False)
-
-            e2e_s = (entry.get("e2e_ms") or 0) / 1000.0
-            t_start = entry.get("t_start")
-            t0 = t_start if t_start is not None else ts
-            record = {
-                "idx": logger.count,
-                "req_id": rid,
-                "t0_wall": t0,
-                "t1_wall": ts,
-                "end_to_end_s": e2e_s,
-                "model_latency_s": e2e_s,
-                "finish_reason": entry.get("finish_reason", "stop"),
-                "endpoint_id": entry.get("endpoint"),
-                "streaming": entry.get("stream", False),
-                "prompt_tokens": entry.get("prompt_tokens", 0),
-                "completion_tokens": entry.get("completion_tokens", 0),
-            }
-
-            ttft_ms = entry.get("ttft_ms")
-            if ttft_ms is not None:
-                record["ttft_s"] = ttft_ms / 1000.0
-
-            tpot_ms = entry.get("tpot_avg_ms")
-            if tpot_ms is not None:
-                record["tpot_avg_s"] = tpot_ms / 1000.0
-
-            model = entry.get("model")
-            if model:
-                record["model"] = model
-
-            logger.append(record)
-            all_records.append(record)
-            new_count += 1
-
-        poll_count += 1
-        if new_count > 0:
-            print(f"[collector] poll #{poll_count}: +{new_count} new records "
-                  f"(total: {logger.count})")
-
-        # --- Optional Prometheus scrape ---
+        # --- Optional Prometheus scrape (latency polling runs in the collector) ---
         now = time.time()
         if metrics_fh and args.prometheus_url and (now - last_prom_scrape) >= args.prom_interval:
             snapshot = _scrape_prometheus(args.prometheus_url, namespace=args.namespace)
@@ -491,14 +399,42 @@ def main():
                 metrics_fh.flush()
             last_prom_scrape = now
 
+        poll_count += 1
         shutdown.wait(args.poll_interval)
 
     # ---- Shutdown: write summary files ----
-    logger.close()
+    collector.stop()
     if metrics_fh:
         metrics_fh.close()
 
     dt_wall = time.time() - t_start
+
+    # logs.json == router truth in pure-observation mode. Build it from
+    # router_logs.json and run the same authoritative join (idempotent: it just
+    # re-attaches the router fields), so external runs match client runs.
+    logs_path = exp_dir / "logs.json"
+    all_records: List[Dict[str, Any]] = []
+    try:
+        with router_logs_path.open("r", encoding="utf-8") as fin, \
+                logs_path.open("w", encoding="utf-8") as fout:
+            for line in fin:
+                line = line.rstrip("\n")
+                if not line.strip():
+                    continue
+                fout.write(line + "\n")
+                try:
+                    all_records.append(json.loads(line))
+                except Exception:
+                    continue
+    except FileNotFoundError:
+        logs_path.write_text("", encoding="utf-8")
+
+    routing_summary = None
+    try:
+        join_logs_with_router(logs_path, router_logs_path)
+        routing_summary = summarize_routing(logs_path)
+    except Exception as e:
+        print(f"[collector] WARN: routing join/summary failed: {e}")
 
     # endpoint_tokens.json
     try:
@@ -510,7 +446,7 @@ def main():
 
     # run_summary.json
     run_summary = {
-        "total_requests": logger.count,
+        "total_requests": collector.count,
         "backend": "prod-collector",
         "load_runner_duration_s": round(dt_wall, 3),
         "wall_time_s": round(dt_wall, 3),
@@ -520,13 +456,15 @@ def main():
         "poll_interval_s": args.poll_interval,
         "prometheus_url": args.prometheus_url,
     }
+    if routing_summary is not None:
+        run_summary["routing"] = routing_summary
     try:
         with (exp_dir / "run_summary.json").open("w") as f:
             json.dump(run_summary, f, indent=2, sort_keys=True)
     except Exception as e:
         print(f"[collector] WARN: failed to write run_summary.json: {e}")
 
-    print(f"[collector] done. {logger.count} records in {dt_wall:.1f}s")
+    print(f"[collector] done. {collector.count} records in {dt_wall:.1f}s")
     print(f"[collector] results: {exp_dir}")
 
 
