@@ -112,6 +112,7 @@ Start at the **[documentation index](docs/README.md)**. Highlights:
 .
 ├── README.md                 # This landing page
 ├── docs/                     # Documentation (see docs/README.md)
+├── analysis-notebooks/       # Post-experiment analysis notebooks
 ├── infra/                    # Ansible cluster-prep automation (see infra/README.md)
 └── src/
     ├── main.py               # Load experiment entry point
@@ -120,8 +121,7 @@ Start at the **[documentation index](docs/README.md)**. Highlights:
     ├── config.py             # Client + Helm configuration schema
     ├── configs/              # Client and sweep YAML configs
     ├── services/             # Router, sidecar (Python + Go), prefix-hash
-    ├── vllm-kv-stack/        # Helm chart (Redis, router, vLLM, gateways, ...)
-    └── jupyters/             # Post-experiment analysis notebooks
+    └── vllm-kv-stack/        # Helm chart (Redis, router, vLLM, gateways, ...)
 ```
 
 ---
