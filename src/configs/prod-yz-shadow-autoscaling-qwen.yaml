@@ -24,6 +24,7 @@
 # Watch it react (note the shadow namespace):
 #   kubectl -n vllm-shadow get scaledobjects,hpa,pods -w
 
+switch_cluster: yz
 backend: "router"
 
 router_url: "http://10.50.156.65:30180"

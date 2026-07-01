@@ -8,6 +8,7 @@
 #   prod-yz-boom-minmax-mooncake.yaml  — adds Mooncake KV cache transfer
 #   prod-yz-boom-minmax-lmcache.yaml   — adds LMCache (wraps Mooncake) + DP2
 
+switch_cluster: yz
 backend: "boom"
 
 router_url: "http://10.50.156.65:30080"

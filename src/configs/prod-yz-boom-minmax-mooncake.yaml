@@ -4,6 +4,7 @@
 # BooM routes through the KV-aware router with sidecars.
 # Claude-compatible API enabled (boom_claude_aliases: true).
 
+switch_cluster: yz
 backend: "boom"
 
 router_url: "http://10.50.156.65:30080"

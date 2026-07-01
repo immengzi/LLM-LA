@@ -12,6 +12,7 @@
 #   sysctl -w vm.swappiness=0
 #   sysctl -w kernel.numa_balancing=0
 
+switch_cluster: yz
 backend: "boom"
 
 router_url: "http://10.50.156.65:30080"
