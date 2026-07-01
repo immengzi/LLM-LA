@@ -291,6 +291,23 @@ func (pd *PushDispatcher) RouteAndPush(reqID, prompt string, meta map[string]int
 			sendMeta["__trace__"] = tr
 		}
 
+		// Capture the per-request routing decision (independent of TRACE) so
+		// recordLatency can enrich /latency_log. prefixLen returns 0 when no
+		// blocks were registered (measurement off). Mirrors push_router.py.
+		if pd.kv != nil {
+			blocks := pd.kv.getRequestBlocks(reqID)
+			info := routingInfo{endpoint: ep, kvHitsLen: pd.kv.prefixLen(ep, reqID), totalBlocks: len(blocks)}
+			if meta != nil {
+				if ak, ok := meta["__affinity_key__"].(string); ok && ak != "" {
+					info.affinityKey, info.hasAffinity = ak, true
+				}
+			}
+			if pd.cfg.LogBlockHashes {
+				info.blockHashes, info.hasBlocks = blocks, true
+			}
+			pd.kv.recordRouting(reqID, info)
+		}
+
 		payload := map[string]interface{}{
 			"req_id": reqID,
 			"prompt": prompt,

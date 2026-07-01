@@ -171,8 +171,17 @@ Most behavior is controlled via environment variables loaded into
   – conversation key affinity (see [key-affinity.md](key-affinity.md)).
 - `KV_HASH_SOURCE` – `inline` (default; hash in-process/in-container) or
   `external` (legacy standalone `vllm-cpu-hash` service).
+- `KV_BLOCK_SIZE` – prefix block size (tokens) used to derive `matched_tokens`.
+- `ROUTER_MEASURE_PREFIX` – compute per-request prefix-hit counts *for logging
+  only*, even when KV routing is off (so `none`/`affinity` still report
+  `kv_hits_len`/`total_blocks`/`kv_hit`). Decoupled from the routing decision.
+- `ROUTER_LOG_BLOCK_HASHES` – also emit the raw `block_hashes` list per request.
 - `HASH_SERVICE_URL` – `/compute_hashes` endpoint; only used by the Go gateway
   (in-container hasher) and in `external` mode (unused by the Python router inline).
+
+The Go gateway and the Python router are kept at parity: both honor
+`ROUTER_STRATEGY`, `ROUTER_MEASURE_PREFIX`, `ROUTER_LOG_BLOCK_HASHES`, and
+`KV_BLOCK_SIZE`, and both enrich `/latency_log` with the same prefix/KV fields.
 - `REDIS_HOST`, `REDIS_PORT`, `MODEL_NAME` – KV watcher’s view of Redis keys.
 - `NAMESPACE`, `LABEL_SELECTOR`, `SIDECAR_PORT` – how to find sidecars in K8s.
 - `RESULT_TIMEOUT_S` – how long `/enqueue` will wait for a result.

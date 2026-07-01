@@ -183,6 +183,7 @@ func (s *Server) popRunID(rid string) string {
 }
 
 func (s *Server) recordLatency(entry map[string]interface{}) {
+	s.enrichRoutingFields(entry)
 	s.latMu.Lock()
 	if len(s.latRing) >= latencyLogMax {
 		s.latRing = s.latRing[1:]
@@ -194,12 +195,49 @@ func (s *Server) recordLatency(entry map[string]interface{}) {
 	}
 }
 
+// enrichRoutingFields merges the per-request routing decision captured at
+// dispatch time into a /latency_log entry. Mirrors _routing_fields in api.py:
+// it always adds kv_hits_len/total_blocks/matched_tokens/kv_hit (0/false when
+// measurement is off) plus affinity_key/block_hashes when recorded. No-op when
+// no routing info was recorded (e.g. /enqueue-only paths).
+func (s *Server) enrichRoutingFields(entry map[string]interface{}) {
+	if s.kv == nil {
+		return
+	}
+	rid, ok := entry["rid"].(string)
+	if !ok || rid == "" {
+		return
+	}
+	info, ok := s.kv.popRouting(rid)
+	if !ok {
+		return
+	}
+	entry["kv_hits_len"] = info.kvHitsLen
+	entry["total_blocks"] = info.totalBlocks
+	entry["matched_tokens"] = info.kvHitsLen * s.cfg.KVBlockSize
+	entry["kv_hit"] = info.kvHitsLen > 0
+	if info.hasAffinity {
+		entry["affinity_key"] = info.affinityKey
+	}
+	if info.hasBlocks {
+		ifaces := make([]interface{}, len(info.blockHashes))
+		for i, b := range info.blockHashes {
+			ifaces[i] = b
+		}
+		entry["block_hashes"] = ifaces
+	}
+}
+
 // registerKVBlocks mirrors _maybe_register_kv_blocks: best-effort hash compute
 // + register request blocks + trace enrichment. Returns the (possibly updated)
 // meta.
 func (s *Server) registerKVBlocks(rid, prompt string, meta map[string]interface{}, isPullMode bool) map[string]interface{} {
 	m := cloneMeta(meta)
-	if !s.cfg.KVAware {
+	// Compute/register prefix blocks when routing needs them (KVAware) OR when
+	// measurement-only logging is requested (MeasurePrefix / LogBlockHashes),
+	// so none/affinity strategies still report kv_hits_len/total_blocks without
+	// using prefix data for the routing decision. Mirrors _maybe_register_kv_blocks.
+	if !s.cfg.MeasurePrefixEnabled() {
 		return m
 	}
 

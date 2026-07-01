@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -32,6 +33,109 @@ func TestPrefixLen(t *testing.T) {
 	}
 	if got := kv.prefixLen("epA", "missing"); got != 0 {
 		t.Fatalf("prefixLen(missing req) = %d, want 0", got)
+	}
+}
+
+// TestMeasurePrefixEnabled verifies prefix blocks are computed whenever routing
+// needs them (KVAware) or measurement/logging is requested, mirroring api.py.
+func TestMeasurePrefixEnabled(t *testing.T) {
+	cases := []struct {
+		kvAware, measure, logHashes bool
+		want                        bool
+	}{
+		{false, false, false, false},
+		{true, false, false, true},
+		{false, true, false, true},
+		{false, false, true, true},
+		{true, true, true, true},
+	}
+	for _, c := range cases {
+		cfg := &Config{KVAware: c.kvAware, MeasurePrefix: c.measure, LogBlockHashes: c.logHashes}
+		if got := cfg.MeasurePrefixEnabled(); got != c.want {
+			t.Fatalf("MeasurePrefixEnabled(kv=%v,measure=%v,log=%v) = %v, want %v",
+				c.kvAware, c.measure, c.logHashes, got, c.want)
+		}
+	}
+}
+
+// TestRecordPopRouting verifies the routing store round-trips, pops once, and
+// evicts oldest entries past the cap. Mirrors record_routing/pop_routing.
+func TestRecordPopRouting(t *testing.T) {
+	kv := newKVAware()
+	kv.recordRouting("r1", routingInfo{endpoint: "epA", kvHitsLen: 2, totalBlocks: 5})
+
+	got, ok := kv.popRouting("r1")
+	if !ok {
+		t.Fatal("popRouting(r1) missing after record")
+	}
+	if got.endpoint != "epA" || got.kvHitsLen != 2 || got.totalBlocks != 5 {
+		t.Fatalf("popRouting(r1) = %+v, want epA/2/5", got)
+	}
+	if _, ok := kv.popRouting("r1"); ok {
+		t.Fatal("popRouting(r1) should be empty after pop")
+	}
+
+	// Overflow the cap: the oldest surviving entry must be evicted.
+	for i := 0; i < routingMax+10; i++ {
+		kv.recordRouting(fmt.Sprintf("k%d", i), routingInfo{endpoint: "ep"})
+	}
+	if _, ok := kv.popRouting("k0"); ok {
+		t.Fatal("k0 should have been evicted past the cap")
+	}
+	if _, ok := kv.popRouting(fmt.Sprintf("k%d", routingMax+9)); !ok {
+		t.Fatal("most recent entry should still be present")
+	}
+}
+
+// TestEnrichRoutingFields verifies /latency_log enrichment mirrors _routing_fields:
+// always kv_hits_len/total_blocks/matched_tokens/kv_hit, plus affinity_key and
+// block_hashes when recorded.
+func TestEnrichRoutingFields(t *testing.T) {
+	s := &Server{cfg: &Config{KVBlockSize: 128}, kv: newKVAware()}
+	s.kv.recordRouting("r1", routingInfo{
+		endpoint:    "epA",
+		kvHitsLen:   3,
+		totalBlocks: 4,
+		affinityKey: "conv-1",
+		hasAffinity: true,
+		blockHashes: []string{"10", "20", "30"},
+		hasBlocks:   true,
+	})
+
+	entry := map[string]interface{}{"rid": "r1"}
+	s.enrichRoutingFields(entry)
+
+	if entry["kv_hits_len"] != 3 || entry["total_blocks"] != 4 {
+		t.Fatalf("counts = %v/%v, want 3/4", entry["kv_hits_len"], entry["total_blocks"])
+	}
+	if entry["matched_tokens"] != 3*128 {
+		t.Fatalf("matched_tokens = %v, want %d", entry["matched_tokens"], 3*128)
+	}
+	if entry["kv_hit"] != true {
+		t.Fatalf("kv_hit = %v, want true", entry["kv_hit"])
+	}
+	if entry["affinity_key"] != "conv-1" {
+		t.Fatalf("affinity_key = %v, want conv-1", entry["affinity_key"])
+	}
+	if bh, ok := entry["block_hashes"].([]interface{}); !ok || len(bh) != 3 {
+		t.Fatalf("block_hashes = %v, want 3 elems", entry["block_hashes"])
+	}
+
+	// kv_hit is false at zero hits, and a missing record is a no-op.
+	s.kv.recordRouting("r2", routingInfo{endpoint: "epB", kvHitsLen: 0, totalBlocks: 0})
+	e2 := map[string]interface{}{"rid": "r2"}
+	s.enrichRoutingFields(e2)
+	if e2["kv_hit"] != false || e2["matched_tokens"] != 0 {
+		t.Fatalf("zero-hit entry = %+v, want kv_hit=false matched_tokens=0", e2)
+	}
+	if _, ok := e2["affinity_key"]; ok {
+		t.Fatal("affinity_key should be absent when not recorded")
+	}
+
+	e3 := map[string]interface{}{"rid": "missing"}
+	s.enrichRoutingFields(e3)
+	if len(e3) != 1 {
+		t.Fatalf("missing record should be a no-op, got %+v", e3)
 	}
 }
 
