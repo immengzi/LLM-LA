@@ -39,6 +39,10 @@ type Config struct {
 	HashMaxKeepalive     int
 	HashKeepaliveExpiryS float64
 
+	KVBlockSize    int
+	MeasurePrefix  bool
+	LogBlockHashes bool
+
 	RouterStrategy string
 
 	KVAware   bool
@@ -131,6 +135,10 @@ func LoadConfig() *Config {
 		HashTimeoutS:         common.EnvFloat("HASH_TIMEOUT_S", 2.0),
 		HashMaxKeepalive:     common.EnvInt("HASH_MAX_KEEPALIVE", 50),
 		HashKeepaliveExpiryS: common.EnvFloat("HASH_KEEPALIVE_EXPIRY_S", 30.0),
+
+		KVBlockSize:    common.EnvInt("KV_BLOCK_SIZE", 128),
+		MeasurePrefix:  common.EnvBool("ROUTER_MEASURE_PREFIX", false),
+		LogBlockHashes: common.EnvBool("ROUTER_LOG_BLOCK_HASHES", false),
 
 		RouterStrategy: common.EnvStr("ROUTER_STRATEGY", ""),
 
@@ -298,6 +306,9 @@ func (c *Config) normalize() {
 	c.QueueWaitModel = qwm
 
 	c.PoolFactor = math.Max(1.0, c.PoolFactor)
+	if c.KVBlockSize < 1 {
+		c.KVBlockSize = 1
+	}
 	if c.DefaultMaxTokens < 1 {
 		c.DefaultMaxTokens = 1
 	}
@@ -344,6 +355,16 @@ func (c *Config) IsPushMode() bool {
 	return strings.HasPrefix(c.RouterMode, "push-")
 }
 
+// MeasurePrefixEnabled reports whether per-request prefix blocks should be
+// computed/registered. Mirrors the guard in
+// src/services/router_service/router/api.py: prefix blocks are needed when KV
+// routing uses them (KVAware) OR when measurement-only logging is requested
+// (MeasurePrefix) OR when the full block-hash list is being logged
+// (LogBlockHashes). Routing itself still keys off KVAware.
+func (c *Config) MeasurePrefixEnabled() bool {
+	return c.KVAware || c.MeasurePrefix || c.LogBlockHashes
+}
+
 func (c *Config) PrintBanner() {
 	fields := map[string]interface{}{
 		"HOST":                    c.Host,
@@ -362,6 +383,9 @@ func (c *Config) PrintBanner() {
 		"KV_HASH_SOURCE":          c.KVHashSource,
 		"HASH_SERVICE_URL":        c.HashServiceURL,
 		"HASH_TIMEOUT_S":          c.HashTimeoutS,
+		"KV_BLOCK_SIZE":           c.KVBlockSize,
+		"ROUTER_MEASURE_PREFIX":   c.MeasurePrefix,
+		"ROUTER_LOG_BLOCK_HASHES": c.LogBlockHashes,
 		"ROUTER_STRATEGY":         c.RouterStrategy,
 		"KV_AWARE":                c.KVAware,
 		"LEN_AWARE":               c.LenAware,

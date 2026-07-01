@@ -294,10 +294,32 @@ func (q *CentralQueue) Pull(endpoint string, want int, model string) []JobItem {
 		q.slo.incrementInflight(endpoint, len(chosen))
 	}
 
-	// Dispatch metrics + endpoint tracking.
+	// Dispatch metrics + endpoint tracking. Also capture the per-request routing
+	// decision (independent of TRACE) so recordLatency can enrich /latency_log.
+	// Mirrors record_routing in router_state.py: reuse the sort's kv_hits when KV
+	// routing is on, else compute prefixLen directly (0 when measurement is off).
+	logBlockHashes := q.cfg.LogBlockHashes
 	for _, it := range chosen {
 		incDispatch(endpoint)
 		q.reqEndpoint[it.reqID] = endpoint
+
+		hits := 0
+		if kvEnabled {
+			hits = kvHits[it.reqID]
+		} else {
+			hits = q.kv.prefixLen(endpoint, it.reqID)
+		}
+		blocks := q.kv.getRequestBlocks(it.reqID)
+		info := routingInfo{endpoint: endpoint, kvHitsLen: hits, totalBlocks: len(blocks)}
+		if it.meta != nil {
+			if ak, ok := it.meta["__affinity_key__"].(string); ok && ak != "" {
+				info.affinityKey, info.hasAffinity = ak, true
+			}
+		}
+		if logBlockHashes {
+			info.blockHashes, info.hasBlocks = blocks, true
+		}
+		q.kv.recordRouting(it.reqID, info)
 	}
 
 	// Affinity: record where each keyed conversation was dispatched so

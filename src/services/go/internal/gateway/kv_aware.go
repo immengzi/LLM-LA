@@ -18,7 +18,27 @@ type kvAware struct {
 	mu          sync.RWMutex
 	reqBlocks   map[string][]string
 	blockOwners map[string]map[string]bool
+
+	// routing captures the router's per-request decision at dispatch time,
+	// independent of the TRACE system, so the /latency_log ring can be enriched
+	// at completion time. Bounded FIFO so timed-out / never-completed requests
+	// cannot leak memory. Mirrors _REQ_ROUTING in kv_aware.py.
+	routing      map[string]routingInfo
+	routingOrder []string
 }
+
+// routingInfo mirrors the dict stored by record_routing in kv_aware.py.
+type routingInfo struct {
+	endpoint    string
+	kvHitsLen   int
+	totalBlocks int
+	affinityKey string
+	hasAffinity bool
+	blockHashes []string
+	hasBlocks   bool
+}
+
+const routingMax = 8192
 
 // NewKVAware constructs the shared KV-aware state (exported for main wiring).
 func NewKVAware() *kvAware { return newKVAware() }
@@ -27,7 +47,41 @@ func newKVAware() *kvAware {
 	return &kvAware{
 		reqBlocks:   make(map[string][]string),
 		blockOwners: make(map[string]map[string]bool),
+		routing:     make(map[string]routingInfo),
 	}
+}
+
+// recordRouting captures the router's per-request decision at dispatch time.
+// Mirrors record_routing in kv_aware.py (bounded, insertion-order eviction).
+func (k *kvAware) recordRouting(reqID string, info routingInfo) {
+	if info.hasBlocks {
+		cp := make([]string, len(info.blockHashes))
+		copy(cp, info.blockHashes)
+		info.blockHashes = cp
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, exists := k.routing[reqID]; !exists {
+		k.routingOrder = append(k.routingOrder, reqID)
+	}
+	k.routing[reqID] = info
+	for len(k.routingOrder) > routingMax {
+		oldest := k.routingOrder[0]
+		k.routingOrder = k.routingOrder[1:]
+		delete(k.routing, oldest)
+	}
+}
+
+// popRouting returns and removes the routing decision recorded for reqID.
+// Mirrors pop_routing in kv_aware.py.
+func (k *kvAware) popRouting(reqID string) (routingInfo, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	info, ok := k.routing[reqID]
+	if ok {
+		delete(k.routing, reqID)
+	}
+	return info, ok
 }
 
 func (k *kvAware) registerRequestBlocks(reqID string, blockHashes []string) {
