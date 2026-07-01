@@ -74,7 +74,7 @@ If `metrics.enabled` is set, a background collector scrapes Prometheus during th
 
 ## Analysis notebooks
 
-Post-experiment analysis lives in `src/jupyters/`. The notebooks read `logs.json` / `run_summary.json` / `metrics.jsonl` across runs to produce latency distributions, throughput curves, and routing-method comparisons. Figures are written under `src/jupyters/figures/`.
+Post-experiment analysis lives in `analysis-notebooks/`. The notebooks read `logs.json` / `run_summary.json` / `metrics.jsonl` across runs to produce latency distributions, throughput curves, and routing-method comparisons. Figures are written under `analysis-notebooks/figures/`.
 
 ## See also
 

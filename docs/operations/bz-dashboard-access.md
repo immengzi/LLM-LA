@@ -66,13 +66,13 @@ secret: `kubectl -n monitoring get secret <grafana> -o jsonpath='{.data.admin-pa
 
 ## Jupyter (analysis notebooks)
 
-The analysis notebooks live in `src/jupyters/` (e.g. `bz-analysis.ipynb`). Jupyter
+The analysis notebooks live in `analysis-notebooks/` (e.g. `bz-analysis.ipynb`). Jupyter
 runs as a **process on the server bound to localhost**, so tunnel to `localhost`
 (not a node IP):
 
 ```bash
 # on the server (BZ), from the repo:
-cd src/jupyters
+cd analysis-notebooks
 jupyter lab --no-browser --port 8888 --ip 127.0.0.1     # note the printed ?token=...
 
 # on your laptop:
