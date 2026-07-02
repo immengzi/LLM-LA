@@ -1,15 +1,15 @@
 clusters:
   yz:
     router_url: "http://10.50.156.65:30080"
-    experiments_root: "/mnt/nvme1/saeid/experiments"
+    experiments_root: "/home/data/saeid/experiments"
 
     hf_lmsys:
-      dataset_name: "/mnt/nvme1/saeid/datasets/lmsys_chat_1m"
-      tokenizer_name: "/mnt/nvme1/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+      dataset_name: "/home/data/saeid/datasets/lmsys_chat_1m"
+      tokenizer_name: "/home/models/GLM-5-w4a8-mtp-QuaRot"
 
     datasets:
       codeflowbench:
-        dataset_name: "/mnt/nvme1/saeid/datasets/CodeFlowBench-2505"
+        dataset_name: "/home/data/saeid/datasets/CodeFlowBench-2505"
         tokenizer_name: "/home/models/MiniMax-M2.7-w8a8-QuaRot"
 
     metrics:
@@ -22,7 +22,7 @@ clusters:
       base_url: "http://10.50.156.65:30401"
 
     helm:
-      nfs_path: "/saeid/models/GLM-5-w4a8-mtp-QuaRot"
+      nfs_path: "/home/models/GLM-5-w4a8-mtp-QuaRot"
       model_host_path: "/home/models"
       mooncake_master_server_address: "10.50.156.106:50088"
       values:

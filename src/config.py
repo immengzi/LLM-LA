@@ -497,6 +497,19 @@ class HelmConfig:
     lmcache_enabled: bool = False
     lmcache_chunk_size: Optional[int] = None
     lmcache_max_local_cpu_size: Optional[int] = None
+    # LMCache backend mode: "mooncake" (default, 33/218 lineage) or "p2p"
+    # (142 lineage: engine-to-engine HCCL P2P + host-staging + lmcache_controller,
+    # no Mooncake). Any value != "p2p" keeps the historical Mooncake behavior.
+    lmcache_mode: str = "mooncake"
+    # P2P / host-staging knobs (only used when lmcache_mode == "p2p"). None => use
+    # the chart's values.yaml default (which matches the 142 reference).
+    lmcache_use_host_staging: Optional[bool] = None
+    lmcache_os_staging_bytes: Optional[int] = None
+    lmcache_p2p_controller_pull_url: Optional[str] = None
+    lmcache_p2p_controller_reply_url: Optional[str] = None
+    # lmcache_controller deployment (p2p mode). Image defaults to the chart's.
+    deploy_lmcache_controller: bool = True
+    lmcache_controller_image: Optional[str] = None
     # --------------------------------------------------------------------
 
     # ---- NDS (NVMe Direct Storage — P2P DMA for KV cache) ----
@@ -504,6 +517,11 @@ class HelmConfig:
     lmcache_nds_path: str = "/workspace/nds_kvcache"
     lmcache_nds_dev: str = "/dev/md0"
     lmcache_nds_size: int = 2048
+    # Optional per-role overrides for the xds/file_p2p binary path (some hosts
+    # stage the build at a different depth on leader vs worker). None => fall
+    # back to the chart's single nds xdsPath.
+    lmcache_nds_xds_path_leader: Optional[str] = None
+    lmcache_nds_xds_path_worker: Optional[str] = None
     # --------------------------------------------------------------------
 
     # ---- Image overrides (bypass registry rewrite — for local images) ----
@@ -696,7 +714,7 @@ def migrate_legacy_helm_to_models(h: HelmConfig) -> None:
 @dataclass
 class ClientConfig:
     switch_cluster: Optional[str] = None
-    experiments_root: str = "/mnt/nvme1/saeid/experiments"
+    experiments_root: str = "/home/data/saeid/experiments"
 
     router_url: str = "http://127.0.0.1:30080"
     total_requests: int = 50
@@ -761,6 +779,11 @@ class ClientConfig:
     # These are top-level so sweep_methods can pass them as --set to Helm.
     vllm_node_selector: Optional[dict] = None
     vllm_avoid_label: str = ""
+
+    # Optional per-role node pinning for the DP LeaderWorkerSet. None => fall
+    # back to vllm_node_selector (same selector for both roles).
+    vllm_leader_node_selector: Optional[dict] = None
+    vllm_worker_node_selector: Optional[dict] = None
 
     # Optional Claude-Code-style request injection (kept as a raw dict and read
     # by http_client._maybe_inject_claude_code_template). None/absent => disabled.
@@ -1042,6 +1065,10 @@ def load_config(path: str) -> ClientConfig:
     vllm_node_selector = raw.get("vllm_node_selector", None)
     vllm_avoid_label = str(raw.get("vllm_avoid_label", "") or "").strip()
 
+    # Optional per-role node pinning for the DP LeaderWorkerSet (top-level keys)
+    vllm_leader_node_selector = raw.get("vllm_leader_node_selector", None)
+    vllm_worker_node_selector = raw.get("vllm_worker_node_selector", None)
+
     return ClientConfig(
         switch_cluster=switch_cluster,
         experiments_root=experiments_root,
@@ -1069,5 +1096,7 @@ def load_config(path: str) -> ClientConfig:
         helm=helm,
         vllm_node_selector=vllm_node_selector,
         vllm_avoid_label=vllm_avoid_label,
+        vllm_leader_node_selector=vllm_leader_node_selector,
+        vllm_worker_node_selector=vllm_worker_node_selector,
         claude_code_injection=claude_code_injection,
     )

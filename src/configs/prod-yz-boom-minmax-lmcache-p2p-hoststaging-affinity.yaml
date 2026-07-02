@@ -1,0 +1,214 @@
+# prod + ROUTER KEY AFFINITY: MiniMax-M2.7 — BooM + LLM-LA (router), DP2 +
+# LMCache in **P2P / host-staging mode** (the direct142 design). Router
+# conversation key-affinity enabled so all turns of a chat stay on the same vLLM
+# pod for prefix-cache reuse. Router routing = affinity ONLY, HARD affinity mode.
+#
+# This is the 142 lineage (NOT the 33/218 Mooncake lineage):
+#   - LMCache connector = LMCacheAscendConnector (native, no Mooncake remote store)
+#   - engine-to-engine KV sharing over HCCL P2P (transfer_channel: hccl)
+#   - HOST-STAGING one-sided reads: register ONE bounded 8 GiB pinned arena instead
+#     of the full CPU KV pool. This sidesteps the >10 GB device-registration ceiling
+#     that crashes the worker on first KV save (our recurring "gpu size" failure).
+#   - coordination via a standalone lmcache_controller (NOT the Mooncake master)
+#   - runs the new image lmcache-ascend:hccl-p2p
+# See docs/internal/lmcache-p2p-host-staging.md +
+#     142/ANALYSIS_kv_cache_drop.md.
+#
+# Differences vs prod-yz-boom-minmax-lmcache-local-hq-affinity.yaml:
+#   - lmcache_mode: mooncake -> p2p
+#   - Mooncake OFF entirely (no master); coordinator = lmcache_controller
+#   - host-staging ON (8 GiB arena)
+#   - NDS dropped (142 uses pure P2P/host-staging, no NDS spill)
+#   - image -> lmcache-ascend:hccl-p2p
+#   - max_local_cpu_size 90 -> 100 (matches 142; host RAM budget still safe)
+#
+# Pre-requisites on each engine node before deploying:
+#   sysctl -w vm.swappiness=0
+#   sysctl -w kernel.numa_balancing=0
+# And label the DP leader/worker nodes (same as the local-hq config):
+#   kubectl label node node7 vllm-role=leader --overwrite   # 7.150.6.33
+#   kubectl label node node1 vllm-role=leader --overwrite   # 7.150.1.218
+#   kubectl label node node8 vllm-role=worker --overwrite   # 7.150.0.37
+#   kubectl label node node2 vllm-role=worker --overwrite   # 7.150.5.207
+
+switch_cluster: yz
+backend: "boom"
+
+vllm_leader_node_selector: { vllm-role: leader }
+vllm_worker_node_selector: { vllm-role: worker }
+
+router_url: "http://10.50.156.65:30080"
+total_requests: 10
+prompt_source: "hf-lmsys"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_name: "/home/data/saeid/datasets/lmsys_chat_1m"
+  split: "train"
+  tokenizer_name: "/home/models/MiniMax-M2.7-w8a8-QuaRot"
+  streaming: true
+  min_input_tokens: 1
+  max_input_tokens: 10000000
+  repeat_each: 1
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 1
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  max_tokens: 8192
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+  use_dataset_output_len: false
+
+output_log_mode: "summary"
+print_trace: false
+
+metrics:
+  enabled: true
+  prometheus_base_url: "http://10.50.156.65:31190"
+  scrape_interval_s: 1.0
+  window_s: 3.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+transport:
+  mode: "async_pubsub"
+  submit_path: "/submit"
+  results_zmq: "tcp://10.50.156.65:30559"
+  topic: "results"
+  run_id: null
+  idle_timeout_s: 1000.0
+  idle_zero_running_s: 10.0
+
+boom:
+  base_url: "http://10.50.156.65:30401"
+  chat_path: "/v1/chat/completions"
+  model: "served-model-minmax"
+  api_key: "sk-boom-master"
+  timeout_s: 10000.0
+  stream: true
+
+helm:
+  boom_claude_aliases: true
+  boom_max_inflight: 1000
+  router_api_key: "ZhongRuanChuangXin!"
+
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 1
+
+  # Router routing = affinity only, HARD mode (time-bounded pin).
+  router_strategy: "affinity"
+  router_len_aware: true
+  router_len_policy: "short_first"
+  router_log_block_hashes: true
+  router_measure_prefix: true
+  router_affinity_mode: "hard"
+
+  expose_per_pod: true
+
+  nfs_path: "/home/models/MiniMax-M2.7-w8a8-QuaRot"
+  model_host_path: "/home/models"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+  sidecar_prefetch: 2
+
+  # --- Mooncake: OFF. 142 has no remote store; coordination is the controller. ---
+  mooncake_enabled: false
+  deploy_mooncake_master: false
+
+  # --- LMCache: P2P / host-staging mode (142) ---
+  lmcache_enabled: true
+  lmcache_mode: "p2p"
+  lmcache_chunk_size: 512
+  lmcache_max_local_cpu_size: 100   # matches 142; 8 TP x 100 GiB = ~800 GiB of 1509
+
+  # Host-staging: register ONE bounded arena (not the full pool) -> avoids the
+  # >10 GB device-registration crash. 8 GiB matches the 142 reference.
+  lmcache_use_host_staging: true
+  lmcache_os_staging_bytes: 8589934592   # 8 GiB
+
+  # lmcache_controller (P2P lookup directory) — pinned to a leader node so its
+  # host IP is stable. Engines dial these URLs. node7 = 7.150.6.33 (a leader).
+  lmcache_p2p_controller_pull_url: "7.150.6.33:9800"
+  lmcache_p2p_controller_reply_url: "7.150.6.33:9900"
+  deploy_lmcache_controller: true
+  # Image the p2p engines AND the controller run. Pushed to the local registry;
+  # using the reg.local:32000 prefix (same registry as 127.0.0.1:32000) to match
+  # the working pull convention. Switch to 127.0.0.1:32000/... if the node's
+  # kubelet only resolves that form.
+  lmcache_controller_image: "reg.local:32000/lmcache-ascend:hccl-p2p"
+
+  # NDS dropped in p2p mode (142 uses pure P2P/host-staging, no NDS spill).
+  lmcache_nds_enabled: false
+
+  # --- vLLM flags ---
+  dtype: "bfloat16"
+  ascend_enable_flashcomm1: true
+  scheduler_cls: "lsched.lsched_vllm.LSchedVLLMAdapter"
+  model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":16}'
+
+  # New P2P image for the vLLM engine pods (see note above).
+  vllm_image: "reg.local:32000/lmcache-ascend:hccl-p2p"
+
+  # Pin the controller pod to the node whose IP is in controller_pull_url.
+  values:
+    lmcacheController.nodeName: "node7"
+
+  models:
+    - name: minimax-m2
+      servedModelName: served-model-minmax
+      replicas: 2
+      streamingMode: true
+      modelSubPath: MiniMax-M2.7-w8a8-QuaRot
+      tensorParallelSize: 8
+      # 32 matches the 142 reference (--max-num-seqs 32). Host-staging is the real
+      # fix for the memory-registration crash, so we don't need to cut concurrency.
+      batchSize: 32
+      sidecarPrefetch: 2
+      dataParallel:
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 8888
+        hcclBuffSize: 1024
+        ompNumThreads: 16
+        pairTopologyKey: roce-pair
+      vllm:
+        gpuMemoryUtilization: 0.92
+        dtype: bfloat16
+        enableExpertParallel: true
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 32768
+        enablePrefixCaching: true
+        enablePromptTokensDetails: true
+        toolCallParser: minimax_m2
+        reasoningParser: minimax_m2_append_think
+        schedulerCls: "lsched.lsched_vllm.LSchedVLLMAdapter"
+        modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
+        ascendEnableFlashcomm1: true

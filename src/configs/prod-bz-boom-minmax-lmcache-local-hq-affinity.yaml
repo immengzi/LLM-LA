@@ -1,0 +1,219 @@
+# prod + ROUTER KEY AFFINITY: MiniMax-M2.7 — BooM + LLM-LA (router), DP2 +
+# LMCache, BZ LOCAL-cache-first. Router conversation key-affinity enabled so all
+# turns of a chat stay on the same vLLM pod for prefix-cache reuse.
+#
+# BZ equivalent of prod-yz-boom-minmax-lmcache-local-hq-affinity.yaml:
+#   - switch_cluster: bz (BZ deployment defaults, paths, IPs, image)
+#   - LMCache with a LARGE local CPU cache, Mooncake remote store OFF
+#   - NO NDS  (BZ nodes don't have the /dev/md0 NVMe P2P setup that YZ has)
+#   - router routing = affinity only, HARD mode (time-bounded pin)
+#
+# Why (see 142/ANALYSIS_kv_cache_drop.md + docs/operations/disaster-recovery.md §11):
+#   Under peak load the shared Mooncake remote store saturated and dropped ~46% of
+#   KV writes, collapsing prefix-cache hit rate. A big local CPU cache holds the
+#   working set in fast host RAM instead.
+#
+# TWO BZ-SPECIFIC CAVEATS — read before deploying:
+#   1. IMAGE: this needs an image with lmcache + lmcache_ascend installed. The BZ
+#      prod image today is vllm-ascend:v0.18.0rc1-openeuler (no LMCache). Point
+#      vllm_image at an LMCache-capable image (e.g. the minimax27:selfcontained
+#      build used on YZ, rebuilt/pushed for BZ) or install LMCache into the BZ image.
+#   2. NO CROSS-ENGINE SHARING: with both Mooncake OFF and NDS absent, each TP
+#      worker only has its OWN local cache — there is no cross-replica/DP KV
+#      sharing (YZ gets that from NDS/P2P). This is why router key-affinity below
+#      matters even more here: it keeps a conversation's repeats on the same engine
+#      so they hit that engine's local cache.
+#
+# RAM: local tier lives in HOST RAM, per TP worker. Size vs BZ node RAM:
+#   8 TP workers x max_local_cpu_size must fit with ~15-20% OS headroom.
+#   VERIFY BZ node RAM (`free -g`) before trusting 128 GiB; lower if nodes are
+#   smaller than the YZ 1.5 TB machines.
+#
+# Pre-requisite: run on each worker node before deploying:
+#   sysctl -w vm.swappiness=0
+#   sysctl -w kernel.numa_balancing=0
+
+switch_cluster: bz
+backend: "boom"
+
+total_requests: 10
+prompt_source: "hf-lmsys"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_name: "/data/gateway/gateway/data/lmsys_conversations_hf"
+  split: "train"
+  tokenizer_name: "/data/models/MiniMax-M2.7-w8a8-QuaRot"
+  streaming: true
+  min_input_tokens: 1
+  max_input_tokens: 10000000
+  repeat_each: 1
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 3
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  max_tokens: 8192
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+  use_dataset_output_len: false
+
+output_log_mode: "summary"
+print_trace: false
+
+metrics:
+  enabled: true
+  scrape_interval_s: 1.0
+  window_s: 3.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+transport:
+  mode: "async_pubsub"
+  submit_path: "/submit"
+  topic: "results"
+  run_id: null
+  idle_timeout_s: 1000.0
+  idle_zero_running_s: 10.0
+
+boom:
+  chat_path: "/v1/chat/completions"
+  model: "served-model-minmax"
+  api_key: "sk-boom-master"
+  timeout_s: 10000.0
+  stream: true
+
+helm:
+  boom_claude_aliases: true
+  boom_max_inflight: 1000
+  router_api_key: "ZhongRuanChuangXin!"
+
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 1
+
+  # Unified routing-strategy selector (overrides router_kv_aware/router_affinity_*).
+  # Uncomment exactly ONE to switch modes:
+  #   none     -> prefix off, affinity off (baseline)
+  #   prefix   -> prefix (KV-aware) only
+  #   affinity -> conversation key-affinity only
+  #   both     -> prefix + affinity
+  # router_strategy: "none"
+  # router_strategy: "prefix"
+  router_strategy: "affinity"
+  # router_strategy: "both"
+  router_len_aware: true
+  router_len_policy: "short_first"
+  # Log the FULL per-request prefix block-hash list into /latency_log ->
+  # router_logs.json + logs.json (block_hashes field). Hit counts always logged.
+  router_log_block_hashes: true
+  # Measure prefix-hit counts for logging even when KV routing is off, so
+  # kv_hits_len/total_blocks/kv_hit are always populated.
+  router_measure_prefix: true
+  # Hard affinity = time-bounded pin (not just a preference), so conversation turns
+  # stay on one pod even under load. Critical on BZ: no cross-engine sharing
+  # (Mooncake off, no NDS — caveat 2), so a conversation must stay on the engine
+  # that already holds its local cache.
+  router_affinity_mode: "hard"
+
+  expose_per_pod: true
+
+  nfs_path: "/data/models/MiniMax-M2.7-w8a8-QuaRot"
+  model_host_path: "/data/models"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+  sidecar_prefetch: 2
+
+  # --- Mooncake remote KV store: DISABLED ---
+  # Dropped so its RAM goes to the local cache. Fallback: if you need cross-engine
+  # sharing, re-enable the master as a small coordinator (mooncake_enabled: true,
+  # deploy_mooncake_master: true, mooncake_global_segment_size: ~10 GiB) and lower
+  # lmcache_max_local_cpu_size to fit RAM.
+  mooncake_enabled: false
+  deploy_mooncake_master: false
+  mooncake_master_port: 50088
+  mooncake_master_server_address: "192.168.0.42:50088"
+  mooncake_global_segment_size: 140000000000
+  mooncake_eviction_high_watermark: 0.9
+  mooncake_eviction_ratio: 0.1
+  mooncake_ascend_buffer_pool: "4:8"
+  mooncake_lookup_rpc_port: "10010"
+  mooncake_host_network: true
+
+  # --- LMCache: large LOCAL CPU cache (no remote, no NDS on BZ) ---
+  lmcache_enabled: true
+  lmcache_chunk_size: 512
+  lmcache_max_local_cpu_size: 128   # GiB per TP worker — VERIFY vs BZ node RAM
+  # NDS intentionally omitted: BZ nodes have no /dev/md0 NVMe P2P device.
+
+  # --- vLLM flags retained from the MiniMax/HQ template ---
+  dtype: "bfloat16"
+  ascend_enable_flashcomm1: true
+  scheduler_cls: "lsched.lsched_vllm.LSchedVLLMAdapter"
+  model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":16}'
+
+  # NOTE: must be an LMCache-capable image (see caveat 1 above).
+  vllm_image: "reg.local:32000/minimax27:selfcontained"
+  mooncake_master_image: "reg.local:32000/minimax27:selfcontained"
+
+  models:
+    - name: minimax-m2
+      servedModelName: served-model-minmax
+      replicas: 2
+      streamingMode: true
+      modelSubPath: MiniMax-M2.7-w8a8-QuaRot
+      tensorParallelSize: 8
+      batchSize: 16
+      sidecarPrefetch: 2
+      dataParallel:
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 8888
+        pairTopologyKey: roce-pair
+        hcclBuffSize: 1024
+        ompNumThreads: 16
+      vllm:
+        gpuMemoryUtilization: 0.92
+        dtype: bfloat16
+        enableExpertParallel: true
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 32768
+        # V1 enables prefix caching by default with near-zero overhead.
+        enablePrefixCaching: true
+        # HQ request: emit per-request cached-token counts so the gateway can
+        # report prefix-cache hit rate (--enable-prompt-tokens-details).
+        enablePromptTokensDetails: true
+        toolCallParser: minimax_m2
+        reasoningParser: minimax_m2_append_think
+        schedulerCls: "lsched.lsched_vllm.LSchedVLLMAdapter"
+        modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
+        ascendEnableFlashcomm1: true
+
+  values:
+    pin.nodeName: "k8s-worker1"

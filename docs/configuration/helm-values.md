@@ -82,6 +82,25 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 | `pin.tolerations` | control-plane/master | Allow scheduling on tainted control-plane nodes |
 | `vllm.avoidLabelValue` | `vllm` | Nodes labelled `avoid=<value>` are excluded from vLLM scheduling |
 | `vllm.nodeSelector` | (template-only; no `values.yaml` default) | Optional positive node selector for vLLM pods |
+| `vllm.leaderNodeSelector` | `{}` | Opt-in per-role selector for the DP LeaderWorkerSet **leader**; empty falls back to `vllm.nodeSelector` |
+| `vllm.workerNodeSelector` | `{}` | Opt-in per-role selector for the DP **worker**; empty falls back to `vllm.nodeSelector` |
+
+### Per-role node pinning (DP leader vs worker)
+
+By default the DP leader and worker share `vllm.nodeSelector`. For the niche case
+where the leader and worker must land on specific, distinct nodes (e.g. so the
+NDS `file_p2p` host paths line up per role), set the two opt-in selectors. Both
+default to `{}` and fall back to `vllm.nodeSelector`, so existing configs render
+identically. The client-config keys are `vllm_leader_node_selector` /
+`vllm_worker_node_selector` (top-level). Label the nodes first:
+
+```bash
+kubectl label node <leaderNode> vllm-role=leader --overwrite
+kubectl label node <workerNode> vllm-role=worker --overwrite
+```
+
+Only the DP (LeaderWorkerSet) path honors these; the non-DP single Deployment
+keeps using `vllm.nodeSelector`.
 
 ### Shadow deployments (running prod + shadow side by side)
 
@@ -186,6 +205,53 @@ Optional cross-node KV transfer. Gated on `mooncake.enabled` only. See [mooncake
 | `mooncake.masterServerAddress` | `10.50.156.106:50088` | Master address (override per cluster) |
 | `lmcache.enabled` | `false` | Wrap Mooncake with LMCache connector (requires `mooncake.enabled`) |
 | `lmcache.nds.enabled` | `false` | NVMe Direct Storage P2P DMA (needs `p2p_dev.ko`) |
+| `lmcache.nds.xdsPath` | `/workspace/qyf/xds/xds/file_p2p` | Host path to the `file_p2p` xds build (mounted + on `PYTHONPATH`) |
+| `lmcache.nds.xdsPathLeader` | `""` | Opt-in per-role override of `xdsPath` for the DP **leader**; empty falls back to `xdsPath` |
+| `lmcache.nds.xdsPathWorker` | `""` | Opt-in per-role override of `xdsPath` for the DP **worker**; empty falls back to `xdsPath` |
+
+The per-role `xdsPath*` knobs exist because some hosts stage the `file_p2p`
+build at a different depth on the leader vs the worker (e.g. master at
+`/workspace/qyf/xds/xds`, worker one level up at `/workspace/qyf/xds`). They are
+opt-in via the client-config `helm:` keys `lmcache_nds_xds_path_leader` /
+`lmcache_nds_xds_path_worker`; when empty both roles use the single `xdsPath`.
+Only the DP path uses them; the non-DP single Deployment keeps `xdsPath`.
+
+### LMCache backend mode: `mooncake` vs `p2p` (`lmcache.mode`)
+
+`lmcache.mode` selects how LMCache shares KV across engines. It defaults to
+`mooncake` — the historical **33/218 lineage** (LMCacheAscendConnectorV1Dynamic
++ Mooncake remote store + `P2PHANDSHAKE`). Any value other than `"p2p"` renders
+the exact same config as before, so existing configs are unaffected.
+
+`lmcache.mode: "p2p"` is the **142 lineage**: LMCacheAscendConnector (native) +
+engine-to-engine HCCL P2P + **host-staging** + a standalone `lmcache_controller`,
+with **no Mooncake**. The key win is `use_host_staging`: the producer registers
+one bounded pinned arena (`os_staging_bytes`, default 8 GiB) instead of the full
+CPU KV pool, which sidesteps the ~10 GB device-registration ceiling that
+otherwise crashes the worker on first KV save.
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `lmcache.mode` | `mooncake` | `mooncake` (33/218) or `p2p` (142 host-staging) |
+| `lmcache.p2p.tpSize` | `8` | Length of the per-TP port arrays |
+| `lmcache.p2p.transferChannel` | `hccl` | Must be `hccl` for host-staging |
+| `lmcache.p2p.useHostStaging` | `true` | Register one bounded arena, not the full pool |
+| `lmcache.p2p.osStagingBytes` | `8589934592` | Arena size (8 GiB); keep below the ~10 GB reg. ceiling |
+| `lmcache.p2p.npuBufferSize` | `134217728` | `p2p_npu_buffer_size` (128 MB ping-pong buffer) |
+| `lmcache.p2p.initPortBase` / `lookupPortBase` / `workerPortBase` | `9950` / `9970` / `9940` | Per-TP port array bases |
+| `lmcache.p2p.controllerPullUrl` / `controllerReplyUrl` | `""` | `host:port` of the `lmcache_controller` the engines dial |
+| `lmcacheController.image` | `127.0.0.1:32000/lmcache-ascend:hccl-p2p` | Image for both p2p engines and the controller |
+| `lmcacheController.port` / `pullPort` / `replyPort` | `9000` / `9800` / `9900` | Controller listen ports |
+| `lmcacheController.nodeName` | `""` | Pin the controller to a fixed node so its IP is stable |
+| `deploy.lmcacheController` | `true` | Deploy the controller when `lmcache.mode == "p2p"` |
+
+Client-config `helm:` keys: `lmcache_mode`, `lmcache_use_host_staging`,
+`lmcache_os_staging_bytes`, `lmcache_p2p_controller_pull_url` /
+`lmcache_p2p_controller_reply_url`, `deploy_lmcache_controller`,
+`lmcache_controller_image`. Per-pod `p2p_host` and `lmcache_instance_id` are
+substituted at runtime from `NODE_IP` / `POD_NAME`, so a single ConfigMap serves
+all pods. In `p2p` mode the sweep forces `deploy.mooncakeMaster=false`. See
+[the P2P host-staging reference](../internal/lmcache-p2p-host-staging.md).
 
 ## Component toggles (`deploy.*`)
 

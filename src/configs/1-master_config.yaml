@@ -12,6 +12,13 @@
 # prod-bz-boom-minmax-mooncake:
 #   - pull
 
+# BZ LOCAL-cache-first + router key-affinity: big local CPU cache (128 GiB/worker),
+# Mooncake OFF, no NDS. BZ port of the local-hq fix (see disaster-recovery.md §11).
+# NOTE: needs an LMCache-capable image and no cross-engine KV sharing — see the
+# config header.
+# prod-bz-boom-minmax-lmcache-local-hq-affinity:
+#   - pull
+
 # ── BZ 4-NODE AFFINITY CHECK: DP1 x 4 replicas, NO Mooncake (worker2 back) ──
 # k8s-worker2 networking is fixed and the node is un-tainted, so the 4 replicas
 # land one-per-node (master, worker, worker1, worker2) — quick test that worker2
@@ -30,8 +37,8 @@
 # ── BZ 4-NODE DP2 AFFINITY CHECK: DP2 x 2 replicas, NO Mooncake ──
 # dataParallel enabled (2 DP ranks/replica, sizeLocal=1, RoCE-paired); replicas: 2
 # -> 2 replicas x 2 ranks = 4 nodes. Mooncake off; hard conversation affinity.
-prod-bz-boom-minmax-multiturn-affinity-dp2:
-  - pull
+# prod-bz-boom-minmax-multiturn-affinity-dp2:
+#   - pull
 
 # ── Full multi-turn router_strategy sweep (DP2 + Mooncake) ──
 # Re-enable once k8s-worker2 networking is fixed and the node is un-tainted:
@@ -74,6 +81,25 @@ prod-bz-boom-minmax-multiturn-affinity-dp2:
 # prod-yz-boom-minmax-lmcache-hq-affinity:
 #   - pull
 
+# Same as lmcache-hq-affinity but LOCAL-cache-first: big local CPU cache (128
+# GiB/worker), Mooncake remote store OFF, NDS/P2P + router key-affinity kept on.
+# Runs 2 DP groups pinned per-role (vllm-role=leader/worker) with per-role NDS
+# xds paths. Fixes the peak-load prefix-cache collapse (see disaster-recovery.md
+# §11 + 142/ANALYSIS_kv_cache_drop.md). ACTIVE — intended deploy.
+prod-yz-boom-minmax-lmcache-local-hq-affinity:
+  - pull
+
+# 142 lineage: LMCache P2P + HOST-STAGING (bounded 8 GiB registered arena ->
+# avoids the >10 GB device-registration crash), lmcache_controller instead of
+# Mooncake, image lmcache-ascend:hccl-p2p. NO Mooncake, NO NDS. See
+# docs/internal/lmcache-p2p-host-staging.md. Enable ONE of these instead of
+# the local-hq-affinity above once the controller node/IP are confirmed.
+# prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity:
+#   - pull
+
+# prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
+#   - pull
+
 # ── YZ shadow pool (parallel to prod, release/ns vllm-shadow) ──
 # prod-yz-shadow-boom-minmax-lmcache-hq:
 #   - pull
@@ -85,6 +111,10 @@ prod-bz-boom-minmax-multiturn-affinity-dp2:
 #   - pull
 
 # prod-yz-shadow-boom-minmax-lmcache-hq-go-affinity:
+#   - pull
+
+# Shadow of the 142 P2P + host-staging replica (set node4 controller IP first).
+# prod-yz-shadow-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
 
 # prod-yz-shadow-autoscaling-qwen:
