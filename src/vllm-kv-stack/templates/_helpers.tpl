@@ -302,6 +302,10 @@ Each flag line ends with ' \' for bash continuation.
 {{- else }}
 --no-enable-prefix-caching \
 {{- end -}}
+{{- $eptd := .mv.enablePromptTokensDetails | default .gv.enablePromptTokensDetails -}}
+{{- if $eptd }}
+--enable-prompt-tokens-details \
+{{- end -}}
 {{- $gpuMem := .mv.gpuMemoryUtilization | default .gv.gpuMemoryUtilization -}}
 {{- if $gpuMem }}
 --gpu-memory-utilization {{ $gpuMem }} \

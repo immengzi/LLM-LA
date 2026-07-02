@@ -1009,6 +1009,8 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         _port_offset = int(getattr(h, "port_offset", 0) or 0)
         _pin_node_override = str(getattr(h, "pin_node_name", "") or "").strip()
         _vllm_node_selector = getattr(cfg, "vllm_node_selector", None)
+        _vllm_leader_node_selector = getattr(cfg, "vllm_leader_node_selector", None)
+        _vllm_worker_node_selector = getattr(cfg, "vllm_worker_node_selector", None)
         _vllm_avoid_label = str(getattr(cfg, "vllm_avoid_label", "") or "").strip()
 
         click.echo(f"[sweep] release={release} namespace={namespace} portOffset={_port_offset}")
@@ -1084,6 +1086,12 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         if _vllm_node_selector and isinstance(_vllm_node_selector, dict):
             for k, v in _vllm_node_selector.items():
                 set_values[f"vllm.nodeSelector.{k}"] = str(v)
+        if _vllm_leader_node_selector and isinstance(_vllm_leader_node_selector, dict):
+            for k, v in _vllm_leader_node_selector.items():
+                set_values[f"vllm.leaderNodeSelector.{k}"] = str(v)
+        if _vllm_worker_node_selector and isinstance(_vllm_worker_node_selector, dict):
+            for k, v in _vllm_worker_node_selector.items():
+                set_values[f"vllm.workerNodeSelector.{k}"] = str(v)
 
         # ---- deploy component flags ----
         # Determine the requested routing mode for this job.
@@ -1235,15 +1243,23 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 f"hostNetwork={set_values['vllm.hostNetwork']}"
             )
 
-        # ---- LMCache toggle (wraps Mooncake for cross-replica KV coordination) ----
+        # ---- LMCache toggle ----
+        # LMCache uses the LMCacheAscendConnectorV1Dynamic connector, which does
+        # NOT require a Mooncake master. With mooncake_enabled=false it runs
+        # "local-cache-first": a large local CPU cache + NDS/P2P for cross-engine
+        # sharing and no Mooncake remote store (the direct142 design — see
+        # 142/ANALYSIS_kv_cache_drop.md + disaster-recovery.md §11). The lmcache
+        # config's remote mooncakestore URL simply stays inactive in that mode.
         lmcache_enabled = bool(getattr(h, "lmcache_enabled", False))
         if lmcache_enabled and not mooncake_enabled:
-            raise click.ClickException(
-                "lmcache_enabled=true requires mooncake_enabled=true "
-                "(lmcache uses mooncake master for KV coordination)"
+            click.echo(
+                "[sweep] NOTE: lmcache_enabled=true with mooncake_enabled=false — "
+                "local-cache-first mode (no Mooncake remote store; NDS/P2P for KV sharing)."
             )
         set_values["lmcache.enabled"] = lmcache_enabled
+        lmcache_mode = str(getattr(h, "lmcache_mode", "mooncake") or "mooncake").strip().lower()
         if lmcache_enabled:
+            set_values["lmcache.mode"] = lmcache_mode
             lmc_chunk = getattr(h, "lmcache_chunk_size", None)
             if lmc_chunk is not None:
                 set_values["lmcache.chunkSize"] = int(lmc_chunk)
@@ -1251,10 +1267,44 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             if lmc_cpu is not None:
                 set_values["lmcache.maxLocalCpuSize"] = int(lmc_cpu)
             click.echo(
-                f"[sweep] lmcache.enabled=true "
+                f"[sweep] lmcache.enabled=true mode={lmcache_mode} "
                 f"chunkSize={set_values.get('lmcache.chunkSize', 'default')} "
                 f"maxLocalCpuSize={set_values.get('lmcache.maxLocalCpuSize', 'default')}"
             )
+
+            # ---- LMCache P2P / host-staging mode (142 lineage) ----
+            if lmcache_mode == "p2p":
+                _hs = getattr(h, "lmcache_use_host_staging", None)
+                if _hs is not None:
+                    set_values["lmcache.p2p.useHostStaging"] = bool(_hs)
+                _osb = getattr(h, "lmcache_os_staging_bytes", None)
+                if _osb is not None:
+                    set_values["lmcache.p2p.osStagingBytes"] = int(_osb)
+                _cpu = str(getattr(h, "lmcache_p2p_controller_pull_url", "") or "").strip()
+                if _cpu:
+                    set_values["lmcache.p2p.controllerPullUrl"] = _cpu
+                _cru = str(getattr(h, "lmcache_p2p_controller_reply_url", "") or "").strip()
+                if _cru:
+                    set_values["lmcache.p2p.controllerReplyUrl"] = _cru
+                set_values["deploy.lmcacheController"] = bool(
+                    getattr(h, "deploy_lmcache_controller", True)
+                )
+                _ci = str(getattr(h, "lmcache_controller_image", "") or "").strip()
+                if _ci:
+                    set_values["lmcacheController.image"] = _ci
+                # p2p mode never uses the Mooncake master (no remote store).
+                set_values["deploy.mooncakeMaster"] = False
+                if not _cpu or not _cru:
+                    click.echo(
+                        "[sweep] WARNING: lmcache.mode=p2p but controller pull/reply URL "
+                        "unset — engines won't find the lmcache_controller. Set "
+                        "lmcache_p2p_controller_pull_url / _reply_url in the config."
+                    )
+                click.echo(
+                    f"[sweep] lmcache.mode=p2p (142 host-staging): mooncake master OFF, "
+                    f"controller deploy={set_values['deploy.lmcacheController']} "
+                    f"pull={_cpu or '(UNSET)'} reply={_cru or '(UNSET)'}"
+                )
 
         # ---- NDS (NVMe Direct Storage — P2P DMA for KV cache) ----
         nds_enabled = bool(getattr(h, "lmcache_nds_enabled", False))
@@ -1269,9 +1319,17 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             nds_size = getattr(h, "lmcache_nds_size", None)
             if nds_size is not None:
                 set_values["lmcache.nds.size"] = int(nds_size)
+            nds_xds_leader = str(getattr(h, "lmcache_nds_xds_path_leader", "") or "").strip()
+            if nds_xds_leader:
+                set_values["lmcache.nds.xdsPathLeader"] = nds_xds_leader
+            nds_xds_worker = str(getattr(h, "lmcache_nds_xds_path_worker", "") or "").strip()
+            if nds_xds_worker:
+                set_values["lmcache.nds.xdsPathWorker"] = nds_xds_worker
             click.echo(
                 f"[sweep] lmcache.nds.enabled=true "
-                f"path={nds_path} dev={nds_dev} size={nds_size}"
+                f"path={nds_path} dev={nds_dev} size={nds_size} "
+                f"xdsPathLeader={nds_xds_leader or '(default)'} "
+                f"xdsPathWorker={nds_xds_worker or '(default)'}"
             )
 
         # ---- New vLLM fields (dtype, schedulerCls, modelLoaderExtraConfig, etc.) ----

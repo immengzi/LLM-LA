@@ -107,3 +107,5 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | [internal/open-sourcing-v01.md](internal/open-sourcing-v01.md) | Go v0.1 runtime/migration design |
 | [internal/boom-integration-notes.md](internal/boom-integration-notes.md) | Dev record: adding `backend: boom` to the framework |
 | [internal/stability-test-findings.md](internal/stability-test-findings.md) | Incident report: 24h stability test |
+| [internal/kv-cache-hit-rate-collapse.md](internal/kv-cache-hit-rate-collapse.md) | Investigation: prefix-cache hit-rate collapse under peak load |
+| [internal/lmcache-p2p-host-staging.md](internal/lmcache-p2p-host-staging.md) | As-built reference: LMCache P2P + host-staging mode (the "direct142" replica) |

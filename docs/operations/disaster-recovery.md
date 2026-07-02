@@ -28,6 +28,7 @@ referenced from here rather than duplicated.
 | Router queue growing, no dispatch | CNI overlay / DNS / dead sidecars | [§7](#7-router-queue-buildup--stuck-dispatch) |
 | `reg.local:32000` pulls fail, registry evicted | Registry on disk-pressure node | [§8](#8-registry-eviction) |
 | Pods on specific nodes can't resolve DNS | clusterDNS / kube-proxy / Calico | [§9](#9-dns--cni-overlay-failure) |
+| Prefix-cache hit rate collapses at peak, TTFT/E2E spike | KV saturation + full/lossy remote KV tier | [§11](#11-prefix-cache-hit-rate-collapse-under-peak-load) |
 
 ---
 
@@ -488,6 +489,119 @@ kubectl cordon <node-name>
 - Monitor the `vLLM health check FAILED` log line or scrape the sidecar
   `/health` status from Prometheus to trigger alerts.
 - For disk-pressure scenarios, also follow [§1 Disk pressure](#1-disk-pressure).
+
+---
+
+## §11  Prefix-cache hit-rate collapse under peak load
+
+**Symptom:**
+- Under high load, the prefix-cache hit rate on our backends drops sharply
+  (observed `llmla1-direct65` → ~8%, `llmla2-direct65` → ~19%), while a
+  well-behaved reference backend (`direct142`) stays flat (~64–74%).
+- TTFT and end-to-end latency spike during the same peak windows.
+- The drop is time-correlated with load, not a step change: hit rate is fine
+  early, then decays as concurrency ramps up, and recovers when load falls.
+- vLLM engine stats during peak: `GPU KV cache usage 93–99%`,
+  `Waiting: 7–14 reqs`, growing `num_preemptions_total`,
+  built-in `Prefix cache hit rate: ~0.4–1.6%`.
+
+**Not the cause (ruled out):** router **kv-aware / affinity** routing. We
+deployed kv-aware routing to fix this and it behaved correctly until the next
+peak, where the same collapse recurred. The problem is the **KV-cache backend**,
+not request routing.
+
+**Root cause:**
+Two coupled failures feed each other into a congestion collapse:
+1. **GPU KV saturation.** At peak the GPU KV cache is pinned at ~99% with a
+   standing queue. vLLM cannot retain its built-in prefix blocks (they are
+   evicted immediately for active requests), so the built-in prefix hit rate
+   falls to ~0%.
+2. **A full, lossy remote KV tier.** We then fall back to the LMCache remote
+   store (Mooncake). Ours was 88% full at its `0.9` eviction watermark and was
+   **dropping ~46% of KV writes** (`PutStart Item≈356243/656176`). The pool is
+   built from our own workers (each of the 4 pods × TP8 = 32 clients donates
+   `global_segment_size` = 75 GiB host RAM ≈ 2.34 TB total). Hot prefixes are
+   evicted or never stored, so reuse decays as load grows. Remote retrievals are
+   also slow (~900 ms for ~2.24 GB), which holds KV blocks and worsens the queue.
+
+This diverged from the reference design: `direct142` uses a **large local CPU
+cache (100 GiB/engine) with no remote store**, plus **LMCache-native P2P**
+(`enable_p2p: true` + an `lmcache_controller` + host-staging; NDS off) between
+engines — `retrieve_hit_rate = 1.0`, zero slow retrievals, GPU KV ~24%, zero
+waiting. It never enters the spiral. Note our `P2PHANDSHAKE` is *Mooncake's*
+metadata server, not LMCache P2P (our `enable_p2p` is `false`) — so it is not
+the same mechanism, and it goes away when Mooncake is off.
+
+**Diagnosis:**
+
+```bash
+# 1. Live engine pressure — look for GPU KV ~99%, Waiting > 0, preemptions rising
+kubectl logs -n vllm <vllm-leader-pod> -c vllm --tail=200 \
+  | grep -E 'GPU KV cache usage|Waiting|Prefix cache hit rate'
+
+# Or straight from a pod's /metrics
+POD=$(kubectl get pods -n vllm --no-headers | awk '/vllm-minimax.*Running/{print $1;exit}')
+kubectl exec -n vllm "$POD" -c vllm -- sh -c \
+  'curl -s http://localhost:8200/metrics | grep -E "^vllm:(gpu_cache_usage_perc|num_requests_waiting|num_preemptions_total|prefix_cache)"'
+
+# 2. Remote KV store fill + write success (the smoking gun)
+MC=$(kubectl get pods -n vllm --no-headers | awk '/mooncake-master.*Running/{print $1;exit}')
+kubectl logs -n vllm "$MC" --tail=200 | grep 'Master Metrics:' | tail -1
+# Watch for: Mem Storage % near watermark, PutStart Item success ratio << 100%,
+#            large Eviction keys/size.
+
+# 3. Rendered LMCache config actually running in the pod
+kubectl exec -n vllm "$POD" -c vllm -- sh -c 'cat /tmp/lmcache_config.yaml'
+# Check: max_local_cpu_size, remote_url (mooncakestore://...), global_segment_size
+
+# 4. Per-node RAM headroom (local tier lives in HOST RAM)
+#    see 142/check_node_ram.sh in the repo for a full collector
+kubectl get nodes -o custom-columns=\
+'NODE:.metadata.name,CAP:.status.capacity.memory,ALLOC:.status.allocatable.memory'
+# and `free -g` on each engine node
+```
+
+**Fix:**
+Reclaim the Mooncake RAM into a large **local** CPU cache and rely on hard
+affinity to keep repeats on the engine that holds them. Ready-made config:
+`prod-yz-boom-minmax-lmcache-local-hq-affinity.yaml`.
+
+```bash
+# In the config's helm values:
+#   lmcache_max_local_cpu_size: 128     # was 50 (GiB per TP worker)
+#   mooncake_enabled: false             # drop the full/lossy remote store
+#   router_strategy: "affinity" + router_affinity_mode: "hard"  # pin repeats to one engine
+# Then redeploy and warm up.
+```
+
+NOTE: on the current Helm chart this is **local-cache-only** — we do NOT run
+LMCache-native P2P (`enable_p2p` is false; our `P2PHANDSHAKE` is Mooncake's and
+dies with it), so dropping Mooncake removes cross-engine sharing. Hard affinity
+compensates. Two known chart gaps: `13-lmcache-config.yaml` still emits
+`remote_url: mooncakestore://…` when Mooncake is off (make it conditional), and
+a true `direct142` P2P design needs additional chart work (see
+`docs/internal/kv-cache-hit-rate-collapse.md`).
+
+RAM budget (engine nodes are dedicated 1.5 TB machines): 8 workers × 128 GiB =
+~1024 GiB, leaving ~285 GiB free per node. Reclaims the ~600 GiB/node previously
+pinned in the Mooncake pool. Confirm free RAM per node before applying.
+
+If GPU KV is still tight after the cache change, cap admitted concurrency
+(`max_num_seqs` / `batchSize`) so admitted requests keep their prefix blocks
+instead of thrashing (see also [§6](#6-npu--memory-oom)).
+
+**Prevention:**
+- Alert when `num_requests_waiting > 0` sustained or `gpu_cache_usage_perc > 0.85`
+  — that is the knee before TTFT/E2E blow up (healthy reference sits at ~24%/0).
+- If Mooncake is kept, alert on `Mem Storage %` near the watermark and on
+  PutStart Item success ratio dropping below ~95%; size the pool so it is not
+  parked at its eviction watermark, and enable the SSD tier.
+- Enable `lmcache:*` Prometheus export on our engines (currently not exported) so
+  the per-tier local/P2P/remote hit breakdown is visible.
+- Only reintroduce a remote KV store when justified (many replicas, working set
+  exceeding per-node RAM, or prefill/decode disaggregation), and size it properly.
+- Full investigation report: [internal/kv-cache-hit-rate-collapse.md](../internal/kv-cache-hit-rate-collapse.md)
+  (raw evidence bundle in `142/`).
 
 ---
 

@@ -6,6 +6,42 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   lmcache_config.yaml: |
+{{- if eq .Values.lmcache.mode "p2p" }}
+{{- /* 142 lineage: LMCache-native P2P + host-staging, no Mooncake remote store.
+       __P2P_HOST__ and __LMCACHE_INSTANCE_ID__ are substituted per-pod at runtime
+       (NODE_IP / POD_NAME) by the init wrapper in 40-vllm-unified.yaml. */ -}}
+{{- $tp := int .Values.lmcache.p2p.tpSize }}
+{{- $initBase := int .Values.lmcache.p2p.initPortBase }}
+{{- $lookupBase := int .Values.lmcache.p2p.lookupPortBase }}
+{{- $workerBase := int .Values.lmcache.p2p.workerPortBase }}
+    chunk_size: {{ .Values.lmcache.chunkSize }}
+    local_cpu: {{ .Values.lmcache.localCpu }}
+    max_local_cpu_size: {{ .Values.lmcache.maxLocalCpuSize }}
+    enable_async_loading: {{ .Values.lmcache.enableAsyncLoading }}
+    save_only_first_rank: {{ .Values.lmcache.p2p.saveOnlyFirstRank }}
+    store_async: {{ .Values.lmcache.p2p.storeAsync }}
+    internal_api_server_enabled: {{ .Values.lmcache.internalApiServerEnabled }}
+    internal_api_server_host: {{ .Values.lmcache.internalApiServerHost | quote }}
+    internal_api_server_port_start: {{ .Values.lmcache.internalApiServerPortStart }}
+    enable_p2p: True
+    p2p_host: "__P2P_HOST__"
+    p2p_init_ports: [{{ range $i := until $tp }}{{ if $i }}, {{ end }}{{ add $initBase $i }}{{ end }}]
+    p2p_lookup_ports: [{{ range $i := until $tp }}{{ if $i }}, {{ end }}{{ add $lookupBase $i }}{{ end }}]
+    transfer_channel: {{ .Values.lmcache.p2p.transferChannel | quote }}
+    p2p_use_npu: {{ .Values.lmcache.p2p.useNpu }}
+    p2p_pull_mode: {{ .Values.lmcache.p2p.pullMode }}
+    p2p_delay_pull: {{ .Values.lmcache.p2p.delayPull }}
+    p2p_npu_buffer_size: {{ .Values.lmcache.p2p.npuBufferSize | int64 }}
+    enable_controller: True
+    lmcache_instance_id: "__LMCACHE_INSTANCE_ID__"
+    controller_pull_url: {{ .Values.lmcache.p2p.controllerPullUrl | quote }}
+    controller_reply_url: {{ .Values.lmcache.p2p.controllerReplyUrl | quote }}
+    lmcache_worker_ports: [{{ range $i := until $tp }}{{ if $i }}, {{ end }}{{ add $workerBase $i }}{{ end }}]
+    extra_config:
+      lookup_backoff_time: {{ .Values.lmcache.p2p.lookupBackoffTime }}
+      use_host_staging: {{ .Values.lmcache.p2p.useHostStaging }}
+      os_staging_bytes: {{ .Values.lmcache.p2p.osStagingBytes | int64 }}
+{{- else }}
     local_cpu: {{ .Values.lmcache.localCpu }}
     remote_url: "mooncakestore://{{ .Values.mooncake.masterServerAddress }}/"
     max_local_cpu_size: {{ .Values.lmcache.maxLocalCpuSize }}
@@ -31,4 +67,5 @@ data:
       local_buffer_size: {{ printf "%.0f" (float64 .Values.lmcache.extraConfig.localBufferSize) }}
       mooncake_prefer_local_alloc: {{ .Values.lmcache.extraConfig.mooncakePreferLocalAlloc }}
       use_ascend_direct: {{ .Values.lmcache.extraConfig.useAscendDirect }}
+{{- end }}
 {{- end }}

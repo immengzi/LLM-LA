@@ -108,7 +108,8 @@ spec:
           - key: "node-role.kubernetes.io/master"
             operator: "Exists"
             effect: "NoSchedule"
-        {{- $ns := $.Values.vllm.nodeSelector | default (dict) }}
+        {{- $ns := $.Values.vllm.leaderNodeSelector | default $.Values.vllm.nodeSelector | default (dict) }}
+        {{- $xds := $.Values.lmcache.nds.xdsPathLeader | default $.Values.lmcache.nds.xdsPath }}
         {{- if $ns }}
         nodeSelector:
           {{- toYaml $ns | nindent 10 }}
@@ -190,11 +191,11 @@ spec:
                 export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
                 {{- end }}
                 {{- if $.Values.lmcache.enabled }}
-                sed "s/__LOCAL_HOSTNAME__/${NODE_IP}/" /etc/lmcache/lmcache_config.yaml > /tmp/lmcache_config.yaml
+                sed -e "s/__LOCAL_HOSTNAME__/${NODE_IP}/" -e "s/__P2P_HOST__/${NODE_IP}/" -e "s/__LMCACHE_INSTANCE_ID__/${POD_NAME}/" /etc/lmcache/lmcache_config.yaml > /tmp/lmcache_config.yaml
                 export LMCACHE_CONFIG_FILE="/tmp/lmcache_config.yaml"
                 {{- if $.Values.lmcache.nds.enabled }}
                 mkdir -p {{ $.Values.lmcache.nds.path }}
-                export PYTHONPATH="{{ $.Values.lmcache.nds.xdsPath }}:${PYTHONPATH:-}"
+                export PYTHONPATH="{{ $xds }}:${PYTHONPATH:-}"
                 {{- end }}
                 {{- end }}
 
@@ -217,7 +218,11 @@ spec:
                   --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@{{ $servedModelName }}"}'
                   {{- end }}
                   {{- if $.Values.lmcache.enabled }} \
+                  {{- if eq $.Values.lmcache.mode "p2p" }}
+                  --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}'
+                  {{- else }}
                   --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
+                  {{- end }}
                   {{- else if $.Values.mooncake.enabled }} \
                   --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"master_server_address":"{{ $.Values.mooncake.masterServerAddress }}","lookup_rpc_port":"{{ $.Values.mooncake.lookupRpcPort }}","backend":"mooncake"}}'
                   {{- end }}
@@ -280,7 +285,7 @@ spec:
               - name: p2p-device
                 mountPath: /dev/p2p_device
               - name: xds-file-p2p
-                mountPath: {{ $.Values.lmcache.nds.xdsPath }}
+                mountPath: {{ $xds }}
                 readOnly: true
               {{- end }}
               {{- end }}
@@ -448,7 +453,7 @@ spec:
               type: CharDevice
           - name: xds-file-p2p
             hostPath:
-              path: {{ $.Values.lmcache.nds.xdsPath }}
+              path: {{ $xds }}
               type: Directory
           {{- end }}
           {{- end }}
@@ -473,6 +478,8 @@ spec:
           - key: "node-role.kubernetes.io/master"
             operator: "Exists"
             effect: "NoSchedule"
+        {{- $ns = $.Values.vllm.workerNodeSelector | default $.Values.vllm.nodeSelector | default (dict) }}
+        {{- $xds = $.Values.lmcache.nds.xdsPathWorker | default $.Values.lmcache.nds.xdsPath }}
         {{- if $ns }}
         nodeSelector:
           {{- toYaml $ns | nindent 10 }}
@@ -574,11 +581,11 @@ spec:
                 export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
                 {{- end }}
                 {{- if $.Values.lmcache.enabled }}
-                sed "s/__LOCAL_HOSTNAME__/${NODE_IP}/" /etc/lmcache/lmcache_config.yaml > /tmp/lmcache_config.yaml
+                sed -e "s/__LOCAL_HOSTNAME__/${NODE_IP}/" -e "s/__P2P_HOST__/${NODE_IP}/" -e "s/__LMCACHE_INSTANCE_ID__/${POD_NAME}/" /etc/lmcache/lmcache_config.yaml > /tmp/lmcache_config.yaml
                 export LMCACHE_CONFIG_FILE="/tmp/lmcache_config.yaml"
                 {{- if $.Values.lmcache.nds.enabled }}
                 mkdir -p {{ $.Values.lmcache.nds.path }}
-                export PYTHONPATH="{{ $.Values.lmcache.nds.xdsPath }}:${PYTHONPATH:-}"
+                export PYTHONPATH="{{ $xds }}:${PYTHONPATH:-}"
                 {{- end }}
                 {{- end }}
 
@@ -598,7 +605,11 @@ spec:
                   --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@{{ $servedModelName }}"}' \
                   {{- end }}
                   {{- if $.Values.lmcache.enabled }}
+                  {{- if eq $.Values.lmcache.mode "p2p" }}
+                  --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}'
+                  {{- else }}
                   --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
+                  {{- end }}
                   {{- else if $.Values.mooncake.enabled }}
                   --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"master_server_address":"{{ $.Values.mooncake.masterServerAddress }}","lookup_rpc_port":"{{ $.Values.mooncake.lookupRpcPort }}","backend":"mooncake"}}'
                   {{- end }}
@@ -648,7 +659,7 @@ spec:
               - name: p2p-device
                 mountPath: /dev/p2p_device
               - name: xds-file-p2p
-                mountPath: {{ $.Values.lmcache.nds.xdsPath }}
+                mountPath: {{ $xds }}
                 readOnly: true
               {{- end }}
               {{- end }}
@@ -715,7 +726,7 @@ spec:
               type: CharDevice
           - name: xds-file-p2p
             hostPath:
-              path: {{ $.Values.lmcache.nds.xdsPath }}
+              path: {{ $xds }}
               type: Directory
           {{- end }}
           {{- end }}
@@ -766,6 +777,7 @@ spec:
           effect: "NoSchedule"
 
       {{- $ns := $.Values.vllm.nodeSelector | default (dict) }}
+      {{- $xds := $.Values.lmcache.nds.xdsPath }}
       {{- if $ns }}
       nodeSelector:
         {{- toYaml $ns | nindent 8 }}
@@ -837,11 +849,11 @@ spec:
               {{- end }}
               {{- end }}
               {{- if $.Values.lmcache.enabled }}
-              sed "s/__LOCAL_HOSTNAME__/${NODE_IP}/" /etc/lmcache/lmcache_config.yaml > /tmp/lmcache_config.yaml
+              sed -e "s/__LOCAL_HOSTNAME__/${NODE_IP}/" -e "s/__P2P_HOST__/${NODE_IP}/" -e "s/__LMCACHE_INSTANCE_ID__/${POD_NAME}/" /etc/lmcache/lmcache_config.yaml > /tmp/lmcache_config.yaml
               export LMCACHE_CONFIG_FILE="/tmp/lmcache_config.yaml"
               {{- if $.Values.lmcache.nds.enabled }}
               mkdir -p {{ $.Values.lmcache.nds.path }}
-              export PYTHONPATH="{{ $.Values.lmcache.nds.xdsPath }}:${PYTHONPATH:-}"
+              export PYTHONPATH="{{ $xds }}:${PYTHONPATH:-}"
               {{- end }}
               {{- end }}
 
@@ -860,7 +872,11 @@ spec:
                 --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@{{ $servedModelName }}"}' \
                 {{- end }}
                 {{- if $.Values.lmcache.enabled }}
+                {{- if eq $.Values.lmcache.mode "p2p" }}
+                --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}' \
+                {{- else }}
                 --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}' \
+                {{- end }}
                 {{- else if $.Values.mooncake.enabled }}
                 --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"master_server_address":"{{ $.Values.mooncake.masterServerAddress }}","lookup_rpc_port":"{{ $.Values.mooncake.lookupRpcPort }}","backend":"mooncake"}}' \
                 {{- end }}
@@ -944,7 +960,7 @@ spec:
             - name: p2p-device
               mountPath: /dev/p2p_device
             - name: xds-file-p2p
-              mountPath: {{ $.Values.lmcache.nds.xdsPath }}
+              mountPath: {{ $xds }}
               readOnly: true
             {{- end }}
             {{- end }}
@@ -1144,7 +1160,7 @@ spec:
             type: CharDevice
         - name: xds-file-p2p
           hostPath:
-            path: {{ $.Values.lmcache.nds.xdsPath }}
+            path: {{ $xds }}
             type: Directory
         {{- end }}
         {{- end }}

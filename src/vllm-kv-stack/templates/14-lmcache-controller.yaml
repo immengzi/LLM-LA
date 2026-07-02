@@ -1,0 +1,84 @@
+{{- if and .Values.lmcache.enabled (eq .Values.lmcache.mode "p2p") .Values.deploy.lmcacheController }}
+{{/* LMCache P2P controller — lightweight lookup directory (holds no KV data).
+     Replaces the Mooncake master as the coordinator for lmcache.mode="p2p".
+     hostNetwork so engines can dial it at <nodeIP>:pullPort/replyPort via
+     lmcache.p2p.controllerPullUrl/controllerReplyUrl. */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lmcache-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: lmcache-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lmcache-controller
+  template:
+    metadata:
+      labels:
+        app: lmcache-controller
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      restartPolicy: Always
+      {{- if .Values.lmcacheController.nodeName }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "kubernetes.io/hostname"
+                    operator: In
+                    values:
+                      - {{ .Values.lmcacheController.nodeName | quote }}
+      {{- end }}
+      {{- if .Values.lmcacheController.tolerations }}
+      tolerations:
+{{- toYaml .Values.lmcacheController.tolerations | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: lmcache-controller
+          image: {{ .Values.lmcacheController.image }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              export PYTHONHASHSEED=123
+              exec lmcache_controller \
+                --host 0.0.0.0 \
+                --port {{ .Values.lmcacheController.port }} \
+                --monitor-ports '{"pull": {{ .Values.lmcacheController.pullPort }}, "reply": {{ .Values.lmcacheController.replyPort }}}'
+          ports:
+            - name: ctl
+              containerPort: {{ .Values.lmcacheController.port }}
+              protocol: TCP
+            - name: pull
+              containerPort: {{ .Values.lmcacheController.pullPort }}
+              protocol: TCP
+            - name: reply
+              containerPort: {{ .Values.lmcacheController.replyPort }}
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.lmcacheController.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.lmcacheController.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+{{- end }}

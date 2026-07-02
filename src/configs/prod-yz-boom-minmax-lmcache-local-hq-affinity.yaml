@@ -1,0 +1,244 @@
+# prod + ROUTER KEY AFFINITY: MiniMax-M2.7 — BooM + LLM-LA (router), DP2 +
+# LMCache, LOCAL-cache-first. Router conversation key-affinity enabled so all
+# turns of a chat stay on the same vLLM pod for prefix-cache reuse.
+#
+# Router routing = affinity ONLY (router_strategy: "affinity"), HARD affinity mode
+# (time-bounded pin), matching prod-yz-boom-minmax-lmcache-affinity.yaml. LARGE
+# local CPU cache; Mooncake kept only as a SMALL coordinator (not a big store).
+#
+# Why (see 142/ANALYSIS_kv_cache_drop.md + disaster-recovery.md §11):
+#   Under peak load our prefix-cache hit rate collapsed (llmla*-direct65 -> 8-19%)
+#   while direct142 stayed flat (~64-74%). Root cause: GPU KV saturation forcing
+#   spillover into a Mooncake remote store that was 88% full and dropping ~46% of
+#   KV writes. Fix: big local cache + shrink the Mooncake pool to a coordinator.
+#   NOTE: Mooncake fully OFF crashed the engine on first KV save (LMCache needs the
+#   master as its P2PHANDSHAKE peer directory), so we keep the master but tiny.
+#
+# Changes vs -hq-affinity:
+#   - lmcache_max_local_cpu_size: 50 -> 90         (GiB per TP worker; 128 pushed node1 into MemoryPressure -> NotReady)
+#   - mooncake_global_segment_size: 140 GB -> 10 GB (coordinator, not a big pool)
+#   - NDS/P2P kept ON; per-role xds paths (leader/worker) ON
+#   - router routing = affinity only, HARD mode (time-bounded pin)
+#
+# RAM budget (engine nodes are dedicated 1.5 TB / 1509 GiB machines):
+#   8 TP workers x 90 GiB local = ~720 GiB, leaving ~790 GiB free per node.
+#   128 GiB (~1024 GiB) left too little headroom under load and node1 went
+#   NotReady (kubelet stall from memory pressure); 90 is still 8x the old 50-era
+#   footprint with room for activations, NDS buffers, page cache, and the sidecar.
+#
+# Pre-requisite: run on each worker node before deploying:
+#   sysctl -w vm.swappiness=0
+#   sysctl -w kernel.numa_balancing=0
+
+switch_cluster: yz
+backend: "boom"
+
+# Pin the DP leaders and workers to fixed, separately-labelled nodes so the
+# NDS/file_p2p host paths line up per role. Runs 2 DP groups (replicas: 2), so
+# BOTH leader nodes carry vllm-role=leader and BOTH worker nodes vllm-role=worker;
+# hostname anti-affinity + roce-pair podAffinity spread the 2 groups. Label first:
+#   kubectl label node node7 vllm-role=leader --overwrite   # 7.150.6.33
+#   kubectl label node node1 vllm-role=leader --overwrite   # 7.150.1.218
+#   kubectl label node node8 vllm-role=worker --overwrite   # 7.150.0.37
+#   kubectl label node node2 vllm-role=worker --overwrite   # 7.150.5.207
+vllm_leader_node_selector: { vllm-role: leader }
+vllm_worker_node_selector: { vllm-role: worker }
+
+router_url: "http://10.50.156.65:30080"
+total_requests: 10
+prompt_source: "hf-lmsys"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_name: "/home/data/saeid/datasets/lmsys_chat_1m"
+  split: "train"
+  tokenizer_name: "/home/models/MiniMax-M2.7-w8a8-QuaRot"
+  streaming: true
+  min_input_tokens: 1
+  max_input_tokens: 10000000
+  repeat_each: 1
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 1
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  max_tokens: 8192
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+  use_dataset_output_len: false
+
+output_log_mode: "summary"
+print_trace: false
+
+metrics:
+  enabled: true
+  prometheus_base_url: "http://10.50.156.65:31190"
+  scrape_interval_s: 1.0
+  window_s: 3.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+transport:
+  mode: "async_pubsub"
+  submit_path: "/submit"
+  results_zmq: "tcp://10.50.156.65:30559"
+  topic: "results"
+  run_id: null
+  idle_timeout_s: 1000.0
+  idle_zero_running_s: 10.0
+
+boom:
+  base_url: "http://10.50.156.65:30401"
+  chat_path: "/v1/chat/completions"
+  model: "served-model-minmax"
+  api_key: "sk-boom-master"
+  timeout_s: 10000.0
+  stream: true
+
+helm:
+  boom_claude_aliases: true
+  boom_max_inflight: 1000
+  router_api_key: "ZhongRuanChuangXin!"
+
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 1
+
+  # Unified routing-strategy selector (overrides router_kv_aware/router_affinity_*).
+  # Uncomment exactly ONE to switch modes:
+  #   none     -> prefix off, affinity off (baseline)
+  #   prefix   -> prefix (KV-aware) only
+  #   affinity -> conversation key-affinity only
+  #   both     -> prefix + affinity
+  # router_strategy: "none"
+  # router_strategy: "prefix"
+  router_strategy: "affinity"
+  # router_strategy: "both"
+  router_len_aware: true
+  router_len_policy: "short_first"
+  # Log the FULL per-request prefix block-hash list into /latency_log ->
+  # router_logs.json + logs.json (block_hashes field). Hit counts always logged.
+  router_log_block_hashes: true
+  # Measure prefix-hit counts for logging even when KV routing is off, so
+  # kv_hits_len/total_blocks/kv_hit are always populated.
+  router_measure_prefix: true
+  # Hard affinity = time-bounded pin (not just a preference), so conversation turns
+  # stay on one pod even under load.
+  router_affinity_mode: "hard"
+
+  expose_per_pod: true
+
+  nfs_path: "/home/models/MiniMax-M2.7-w8a8-QuaRot"
+  model_host_path: "/home/models"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+  sidecar_prefetch: 2
+
+  # --- Mooncake: SMALL COORDINATOR ONLY (not a big remote store) ---
+  # The LMCache connector needs the Mooncake master as its P2PHANDSHAKE peer
+  # directory: with Mooncake fully off the engine crashed on the first KV save
+  # (worker died in collective_rpc). So we keep the master deployed but shrink
+  # its segment to a token size, and pour RAM into the local CPU cache instead.
+  # This avoids the old 46%-lossy, 88%-full shared pool while keeping the engine
+  # alive. See disaster-recovery.md §11 + 142/ANALYSIS_kv_cache_drop.md.
+  mooncake_enabled: true
+  deploy_mooncake_master: true
+  mooncake_master_server_address: "10.50.156.65:50088"
+  mooncake_master_port: 50088
+  mooncake_global_segment_size: 10000000000   # ~10 GB: coordinator + tiny store (was 140 GB)
+  mooncake_eviction_high_watermark: 0.9
+  mooncake_eviction_ratio: 0.1
+  mooncake_ascend_buffer_pool: "4:8"
+  mooncake_lookup_rpc_port: "10010"
+  mooncake_host_network: true
+
+  # --- LMCache: large LOCAL CPU cache (matches direct142's ~100 GiB) ---
+  lmcache_enabled: true
+  lmcache_chunk_size: 512
+  lmcache_max_local_cpu_size: 90    # was 50 -> tried 128 (node1 hit memory pressure -> NotReady); 90 keeps big headroom
+
+  # --- NDS (NVMe Direct Storage — P2P DMA for KV cache) — KEPT ON ---
+  # This is the cross-engine sharing path direct142 uses (no remote store).
+  lmcache_nds_enabled: true
+  lmcache_nds_path: "/workspace/nds_kvcache"
+  lmcache_nds_dev: "/dev/md0"
+  lmcache_nds_size: 1024
+  # Per-role xds/file_p2p path — RE-ENABLED. Reference host staged the binary at
+  # a different depth on master vs worker: 33/218 masters at /workspace/qyf/xds/xds,
+  # 37/207 workers one level up at /workspace/qyf/xds. Node pinning below keeps the
+  # leader/worker->node assignment fixed so these paths line up per role.
+  lmcache_nds_xds_path_leader: "/workspace/qyf/xds/xds/file_p2p"
+  lmcache_nds_xds_path_worker: "/workspace/qyf/xds/file_p2p"
+
+  # --- New vLLM flags for LMCache setup ---
+  dtype: "bfloat16"
+  ascend_enable_flashcomm1: true
+  scheduler_cls: "lsched.lsched_vllm.LSchedVLLMAdapter"
+  model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":16}'
+
+  # vllm image now served from reg.local:32000 (pushed via vllm-image.sh)
+  vllm_image: "reg.local:32000/minimax27:selfcontained"
+  mooncake_master_image: "reg.local:32000/minimax27:selfcontained"
+
+  models:
+    - name: minimax-m2
+      servedModelName: served-model-minmax
+      replicas: 2
+      streamingMode: true
+      modelSubPath: MiniMax-M2.7-w8a8-QuaRot
+      tensorParallelSize: 8
+      # 32 -> 24: cap per-engine concurrency to relieve peak memory pressure / "gpu size"
+      # crashes. If it still OOMs, drop to 16; if latency suffers with headroom to spare,
+      # step back toward 32. (Router-side batch; does not touch gpuMemoryUtilization.)
+      batchSize: 16
+      sidecarPrefetch: 2
+      dataParallel:
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 8888
+        hcclBuffSize: 1024
+        ompNumThreads: 16
+        pairTopologyKey: roce-pair
+      vllm:
+        gpuMemoryUtilization: 0.92
+        dtype: bfloat16
+        enableExpertParallel: true
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 32768
+        # V1 enables prefix caching by default with near-zero overhead.
+        # Omitting or setting true matches HQ behavior.
+        enablePrefixCaching: true
+        # HQ request: emit per-request cached-token counts so the gateway can
+        # report prefix-cache hit rate (--enable-prompt-tokens-details).
+        enablePromptTokensDetails: true
+        toolCallParser: minimax_m2
+        reasoningParser: minimax_m2_append_think
+        schedulerCls: "lsched.lsched_vllm.LSchedVLLMAdapter"
+        modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
+        ascendEnableFlashcomm1: true

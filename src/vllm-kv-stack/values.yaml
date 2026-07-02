@@ -229,6 +229,12 @@ vllm:
   # use independent avoid labels.
   avoidLabelValue: "vllm"
 
+  # Optional per-role node pinning (DP LeaderWorkerSet). Empty = fall back to
+  # nodeSelector below (i.e. same selector for both roles). Set these to pin the
+  # DP leader and worker to specific labelled nodes, e.g. {vllm-role: leader}.
+  leaderNodeSelector: {}
+  workerNodeSelector: {}
+
   # Memory / performance
   kvCacheDtype: "auto"             # "auto", "fp8", "fp8_e4m3" — fp8 halves KV cache memory
   cpuOffloadGb: null               # null = off; set to e.g. 3 to offload model weights to CPU for more KV cache
@@ -251,6 +257,7 @@ vllm:
   additionalConfig: {}             # set to {multistreamOverlapSharedExpert: true} to enable
   speculativeConfig: {}            # set to {numSpeculativeTokens: 3, method: "deepseek_mtp"} to enable
   enablePrefixCaching: false       # true = enable prefix caching (uses KV cache memory)
+  enablePromptTokensDetails: false # true = --enable-prompt-tokens-details (per-request cached-token counts for gateway hit-rate feedback)
   toolCallParser: null             # e.g. "qwen3_coder", "glm47" — also enables --enable-auto-tool-choice
   reasoningParser: null            # e.g. "qwen3", "glm45"
   hostNetwork: false
@@ -400,6 +407,14 @@ mooncake:
 # vLLM pods get LMCACHE_CONFIG_FILE instead of MOONCAKE_CONFIG_PATH.
 lmcache:
   enabled: false
+  # LMCache backend mode:
+  #   "mooncake" (default) — 33/218 lineage: LMCacheAscendConnectorV1Dynamic +
+  #                          Mooncake remote store + P2PHANDSHAKE. Unchanged.
+  #   "p2p"                 — 142 lineage: LMCacheAscendConnector + engine-to-engine
+  #                          HCCL P2P + host-staging + lmcache_controller, NO Mooncake.
+  # Anything other than "p2p" renders the historical Mooncake config verbatim, so
+  # existing configs are unaffected.
+  mode: "mooncake"
   chunkSize: 512
   maxLocalCpuSize: 50
   localCpu: true
@@ -416,6 +431,27 @@ lmcache:
     localBufferSize: 0
     mooncakePreferLocalAlloc: true
     useAscendDirect: true
+  # ---- P2P / host-staging mode (142). Only read when mode == "p2p". ----
+  # Defaults match lmcache-csi/142/*/lmcache_instance*_host_staging.yaml.
+  p2p:
+    tpSize: 8                        # per-TP port arrays are length tpSize
+    transferChannel: "hccl"          # host-staging REQUIRES "hccl" (not hccl_onesided)
+    useNpu: true                     # p2p_use_npu: intermediate buffer on NPU
+    pullMode: true                   # p2p_pull_mode: read vs write
+    delayPull: true                  # p2p_delay_pull: required by host-staging
+    npuBufferSize: 134217728         # p2p_npu_buffer_size: 128 MB ping-pong buffer
+    initPortBase: 9950               # p2p_init_ports  = [base .. base+tpSize-1]
+    lookupPortBase: 9970             # p2p_lookup_ports
+    workerPortBase: 9940             # lmcache_worker_ports
+    useHostStaging: true             # register ONE bounded arena, not the full pool
+    osStagingBytes: 8589934592       # 8 GiB — keep SAFELY below the ~10 GB reg. ceiling
+    saveOnlyFirstRank: false
+    storeAsync: false
+    lookupBackoffTime: 0.001
+    # host:port of the lmcache_controller the engines dial. Empty => must be set
+    # by the config (points at the pinned controller node, e.g. 10.50.156.65).
+    controllerPullUrl: ""
+    controllerReplyUrl: ""
   # NDS (NVMe Direct Storage) — P2P DMA from NVMe SSD to NPU memory.
   # Requires p2p_dev.ko kernel module loaded on the host and /dev/p2p_device present.
   nds:
@@ -424,6 +460,27 @@ lmcache:
     dev: "/dev/md0"
     size: 2048
     xdsPath: "/workspace/qyf/xds/xds/file_p2p"
+    # Optional per-role overrides for the xds/file_p2p path (some hosts stage the
+    # build at a different depth on leader vs worker). Empty = use xdsPath above.
+    xdsPathLeader: ""
+    xdsPathWorker: ""
+
+# -----------------------------------------------------------------------
+# LMCache controller — lightweight P2P lookup directory for lmcache.mode="p2p".
+# Replaces the Mooncake master as the coordinator (it holds NO KV data, just the
+# who-has-which-chunk directory). Deployed only when mode=="p2p" AND
+# deploy.lmcacheController. Engines dial it via lmcache.p2p.controllerPullUrl/
+# controllerReplyUrl (raw node IP:port; hostNetwork, so no Service needed).
+lmcacheController:
+  image: "127.0.0.1:32000/lmcache-ascend:hccl-p2p"
+  port: 9000
+  pullPort: 9800
+  replyPort: 9900
+  # Pin the controller to a fixed node so its host IP is stable and matches
+  # lmcache.p2p.controllerPullUrl/replyUrl. Empty = let the scheduler place it
+  # (only safe if you don't hardcode the controller IP).
+  nodeName: ""
+  tolerations: []
 
 # Component deployment control
 # Set to false to skip deploying a component (used for decoupled vLLM/stack deploys)
@@ -435,6 +492,7 @@ deploy:
   # ("external" -> deployed). This flag is no longer read by the chart.
   cpuHash: false
   mooncakeMaster: true    # set false to skip mooncake-master
+  lmcacheController: true # deploy lmcache_controller when lmcache.mode=="p2p"
 
 # -----------------------------------------------------------------------
 # LiteLLM proxy — production auth/spend gateway in front of the router.
