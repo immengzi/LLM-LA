@@ -86,8 +86,8 @@
 # Runs 2 DP groups pinned per-role (vllm-role=leader/worker) with per-role NDS
 # xds paths. Fixes the peak-load prefix-cache collapse (see disaster-recovery.md
 # §11 + 142/ANALYSIS_kv_cache_drop.md). ACTIVE — intended deploy.
-prod-yz-boom-minmax-lmcache-local-hq-affinity:
-  - pull
+# prod-yz-boom-minmax-lmcache-local-hq-affinity:
+#   - pull
 
 # 142 lineage: LMCache P2P + HOST-STAGING (bounded 8 GiB registered arena ->
 # avoids the >10 GB device-registration crash), lmcache_controller instead of
@@ -97,8 +97,8 @@ prod-yz-boom-minmax-lmcache-local-hq-affinity:
 # prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
 
-# prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
-#   - pull
+prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
+  - pull
 
 # ── YZ shadow pool (parallel to prod, release/ns vllm-shadow) ──
 # prod-yz-shadow-boom-minmax-lmcache-hq:

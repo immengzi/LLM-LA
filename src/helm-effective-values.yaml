@@ -59,7 +59,8 @@ dataParallel:
   sizeLocal: 1
 deploy:
   cpuHash: false
-  mooncakeMaster: true
+  lmcacheController: true
+  mooncakeMaster: false
   redis: true
   router: true
   vllm: true
@@ -90,7 +91,7 @@ litellm:
 lmcache:
   chunkSize: 512
   enableAsyncLoading: false
-  enabled: false
+  enabled: true
   extraConfig:
     globalSegmentSize: 80530636800
     localBufferSize: 0
@@ -103,14 +104,41 @@ lmcache:
   internalApiServerHost: 0.0.0.0
   internalApiServerPortStart: 6999
   localCpu: true
-  maxLocalCpuSize: 50
+  maxLocalCpuSize: 100
+  mode: p2p
   nds:
     dev: /dev/md0
     enabled: false
     path: /workspace/nds_kvcache
     size: 2048
     xdsPath: /workspace/qyf/xds/xds/file_p2p
+    xdsPathLeader: ""
+    xdsPathWorker: ""
+  p2p:
+    controllerPullUrl: 192.168.0.42:9800
+    controllerReplyUrl: 192.168.0.42:9900
+    delayPull: true
+    initPortBase: 9950
+    lookupBackoffTime: 0.001
+    lookupPortBase: 9970
+    npuBufferSize: 134217728
+    osStagingBytes: 8589934592
+    pullMode: true
+    saveOnlyFirstRank: false
+    storeAsync: false
+    tpSize: 8
+    transferChannel: hccl
+    useHostStaging: true
+    useNpu: true
+    workerPortBase: 9940
   useLayerwise: false
+lmcacheController:
+  image: reg.local:32000/lmcache-ascend:hccl-p2p
+  nodeName: k8s-worker1
+  port: 9000
+  pullPort: 9800
+  replyPort: 9900
+  tolerations: []
 modelVolume:
   create: false
   hostPath: /data/models
@@ -128,7 +156,7 @@ models:
     rpcPort: 8888
     size: 2
     sizeLocal: 1
-  image: reg.local:32000/ascend/vllm-ascend:v0.18.0rc1-openeuler
+  image: reg.local:32000/lmcache-ascend:hccl-p2p
   modelSubPath: MiniMax-M2.7-w8a8-QuaRot
   name: minimax-m2
   replicas: 2
@@ -143,6 +171,7 @@ models:
     dtype: bfloat16
     enableExpertParallel: true
     enablePrefixCaching: true
+    enablePromptTokensDetails: true
     gpuMemoryUtilization: 0.92
     maxNumBatchedTokens: 32768
     modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
@@ -224,10 +253,12 @@ vllm:
   dtype: bfloat16
   enableExpertParallel: false
   enablePrefixCaching: false
+  enablePromptTokensDetails: false
   generationConfig: null
   gpuMemoryUtilization: null
   hostNetwork: false
   kvCacheDtype: auto
+  leaderNodeSelector: {}
   maxModelLen: null
   maxNumBatchedTokens: null
   modelLoaderExtraConfig:
@@ -240,3 +271,4 @@ vllm:
   speculativeConfig: {}
   toolCallParser: null
   trustRemoteCode: false
+  workerNodeSelector: {}
