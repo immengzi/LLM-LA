@@ -168,7 +168,11 @@ helm:
   # --- vLLM flags ---
   dtype: "bfloat16"
   ascend_enable_flashcomm1: true
-  scheduler_cls: "lsched.lsched_vllm.LSchedVLLMAdapter"
+  # 142 drops the custom LSched scheduler and the hccl-p2p image does not ship
+  # the `lsched` module, so setting this crashes EngineCore with
+  # "ModuleNotFoundError: No module named 'lsched'". Leave unset to use vLLM's
+  # default scheduler (matches the 142 reference run scripts).
+  # scheduler_cls: "lsched.lsched_vllm.LSchedVLLMAdapter"
   model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":16}'
 
   # New P2P image for the vLLM engine pods (see note above).
@@ -185,9 +189,9 @@ helm:
       streamingMode: true
       modelSubPath: MiniMax-M2.7-w8a8-QuaRot
       tensorParallelSize: 8
-      # 32 matches the 142 reference (--max-num-seqs 32). Host-staging is the real
-      # fix for the memory-registration crash, so we don't need to cut concurrency.
-      batchSize: 32
+      # 16 chosen over the 142 reference's 32 — better observed results. Host-staging
+      # (not lowering concurrency) is what fixes the memory-registration crash.
+      batchSize: 16
       sidecarPrefetch: 2
       dataParallel:
         enabled: true
@@ -209,6 +213,7 @@ helm:
         enablePromptTokensDetails: true
         toolCallParser: minimax_m2
         reasoningParser: minimax_m2_append_think
-        schedulerCls: "lsched.lsched_vllm.LSchedVLLMAdapter"
+        # Dropped for p2p/142 — hccl-p2p image has no `lsched` module.
+        # schedulerCls: "lsched.lsched_vllm.LSchedVLLMAdapter"
         modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
         ascendEnableFlashcomm1: true
