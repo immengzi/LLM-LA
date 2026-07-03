@@ -97,8 +97,8 @@
 # prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
 
-# prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
-#   - pull
+prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
+  - pull
 
 # ── YZ shadow pool (parallel to prod, release/ns vllm-shadow) ──
 # prod-yz-shadow-boom-minmax-lmcache-hq:
@@ -114,8 +114,8 @@
 #   - pull
 
 # Shadow of the 142 P2P + host-staging replica (controller pinned to node3).
-prod-yz-shadow-boom-minmax-lmcache-p2p-hoststaging-affinity:
-  - pull
+# prod-yz-shadow-boom-minmax-lmcache-p2p-hoststaging-affinity:
+#   - pull
 
 # prod-yz-shadow-autoscaling-qwen:
 #   - pull
