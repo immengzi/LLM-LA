@@ -7,11 +7,12 @@
 #   The engines run as a LeaderWorkerSet with RecreateGroupOnPodRestart, so the
 #   restart unit is a whole DP GROUP (leader + its worker), not a single pod.
 #   This script restarts one group at a time, keeps the other group(s) serving,
-#   waits for full readiness + /health, then restores the ONE piece of state a
-#   plain restart loses: the imperative `vllm-pod-id` pod label that the sweep
-#   applies (the per-pod NodePort service `vllm-pp-<pod>` selects on it).
+#   and waits for full readiness + /health before moving on.
 #
-#   Everything else survives a restart automatically:
+#   Everything survives a restart automatically now, including the per-pod
+#   NodePort service `vllm-pp-<pod>`: it selects on the built-in
+#   `statefulset.kubernetes.io/pod-name` label (controller-managed), so it
+#   re-attaches on its own — the script only verifies the endpoint came back.
 #     - PodMonitor scraping (keys off the template label component=vllm)
 #     - router / boom / prometheus / litellm / mooncake-master Services (stable)
 #     - NDS mounts, xds paths, nodeSelectors, sidecar, env (in the pod template)
@@ -208,15 +209,15 @@ health_check() {
 
 relabel_leader() {
   local leader="$1"
-  log "  re-applying per-pod label vllm-pod-id=$leader"
-  run label pod "$leader" "vllm-pod-id=$leader" --overwrite
-  # confirm the per-pod service now has an endpoint (best-effort)
+  # No manual re-label needed anymore: the per-pod NodePort service selects on
+  # the built-in `statefulset.kubernetes.io/pod-name` label, which the controller
+  # re-applies automatically on restart. We just verify the endpoint re-attached.
   local svc="vllm-pp-${leader}"; svc="${svc:0:63}"
   if [[ "$DRY_RUN" != "true" ]]; then
     local eps
     eps="$(kc get endpoints "$svc" -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)"
     if [[ -n "$eps" ]]; then
-      ok "  per-pod service $svc endpoint(s): $eps"
+      ok "  per-pod service $svc endpoint(s) re-attached automatically: $eps"
     else
       warn "  per-pod service $svc has no endpoint yet (may just need a few seconds)."
     fi

@@ -12,6 +12,21 @@ serviceImpl: python
 # avoid port collisions with the primary deployment on the same cluster.
 portOffset: 0
 
+# Per-pod NodePort services for direct/external vLLM metrics access.
+# Managed by the sweep runner (sweep_methods.py) via helm upgrade --reuse-values
+# when a config sets expose_per_pod: true — the runner discovers the pods,
+# renders one NodePort Service per pod, and sets these values. Not meant to be
+# edited by hand.
+perPodServices:
+  enabled: false
+  pods: []
+  # true  -> selector uses statefulset.kubernetes.io/pod-name (DP/LeaderWorkerSet;
+  #          controller-managed, survives restarts).
+  # false -> selector uses the imperative vllm-pod-id label (non-DP Deployment
+  #          fallback; the sweep runner applies that label).
+  # The sweep runner sets this automatically based on the discovered workload.
+  useStatefulSetSelector: true
+
 replicas:
   router: 1
   vllm: 16
