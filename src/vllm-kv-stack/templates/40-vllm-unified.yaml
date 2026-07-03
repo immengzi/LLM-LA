@@ -1210,8 +1210,15 @@ spec:
 {{/* ---- Per-pod NodePort services ---- */}}
 {{/* Created by the sweep runner via helm upgrade --reuse-values after pods
      are running.  Each entry in perPodServices.pods gets a dedicated
-     NodePort Service whose selector targets a single pod by its unique
-     vllm-pod-id label (applied by the sweep runner before this upgrade). */}}
+     NodePort Service targeting a single pod.  The selector depends on the
+     workload type (perPodServices.useStatefulSetSelector, set by the sweep
+     runner from the discovered pods):
+       - DP (LeaderWorkerSet, StatefulSet-backed leaders): select on the
+         built-in `statefulset.kubernetes.io/pod-name` label, which the
+         controller re-applies on every restart -> the Service stays attached
+         across pod restarts with NO manual re-labeling or re-sweep.
+       - non-DP (plain Deployment, no stable per-pod label): fall back to the
+         imperative `vllm-pod-id` label applied by the sweep runner. */}}
 {{- if and .Values.perPodServices .Values.perPodServices.enabled }}
 {{- range $pod := .Values.perPodServices.pods }}
 ---
@@ -1226,7 +1233,11 @@ metadata:
 spec:
   type: NodePort
   selector:
+    {{- if $.Values.perPodServices.useStatefulSetSelector }}
+    statefulset.kubernetes.io/pod-name: {{ $pod.name }}
+    {{- else }}
     vllm-pod-id: {{ $pod.name }}
+    {{- end }}
   ports:
     - name: http
       port: 8200
