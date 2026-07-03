@@ -24,25 +24,47 @@
 switch_cluster: bz
 backend: "boom"
 
-total_requests: 10
-prompt_source: "hf-lmsys"
+# Long-running multi-turn soak: consume the whole codeflowbench pool. The det
+# schedule dispatches min(rate_rps*duration_s, total_requests) conversations and
+# there is NO sampling with replacement (result = pool[:n]), so the run length is
+# governed by the filtered pool (<= max_pool_size, after min_user_turns>=3), not
+# by this cap. total_requests is set far above the pool so the FULL pool is used.
+total_requests: 100000
+prompt_source: "codeflow"
 
 file_prompts:
   path: "prompts.json"
   variant: "short"
 
 hf_lmsys:
-  dataset_name: "/data/gateway/gateway/data/lmsys_conversations_hf"
+  dataset_profile: codeflowbench
   split: "train"
-  tokenizer_name: "/data/models/MiniMax-M2.7-w8a8-QuaRot"
-  streaming: true
+  streaming: false
   min_input_tokens: 1
-  max_input_tokens: 10000000
+  max_input_tokens: 3000
   repeat_each: 1
+  seed: 314
+  multi_turn: true
+  min_user_turns: 3
+  max_pool_size: 99999
+
+# --- Previous single-turn lmsys dataset (swap back by restoring these and
+#     setting prompt_source: "hf-lmsys" + total_requests: 10 above; also set
+#     generation.max_tokens back to 8192) ---
+# total_requests: 10
+# prompt_source: "hf-lmsys"
+# hf_lmsys:
+#   dataset_name: "/data/gateway/gateway/data/lmsys_conversations_hf"
+#   split: "train"
+#   tokenizer_name: "/data/models/MiniMax-M2.7-w8a8-QuaRot"
+#   streaming: true
+#   min_input_tokens: 1
+#   max_input_tokens: 10000000
+#   repeat_each: 1
 
 load_pattern:
   pattern: "det"
-  rate_rps: 3
+  rate_rps: 5.0   # conversations/sec; spreads in-flight across pods
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -59,13 +81,16 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
-  max_tokens: 8192
+  # Cap generated tokens per turn (not dataset length) so turns stay short and
+  # many conversations keep flowing through the deployment during the soak.
+  max_tokens: 64
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null
   target_total_tokens: null
   think: false
   use_dataset_output_len: false
+  min_output_tokens_floor: 1024   # unused while use_dataset_output_len=false
 
 output_log_mode: "summary"
 print_trace: false
@@ -84,7 +109,7 @@ transport:
   topic: "results"
   run_id: null
   idle_timeout_s: 1000.0
-  idle_zero_running_s: 10.0
+  idle_zero_running_s: 300.0   # tolerate inter-turn gaps so the long soak isn't cut short
 
 boom:
   chat_path: "/v1/chat/completions"

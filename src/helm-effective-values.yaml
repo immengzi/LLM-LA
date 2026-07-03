@@ -17,7 +17,7 @@ autoscaling:
   vllmQuery: ""
   vllmThreshold: "0.8"
 backend: boom
-batchSize: 32
+batchSize: 16
 boom:
   claudeCodeAliases: true
   databaseUrl: ""
@@ -147,7 +147,7 @@ modelVolume:
   nfsServer: nfs.local
   pvcName: models-nfs-pvc
 models:
-- batchSize: 32
+- batchSize: 16
   dataParallel:
     enabled: true
     hcclBuffSize: 1024
