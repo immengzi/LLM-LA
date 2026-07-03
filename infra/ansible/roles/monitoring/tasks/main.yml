@@ -75,6 +75,30 @@
   register: dashboard_cm
   changed_when: "'unchanged' not in dashboard_cm.stdout"
 
+- name: Read LA-Boom load & backpressure dashboard JSON
+  ansible.builtin.slurp:
+    src: "{{ repo_root }}/infra/grafana-dashboards/laboom-load-backpressure.json"
+  register: load_dashboard_json_b64
+
+- name: Deploy LA-Boom load & backpressure Grafana dashboard ConfigMap
+  ansible.builtin.shell: |
+    cat <<'CONFIGMAP_EOF' | kubectl apply -f -
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: laboom-load-backpressure-dashboard
+      namespace: {{ monitoring_namespace }}
+      labels:
+        grafana_dashboard: "1"
+    data:
+      laboom-load-backpressure.json: |
+    {{ (load_dashboard_json_b64.content | b64decode) | indent(6, first=True) }}
+    CONFIGMAP_EOF
+  args:
+    executable: /bin/bash
+  register: load_dashboard_cm
+  changed_when: "'unchanged' not in load_dashboard_cm.stdout"
+
 - name: Display Grafana access info
   ansible.builtin.debug:
     msg: >-
