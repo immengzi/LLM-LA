@@ -9,7 +9,7 @@
 # Node layout (single DP2 group, replicas: 1):
 #   node3: prod infra (unchanged) + shadow vLLM (one DP2 pod)
 #   node4: shadow infra (router, redis, BooM) + shadow vLLM (one DP2 pod)
-#          + the lmcache_controller (pinned here)
+#   node3 also hosts the lmcache_controller (pinned there, co-located w/ the DP leader)
 #
 # Pre-requisites:
 #   kubectl label node node3 avoid=vllm --overwrite
@@ -19,12 +19,10 @@
 #     ctr -n k8s.io images pull reg.local:32000/lmcache-ascend:hccl-p2p
 #   sysctl -w vm.swappiness=0 && sysctl -w kernel.numa_balancing=0   (on node3/4)
 #
-# BEFORE DEPLOY — set the controller IP (the ONE per-env item):
-#   The lmcache_controller is pinned to node4; engines dial it over the host/RoCE
-#   network (the same network as p2p_host / NODE_IP, i.e. 7.150.x — NOT the 10.50.x
-#   mooncake address). Find node4's host IP and put it in controller_pull_url /
-#   controller_reply_url below:
-#     kubectl get node node4 -o jsonpath='{.status.addresses}'
+# Controller placement: pinned to node3 (host IP 10.50.156.65 on this cluster);
+# engines dial it over the node host network. controller_pull_url/reply_url below
+# must match node3's host IP. To re-check a node's IP:
+#     kubectl get node node3 -o jsonpath='{.status.addresses}'
 
 switch_cluster: yz
 backend: "boom"
@@ -147,17 +145,21 @@ helm:
   lmcache_enabled: true
   lmcache_mode: "p2p"
   lmcache_chunk_size: 512
-  # 50 GiB matches the shadow-hq baseline and is conservative because node3 is
-  # SHARED with prod infra. If node3/node4 show headroom (`free -g`), raise toward
-  # 100 to match the 142 reference and the prod p2p config.
-  lmcache_max_local_cpu_size: 50
+  # 100 GiB/rank matches the 142 reference and the prod yz p2p config.
+  # RAM budget: node3/node4 are ~2 TB machines (bigger than the 1.5 TB prod engine
+  # nodes), and p2p mode runs NO Mooncake master — so the cache is private per
+  # engine, not a shared pool. 8 TP ranks x 100 GiB = ~800 GiB/node, <40% of 2 TB,
+  # leaving ~800 GiB headroom. Independent of the 8 GiB host-staging arena below,
+  # so raising this does NOT reintroduce the device-registration ("gpu size") crash.
+  # Safe to push to 128-150 for more retention if desired; 100 keeps the A/B clean.
+  lmcache_max_local_cpu_size: 100
 
   lmcache_use_host_staging: true
   lmcache_os_staging_bytes: 8589934592   # 8 GiB
 
-  # Controller pinned to node4. SET THESE to node4's host/RoCE IP (see header).
-  lmcache_p2p_controller_pull_url: "<NODE4_HOST_IP>:9800"
-  lmcache_p2p_controller_reply_url: "<NODE4_HOST_IP>:9900"
+  # Controller pinned to node3 (host IP 10.50.156.65 on this cluster).
+  lmcache_p2p_controller_pull_url: "10.50.156.65:9800"
+  lmcache_p2p_controller_reply_url: "10.50.156.65:9900"
   deploy_lmcache_controller: true
   lmcache_controller_image: "reg.local:32000/lmcache-ascend:hccl-p2p"
 
@@ -176,9 +178,9 @@ helm:
 
   vllm_image: "reg.local:32000/lmcache-ascend:hccl-p2p"
 
-  # Pin the controller to node4 (shadow infra node).
+  # Pin the controller to node3 (co-located with the DP leader; host IP 10.50.156.65).
   values:
-    lmcacheController.nodeName: "node4"
+    lmcacheController.nodeName: "node3"
 
   models:
     - name: minimax-m2

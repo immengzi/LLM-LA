@@ -702,9 +702,12 @@ def _create_per_pod_services(
 ) -> List[Tuple[str, str]]:
     """Create a NodePort Service per externally-reachable vLLM pod via Helm.
 
-    Discovers running pods, labels each with a unique ``vllm-pod-id``, then
-    runs ``helm upgrade --reuse-values`` with the pod list so the chart
-    template renders one NodePort Service per pod.  Because the services are
+    Discovers running pods, then runs ``helm upgrade --reuse-values`` with the
+    pod list so the chart template renders one NodePort Service per pod.  Each
+    Service selects its pod by the built-in ``statefulset.kubernetes.io/pod-name``
+    label, which the StatefulSet controller re-applies automatically on every
+    restart — so the per-pod metrics endpoint stays attached across pod
+    restarts with no manual re-labeling or re-sweep.  Because the services are
     Helm-managed, ``helm uninstall`` cleans them up automatically.
 
     For DP pods only the leader (worker-index 0) is exposed.
@@ -729,6 +732,12 @@ def _create_per_pod_services(
         return []
 
     discovered_pods: List[str] = []
+    # DP pods are a LeaderWorkerSet (StatefulSet-backed) -> they carry the
+    # controller-managed `statefulset.kubernetes.io/pod-name` label, which
+    # survives restarts, so the per-pod Service can select on it with no manual
+    # labeling. Non-DP pods are a plain Deployment with no such stable label,
+    # so we fall back to the imperative `vllm-pod-id` label for those.
+    use_ss_selector = True
 
     for pod in pods:
         pod_name: str = pod["metadata"]["name"]
@@ -738,22 +747,30 @@ def _create_per_pod_services(
         if worker_idx is not None and worker_idx != "0":
             continue
 
-        try:
-            _kubectl(
-                ["label", "pod", pod_name, "-n", namespace,
-                 "vllm-pod-id=" + pod_name, "--overwrite"],
-                check=True, capture=True,
-            )
-        except Exception:
-            click.echo(f"[per-pod] WARN: failed to label pod {pod_name}")
-            continue
+        is_lws = worker_idx is not None or "leaderworkerset.sigs.k8s.io/name" in labels
+        if not is_lws:
+            # Non-DP Deployment: no stable pod-name label -> apply vllm-pod-id.
+            use_ss_selector = False
+            try:
+                _kubectl(
+                    ["label", "pod", pod_name, "-n", namespace,
+                     "vllm-pod-id=" + pod_name, "--overwrite"],
+                    check=True, capture=True,
+                )
+            except Exception:
+                click.echo(f"[per-pod] WARN: failed to label pod {pod_name}")
+                continue
 
         discovered_pods.append(pod_name)
 
     if not discovered_pods:
         return []
 
-    click.echo(f"[per-pod] Registering {len(discovered_pods)} pod(s) via helm upgrade --reuse-values")
+    _selector = "statefulset.kubernetes.io/pod-name" if use_ss_selector else "vllm-pod-id"
+    click.echo(
+        f"[per-pod] Registering {len(discovered_pods)} pod(s) via helm upgrade "
+        f"--reuse-values (selector={_selector})"
+    )
 
     cmd: List[str] = [
         "upgrade", release, str(chart_dir),
@@ -761,6 +778,7 @@ def _create_per_pod_services(
         "--reuse-values",
         "--timeout", "5m",
         "--set", "perPodServices.enabled=true",
+        "--set", f"perPodServices.useStatefulSetSelector={'true' if use_ss_selector else 'false'}",
     ]
     _per_pod_base_port = 31361 + port_offset
     for i, pname in enumerate(discovered_pods):
