@@ -151,10 +151,14 @@ helm:
   lmcache_use_host_staging: true
   lmcache_os_staging_bytes: 8589934592   # 8 GiB
 
-  # lmcache_controller (P2P lookup directory) — pinned to a leader node so its
-  # host IP is stable. Engines dial these URLs. node7 = 7.150.6.33 (a leader).
-  lmcache_p2p_controller_pull_url: "7.150.6.33:9800"
-  lmcache_p2p_controller_reply_url: "7.150.6.33:9900"
+  # lmcache_controller (P2P lookup directory) — pinned to node3, the control-plane/
+  # infra node that is OFF the DP leader/worker nodes, so the controller never
+  # competes for a leader slot or hostPort with the vLLM engines (pinning it to a
+  # leader node blocked the 2nd DP group's leader from scheduling). Engines dial
+  # these URLs. node3 InternalIP = 10.50.156.65 (the API-server IP, reachable
+  # cluster-wide; same host the shadow config uses).
+  lmcache_p2p_controller_pull_url: "10.50.156.65:9800"
+  lmcache_p2p_controller_reply_url: "10.50.156.65:9900"
   deploy_lmcache_controller: true
   # Image the p2p engines AND the controller run. Pushed to the local registry;
   # using the reg.local:32000 prefix (same registry as 127.0.0.1:32000) to match
@@ -180,7 +184,7 @@ helm:
 
   # Pin the controller pod to the node whose IP is in controller_pull_url.
   values:
-    lmcacheController.nodeName: "node7"
+    lmcacheController.nodeName: "node3"
 
   models:
     - name: minimax-m2
