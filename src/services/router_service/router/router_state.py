@@ -17,6 +17,7 @@ from .predictors import get_length_predictor
 from .len_select import select_len_aware
 from .models import JobItem, now_s
 from .affinity import AffinityMap
+from .affinity_store import build_affinity_store
 from .metrics import (
     set_central_queue_length,
     set_central_queue_length_by_model,
@@ -138,9 +139,30 @@ class RouterState:
         self._cleanup_task: Optional[asyncio.Task] = None
 
         # Key-affinity conversation->endpoint map (None when disabled).
-        self._affinity: Optional[AffinityMap] = (
-            AffinityMap(_cfg.AFFINITY_TTL_S) if _cfg.AFFINITY_ENABLED else None
-        )
+        # When AFFINITY_PERSIST_ENABLED, back it with a durable Redis store so
+        # the map survives restarts/redeploys (write-through + startup warm).
+        self._affinity: Optional[AffinityMap] = None
+        self._affinity_persist: bool = False
+        if _cfg.AFFINITY_ENABLED:
+            store = None
+            if bool(getattr(_cfg, "AFFINITY_PERSIST_ENABLED", False)):
+                try:
+                    store = build_affinity_store(_cfg)
+                except Exception as e:  # log-and-continue: never fatal
+                    print(f"[PullRouter] WARNING: affinity persistence disabled: {e!r}")
+                    sys.stdout.flush()
+                    store = None
+            self._affinity = AffinityMap(
+                _cfg.AFFINITY_TTL_S,
+                store=store,
+                cache_max=int(getattr(_cfg, "AFFINITY_CACHE_MAX", 0)),
+            )
+            self._affinity_persist = store is not None
+
+        # Endpoint (pod) liveness tracking for persisted affinity: last time
+        # each endpoint pulled. Used only when persistence is on, to treat
+        # mappings to stale/absent (e.g. post-redeploy renamed) pods as misses.
+        self._seen_endpoints: Dict[str, float] = {}
 
         # initialize gauge
         set_central_queue_length(0)
@@ -216,6 +238,21 @@ class RouterState:
             return []
 
         with self._lock:
+            # Track endpoint liveness (used for persisted-affinity availability).
+            #
+            # READINESS ANCHOR (load-bearing): a sidecar only issues /pull when
+            # it has confirmed vLLM /health == 200 within the last ~5s (the
+            # sidecar health-gate; see sidecar/router_client.py and
+            # go/internal/sidecar/pull_worker.go). vLLM returns 200 only after
+            # weights are loaded, so a pull ⟹ this pod was *serviceable* ≤5s
+            # ago. This table therefore doubles as the per-pod READY timestamp;
+            # no separate ready signal exists or is needed. INVARIANT: if the
+            # sidecar ever pulls before vLLM is ready (warmup pull / relaxed
+            # health gate), the affinity readiness check below silently breaks.
+            # See docs/internal/persistent-affinity-map.md.
+            if self._affinity_persist and endpoint:
+                self._seen_endpoints[endpoint] = time.time()
+
             q = self._get_queue(model or _DEFAULT_MODEL)
             if not q:
                 self._publish_queue_metrics()
@@ -913,6 +950,75 @@ class RouterState:
     # Key affinity helpers (call under lock)
     # -------------------------------------------------------
 
+    def _endpoint_available(self, endpoint: str) -> bool:
+        """Whether an affinity-target endpoint is a valid, READY routing target.
+
+        Single-signal readiness (see the READINESS ANCHOR note at the pull-stamp
+        site and docs/internal/persistent-affinity-map.md): ``_seen_endpoints``
+        records the last health-gated pull per pod, and a health-gated pull
+        means vLLM was serviceable ≤5s ago — so this doubles as the per-pod
+        READY timestamp. There is no separate ready signal, warm-time seeding,
+        grace timer, or discovery/existence set.
+
+        Predicate:
+          persist off                          -> True   (legacy path, byte-identical)
+          _seen_endpoints[target] missing      -> False  (never-ready / still loading -> LB)
+          now - _seen_endpoints[target] > STALE -> False  (gone / scaled down -> LB)
+          otherwise                            -> True   (ready & serving -> honor pin)
+
+        Warmed cross-pod mappings become valid the instant the target pod is
+        ready (its first post-ready pull, ~one poll tick after vLLM goes
+        healthy), so they survive the full vLLM cold-start window without any
+        grace timer. ``_seen_endpoints`` repopulates naturally from post-restart
+        pulls — nothing is seeded at warm() time.
+        """
+        if not self._affinity_persist:
+            return True
+        if not endpoint:
+            return False
+        last = self._seen_endpoints.get(endpoint)
+        if last is None:
+            return False
+        stale_s = float(getattr(_cfg, "AFFINITY_ENDPOINT_STALE_S", 1800.0))
+        return (time.time() - last) <= stale_s
+
+    def affinity_prefetch(self, key: str) -> None:
+        """Warm one conversation key from the durable store into memory.
+
+        Called once per request at admission (api._inject_affinity). No-op when
+        affinity is disabled or not persisted.
+        """
+        if self._affinity is None or not self._affinity_persist or not key:
+            return
+        try:
+            self._affinity.prefetch(key)
+        except Exception:
+            pass
+
+    def warm_affinity_from_store(self) -> int:
+        """Reload the affinity map from Redis at startup. Returns loaded count."""
+        if self._affinity is None or not self._affinity_persist:
+            return 0
+        try:
+            n = self._affinity.warm()
+            set_affinity_map_size(self._affinity.size())
+            print(f"[PullRouter] affinity map warmed from store: {n} mappings")
+            sys.stdout.flush()
+            return n
+        except Exception as e:
+            print(f"[PullRouter] WARNING: affinity warm failed: {e!r}")
+            sys.stdout.flush()
+            return 0
+
+    def close_affinity_store(self) -> None:
+        """Flush + close the durable affinity store (shutdown)."""
+        if self._affinity is None:
+            return
+        try:
+            self._affinity.close()
+        except Exception:
+            pass
+
     def _affinity_match(self, endpoint: str, meta: dict) -> bool:
         """True if this item's conversation key currently maps to endpoint."""
         if self._affinity is None:
@@ -952,7 +1058,10 @@ class RouterState:
                 available.append(item)
                 continue
             target = self._affinity.lookup(key)
-            if target is None or target == endpoint:
+            # Fall back to normal LB when there is no pin, the pin is us, or the
+            # pinned pod is no longer available (scaled down / renamed by a
+            # redeploy). Dispatch then re-claims (write-back) the new pod.
+            if target is None or target == endpoint or not self._endpoint_available(target):
                 available.append(item)
                 continue
             aff_ts = float((meta or {}).get("__affinity_ts__") or ts)

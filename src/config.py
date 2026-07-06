@@ -429,8 +429,19 @@ class HelmConfig:
     # ---- conversation key-affinity knobs (maps to Helm chart values.router.affinity*) ----
     router_affinity_enabled: bool = False
     router_affinity_mode: str = "soft"  # soft | hard
-    router_affinity_ttl_s: float = 300.0
-    router_affinity_hard_timeout_s: float = 5.0
+    router_affinity_ttl_s: float = 86400.0
+    router_affinity_hard_timeout_s: float = 300.0
+
+    # ---- persistent affinity map (Redis-backed) knobs ----
+    # OFF by default; when on, affinity_key->pod is written through to Redis and
+    # reloaded on startup so it survives router restarts + full redeploys.
+    router_affinity_persist_enabled: bool = False
+    router_affinity_redis_ttl_seconds: int = 0        # 0 = no expiry
+    router_affinity_redis_key_prefix: str = "affinity"
+    router_affinity_cache_max: int = 100000           # in-memory front-cache bound (0 = unbounded)
+    router_affinity_cache_refresh_s: float = 0.0      # periodic re-warm (0 = startup only)
+    router_affinity_endpoint_stale_s: float = 1800.0  # pod "available"/ready-heartbeat window for stale-pin fallback
+    router_affinity_cluster: str = ""                 # key namespace cluster (empty => k8s namespace)
 
     # ---- AIBrix exposure knobs (maps to Helm chart values.aibrix.*) ----
     aibrix_enabled: bool = False

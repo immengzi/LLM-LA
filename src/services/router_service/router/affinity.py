@@ -72,15 +72,41 @@ class AffinityMap:
     Lock ordering: this map's lock is always acquired while the caller already
     holds the RouterState lock; this class never calls back into RouterState, so
     the ordering is strict (RouterState -> AffinityMap) and deadlock-free.
+
+    Optional durability: when a ``store`` (RedisAffinityStore-like) is provided,
+    ``claim`` is write-through to the store (off the hot path via the store's
+    background writer), ``warm`` bulk-loads the store into memory at startup,
+    and ``prefetch`` does the single per-request Redis GET at admission on a
+    memory miss. The pull hot path (``lookup``) stays purely in-memory. With no
+    store, behavior is byte-for-byte identical to before.
     """
 
-    def __init__(self, ttl_s: float):
+    def __init__(self, ttl_s: float, store=None, cache_max: int = 0):
         self._map: Dict[str, AffinityEntry] = {}
         self._ttl = float(ttl_s)
         self._lock = threading.Lock()
+        self._store = store
+        self._cache_max = int(cache_max or 0)
+
+    @property
+    def persistent(self) -> bool:
+        return self._store is not None
+
+    def _evict_if_needed_locked(self) -> None:
+        """Bound the in-memory cache; evicted keys remain durable in the store."""
+        if self._cache_max <= 0 or len(self._map) <= self._cache_max:
+            return
+        # Evict oldest-by-last_seen down to the bound (cheap; runs rarely).
+        overflow = len(self._map) - self._cache_max
+        for k, _e in sorted(self._map.items(), key=lambda kv: kv[1].last_seen)[:overflow]:
+            del self._map[k]
 
     def lookup(self, key: str) -> Optional[str]:
-        """Return the mapped endpoint if present and not expired, else None."""
+        """Return the mapped endpoint if present and not expired, else None.
+
+        In-memory only — safe to call repeatedly on the pull hot path. Use
+        ``prefetch`` (once per request) to consult the durable store.
+        """
         if not key:
             return None
         with self._lock:
@@ -92,12 +118,57 @@ class AffinityMap:
                 return None
             return e.endpoint
 
+    def prefetch(self, key: str) -> Optional[str]:
+        """Warm one key from the durable store into memory on an in-memory miss.
+
+        Called once per request at admission. No-op (falls back to ``lookup``)
+        when there is no store. Returns the resolved endpoint or None.
+        """
+        if not key:
+            return None
+        hit = self.lookup(key)
+        if hit is not None or self._store is None:
+            return hit
+        ep = self._store.get(key)
+        if ep:
+            with self._lock:
+                self._map[key] = AffinityEntry(ep, time.monotonic())
+                self._evict_if_needed_locked()
+            return ep
+        return None
+
     def claim(self, key: str, endpoint: str) -> None:
-        """Record (or refresh) that this conversation key is served by endpoint."""
+        """Record (or refresh) that this conversation key is served by endpoint.
+
+        Write-through to the durable store when one is configured (the store's
+        writer is asynchronous, so this stays off the hot path).
+        """
         if not key or not endpoint:
             return
         with self._lock:
             self._map[key] = AffinityEntry(endpoint, time.monotonic())
+            self._evict_if_needed_locked()
+        if self._store is not None:
+            self._store.put(key, endpoint)
+
+    def warm(self) -> int:
+        """Bulk-load the durable store into the in-memory cache. Returns count."""
+        if self._store is None:
+            return 0
+        loaded = self._store.warm()
+        if not loaded:
+            return 0
+        now = time.monotonic()
+        with self._lock:
+            for k, ep in loaded.items():
+                if ep:
+                    self._map[k] = AffinityEntry(ep, now)
+            self._evict_if_needed_locked()
+            return len(self._map)
+
+    def close(self) -> None:
+        if self._store is not None:
+            self._store.close()
 
     def prune(self) -> None:
         """Opportunistic TTL sweep to bound memory; safe to call often."""

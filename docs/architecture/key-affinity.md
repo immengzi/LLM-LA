@@ -2,6 +2,10 @@
 
 > For a high-level overview of the routing strategies and where affinity fits,
 > see [router-strategies.md](router-strategies.md).
+>
+> **See also:** [internal/persistent-affinity-map.md](../internal/persistent-affinity-map.md)
+> — an optional Redis-backed extension that persists the conversation→pod map so
+> pins survive router restarts/redeploys.
 
 Key affinity keeps **all turns of a single chat conversation on the same vLLM
 pod**, so the engine's internal prefix cache (and any KV blocks the router

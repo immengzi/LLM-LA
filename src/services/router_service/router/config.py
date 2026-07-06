@@ -137,6 +137,40 @@ class RouterConfig:
     AFFINITY_TTL_S: float = 300.0        # conversation->endpoint mapping lifetime
     AFFINITY_HARD_TIMEOUT_S: float = 5.0  # hard mode: max hold before releasing to any pod
 
+    # --------------------------------------------------------------------
+    # PERSISTENT AFFINITY MAP (durable conversation->pod mapping in Redis)
+    # Off by default. When on, every affinity claim is write-through to Redis
+    # and the in-memory map is warmed from Redis at startup, so the map
+    # survives router restarts and full redeploys. The pull hot path stays
+    # in-memory; the only per-request Redis GET happens once at admission
+    # (prefetch) on a memory miss. Feature-off behavior is byte-identical.
+    # --------------------------------------------------------------------
+    AFFINITY_PERSIST_ENABLED: bool = False
+    # Redis key TTL for each mapping. 0 = no expiry (mappings live until
+    # overwritten). Trade-off: 0 preserves continuity across long deploy gaps
+    # but keeps stale (post-scale-down) keys around; a finite TTL bounds stale
+    # keys at the cost of dropping mappings for conversations idle > TTL.
+    AFFINITY_REDIS_TTL_SECONDS: int = 0
+    AFFINITY_REDIS_KEY_PREFIX: str = "affinity"
+    # In-memory front-cache bound (0 = unbounded). LRU-ish eviction by oldest
+    # last_seen when exceeded; evicted keys stay durable in Redis.
+    AFFINITY_CACHE_MAX: int = 100000
+    # Periodic re-warm of the in-memory cache from Redis (0 = warm once at
+    # startup only). Useful only in multi-writer topologies.
+    AFFINITY_CACHE_REFRESH_S: float = 0.0
+    # An endpoint (pod) is considered available if it has pulled within this
+    # window. Used only when persistence is on, to drop stale/absent pod
+    # mappings (scaled-down / never-ready pods) and fall back to normal LB.
+    # A sidecar /pull is health-gated on vLLM /health, so a pull doubles as a
+    # per-pod READY heartbeat (see docs/internal/persistent-affinity-map.md);
+    # ready pods heartbeat sub-second, so 1800s is generous headroom against a
+    # briefly-silent ready pod. Cost of a large value: a genuinely dead pod's
+    # mappings linger longer before fallback (harmless: miss -> LB).
+    AFFINITY_ENDPOINT_STALE_S: float = 1800.0
+    # Cluster component of the Redis key namespace. Empty => falls back to the
+    # k8s NAMESPACE, so keys are namespaced per deployment out of the box.
+    CLUSTER: str = ""
+
     # how many items to scan vs want
     POOL_FACTOR: int = 4
     POOL_BIDIRECTIONAL: bool = False
@@ -311,6 +345,25 @@ def get_config() -> RouterConfig:
     cfg.AFFINITY_HARD_TIMEOUT_S = float(
         os.getenv("AFFINITY_HARD_TIMEOUT_S", cfg.AFFINITY_HARD_TIMEOUT_S)
     )
+
+    # Persistent affinity map (Redis-backed)
+    cfg.AFFINITY_PERSIST_ENABLED = os.getenv(
+        "AFFINITY_PERSIST_ENABLED", str(cfg.AFFINITY_PERSIST_ENABLED)
+    ).lower() == "true"
+    cfg.AFFINITY_REDIS_TTL_SECONDS = max(
+        0, int(float(os.getenv("AFFINITY_REDIS_TTL_SECONDS", cfg.AFFINITY_REDIS_TTL_SECONDS)))
+    )
+    cfg.AFFINITY_REDIS_KEY_PREFIX = (
+        os.getenv("AFFINITY_REDIS_KEY_PREFIX", cfg.AFFINITY_REDIS_KEY_PREFIX).strip() or "affinity"
+    )
+    cfg.AFFINITY_CACHE_MAX = max(0, int(os.getenv("AFFINITY_CACHE_MAX", cfg.AFFINITY_CACHE_MAX)))
+    cfg.AFFINITY_CACHE_REFRESH_S = max(
+        0.0, float(os.getenv("AFFINITY_CACHE_REFRESH_S", cfg.AFFINITY_CACHE_REFRESH_S))
+    )
+    cfg.AFFINITY_ENDPOINT_STALE_S = max(
+        0.0, float(os.getenv("AFFINITY_ENDPOINT_STALE_S", cfg.AFFINITY_ENDPOINT_STALE_S))
+    )
+    cfg.CLUSTER = os.getenv("CLUSTER", cfg.CLUSTER).strip()
 
     # Unified routing strategy: when set, derives KV_AWARE / AFFINITY_ENABLED
     # from a single knob and overrides the individual flags above.
