@@ -51,6 +51,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | [mooncake/helm-integration.md](deployment/mooncake/helm-integration.md) | Mooncake KV transfer Helm wiring |
 | [mooncake/glm5-production.md](deployment/mooncake/glm5-production.md) | Production GLM-5 + Mooncake topology |
 | [docker-reference/mooncake-pd-test.md](deployment/docker-reference/mooncake-pd-test.md) | Bare-Docker Mooncake prefiller/decoder (P/D) lab |
+| [LMCache-p2p-build.md](deployment/LMCache-p2p-build.md) | Build LMCache-Ascend with the P2P (HCCL host-staging) backend from the pinned fork into the `lmcache-ascend:hccl-p2p` image.
 
 ## Operations
 
