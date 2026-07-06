@@ -50,9 +50,10 @@ services/go/
     │   ├── queue.go           # CentralQueue: per-model FIFO + KV-aware + length-aware + SLO hooks
     │   ├── result_store.go    # result correlation
     │   ├── handlers.go        # HTTP handlers (chi)
-    │   ├── kv_aware.go        # block-owner map + longest-prefix match
+    │   ├── kv_aware.go        # per-request owner map (reqOwners) + block-owner map + longest-prefix match
+    │   ├── owner_lookup.go    # default owner source: targeted per-request Redis HGETALL (KV_OWNER_SOURCE=lookup)
     │   ├── hash_client.go     # KV-hash client: in-container hasher (inline) or legacy service (external)
-    │   ├── kv_watcher.go      # Redis KV block scanner (per-model)
+    │   ├── kv_watcher.go      # legacy owner source + pod discovery: Redis KV block scanner (KV_OWNER_SOURCE=watcher)
     │   ├── model_registry.go  # multi-model registry + Resolve / 404
     │   ├── predictors.go      # output-length predictors (singleton)
     │   ├── latency_predictor.go  # linear + bayesian latency models
@@ -149,7 +150,7 @@ helm upgrade --install vllm ./src/vllm-kv-stack \
 |------|-------|
 | HTTP endpoints | `/enqueue`, `/submit`, `/pull`, `/result`, `/result_chunk`, `/v1/chat/completions`, `/health*`, `/metrics`, `/latency_log`, `/debug/slo`, `/debug/slo/{req_id}`; `/result_submit` only when `RESULT_TRANSPORT_MODE=submit_ack` |
 | Routing modes | `pull`, `push-rr`, `push-random`, `push-leastq` (both `health` and `local` modes) |
-| KV-aware routing | Redis block-owner scan + longest-prefix match; request hashes from the in-container `prefix_hash.py` (inline) or the legacy `vllm-cpu-hash` service (external) |
+| KV-aware routing | Owner source `lookup` (default: targeted per-request Redis `HGETALL`, `KVLookupMaxBlocks` cap) or `watcher` (legacy background scan) + longest-prefix match; request hashes from the in-container `prefix_hash.py` (inline) or the legacy `vllm-cpu-hash` service (external) |
 | SLO-aware scheduling | slack-based sort, admission throttle, latency predictors (`linear` default, `bayesian`/`hybrid`; `piecewise` accepted but not implemented), batch/queue-wait estimators, full `/debug/slo` |
 | Length-aware batching | `short_first`, `long_first` |
 | Client transports | `sync`, `async_pubsub` (ZMQ PUB publisher). Note: `submit_ack` is a router-side `RESULT_TRANSPORT_MODE` (sidecar→router result delivery), not a client transport mode. |

@@ -77,6 +77,11 @@ spec:
             # ---- KV-block hash source (inline | external) ----
             - name: KV_HASH_SOURCE
               value: {{ quote (default "inline" .Values.router.hashSource) }}
+            # ---- KV block-owner source for prefix/both routing (lookup | watcher) ----
+            - name: KV_OWNER_SOURCE
+              value: {{ quote (default "lookup" .Values.router.ownerSource) }}
+            - name: KV_LOOKUP_MAX_BLOCKS
+              value: {{ quote (toString (.Values.router.lookupMaxBlocks | default 512)) }}
             - name: HASH_SERVICE_URL
               {{- if and (eq (lower (default "python" .Values.serviceImpl)) "go") (ne (lower (default "inline" .Values.router.hashSource)) "external") }}
               value: "http://127.0.0.1:9095"

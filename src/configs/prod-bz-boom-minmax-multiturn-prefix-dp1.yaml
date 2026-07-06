@@ -123,6 +123,10 @@ helm:
   # router_strategy: "both"
   router_len_aware: true
   router_len_policy: "short_first"
+  # Block-owner source for prefix routing: lookup = targeted per-request Redis
+  # HGETALL at ingress (functional kv_hit); watcher = legacy background scan.
+  router_owner_source: "lookup"
+  router_lookup_max_blocks: 512
   # Log the FULL per-request prefix block-hash list into /latency_log ->
   # router_logs.json + logs.json (block_hashes field). Bulky; on here to test
   # block-level prefix overlap. Hit counts are always logged regardless.

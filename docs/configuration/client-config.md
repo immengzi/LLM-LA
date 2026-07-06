@@ -316,6 +316,17 @@ environment variables on the router deployment (e.g. in Kubernetes YAML).
   it is the legacy service (`http://vllm-cpu-hash:9095`). Unused by the Python
   router in `inline` mode.
 
+- `KV_OWNER_SOURCE: str`  
+  Block-owner source for `prefix`/`both` routing: `lookup` (default; targeted
+  per-request Redis `HGETALL` at admit, giving a truthful `kv_hit`) or `watcher`
+  (legacy background scan into a shared map). Inert under `affinity`/`none`. Set
+  via client config `router_owner_source` / Helm `router.ownerSource`.
+
+- `KV_LOOKUP_MAX_BLOCKS: int`  
+  Cap on how many leading block hashes are looked up per request when
+  `KV_OWNER_SOURCE=lookup` (default `512`). Set via client config
+  `router_lookup_max_blocks` / Helm `router.lookupMaxBlocks`.
+
 ### K8s / sidecar discovery
 
 - `NAMESPACE: str`  

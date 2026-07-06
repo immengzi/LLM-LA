@@ -41,10 +41,11 @@ type Server struct {
 	cfg        *Config
 	queue      *CentralQueue
 	results    *ResultStore
-	kv         *kvAware
-	hashClient *HashClient
-	registry   *ModelRegistry
-	kvWatcher  *KVWatcher
+	kv          *kvAware
+	hashClient  *HashClient
+	registry    *ModelRegistry
+	kvWatcher   *KVWatcher
+	ownerLookup *OwnerLookup // nil unless KV_OWNER_SOURCE=lookup
 	pushRouter   *PushDispatcher    // nil in pull mode
 	pushDispatch *PushDispatchQueue // nil unless push + decouple dispatch
 	publisher    resultPublisher    // nil unless async_pubsub
@@ -77,6 +78,7 @@ func NewServer(cfg *Config, q *CentralQueue, rs *ResultStore, kv *kvAware, hc *H
 func (s *Server) SetPublisher(p resultPublisher)      { s.publisher = p }
 func (s *Server) SetSLORegistry(r sloRegistry)        { s.slo = r }
 func (s *Server) SetPushDispatch(d *PushDispatchQueue) { s.pushDispatch = d }
+func (s *Server) SetOwnerLookup(o *OwnerLookup)       { s.ownerLookup = o }
 
 // DispatchPushJob performs KV registration then pushes to a sidecar. Used as
 // the worker callback for the decoupled push dispatcher.
@@ -209,6 +211,8 @@ func (s *Server) enrichRoutingFields(entry map[string]interface{}) {
 		return
 	}
 	info, ok := s.kv.popRouting(rid)
+	// Release per-request KV state (block hashes + owner cache) at completion.
+	s.kv.forgetRequest(rid)
 	if !ok {
 		return
 	}
@@ -282,6 +286,15 @@ func (s *Server) registerKVBlocks(rid, prompt string, meta map[string]interface{
 	}
 
 	s.kv.registerRequestBlocks(rid, hashes)
+
+	// Targeted, fresh ownership prefetch for routing: HGETALL exactly this
+	// request's block hashes so prefixLen is exact and eviction-aware. Only
+	// needed when KV routing is on; failures fall back to affinity.
+	if s.cfg.KVAware && len(hashes) > 0 && s.cfg.KVOwnerSource == "lookup" && s.ownerLookup != nil {
+		if owners := s.ownerLookup.FetchBlockOwners(s.cfg.ModelName, hashes); owners != nil {
+			s.kv.setRequestOwners(rid, owners)
+		}
+	}
 
 	if s.cfg.TraceEnabled {
 		tr := traceOf(m)

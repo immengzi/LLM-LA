@@ -131,9 +131,27 @@ helm:
   router_strategy: "affinity"
   router_len_aware: true
   router_len_policy: "short_first"
+  # Block-owner source for prefix routing. Inert under affinity (no effect on
+  # routing here); kept explicit so a switch to prefix/both is drop-in.
+  router_owner_source: "lookup"
+  router_lookup_max_blocks: 512
   router_log_block_hashes: true
   router_measure_prefix: true
   router_affinity_mode: "hard"
+  router_affinity_ttl_s: 86400   # 24h. Memory-neutral today (prune() not wired -> lazy
+  # expiry only), so a long TTL just retains locality across idle gaps. Real memory
+  # bound is unique conversations since restart, not TTL; watch router_affinity_map_size.
+  # Hard-affinity spillover window. Default 5s spills ~1/3 of pinned
+  # conversations to other pods at peak (confirmed via router_affinity_releases_total
+  # jumping 0 -> peak), scattering prefixes -> KV hit-rate (命中率) cliff. Waiting
+  # longer for the pinned pod preserves prefix locality at the cost of tail latency
+  # (this is what the flat-hit-rate "142" router effectively does). Bump
+  # incrementally while watching releases_total, the 命中率 panel, and p99 latency.
+  # 600: strongly favors prefix locality (near-"142" never-spill). Hard ceiling is
+  # RESULT_TIMEOUT_S=1000s (router waits that long end-to-end INCLUDING this hold, then
+  # 504s), so 600 leaves ~400s for pull+inference. Higher also slows failover: requests
+  # pinned to a dead/restarting pod wait this long before spilling to a healthy one.
+  router_affinity_hard_timeout_s: 600
 
   expose_per_pod: true
 
@@ -161,7 +179,7 @@ helm:
   lmcache_p2p_controller_pull_url: "192.168.0.42:9800"
   lmcache_p2p_controller_reply_url: "192.168.0.42:9900"
   deploy_lmcache_controller: true
-  lmcache_controller_image: "reg.local:32000/lmcache-ascend:hccl-p2p"
+  lmcache_controller_image: "reg.local:32000/lmcache-ascend:hccl-p2p-metrics-fix"
 
   # NDS absent on BZ (no /dev/md0); nothing to disable.
   lmcache_nds_enabled: false
@@ -177,7 +195,7 @@ helm:
   model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":16}'
 
   # Must be the lmcache-ascend:hccl-p2p image on the BZ registry (caveat 1).
-  vllm_image: "reg.local:32000/lmcache-ascend:hccl-p2p"
+  vllm_image: "reg.local:32000/lmcache-ascend:hccl-p2p-metrics-fix"
 
   models:
     - name: minimax-m2
@@ -187,7 +205,7 @@ helm:
       modelSubPath: MiniMax-M2.7-w8a8-QuaRot
       tensorParallelSize: 8
       # 16 chosen over the 142 reference's 32 — better observed results.
-      batchSize: 16
+      batchSize: 32
       sidecarPrefetch: 2
       dataParallel:
         enabled: true

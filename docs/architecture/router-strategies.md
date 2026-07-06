@@ -98,12 +98,19 @@ flowchart LR
     B3 --> SCORE["score = 2"]
 ```
 
+Ownership source: by default (`router.ownerSource: lookup`) the router fetches the
+request's own block owners directly from Redis at admit time (targeted `HGETALL`,
+capped by `router.lookupMaxBlocks`), so the score above reflects fresh state and
+`kv_hit` is truthful. The legacy `watcher` mode instead reads a background-scanned
+shared map — retained for compatibility but prone to under-counting under load.
+
 Internals:
 
 - [prefix-hash.md](prefix-hash.md) — how request block hashes are produced
   (vLLM-compatible chained hashing, tool canonicalization, inline vs external).
 - [kv-cache-flow.md](kv-cache-flow.md) — how block ownership is learned
-  (vLLM → sidecar → Redis → KVWatcher) and how `prefix_len` scoring/tiering works.
+  (vLLM → sidecar → Redis → targeted lookup / KVWatcher) and how `prefix_len`
+  scoring/tiering works.
 
 ---
 
@@ -161,6 +168,8 @@ Select the strategy with one knob. The modifiers apply only when affinity is on.
 helm:
   router_strategy: "both"        # none | prefix | affinity | both
   router_affinity_mode: "soft"   # soft | hard (only when affinity is on)
+  router_owner_source: "lookup"  # lookup | watcher (owner source for prefix/both)
+  router_lookup_max_blocks: 512  # cap on per-request owner lookups
 ```
 
 - The selector overrides the low-level `KV_AWARE` / `AFFINITY_ENABLED` flags when
