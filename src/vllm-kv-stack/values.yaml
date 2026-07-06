@@ -75,7 +75,11 @@ router:
 
   # Router-side inline KV hash controls. The tokenizer path is mounted at /model.
   kvBlockSize: 128
-  kvCanonicaliseTools: "1"
+  # Default OFF: current BooM gateway serialises tools in insertion order
+  # (serde_json preserve_order), so the router must not sort tool parameters
+  # keys -- doing so drifts from what vLLM tokenises. Set "1" only against a
+  # legacy BooM build that alphabetically sorts tools.
+  kvCanonicaliseTools: "0"
 
   # When true, the /latency_log ring (and thus router_logs.json + logs.json when
   # collect_router_log is on) includes the full per-request prefix block-hash

@@ -86,8 +86,8 @@ what the model path actually serves so the hashes line up:
 
 Tool schemas are JSON objects whose key order is semantically irrelevant, but key
 order becomes tokenization-visible once a chat template renders the tools into
-prompt text. To keep hashes stable, OpenAI `tools` are canonicalized before
-hashing (gated by `KV_CANONICALISE_TOOLS`, default on):
+prompt text. Canonicalizing OpenAI `tools` before hashing (gated by
+`KV_CANONICALISE_TOOLS`, **default off**) rebuilds them as:
 
 - each outer tool object is rebuilt in a fixed order: `type`, then `function`
 - the function object is rebuilt as `name`, optional `description`, then
@@ -98,6 +98,12 @@ This is router-side only: it does not modify the gateway and does not change the
 body sent to vLLM. Its single purpose is to make the router's pre-routing hashes
 match the tool serialization the OpenAI-compatible path produces. If that
 serialization changes, this hook must be revalidated.
+
+It ships **off by default** because the current BooM gateway serializes request
+tools with serde_json `preserve_order` (insertion order); sorting keys here would
+drift from what vLLM tokenizes and cause block-level KV hash mismatches. Set
+`KV_CANONICALISE_TOOLS=1` only against a legacy BooM build that alphabetically
+sorts tools (serde_json `BTreeMap` behaviour).
 
 ---
 
@@ -162,7 +168,7 @@ Router-side (env, set by `templates/31-router.yaml`):
 | `KV_TOKENIZER_PATH` | `/model` | Tokenizer/model directory; must match the vLLM pods |
 | `KV_BLOCK_SIZE` | `128` | Block size; must match the vLLM pods' `--block-size` |
 | `PYTHONHASHSEED` | `0` | Seed for `NONE_HASH`; must match the vLLM pods |
-| `KV_CANONICALISE_TOOLS` | `1` (on) | Canonicalize OpenAI `tools` before hashing |
+| `KV_CANONICALISE_TOOLS` | `0` (off) | Canonicalize OpenAI `tools` before hashing (set `1` only vs a legacy sorting BooM) |
 | `POOL_FACTOR` | `4` | Head-scan multiple of `want` |
 | `POOL_BIDIRECTIONAL` | `false` | Also sample from the queue tail |
 | `DP_SIZE`, `DP_SIZE_LOCAL` | `1`, `1` | DP sidecar fan-in topology |
