@@ -93,8 +93,10 @@ spec:
               value: {{ ternary "true" "false" (.Values.router.measurePrefix | default false) | quote }}
             - name: PYTHONHASHSEED
               value: "0"
+            # Default OFF: current BooM preserves tools insertion order, so the
+            # router must NOT sort tool parameters keys (would drift from vLLM).
             - name: KV_CANONICALISE_TOOLS
-              value: {{ if hasKey .Values.router "kvCanonicaliseTools" }}{{ quote (toString .Values.router.kvCanonicaliseTools) }}{{ else }}"1"{{ end }}
+              value: {{ if hasKey .Values.router "kvCanonicaliseTools" }}{{ quote (toString .Values.router.kvCanonicaliseTools) }}{{ else }}"0"{{ end }}
 
             # ---- Unified routing strategy (overrides kvAware/affinityEnabled when set) ----
             - name: ROUTER_STRATEGY
