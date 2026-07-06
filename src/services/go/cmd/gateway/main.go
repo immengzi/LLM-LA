@@ -48,6 +48,14 @@ func main() {
 
 	srv := gateway.NewServer(cfg, queue, results, kv, hashClient, registry, kvWatcher, pushRouter)
 
+	// Targeted per-request block-owner lookup (preferred routing source).
+	var ownerLookup *gateway.OwnerLookup
+	if cfg.KVAware && cfg.KVOwnerSource == "lookup" {
+		ownerLookup = gateway.NewOwnerLookup(cfg)
+		srv.SetOwnerLookup(ownerLookup)
+		log.Printf("[router] KV owner lookup ready (targeted Redis, max_blocks=%d).", cfg.KVLookupMaxBlocks)
+	}
+
 	// Decoupled push dispatcher: buffers requests so the request handler never
 	// blocks on the sidecar push (parity with router/api.py _PushDispatcher).
 	var pushDispatch *gateway.PushDispatchQueue
@@ -116,5 +124,8 @@ func main() {
 	}
 
 	kvWatcher.Stop()
+	if ownerLookup != nil {
+		ownerLookup.Close()
+	}
 	log.Println("[router] Shutdown complete.")
 }

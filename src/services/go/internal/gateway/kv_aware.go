@@ -15,9 +15,16 @@ import "sync"
 // blocks are owned by a given endpoint (longest-prefix match), exactly like
 // the Python implementation.
 type kvAware struct {
-	mu          sync.RWMutex
-	reqBlocks   map[string][]string
-	blockOwners map[string]map[string]bool
+	mu        sync.RWMutex
+	reqBlocks map[string][]string
+	// reqOwners holds fresh per-request ownership from the targeted Redis
+	// lookup (owner_lookup): req_id -> block_hash -> set(owner pod). Preferred
+	// over blockOwners because it reflects eviction and never goes stale.
+	reqOwners map[string]map[string]map[string]bool
+	// Insertion order for bounded backstop eviction (primary cleanup is
+	// forgetRequest at completion). Mirrors the OrderedDict bounds in kv_aware.py.
+	reqStateOrder []string
+	blockOwners   map[string]map[string]bool
 
 	// routing captures the router's per-request decision at dispatch time,
 	// independent of the TRACE system, so the /latency_log ring can be enriched
@@ -39,6 +46,7 @@ type routingInfo struct {
 }
 
 const routingMax = 8192
+const reqStateMax = 16384
 
 // NewKVAware constructs the shared KV-aware state (exported for main wiring).
 func NewKVAware() *kvAware { return newKVAware() }
@@ -46,8 +54,21 @@ func NewKVAware() *kvAware { return newKVAware() }
 func newKVAware() *kvAware {
 	return &kvAware{
 		reqBlocks:   make(map[string][]string),
+		reqOwners:   make(map[string]map[string]map[string]bool),
 		blockOwners: make(map[string]map[string]bool),
 		routing:     make(map[string]routingInfo),
+	}
+}
+
+// trackReqStateLocked records insertion order and evicts the oldest per-request
+// state once the bound is exceeded. Caller must hold k.mu.
+func (k *kvAware) trackReqStateLocked(reqID string) {
+	k.reqStateOrder = append(k.reqStateOrder, reqID)
+	for len(k.reqStateOrder) > reqStateMax {
+		oldest := k.reqStateOrder[0]
+		k.reqStateOrder = k.reqStateOrder[1:]
+		delete(k.reqBlocks, oldest)
+		delete(k.reqOwners, oldest)
 	}
 }
 
@@ -88,7 +109,23 @@ func (k *kvAware) registerRequestBlocks(reqID string, blockHashes []string) {
 	cp := make([]string, len(blockHashes))
 	copy(cp, blockHashes)
 	k.mu.Lock()
+	if _, exists := k.reqBlocks[reqID]; !exists {
+		k.trackReqStateLocked(reqID)
+	}
 	k.reqBlocks[reqID] = cp
+	k.mu.Unlock()
+}
+
+// setRequestOwners records fresh per-request block ownership from the targeted
+// Redis lookup. Mirrors set_request_owners in kv_aware.py.
+func (k *kvAware) setRequestOwners(reqID string, owners map[string]map[string]bool) {
+	k.mu.Lock()
+	if _, existsB := k.reqBlocks[reqID]; !existsB {
+		if _, existsO := k.reqOwners[reqID]; !existsO {
+			k.trackReqStateLocked(reqID)
+		}
+	}
+	k.reqOwners[reqID] = owners
 	k.mu.Unlock()
 }
 
@@ -104,6 +141,7 @@ func (k *kvAware) getRequestBlocks(reqID string) []string {
 func (k *kvAware) forgetRequest(reqID string) {
 	k.mu.Lock()
 	delete(k.reqBlocks, reqID)
+	delete(k.reqOwners, reqID)
 	k.mu.Unlock()
 }
 
@@ -124,6 +162,9 @@ func (k *kvAware) registerBlockOwners(blockHash string, owners []string) {
 }
 
 // prefixLen returns how many leading blocks of req_id are owned by endpoint.
+// Prefers the fresh per-request ownership captured at ingress
+// (setRequestOwners); falls back to the legacy background-scan map only when no
+// per-request lookup was recorded. Mirrors prefix_len in kv_aware.py.
 func (k *kvAware) prefixLen(endpoint, reqID string) int {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
@@ -131,6 +172,20 @@ func (k *kvAware) prefixLen(endpoint, reqID string) int {
 	if len(blocks) == 0 {
 		return 0
 	}
+
+	if reqOwn, ok := k.reqOwners[reqID]; ok {
+		count := 0
+		for _, h := range blocks {
+			set := reqOwn[h]
+			if set == nil || !set[endpoint] {
+				break
+			}
+			count++
+		}
+		return count
+	}
+
+	// Fallback: legacy global block-owner map (add-only background scan).
 	count := 0
 	for _, h := range blocks {
 		owners := k.blockOwners[h]

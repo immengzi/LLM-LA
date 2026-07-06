@@ -111,9 +111,12 @@ Information comes from:
 
 - **KV-block hasher** – computes block hashes for each new request; inline via
   `prefix_hash.py` by default (legacy external service is opt-in).
-- **KV watcher** – periodically scans Redis (`scan_iter` over `{model}:kvblock:*`)
-  to learn which blocks are owned by which pods. Kubernetes is used only for pod
-  discovery, not for block ownership.
+- **Block ownership** – by default (`KV_OWNER_SOURCE=lookup`) the router fetches a
+  request's own block owners on demand at admit via a targeted Redis `HGETALL`
+  (`owner_lookup.py`). The legacy **KV watcher** (`KV_OWNER_SOURCE=watcher`)
+  instead periodically scans Redis (`scan_iter` over `{model}:kvblock:*`) into a
+  shared owner map. Kubernetes is used only for pod discovery (which the watcher
+  loop still performs), not for block ownership.
 
 When a sidecar pulls work, the router prefers:
 
