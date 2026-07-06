@@ -54,6 +54,8 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 | `apiKey` | `""` | Auth for `/v1/chat/completions` (empty = no auth) |
 | `strategy` | `""` | Unified selector: `none` \| `prefix` \| `affinity` \| `both`. When set, overrides `kvAware`/`affinityEnabled` ([details](../architecture/key-affinity.md)) |
 | `hashSource` | `inline` | KV-block hash source: `inline` (in-process/in-container `prefix_hash.py`) \| `external` (legacy `vllm-cpu-hash` pod, auto-deployed in this mode) ([details](../architecture/prefix-hash.md)) |
+| `ownerSource` | `lookup` | KV block-owner source for `prefix`/`both`: `lookup` (targeted per-request Redis `HGETALL` at admit; truthful `kv_hit`) \| `watcher` (legacy background scan) ([details](../architecture/kv-cache-flow.md)) |
+| `lookupMaxBlocks` | `512` | Max leading block hashes looked up per request when `ownerSource=lookup` |
 | `kvAware` | `true` | KV-aware routing |
 | `lenAware` | `true` | Length-aware batching |
 | `lenPolicy` | `short_first` | `short_first` \| `long_first` |

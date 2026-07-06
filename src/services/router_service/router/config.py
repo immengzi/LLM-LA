@@ -102,6 +102,14 @@ class RouterConfig:
     KV_DISCOVERY_INTERVAL_S: float = 5.0
     KV_LOG_KEYS: str = "off"  # off | summary | full
 
+    # Block-owner source used for prefix routing:
+    #   "lookup"  -> targeted per-request HGETALL of the request's own block
+    #                hashes at ingress (exact, fresh, eviction-aware). Default.
+    #   "watcher" -> legacy blind background scan (kv_watcher / _BLOCK_OWNERS).
+    KV_OWNER_SOURCE: str = "lookup"
+    # Cap HGETALL fan-out per request (only the leading prefix matters).
+    KV_LOOKUP_MAX_BLOCKS: int = 512
+
     # --------------------------------------------------------------------
     # UNIFIED ROUTING STRATEGY (single selector for the two KV mechanisms)
     # "" (unset) -> use the legacy KV_AWARE / AFFINITY_ENABLED flags as-is.
@@ -281,6 +289,12 @@ def get_config() -> RouterConfig:
     cfg.LABEL_SELECTOR = os.getenv("LABEL_SELECTOR", cfg.LABEL_SELECTOR)
     cfg.VLLM_PORT = int(os.getenv("VLLM_PORT", cfg.VLLM_PORT))
     cfg.KV_LOG_KEYS = os.getenv("KV_LOG_KEYS", cfg.KV_LOG_KEYS)
+
+    # Block-owner source for prefix routing
+    cfg.KV_OWNER_SOURCE = os.getenv("KV_OWNER_SOURCE", cfg.KV_OWNER_SOURCE).strip().lower()
+    if cfg.KV_OWNER_SOURCE not in ("lookup", "watcher"):
+        cfg.KV_OWNER_SOURCE = "lookup"
+    cfg.KV_LOOKUP_MAX_BLOCKS = int(os.getenv("KV_LOOKUP_MAX_BLOCKS", cfg.KV_LOOKUP_MAX_BLOCKS))
 
     # Routing knobs
     cfg.KV_AWARE = os.getenv("KV_AWARE", str(cfg.KV_AWARE)).lower() == "true"

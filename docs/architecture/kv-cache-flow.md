@@ -92,7 +92,8 @@ There is also a lateral flow at admit time: when a request is enqueued, the rout
 | `vLLM` | Emits `BlockStored`, `BlockRemoved`, `AllBlocksCleared` events over ZMQ |
 | `KVSubscriber` (sidecar) | ZMQ SUB thread; decodes events; writes to Redis |
 | `Redis` | Shared state store for block ownership |
-| `KVWatcher` (router) | Scans Redis; maintains `_BLOCK_OWNERS` in-memory |
+| `owner_lookup.py` (router) | Default owner source: targeted per-request Redis `HGETALL` at admit; fills `_REQ_OWNERS` (`KV_OWNER_SOURCE=lookup`) |
+| `KVWatcher` (router) | Legacy owner source + pod discovery: scans Redis into `_BLOCK_OWNERS` (`KV_OWNER_SOURCE=watcher`) |
 | `prefix_hash.py` (shared) | Computes request block hashes; runs in-process (Python router) and in-container on `127.0.0.1` (Go gateway) in the default `inline` mode |
 | `vllm-cpu-hash` pod (legacy) | Standalone HTTP hasher, used only when `KV_HASH_SOURCE=external`; auto-deployed in that mode |
 | `kv_aware.py` (router) | Stores `_REQ_BLOCKS`, `_BLOCK_OWNERS`; implements `prefix_len` |
@@ -181,6 +182,26 @@ sidecar process
 
 ## Plane 2: State Propagation to Router
 
+### Owner source: `lookup` (default) vs `watcher` (legacy)
+
+Block ownership can reach the router two ways, selected by `KV_OWNER_SOURCE`
+(Helm `router.ownerSource`, config `router_owner_source`):
+
+- **`lookup` (default).** At admit time the router issues a targeted, pipelined
+  Redis `HGETALL` for the request's *own* block hashes (`owner_lookup.py`, capped
+  by `KV_LOOKUP_MAX_BLOCKS` / `router.lookupMaxBlocks`, default 512) and stores
+  the result in a per-request owner map (`_REQ_OWNERS`). `prefix_len` scores
+  against this fresh, request-scoped view, so `prefix`/`both` routing and the
+  `kv_hit` metric are truthful. The per-request state is dropped at completion.
+- **`watcher` (legacy).** The background `KVWatcher` blind-scans Redis into a
+  shared `_BLOCK_OWNERS` map. Retained for backward compatibility; it can starve
+  under load (bounded by `KV_WATCH_MAX_KEYS`) and under-count `kv_hit`. Used only
+  when `KV_OWNER_SOURCE=watcher`, and as the fallback map when a per-request
+  lookup returned nothing.
+
+The `KVWatcher` and pod-discovery loops below still run in both modes (pod
+discovery is always needed to translate Redis pod names to endpoint URLs).
+
 ### KVWatcher
 
 `KVWatcher` runs in a daemon **thread** in the router process (via `asyncio.run()`), not as an asyncio task on the main loop. It wakes every `KV_WATCH_INTERVAL_S` seconds and calls `_scan_once()`.
@@ -211,7 +232,7 @@ _REQ_BLOCKS: dict[str, list[int]]
 # e.g. { "a3f9...": [H1, H2, H3, H4] }
 ```
 
-`_BLOCK_OWNERS` is written exclusively by `KVWatcher`. `_REQ_BLOCKS` is written at admit time and cleaned up after result delivery.
+`_BLOCK_OWNERS` is written exclusively by `KVWatcher` (watcher mode). In the default `lookup` mode the router instead fills a per-request `_REQ_OWNERS` map (`block_hash → set of pods`) from the targeted `owner_lookup.py` fetch, and `prefix_len` prefers it over `_BLOCK_OWNERS`. `_REQ_BLOCKS` (and `_REQ_OWNERS`) are written at admit time and dropped after result delivery (`drop_request`).
 
 ### Pod discovery
 
@@ -463,7 +484,7 @@ Neither error is detectable at the routing layer. There is no validation or veri
 
 ## Known Limitations
 
-**Stale ownership window.** The KVWatcher scans Redis every `KV_WATCH_INTERVAL_S` (default 1s). Between scans, blocks evicted from vLLM are not reflected in `_BLOCK_OWNERS`. The router may route to a pod that no longer has the blocks, resulting in a silent cache miss.
+**Stale ownership window (watcher mode only).** With `KV_OWNER_SOURCE=watcher`, the KVWatcher scans Redis every `KV_WATCH_INTERVAL_S` (default 1s). Between scans, blocks evicted from vLLM are not reflected in `_BLOCK_OWNERS`, so the router may route to a pod that no longer has the blocks (silent cache miss). The default `lookup` mode avoids this by reading fresh ownership per request at admit; only the sub-millisecond gap between the lookup and dispatch remains.
 
 **No token-level granularity.** `prefix_len` counts blocks, not tokens. Whether a block represents 16 or 64 tokens is not tracked. Tier comparisons across requests with different block sizes or token densities may not accurately reflect proportional cache reuse benefit.
 

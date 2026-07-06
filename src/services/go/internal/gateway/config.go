@@ -33,6 +33,13 @@ type Config struct {
 	KVWatchMaxKeys       int
 	KVDiscoveryIntervalS float64
 
+	// Block-owner source for prefix routing: "lookup" (targeted per-request
+	// HGETALL of the request's own blocks; exact, fresh, eviction-aware) or
+	// "watcher" (legacy blind background scan). KVLookupMaxBlocks caps the
+	// HGETALL fan-out per request.
+	KVOwnerSource     string
+	KVLookupMaxBlocks int
+
 	KVHashSource         string
 	HashServiceURL       string
 	HashTimeoutS         float64
@@ -129,6 +136,9 @@ func LoadConfig() *Config {
 		KVWatchIntervalS:     common.EnvFloat("KV_WATCH_INTERVAL_S", 1.0),
 		KVWatchMaxKeys:       common.EnvInt("KV_WATCH_MAX_KEYS", 200),
 		KVDiscoveryIntervalS: common.EnvFloat("KV_DISCOVERY_INTERVAL_S", 5.0),
+
+		KVOwnerSource:     common.EnvStr("KV_OWNER_SOURCE", "lookup"),
+		KVLookupMaxBlocks: common.EnvInt("KV_LOOKUP_MAX_BLOCKS", 512),
 
 		KVHashSource:         common.EnvStr("KV_HASH_SOURCE", "inline"),
 		HashServiceURL:       common.EnvStr("HASH_SERVICE_URL", "http://127.0.0.1:9095"),
@@ -253,6 +263,12 @@ func (c *Config) normalize() {
 		hs = "inline"
 	}
 	c.KVHashSource = hs
+
+	ownerSrc := strings.TrimSpace(strings.ToLower(c.KVOwnerSource))
+	if ownerSrc != "lookup" && ownerSrc != "watcher" {
+		ownerSrc = "lookup"
+	}
+	c.KVOwnerSource = ownerSrc
 
 	// Unified routing strategy: when set, derives KVAware / AffinityEnabled from
 	// a single knob and overrides the individual flags above. Ports
@@ -380,6 +396,8 @@ func (c *Config) PrintBanner() {
 		"KV_WATCH_INTERVAL_S":     c.KVWatchIntervalS,
 		"KV_WATCH_MAX_KEYS":       c.KVWatchMaxKeys,
 		"KV_DISCOVERY_INTERVAL_S": c.KVDiscoveryIntervalS,
+		"KV_OWNER_SOURCE":         c.KVOwnerSource,
+		"KV_LOOKUP_MAX_BLOCKS":    c.KVLookupMaxBlocks,
 		"KV_HASH_SOURCE":          c.KVHashSource,
 		"HASH_SERVICE_URL":        c.HashServiceURL,
 		"HASH_TIMEOUT_S":          c.HashTimeoutS,
