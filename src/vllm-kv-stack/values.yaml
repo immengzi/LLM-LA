@@ -143,6 +143,33 @@ router:
   # hard mode: max time an item waits for its pod before release to any pod
   affinityHardTimeoutS: 5
 
+  # ---- Persistent affinity map (Redis-backed; OFF by default) ----
+  # When true, every affinity claim is write-through to Redis and the in-memory
+  # map is warmed from Redis at startup, so the conversation->pod map survives
+  # router restarts and full redeploys. Requires Redis persistence (see the
+  # `redis:` block below) to survive a Redis pod restart too. Feature-off is
+  # byte-for-byte identical to the legacy in-memory-only behavior.
+  affinityPersistEnabled: false
+  # Per-key Redis TTL. 0 = no expiry (preserve continuity across long deploy
+  # gaps, at the cost of keeping stale post-scale-down keys). A finite value
+  # bounds stale keys but drops mappings for conversations idle > TTL.
+  affinityRedisTtlSeconds: 0
+  # Redis key namespace prefix: "{prefix}:{cluster}:{model}:{affinity_key}".
+  affinityRedisKeyPrefix: "affinity"
+  # In-memory front-cache bound (0 = unbounded); evicted keys stay in Redis.
+  affinityCacheMax: 100000
+  # Periodic re-warm from Redis (0 = warm once at startup only).
+  affinityCacheRefreshS: 0
+  # A pinned pod is "available" only if it pulled within this window. A sidecar
+  # /pull is health-gated on vLLM /health, so a pull doubles as a per-pod READY
+  # heartbeat (ready pods heartbeat sub-second); this window is headroom against
+  # a briefly-silent ready pod, and ages out genuinely gone/scaled-down pods to
+  # LB. See docs/internal/persistent-affinity-map.md.
+  affinityEndpointStaleS: 1800
+  # Cluster component of the Redis key namespace. Empty => the chart falls back
+  # to .Values.switchCluster, then the code falls back to the k8s namespace.
+  affinityCluster: ""
+
   # SLO-aware routing (disabled by default — zero impact on legacy path)
   sloAware: false
   sloWithKv: true
@@ -511,6 +538,20 @@ lmcacheController:
   # (only safe if you don't hardcode the controller IP).
   nodeName: ""
   tolerations: []
+
+# -----------------------------------------------------------------------
+# Redis persistence (for the durable, Redis-backed affinity map).
+# When persistence.enabled=true the chart mounts a PVC at /data and runs Redis
+# with AOF (appendonly) + RDB so the affinity map survives a Redis pod
+# restart/reschedule and a full redeploy. Leave disabled if you do not use
+# router.affinityPersistEnabled (default keeps the old ephemeral behavior).
+redis:
+  appendfsync: everysec   # everysec (default) | always | no
+  persistence:
+    enabled: false
+    size: 5Gi
+    accessMode: ReadWriteOnce
+    storageClass: ""      # "" = cluster default StorageClass
 
 # Component deployment control
 # Set to false to skip deploying a component (used for decoupled vLLM/stack deploys)

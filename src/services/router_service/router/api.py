@@ -949,6 +949,14 @@ async def _startup():
     _install_submit_route()
     _install_result_submit_route()
 
+    # Reload the durable affinity map from Redis (no-op unless persistence is
+    # on). Done before serving so warm mappings are available immediately.
+    try:
+        router_state.warm_affinity_from_store()
+    except Exception as e:
+        print(f"[router] WARNING: affinity warm failed: {e!r}")
+        sys.stdout.flush()
+
     _kv_watcher = KVWatcher()
     _kv_watcher.start()
     print("[router] KVWatcher started.")
@@ -1026,6 +1034,12 @@ async def _shutdown():
 
     try:
         await owner_lookup.close_owner_lookup()
+    except Exception:
+        pass
+
+    # Flush + close the durable affinity store (no-op unless persistence is on).
+    try:
+        router_state.close_affinity_store()
     except Exception:
         pass
 
@@ -1811,6 +1825,12 @@ def _inject_affinity(
     if key:
         meta["__affinity_key__"] = key
         meta["__affinity_ts__"] = time.time()
+        # Read-on-arrival: warm this key from the durable store into the
+        # in-memory cache (once per request; no-op unless persistence is on).
+        try:
+            router_state.affinity_prefetch(key)
+        except Exception:
+            pass
     return meta
 
 

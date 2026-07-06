@@ -158,6 +158,12 @@ class RouterPullWorker:
         interval = max(0.01, float(_cfg.PULL_INTERVAL_S))
         while not self._stop_evt.is_set():
             try:
+                # LOAD-BEARING health gate: pulls happen only when vLLM /health
+                # is 200. The router's persistent-affinity readiness anchor
+                # relies on "a pull ⟹ this pod was ready ≤5s ago". Do NOT pull
+                # before vLLM is ready (no warmup pull / relaxed gate) without
+                # re-evaluating the affinity readiness predicate.
+                # See docs/internal/persistent-affinity-map.md (invariant).
                 if self.check_vllm_health():
                     self.pull_if_capacity()
             except Exception as e:
@@ -184,6 +190,9 @@ class RouterPullWorker:
         if self._stop_evt.is_set():
             return
 
+        # LOAD-BEARING health gate (see _poll_loop + the affinity readiness
+        # invariant in docs/internal/persistent-affinity-map.md): never pull
+        # before vLLM is ready, or the router's per-pod READY anchor breaks.
         if not self._vllm_healthy:
             return
 

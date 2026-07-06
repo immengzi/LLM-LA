@@ -117,6 +117,12 @@ func (w *RouterPullWorker) pollLoop() {
 			return
 		default:
 		}
+		// LOAD-BEARING health gate: pulls happen only when vLLM /health is 200.
+		// The router's persistent-affinity readiness anchor relies on
+		// "a pull ⟹ this pod was ready ≤5s ago". Do NOT pull before vLLM is
+		// ready (no warmup pull / relaxed gate) without re-evaluating the
+		// affinity readiness predicate. See
+		// docs/internal/persistent-affinity-map.md (invariant).
 		if w.CheckVLLMHealth() {
 			w.PullIfCapacity()
 		}
@@ -145,6 +151,9 @@ type pullResponse struct {
 }
 
 func (w *RouterPullWorker) PullIfCapacity() {
+	// LOAD-BEARING health gate (see pollLoop + the affinity readiness invariant
+	// in docs/internal/persistent-affinity-map.md): never pull before vLLM is
+	// ready, or the router's per-pod READY anchor breaks.
 	if !w.vllmHealthy.Load() {
 		return
 	}

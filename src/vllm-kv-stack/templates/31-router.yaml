@@ -127,6 +127,21 @@ spec:
               value: {{ quote (toString .Values.router.affinityTtlS) }}
             - name: AFFINITY_HARD_TIMEOUT_S
               value: {{ quote (toString .Values.router.affinityHardTimeoutS) }}
+            # ---- Persistent affinity map (Redis-backed) ----
+            - name: AFFINITY_PERSIST_ENABLED
+              value: {{ ternary "true" "false" (.Values.router.affinityPersistEnabled | default false) | quote }}
+            - name: AFFINITY_REDIS_TTL_SECONDS
+              value: {{ quote (toString (.Values.router.affinityRedisTtlSeconds | default 86400)) }}
+            - name: AFFINITY_REDIS_KEY_PREFIX
+              value: {{ quote (.Values.router.affinityRedisKeyPrefix | default "affinity") }}
+            - name: AFFINITY_CACHE_MAX
+              value: {{ quote (toString (.Values.router.affinityCacheMax | default 100000)) }}
+            - name: AFFINITY_CACHE_REFRESH_S
+              value: {{ quote (toString (.Values.router.affinityCacheRefreshS | default 0)) }}
+            - name: AFFINITY_ENDPOINT_STALE_S
+              value: {{ quote (toString (.Values.router.affinityEndpointStaleS | default 1800)) }}
+            - name: CLUSTER
+              value: {{ quote (.Values.router.affinityCluster | default (.Values.switchCluster | default "")) }}
             # ------------------------------------
 
             # ---- SLO-aware routing knobs ----

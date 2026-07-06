@@ -1,5 +1,24 @@
 {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
 {{- if .Values.deploy.redis }}
+{{- $persist := (and .Values.redis .Values.redis.persistence .Values.redis.persistence.enabled) }}
+{{- $appendfsync := (default "everysec" (and .Values.redis .Values.redis.appendfsync)) }}
+{{- if $persist }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - {{ default "ReadWriteOnce" .Values.redis.persistence.accessMode }}
+  resources:
+    requests:
+      storage: {{ default "5Gi" .Values.redis.persistence.size }}
+  {{- if .Values.redis.persistence.storageClass }}
+  storageClassName: {{ .Values.redis.persistence.storageClass | quote }}
+  {{- end }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,6 +26,12 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
+  {{- if $persist }}
+  # An RWO PVC can only be mounted by one pod at a time; Recreate avoids a
+  # rolling-update deadlock where the new pod cannot mount while the old holds it.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app: redis
@@ -34,14 +59,29 @@ spec:
           image: {{ include "vllmkv.image" (list . .Values.images.redis) }}
           args:
             - redis-server
+            # RDB snapshots kept as a backstop even when AOF is on.
             - --save
             - "60"
             - "1"
+            - --dir
+            - /data
+            {{- if $persist }}
+            # Durable append-only file so writes survive a Redis restart/redeploy.
+            - --appendonly
+            - "yes"
+            - --appendfsync
+            - {{ $appendfsync | quote }}
+            {{- end }}
             - --loglevel
             - warning
           ports:
             - containerPort: 6379
               name: redis
+          {{- if $persist }}
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          {{- end }}
           resources:
             requests:
               cpu: "100m"
@@ -59,6 +99,12 @@ spec:
               port: 6379
             initialDelaySeconds: 10
             periodSeconds: 20
+      {{- if $persist }}
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-data
+      {{- end }}
 
 ---
 apiVersion: v1

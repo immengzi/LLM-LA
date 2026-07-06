@@ -1071,6 +1071,15 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             "router.affinityTtlS": float(getattr(h, "router_affinity_ttl_s", 300.0)),
             "router.affinityHardTimeoutS": float(getattr(h, "router_affinity_hard_timeout_s", 5.0)),
 
+            # Persistent affinity map (Redis-backed) knobs
+            "router.affinityPersistEnabled": bool(getattr(h, "router_affinity_persist_enabled", False)),
+            "router.affinityRedisTtlSeconds": int(getattr(h, "router_affinity_redis_ttl_seconds", 0)),
+            "router.affinityRedisKeyPrefix": str(getattr(h, "router_affinity_redis_key_prefix", "affinity")),
+            "router.affinityCacheMax": int(getattr(h, "router_affinity_cache_max", 100000)),
+            "router.affinityCacheRefreshS": float(getattr(h, "router_affinity_cache_refresh_s", 0.0)),
+            "router.affinityEndpointStaleS": float(getattr(h, "router_affinity_endpoint_stale_s", 1800.0)),
+            "router.affinityCluster": str(getattr(h, "router_affinity_cluster", "")),
+
             "aibrix.enabled": bool(getattr(h, "aibrix_enabled", False)),
             "aibrix.modelName": str(getattr(h, "aibrix_model_name", "served-model")),
             "aibrix.port": int(getattr(h, "aibrix_port", 8200)),
