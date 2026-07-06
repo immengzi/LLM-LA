@@ -1,0 +1,41 @@
+ARG BASE_IMAGE=quay.io/ascend/vllm-ascend:v0.18.0-openeuler
+FROM ${BASE_IMAGE}
+
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
+ARG PIP_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
+ARG PIP_TRUSTED_HOST="mirrors.aliyun.com"
+
+ENV SOC_VERSION=Ascend
+ENV LMCACHE_TRACK_USAGE=false
+ENV PIP_NO_CACHE_DIR=1
+ENV TORCH_DEVICE_BACKEND_AUTOLOAD=0
+
+RUN printf "[global]\nindex-url = %s\ntrusted-host = %s\n" "$PIP_INDEX_URL" "$PIP_TRUSTED_HOST" > /etc/pip.conf
+
+WORKDIR /workspace
+COPY . /workspace/LMCache-Ascend/
+
+# 1) LMCache 0.4.3 wheel + controller patch (locate via pip show, never import)
+RUN NO_CUDA_EXT=1 pip install lmcache==0.4.3 && \
+    LMC="$(pip show lmcache | awk '/^Location:/{print $2}')" && \
+    echo ">>> patch LMCache @ $LMC" && cd "$LMC" && \
+    git apply -p1 --verbose /workspace/LMCache-Ascend/docker/lmcache-controller.diff && \
+    grep -q target_worker_id "$LMC/lmcache/v1/cache_controller/utils.py"
+
+# 2) vLLM sched_yield patch via script (baseline mismatch => cannot git apply)
+RUN bash /workspace/LMCache-Ascend/docker/patch-vllm.sh
+
+# 2b) OPTIONAL: only for cross-instance P2P / disagg-prefill
+# RUN cd /vllm-workspace/vllm-ascend && \
+#     git apply -p1 --verbose /workspace/LMCache-Ascend/docker/vllm-sched.diff
+
+# 3) Compile + editable install LMCache-Ascend (kvcache-ops C++)
+RUN cd /workspace/LMCache-Ascend && \
+    export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/$(uname -i)-openEuler-linux:$CPLUS_INCLUDE_PATH && \
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib && \
+    pip install -v --no-build-isolation -e .
+
+CMD ["/bin/bash"]
