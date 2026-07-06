@@ -396,6 +396,17 @@ class HelmConfig:
     # vllm-cpu-hash service (the external pod is auto-deployed when external).
     router_hash_source: str = "inline"
 
+    # ---- KV block-owner source for prefix routing (maps to values.router.ownerSource) ----
+    # "lookup"  = targeted per-request Redis HGETALL of the request's own block
+    #             hashes at ingress (default). Makes prefix/both routing and the
+    #             kv_hit metric truthful; inert under affinity/none strategies.
+    # "watcher" = legacy background scan that populated a shared block-owner map
+    #             (add-only, could starve under load -> under-counted kv_hit).
+    router_owner_source: str = "lookup"
+    # Cap on how many leading block hashes are looked up per request (owner
+    # source = lookup). Maps to values.router.lookupMaxBlocks.
+    router_lookup_max_blocks: int = 512
+
     # ---- full prefix block-hash logging (maps to values.router.logBlockHashes) ----
     # When true, the router emits each request's full block-hash list into
     # /latency_log; with collect_router_log on, it lands in router_logs.json and

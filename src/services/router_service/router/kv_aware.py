@@ -11,12 +11,19 @@ Debug helpers:
 """
 
 from collections import OrderedDict
-from typing import Dict, List, Iterable, Optional
+from typing import Dict, List, Iterable, Optional, Set
 from threading import RLock
 
-# req_id -> [block_hashes...]
-_REQ_BLOCKS: Dict[str, List[int]] = {}
-# block_hash -> { endpoint_url: True }
+# req_id -> [block_hashes...] (bounded; primary cleanup is drop_request at
+# completion, the bound is only a backstop for requests that never complete).
+_REQ_BLOCKS: "OrderedDict[str, List[int]]" = OrderedDict()
+_REQ_BLOCKS_MAX = 16384
+# req_id -> { block_hash: {owner_pod, ...} } fresh ownership from the targeted
+# per-request Redis lookup (owner_lookup.fetch_block_owners). Preferred over the
+# global _BLOCK_OWNERS map because it reflects eviction and never goes stale.
+_REQ_OWNERS: "OrderedDict[str, Dict[int, Set[str]]]" = OrderedDict()
+_REQ_OWNERS_MAX = 16384
+# block_hash -> { endpoint_url: True } (legacy background-scan map; fallback only)
 _BLOCK_OWNERS: Dict[int, Dict[str, bool]] = {}
 
 # req_id -> routing decision captured at dispatch time (independent of the
@@ -64,6 +71,25 @@ def pop_routing(req_id: str) -> Optional[Dict]:
 def register_request_blocks(req_id: str, block_hashes: Iterable[int]) -> None:
     with _LOCK:
         _REQ_BLOCKS[req_id] = list(block_hashes)
+        _REQ_BLOCKS.move_to_end(req_id)
+        while len(_REQ_BLOCKS) > _REQ_BLOCKS_MAX:
+            _REQ_BLOCKS.popitem(last=False)
+
+
+def set_request_owners(req_id: str, owners: Dict[int, Set[str]]) -> None:
+    """Record fresh per-request block ownership from the targeted Redis lookup."""
+    with _LOCK:
+        _REQ_OWNERS[req_id] = owners
+        _REQ_OWNERS.move_to_end(req_id)
+        while len(_REQ_OWNERS) > _REQ_OWNERS_MAX:
+            _REQ_OWNERS.popitem(last=False)
+
+
+def drop_request(req_id: str) -> None:
+    """Release per-request state at completion (prevents unbounded growth)."""
+    with _LOCK:
+        _REQ_BLOCKS.pop(req_id, None)
+        _REQ_OWNERS.pop(req_id, None)
 
 
 def get_request_blocks(req_id: str) -> List[int]:
@@ -85,12 +111,29 @@ def register_block_owners(block_hash: int, owners: Iterable[str]) -> None:
 
 def prefix_len(endpoint: str, req_id: str) -> int:
     """
-    How many prefix blocks of this request are owned by this endpoint?
+    How many contiguous leading blocks of this request are owned by this
+    endpoint?
+
+    Prefers the fresh per-request ownership captured at ingress
+    (set_request_owners); falls back to the legacy background-scan map only when
+    no per-request lookup was recorded.
     """
     with _LOCK:
         blocks = _REQ_BLOCKS.get(req_id)
         if not blocks:
             return 0
+
+        req_owners = _REQ_OWNERS.get(req_id)
+        if req_owners is not None:
+            count = 0
+            for h in blocks:
+                ep_set = req_owners.get(h)
+                if not ep_set or endpoint not in ep_set:
+                    break
+                count += 1
+            return count
+
+        # Fallback: legacy global block-owner map (add-only background scan).
         owners = _BLOCK_OWNERS
         count = 0
         for h in blocks:

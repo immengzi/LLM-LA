@@ -99,6 +99,17 @@ router:
   #              pod is auto-deployed by the chart only when this is "external".
   hashSource: inline
 
+  # KV block-owner source used for prefix/both routing (applies to both python
+  # and go):
+  #   lookup  = targeted per-request Redis HGETALL of the request's own block
+  #             hashes at ingress (default). Makes prefix/both routing and the
+  #             kv_hit metric truthful; inert under affinity/none strategies.
+  #   watcher = legacy background scan into a shared block-owner map (add-only,
+  #             could starve under load and under-count kv_hit).
+  ownerSource: lookup
+  # Cap on leading block hashes looked up per request when ownerSource=lookup.
+  lookupMaxBlocks: 512
+
   # Claude Code client seam: strip the per-request cch attribution counter.
   stripCch: "1"
 

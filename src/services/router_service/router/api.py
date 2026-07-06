@@ -31,7 +31,8 @@ from .models import (
 )
 from .router_state import router_state
 from .kv_watcher import KVWatcher
-from .kv_aware import register_request_blocks, pop_routing
+from .kv_aware import register_request_blocks, pop_routing, set_request_owners, drop_request
+from . import owner_lookup
 from .affinity import derive_affinity_key
 from .push_router import PushRouter
 from .metrics import (
@@ -94,6 +95,8 @@ def _routing_fields(rid: str) -> Dict[str, Any]:
     routing info was recorded (e.g. /enqueue-only paths).
     """
     info = pop_routing(rid)
+    # Release per-request KV state (block hashes + owner cache) at completion.
+    drop_request(rid)
     if not info:
         return {}
     kv_hits_len = int(info.get("kv_hits_len", 0))
@@ -595,6 +598,20 @@ async def _maybe_register_kv_blocks(
 
         register_request_blocks(req_id, block_hashes)
 
+        # Targeted, fresh ownership prefetch for routing: HGETALL exactly this
+        # request's block hashes so prefix_len() is exact and eviction-aware.
+        # Only needed when KV routing is on; failures fall back to affinity.
+        if (
+            _cfg.KV_AWARE
+            and block_hashes
+            and getattr(_cfg, "KV_OWNER_SOURCE", "lookup") == "lookup"
+        ):
+            try:
+                owners = await owner_lookup.fetch_block_owners(block_hashes)
+                set_request_owners(req_id, owners)
+            except Exception:
+                pass
+
         if getattr(_cfg, "TRACE_ENABLED", False):
             tr = dict(m.get("__trace__") or {})
             tr["router_block_hashes"] = block_hashes  # ALWAYS set (possibly [])
@@ -937,6 +954,18 @@ async def _startup():
     print("[router] KVWatcher started.")
     sys.stdout.flush()
 
+    # Targeted per-request block-owner lookup (preferred routing source).
+    if getattr(_cfg, "KV_AWARE", False) and getattr(_cfg, "KV_OWNER_SOURCE", "lookup") == "lookup":
+        try:
+            await owner_lookup.init_owner_lookup()
+            print(
+                f"[router] KV owner lookup ready (targeted Redis, "
+                f"max_blocks={getattr(_cfg, 'KV_LOOKUP_MAX_BLOCKS', 512)})."
+            )
+        except Exception as e:
+            print(f"[router] WARNING: KV owner lookup init failed: {e!r}")
+        sys.stdout.flush()
+
     # Push router (optional)
     if _is_push_mode():
         _push_router = PushRouter(mode=_cfg.ROUTER_MODE)
@@ -994,6 +1023,11 @@ async def _shutdown():
         _kv_watcher.stop()
         print("[router] KVWatcher stopped.")
         _kv_watcher = None
+
+    try:
+        await owner_lookup.close_owner_lookup()
+    except Exception:
+        pass
 
     if _push_dispatcher is not None:
         try:
