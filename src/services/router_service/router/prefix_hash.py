@@ -43,8 +43,15 @@ def _canonicalise_value(obj: Any) -> Any:
 
 
 def canonicalise_tools_enabled() -> bool:
-    """Gate Boom-compatible tools canonicalisation; default on for migration parity."""
-    return os.getenv("KV_CANONICALISE_TOOLS", "1").strip().lower() in (
+    """Gate Boom-compatible tools canonicalisation.
+
+    Default OFF: the current BooM gateway serialises request tools with
+    serde_json `preserve_order` (insertion order), so sorting tool
+    function.parameters keys here would diverge from what vLLM actually
+    tokenises. Set KV_CANONICALISE_TOOLS=1 only against a BooM build that
+    alphabetically sorts tools (legacy BTreeMap behaviour).
+    """
+    return os.getenv("KV_CANONICALISE_TOOLS", "0").strip().lower() in (
         "1",
         "true",
         "yes",
