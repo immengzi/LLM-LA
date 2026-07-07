@@ -128,6 +128,12 @@ helm:
   # routing here); kept explicit so a switch to prefix/both is drop-in.
   router_owner_source: "lookup"
   router_lookup_max_blocks: 512
+  # Whole-block strip of Claude Code's x-anthropic-billing-header attribution
+  # (rotating cc_version + per-request cch counter) router-side for byte-stable
+  # KV-prefix matching. Chart default is OFF. Requires the remove-cc-header router
+  # build. Left commented. Idempotent: safe even if BooM Gateway also strips (the
+  # second pass finds nothing and no-ops) — enabling both is redundant, not harmful.
+  # router_strip_cch: "1"
   router_log_block_hashes: true
   router_measure_prefix: true
   router_affinity_mode: "hard"

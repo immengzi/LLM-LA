@@ -138,6 +138,11 @@ helm:
   # routing here); kept explicit so a switch to prefix/both is drop-in.
   router_owner_source: "lookup"
   router_lookup_max_blocks: 512
+  # Strip the whole Claude Code x-anthropic-billing-header attribution block
+  # (rotating cc_version + per-request cch counter) router-side so KV-prefix
+  # matching is byte-stable across requests. Chart default is OFF ("0"); opt in
+  # here. Requires the remove-cc-header router build (whole-block strip).
+  router_strip_cch: "1"
   router_log_block_hashes: true
   router_measure_prefix: true
   router_affinity_mode: "hard"
@@ -242,15 +247,16 @@ helm:
   # Pin the controller to a real BZ node whose IP == controller_pull_url host.
   values:
     lmcacheController.nodeName: "k8s-worker1"
-    # router: persist-affinity build (digest 89be8a05…f89fd), the build validated
-    # for the Redis-backed affinity map; replaces the clusters.yaml `latest` pin.
-    images.router: "kv-router:persist-affinity-9004c35"
+    # router: remove-cc-header build (digest e407aab5…f0a5b). Adds whole-block
+    # stripping of Claude Code's `x-anthropic-billing-header` attribution block
+    # (STRIP_CCH), matching BooM Gateway/vLLM PR #36829 — restores cross-request
+    # KV-prefix cache hits that the old narrow `; cch=` regex never fixed.
+    images.router: "kv-router:remove-cc-header"
     # boom: == bz default; kept explicit for reproducibility.
     boom.image: "boom-gateway:v5"
     # sidecar: left on clusters.yaml default kv-sidecar:latest — persist-affinity
     # is router-side; the only sidecar edit on this branch is comment-only, so
     # latest is behavior-compatible with the router above.
-    #
     # Redis on-disk durability (AOF + PVC) intentionally NOT enabled this round —
     # Redis is EPHEMERAL. The write/read/warm paths are validated with ephemeral
     # Redis (they never restart the Redis pod); AOF/PVC (to survive a Redis pod

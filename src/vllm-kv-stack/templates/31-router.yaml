@@ -182,7 +182,7 @@ spec:
             - name: POOL_FACTOR
               value: "4"
             - name: STRIP_CCH
-              value: {{ quote (toString (.Values.router.stripCch | default "1")) }}
+              value: {{ quote (toString (.Values.router.stripCch | default "0")) }}
             - name: POOL_BIDIRECTIONAL
               value: {{ ternary "true" "false" (.Values.router.poolBidirectional | default false) | quote }}
             - name: DEFAULT_MAX_TOKENS
