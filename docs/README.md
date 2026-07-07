@@ -61,9 +61,10 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | [bz-cluster-nodes.md](operations/bz-cluster-nodes.md) | BZ cluster node inventory: public/private IPs, SSH aliases, NPU, schematic |
 | [bz-dashboard-access.md](operations/bz-dashboard-access.md) | Reach BZ dashboards/notebooks (Prometheus, Grafana, Jupyter) over SSH tunnels |
 | [autoscaling.md](operations/autoscaling.md) | Per-model KEDA autoscaling (dense, multi-model, data-parallel) |
-| [infra/](../infra/README.md) | Ansible automation of the cluster-setup checklist (`make prep` / `make verify`) |
+| [cluster-prep-automation.md](operations/cluster-prep-automation.md) | Ansible automation of the cluster-setup checklist (`make prep` / `make verify`) |
 | [multi-node-setup-guide.md](operations/multi-node-setup-guide.md) | Deep multi-node infra reference (NFS, PV, registry, RoCE) |
 | [registry.md](operations/registry.md) | Private registry (`reg.local:32000`) operations |
+| [image-patches.md](operations/image-patches.md) | vLLM/LMCache-Ascend source patches baked into the image (negative-counter crash fix) |
 | [k8s-dns-troubleshooting.md](operations/k8s-dns-troubleshooting.md) | DNS/networking runbook |
 | [disaster-recovery.md](operations/disaster-recovery.md) | Incident runbook: disk pressure, NPU/scheduling, node loss, OOM, stuck routing |
 | [docker-proxy-fix.md](operations/docker-proxy-fix.md) | Docker pulls behind an SSL-inspecting proxy |

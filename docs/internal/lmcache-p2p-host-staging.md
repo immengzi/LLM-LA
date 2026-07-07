@@ -85,6 +85,13 @@ registration ceiling** — we register the whole 90 GiB CPU KV pool with the
 transfer engine. Host-staging caps the registered region at 8 GiB. This is
 likely the real fix for the crash, not batch size / gpuMemoryUtilization.
 
+> Separate crash, same mode: once host-staging is in place, a rollback under
+> KV pressure can also feed a **negative prompt-token delta** into a Prometheus
+> counter and kill the engine during metrics recording. That is fixed by a
+> source patch baked into the image — see
+> [image-patches.md](../operations/image-patches.md). Both fixes are required
+> for a stable p2p deploy.
+
 IMPORTANT CONSTRAINT: host-staging is not a standalone knob. Its comment says it
 *"lives in HcclChannel, so this REQUIRES `transfer_channel: hccl` (NOT
 hccl_onesided) and `p2p_delay_pull: True`."* It only works in the LMCache P2P
@@ -388,7 +395,9 @@ Build is complete; this is the per-environment rollout sequence.
    `values.lmcacheController.nodeName` in the target config (yz preset to `node7`;
    bz is a placeholder).
 2. **Confirm the image tag** `lmcache-ascend:hccl-p2p` pulls on the engine nodes
-   (registry-host form).
+   (registry-host form) and that it includes the negative-counter fix — either
+   the `hccl-p2p-metrics-fix` overlay tag or a rebuild with the diff baked in
+   (see [image-patches.md](../operations/image-patches.md)).
 3. **BC check** (see top): `helm template` an unchanged Mooncake config on this
    branch vs the previous commit → diff must be empty.
 4. **Render check**: `helm template` the p2p config and eyeball

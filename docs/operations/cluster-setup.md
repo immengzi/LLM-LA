@@ -7,9 +7,11 @@ PV lifecycle, registry internals, diagnostics), see
 [multi-node-setup-guide.md](multi-node-setup-guide.md).
 
 > **Automated equivalent:** the steps below are scripted as an idempotent Ansible
-> playbook under [`infra/`](../../infra/README.md). Use `make prep` to run the
-> whole checklist and `make verify` for the read-only preflight checks (§13-14).
-> This document remains the source of truth for *why* each step is needed.
+> playbook under [`infra/`](../../infra/); see
+> [cluster-prep-automation.md](cluster-prep-automation.md). Use `make prep` to run
+> the whole checklist and `make verify` for the read-only preflight checks
+> (§13-14). This document remains the source of truth for *why* each step is
+> needed.
 
 ---
 
@@ -218,6 +220,10 @@ images must be present in the registry before deploying:
 
 **Reference**: [registry.md](registry.md) "Images in the registry",
 individual `build.sh` scripts and `services/build-common.sh`.
+
+For the LMCache P2P image (`lmcache-ascend:hccl-p2p`), source-level patches
+(notably the negative-counter crash fix) must be baked in before push — see
+[image-patches.md](image-patches.md).
 
 ---
 

@@ -1,0 +1,20 @@
+# Layer the negative-counter crash fix onto the existing hccl-p2p image.
+# No full LMCache-Ascend rebuild required; your lmcache-controller.diff and
+# vllm-utils.diff are already baked into the base image.
+#
+# The base image has no `patch`/`git` binary, so we apply the fix with a
+# self-verifying python script (python3 is always present in a vLLM image).
+#
+# Build (from microservice repo root):
+#   docker build -f infra/patches/Dockerfile.hccl-p2p-metrics-fix \
+#     -t reg.local:32000/lmcache-ascend:hccl-p2p-metrics-fix .
+#
+# Push:
+#   docker push reg.local:32000/lmcache-ascend:hccl-p2p-metrics-fix
+
+FROM reg.local:32000/lmcache-ascend:hccl-p2p
+
+COPY infra/patches/apply_metrics_fix.py /tmp/apply_metrics_fix.py
+
+RUN python3 /tmp/apply_metrics_fix.py /vllm-workspace/vllm/vllm/v1/metrics/loggers.py && \
+    rm -f /tmp/apply_metrics_fix.py
