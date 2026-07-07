@@ -407,6 +407,13 @@ class HelmConfig:
     # source = lookup). Maps to values.router.lookupMaxBlocks.
     router_lookup_max_blocks: int = 512
 
+    # ---- Claude Code attribution stripping (maps to values.router.stripCch) ----
+    # "1" strips the whole x-anthropic-billing-header attribution block (rotating
+    # cc_version + per-request cch counter) from system messages router-side so
+    # KV-prefix matching is byte-stable across requests. "0" leaves requests
+    # untouched. Default OFF.
+    router_strip_cch: str = "0"
+
     # ---- full prefix block-hash logging (maps to values.router.logBlockHashes) ----
     # When true, the router emits each request's full block-hash list into
     # /latency_log; with collect_router_log on, it lands in router_logs.json and

@@ -1590,25 +1590,68 @@ async def pull(req: PullRequest):
 # /result) are completely untouched — fully backward compatible.
 # ============================================================
 
+# Claude Code prepends a standalone system text block that begins with
+#   x-anthropic-billing-header: cc_version=<ver>; cch=<random>; cc_entrypoint=<...>;
+# BOTH the rotating tail of cc_version AND the per-request cch counter change on
+# every request, so byte-exact KV-cache prefix matching misses 100% of the time.
+# The previous narrow regex only removed the `; cch=<hex>` fragment and left the
+# rotating cc_version behind, so it never actually restored cross-request cache
+# hits. We now drop the ENTIRE attribution block, matching BooM Gateway's
+# rewrite::strip_cc_attribution_anthropic and vLLM PR #36829.
+_ATTRIBUTION_PREFIX = "x-anthropic-billing-header"
+# String-form system content: remove the whole attribution line.
+_ATTRIBUTION_LINE_RE = re.compile(
+    r"^[ \t]*x-anthropic-billing-header:[^\n]*\n?", re.MULTILINE
+)
+# Backward-compat fallback: legacy fragment removal for any residual `cch=`
+# embedded mid-text (e.g. block not at the start of a line).
 _CCH_RE = re.compile(r"; cch=[0-9a-f]+")
 
 
-def _strip_cch_inplace(req: "_ChatCompletionRequest") -> None:
-    """Strip Claude Code's per-request `cch=<hex>` counter from system text.
+def _is_attribution_text(text: str) -> bool:
+    """True if a text block is Claude Code's injected attribution block."""
+    return text.startswith(_ATTRIBUTION_PREFIX)
 
-    This is a router-side client compatibility seam. It is gated by
-    `STRIP_CCH=1` and intentionally does not modify BooM Gateway.
+
+def _strip_cch_inplace(req: "_ChatCompletionRequest") -> None:
+    """Strip Claude Code's `x-anthropic-billing-header` attribution block.
+
+    Claude Code injects a standalone system text block:
+        x-anthropic-billing-header: cc_version=...; cch=<random>; cc_entrypoint=...;
+    whose rotating cc_version tail and per-request cch counter invalidate
+    byte-exact KV-cache prefix matching on every request. We drop the entire
+    block (list form) or line (string form), mirroring BooM Gateway's
+    strip_cc_attribution_anthropic and vLLM PR #36829.
+
+    Router-side client compatibility seam, gated by `STRIP_CCH=1`. Intentionally
+    does not modify BooM Gateway.
     """
     for msg in req.messages:
         if msg.role.strip().lower() != "system":
             continue
         c = msg.content
         if isinstance(c, str):
-            new_c = _CCH_RE.sub("", c)
+            # Remove the whole attribution line, then scrub any residual
+            # fragment for safety.
+            new_c = _ATTRIBUTION_LINE_RE.sub("", c)
+            new_c = _CCH_RE.sub("", new_c)
             if new_c != c:
                 msg.content = new_c
         elif isinstance(c, list):
-            for part in c:
+            # Drop entire text parts that are the attribution block.
+            new_parts = [
+                part
+                for part in c
+                if not (
+                    isinstance(part, dict)
+                    and part.get("type") == "text"
+                    and _is_attribution_text(part.get("text", ""))
+                )
+            ]
+            if len(new_parts) != len(c):
+                msg.content = new_parts
+            # Scrub any residual fragment left in surviving text parts.
+            for part in msg.content:
                 if isinstance(part, dict) and part.get("type") == "text":
                     t = part.get("text", "")
                     nt = _CCH_RE.sub("", t)

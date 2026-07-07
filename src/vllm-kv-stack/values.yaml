@@ -117,8 +117,11 @@ router:
   # Cap on leading block hashes looked up per request when ownerSource=lookup.
   lookupMaxBlocks: 512
 
-  # Claude Code client seam: strip the per-request cch attribution counter.
-  stripCch: "1"
+  # Claude Code client seam: when "1", strip the whole x-anthropic-billing-header
+  # attribution block (rotating cc_version + per-request cch counter) from system
+  # messages so KV-prefix matching is byte-stable. Default OFF ("0"); opt in per
+  # deployment (e.g. router_strip_cch in the sweep config).
+  stripCch: "0"
 
   # Query head+tail of the pull pool for prefix matches.
   poolBidirectional: false
