@@ -50,6 +50,12 @@ type Config struct {
 	MeasurePrefix  bool
 	LogBlockHashes bool
 
+	// When true, the /latency_log ring includes the full request body under
+	// "request_body". Opt-in; LogRequestBodyMaxBytes caps each body (0 =
+	// unlimited). Bodies live in the bounded ring so they evict automatically.
+	LogRequestBody         bool
+	LogRequestBodyMaxBytes int
+
 	RouterStrategy string
 
 	KVAware   bool
@@ -149,6 +155,9 @@ func LoadConfig() *Config {
 		KVBlockSize:    common.EnvInt("KV_BLOCK_SIZE", 128),
 		MeasurePrefix:  common.EnvBool("ROUTER_MEASURE_PREFIX", false),
 		LogBlockHashes: common.EnvBool("ROUTER_LOG_BLOCK_HASHES", false),
+
+		LogRequestBody:         common.EnvBool("ROUTER_LOG_REQUEST_BODY", false),
+		LogRequestBodyMaxBytes: common.EnvInt("ROUTER_LOG_REQUEST_BODY_MAX_BYTES", 16384),
 
 		RouterStrategy: common.EnvStr("ROUTER_STRATEGY", ""),
 
@@ -404,6 +413,8 @@ func (c *Config) PrintBanner() {
 		"KV_BLOCK_SIZE":           c.KVBlockSize,
 		"ROUTER_MEASURE_PREFIX":   c.MeasurePrefix,
 		"ROUTER_LOG_BLOCK_HASHES": c.LogBlockHashes,
+		"ROUTER_LOG_REQUEST_BODY": c.LogRequestBody,
+		"ROUTER_LOG_REQUEST_BODY_MAX_BYTES": c.LogRequestBodyMaxBytes,
 		"ROUTER_STRATEGY":         c.RouterStrategy,
 		"KV_AWARE":                c.KVAware,
 		"LEN_AWARE":               c.LenAware,

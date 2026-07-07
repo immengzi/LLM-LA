@@ -368,6 +368,8 @@ def main():
             logger=run_logger,
             output_log_mode=cfg.output_log_mode,
             print_trace=cfg.print_trace,
+            log_request_body=getattr(cfg, "log_request_body", False),
+            request_body_max_bytes=getattr(cfg, "request_body_max_bytes", 16384),
             transport=getattr(cfg, "transport", None),
             backend=backend,
             aibrix=getattr(cfg, "aibrix", None),

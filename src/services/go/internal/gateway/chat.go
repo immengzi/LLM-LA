@@ -204,6 +204,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	for k, v := range xlat {
 		lat[k] = v
 	}
+	s.attachRequestBody(lat, chatBody)
 	s.recordLatency(lat)
 
 	message := map[string]interface{}{"role": "assistant"}
@@ -261,6 +262,38 @@ func (s *Server) enqueueAndWait(w http.ResponseWriter, prompt, resolvedModel str
 		return rid, tStart, nil
 	}
 	return rid, tStart, result
+}
+
+// truncateBodyForLog returns body as-is when it serializes within the
+// configured byte cap, else a bounded marker. Cap of 0 means unlimited.
+// Mirrors the Python/client truncation so logs.json bodies share one shape.
+func (s *Server) truncateBodyForLog(body map[string]interface{}) interface{} {
+	maxBytes := s.cfg.LogRequestBodyMaxBytes
+	b, err := json.Marshal(body)
+	if err != nil {
+		return body
+	}
+	if maxBytes > 0 && len(b) > maxBytes {
+		preview := string(b)
+		if len(preview) > maxBytes {
+			preview = preview[:maxBytes]
+		}
+		return map[string]interface{}{
+			"_truncated": true,
+			"bytes":      len(b),
+			"preview":    preview,
+		}
+	}
+	return body
+}
+
+// attachRequestBody adds a truncated "request_body" to a latency ring entry
+// when ROUTER_LOG_REQUEST_BODY is enabled. No-op otherwise (zero cost).
+func (s *Server) attachRequestBody(lat map[string]interface{}, body map[string]interface{}) {
+	if !s.cfg.LogRequestBody || body == nil {
+		return
+	}
+	lat["request_body"] = s.truncateBodyForLog(body)
 }
 
 func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, prompt, model, resolvedModel string, chatBody map[string]interface{}) {
@@ -352,6 +385,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, prompt, mode
 		for k, v := range xlat {
 			lat[k] = v
 		}
+		s.attachRequestBody(lat, chatBody)
 		s.recordLatency(lat)
 	}
 

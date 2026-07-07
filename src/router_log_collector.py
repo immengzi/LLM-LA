@@ -121,6 +121,11 @@ def router_entry_to_record(entry: Dict[str, Any], idx: int) -> Dict[str, Any]:
         if k in entry:
             record[k] = entry[k]
 
+    # Passthrough the full request body when the router emitted it
+    # (ROUTER_LOG_REQUEST_BODY). Already bounded/truncated server-side.
+    if "request_body" in entry:
+        record["request_body"] = entry["request_body"]
+
     return record
 
 

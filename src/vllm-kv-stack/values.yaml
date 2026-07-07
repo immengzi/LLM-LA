@@ -86,6 +86,13 @@ router:
   # list. Bulky; the kv-hit counts are always logged regardless of this flag.
   logBlockHashes: false
 
+  # When true, the /latency_log ring includes the full request body (messages +
+  # sampling params) under "request_body". Opt-in and off by default. Bodies
+  # live in the bounded ring (evict automatically) and logRequestBodyMaxBytes
+  # caps each body (0 = unlimited) so worst-case memory stays bounded.
+  logRequestBody: false
+  logRequestBodyMaxBytes: 16384
+
   # When true, compute per-request prefix blocks + the chosen endpoint's
   # prefix-hit count FOR LOGGING ONLY, even when kvAware is off (affinity-only
   # or none strategies). Makes kv_hits_len/total_blocks/kv_hit comparable across

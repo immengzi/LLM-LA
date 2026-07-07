@@ -413,6 +413,15 @@ class HelmConfig:
     # logs.json. Bulky; off by default. Hit counts are always logged regardless.
     router_log_block_hashes: bool = False
 
+    # ---- full request-body logging (maps to values.router.logRequestBody) ----
+    # When true, the router stores each request's full body (messages + sampling
+    # params) into /latency_log; with collect_router_log on it lands in
+    # router_logs.json / logs.json. Opt-in and off by default. Bodies ride the
+    # bounded /latency_log ring (evict automatically); router_log_request_body_max_bytes
+    # caps each body (0 = unlimited).
+    router_log_request_body: bool = False
+    router_log_request_body_max_bytes: int = 16384
+
     # ---- prefix measurement-only (maps to values.router.measurePrefix) ----
     # When true, the router computes per-request prefix blocks + the chosen
     # endpoint's hit count for LOGGING even when KV routing is off (affinity-only
@@ -761,6 +770,13 @@ class ClientConfig:
     output_log_mode: str = "full"
     print_trace: bool = False
 
+    # When true, persist the full request body (messages + sampling params, i.e.
+    # the exact wire payload) into each logs.json record under "request_body".
+    # Opt-in (off by default); request_body_max_bytes bounds each logged body
+    # (0 = unlimited), truncating oversized bodies to a bounded marker.
+    log_request_body: bool = False
+    request_body_max_bytes: int = 16384
+
     # When true (sweep_methods only): stream `kubectl logs` of every pod/container
     # in the deploy namespace into <exp_dir>/vllm-logs/<pod>/<container>.log.
     collect_vllm_logs: bool = False
@@ -981,6 +997,8 @@ def load_config(path: str) -> ClientConfig:
 
     output_log_mode = raw.get("output_log_mode", ClientConfig.output_log_mode)
     print_trace = raw.get("print_trace", ClientConfig.print_trace)
+    log_request_body = bool(raw.get("log_request_body", ClientConfig.log_request_body))
+    request_body_max_bytes = int(raw.get("request_body_max_bytes", ClientConfig.request_body_max_bytes))
     collect_vllm_logs = bool(raw.get("collect_vllm_logs", ClientConfig.collect_vllm_logs))
     collect_router_log = bool(raw.get("collect_router_log", ClientConfig.collect_router_log))
     router_log_url = str(raw.get("router_log_url", ClientConfig.router_log_url) or "")
@@ -1105,6 +1123,8 @@ def load_config(path: str) -> ClientConfig:
         generation=generation,
         output_log_mode=output_log_mode,
         print_trace=print_trace,
+        log_request_body=log_request_body,
+        request_body_max_bytes=request_body_max_bytes,
         collect_vllm_logs=collect_vllm_logs,
         collect_router_log=collect_router_log,
         router_log_url=router_log_url,

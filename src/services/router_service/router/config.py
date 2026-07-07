@@ -252,6 +252,14 @@ class RouterConfig:
     # included; this only controls the raw hash list.
     ROUTER_LOG_BLOCK_HASHES: bool = False
 
+    # When true, the /latency_log ring includes the full request body
+    # (messages + sampling params) under "request_body". Opt-in and off by
+    # default: bodies are stored inside the bounded ring (maxlen 2000) so they
+    # evict automatically, and ROUTER_LOG_REQUEST_BODY_MAX_BYTES caps each body
+    # (0 = unlimited) so worst-case memory stays bounded (~ring x max_bytes).
+    ROUTER_LOG_REQUEST_BODY: bool = False
+    ROUTER_LOG_REQUEST_BODY_MAX_BYTES: int = 16384
+
     # When true, compute per-request prefix blocks and the chosen endpoint's
     # prefix-hit count FOR LOGGING ONLY, even when KV_AWARE is off (e.g. the
     # affinity-only / none strategies). Decouples measurement from the routing

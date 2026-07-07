@@ -44,6 +44,7 @@ Each run is written to a numbered directory under the experiments root. The run 
 | `affinity_key` | Conversation key the router pinned on (when affinity is active) |
 | `trace`, `trace_metrics` | Stage timestamps + derived stage latencies (when tracing is on) |
 | `output` | Generated text (when logged) |
+| `request_body` | Full request body (messages + sampling params) when request-body logging is on (client `log_request_body`, or router `ROUTER_LOG_REQUEST_BODY` via the collector); truncated to a `{"_truncated", "bytes", "preview"}` marker past the byte cap |
 
 Multi-turn runs add `conversation_id`, `turn_idx`, and streaming runs add `ttft_s` / `tpot_avg_s`. Failed requests carry `error`, `send_failed`, or `lost (...)` markers.
 
@@ -63,6 +64,12 @@ The same module powers the external observer `prod_latency_collector.py`, so a
 prod capture emits the identical `router_logs.json` + enriched `logs.json`. Set
 `ROUTER_LOG_BLOCK_HASHES=true` on the router to also include the raw prefix
 `block_hashes` list per request (bulky; off by default).
+
+Set `ROUTER_LOG_REQUEST_BODY=true` on the router (Helm `router.logRequestBody`)
+to also store each request's full body under `request_body`; the collector then
+passes it through into `router_logs.json` / `logs.json`. Opt-in and off by
+default. Bodies ride the bounded `/latency_log` ring (evict automatically) and
+`ROUTER_LOG_REQUEST_BODY_MAX_BYTES` (default 16384, `0` = unlimited) caps each.
 
 ## Trace metrics
 
