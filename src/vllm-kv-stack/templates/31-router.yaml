@@ -94,6 +94,10 @@ spec:
               value: {{ quote (toString (.Values.router.kvBlockSize | default 128)) }}
             - name: ROUTER_LOG_BLOCK_HASHES
               value: {{ ternary "true" "false" (.Values.router.logBlockHashes | default false) | quote }}
+            - name: ROUTER_LOG_REQUEST_BODY
+              value: {{ ternary "true" "false" (.Values.router.logRequestBody | default false) | quote }}
+            - name: ROUTER_LOG_REQUEST_BODY_MAX_BYTES
+              value: {{ quote (toString (.Values.router.logRequestBodyMaxBytes | default 16384)) }}
             - name: ROUTER_MEASURE_PREFIX
               value: {{ ternary "true" "false" (.Values.router.measurePrefix | default false) | quote }}
             - name: PYTHONHASHSEED

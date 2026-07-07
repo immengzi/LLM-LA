@@ -179,12 +179,18 @@ Most behavior is controlled via environment variables loaded into
   only*, even when KV routing is off (so `none`/`affinity` still report
   `kv_hits_len`/`total_blocks`/`kv_hit`). Decoupled from the routing decision.
 - `ROUTER_LOG_BLOCK_HASHES` – also emit the raw `block_hashes` list per request.
+- `ROUTER_LOG_REQUEST_BODY` – also store each request's full body (messages +
+  sampling params) under `request_body` in the `/latency_log` ring. Opt-in, off
+  by default; the body rides the bounded ring so it evicts automatically.
+  `ROUTER_LOG_REQUEST_BODY_MAX_BYTES` (default 16384, `0` = unlimited) caps each
+  body, truncating oversized ones to a `{"_truncated", "bytes", "preview"}` marker.
 - `HASH_SERVICE_URL` – `/compute_hashes` endpoint; only used by the Go gateway
   (in-container hasher) and in `external` mode (unused by the Python router inline).
 
 The Go gateway and the Python router are kept at parity: both honor
-`ROUTER_STRATEGY`, `ROUTER_MEASURE_PREFIX`, `ROUTER_LOG_BLOCK_HASHES`, and
-`KV_BLOCK_SIZE`, and both enrich `/latency_log` with the same prefix/KV fields.
+`ROUTER_STRATEGY`, `ROUTER_MEASURE_PREFIX`, `ROUTER_LOG_BLOCK_HASHES`,
+`ROUTER_LOG_REQUEST_BODY`, and `KV_BLOCK_SIZE`, and both enrich `/latency_log`
+with the same prefix/KV fields.
 - `REDIS_HOST`, `REDIS_PORT`, `MODEL_NAME` – KV watcher’s view of Redis keys.
 - `NAMESPACE`, `LABEL_SELECTOR`, `SIDECAR_PORT` – how to find sidecars in K8s.
 - `RESULT_TIMEOUT_S` – how long `/enqueue` will wait for a result.

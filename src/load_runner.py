@@ -77,6 +77,51 @@ class ConversationTask:
 _sec_lock = threading.Lock()
 _sec_counts: Dict[int, int] = {}
 
+# Per-run request-body logging config, set once by run_open_loop_load(). Opt-in
+# (off by default) so there is zero cost unless explicitly enabled.
+_LOG_REQUEST_BODY: bool = False
+_REQUEST_BODY_MAX_BYTES: int = 16384
+
+
+def _truncate_body(obj: Any, max_bytes: int) -> Any:
+    """Return obj as-is when it serializes within max_bytes, else a bounded
+    marker {"_truncated": True, "bytes": N, "preview": "..."}. max_bytes<=0
+    means unlimited. Shared shape with the router-side truncation helpers."""
+    try:
+        s = json.dumps(obj, ensure_ascii=False, default=str)
+    except Exception:
+        s = str(obj)
+    if max_bytes and max_bytes > 0:
+        encoded = s.encode("utf-8")
+        if len(encoded) > max_bytes:
+            return {
+                "_truncated": True,
+                "bytes": len(encoded),
+                "preview": s[:max_bytes],
+            }
+    return obj
+
+
+def _attach_request_body(
+    record: Dict[str, Any],
+    *,
+    result: Any = None,
+    fallback_body: Any = None,
+) -> None:
+    """Add a truncated ``request_body`` to *record* when request-body logging is
+    enabled. Prefers the payload the HTTP layer attached to *result*; otherwise
+    uses *fallback_body* (used by the router/enqueue paths that build the wire
+    payload locally)."""
+    if not _LOG_REQUEST_BODY:
+        return
+    body = None
+    if isinstance(result, dict) and result.get("request_body") is not None:
+        body = result.get("request_body")
+    elif fallback_body is not None:
+        body = fallback_body
+    if body is not None:
+        record["request_body"] = _truncate_body(body, _REQUEST_BODY_MAX_BYTES)
+
 
 def _extract_result_fields(
     result: Optional[Dict[str, Any]],
@@ -287,6 +332,8 @@ def _emit_completion_from_result(
         if trace_metrics is not None:
             record["trace_metrics"] = trace_metrics
 
+        _attach_request_body(record, result=result, fallback_body=info.get("request_body"))
+
         logger.log_request(record)
 
     done_counter["done"] = int(done_counter.get("done", 0)) + 1
@@ -488,6 +535,11 @@ def _request_thread_router_sync(
                 if trace_metrics is not None:
                     record["trace_metrics"] = trace_metrics
 
+                enqueue_body: Dict[str, Any] = {"prompt": task.prompt, "meta": meta}
+                if slo_fields:
+                    enqueue_body.update(slo_fields)
+                _attach_request_body(record, result=result, fallback_body=enqueue_body)
+
                 logger.log_request(record)
 
         except Exception as e:
@@ -607,6 +659,8 @@ def _request_thread_aibrix_http(
                     record["trace"] = trace_dict
                 if trace_metrics is not None:
                     record["trace_metrics"] = trace_metrics
+
+                _attach_request_body(record, result=result)
 
                 logger.log_request(record)
 
@@ -751,6 +805,8 @@ def _request_thread_litellm_http(
                 if trace_metrics is not None:
                     record["trace_metrics"] = trace_metrics
 
+                _attach_request_body(record, result=result)
+
                 logger.log_request(record)
 
         except Exception as e:
@@ -890,6 +946,8 @@ def _request_thread_litellm_http_stream(
                     record["trace"] = trace_dict
                 if trace_metrics is not None:
                     record["trace_metrics"] = trace_metrics
+
+                _attach_request_body(record, result=result)
 
                 logger.log_request(record)
 
@@ -1074,6 +1132,8 @@ def _request_thread_conversation(
                     if trace_metrics is not None:
                         record["trace_metrics"] = trace_metrics
 
+                    _attach_request_body(record, result=result)
+
                     logger.log_request(record)
 
                 accumulated_prompt_tokens = usage_prompt_tokens or accumulated_prompt_tokens
@@ -1211,6 +1271,8 @@ def _request_thread_anthropic_http(
                     record["trace"] = trace_dict
                 if trace_metrics is not None:
                     record["trace_metrics"] = trace_metrics
+
+                _attach_request_body(record, result=result)
 
                 logger.log_request(record)
 
@@ -1619,6 +1681,8 @@ def run_open_loop_load(
     conv_output_tokens: Optional[List[List[int]]] = None,
     multi_model: Optional[MultiModelConfig] = None,
     claude_code_injection: Optional[dict] = None,
+    log_request_body: bool = False,
+    request_body_max_bytes: int = 16384,
 ):
     """
     Execute a precomputed schedule.
@@ -1641,6 +1705,11 @@ def run_open_loop_load(
     """
     if len(prompts) != len(plan_times):
         raise ValueError("prompts and plan_times length mismatch")
+
+    # Publish per-run request-body logging config for the worker threads.
+    global _LOG_REQUEST_BODY, _REQUEST_BODY_MAX_BYTES
+    _LOG_REQUEST_BODY = bool(log_request_body)
+    _REQUEST_BODY_MAX_BYTES = int(request_body_max_bytes)
 
     total = len(prompts)
     if total == 0:
@@ -2257,6 +2326,11 @@ def run_open_loop_load(
                 "t0_wall": t0,
                 "logger": logger,
             }
+            if _LOG_REQUEST_BODY:
+                submit_body: Dict[str, Any] = {"prompt": prompt, "meta": meta}
+                if slo_fields:
+                    submit_body.update(slo_fields)
+                info["request_body"] = submit_body
 
             with pending_lock:
                 pending[rid] = info

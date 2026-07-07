@@ -489,6 +489,9 @@ def send_one_aibrix(
     if usage is not None:
         result["usage"] = usage
 
+    # Carry the exact wire payload so the caller can optionally log it.
+    result["request_body"] = payload
+
     return rid, result
 
 
@@ -683,6 +686,9 @@ def send_one_litellm_stream(
     if usage is not None:
         result["usage"] = usage
 
+    # Carry the exact wire payload (post-injection) so the caller can log it.
+    result["request_body"] = payload
+
     return rid, result
 
 # ============================================================
@@ -847,5 +853,8 @@ def send_one_litellm(
 
     if usage is not None:
         result["usage"] = usage
+
+    # Carry the exact wire payload (post-injection) so the caller can log it.
+    result["request_body"] = payload
 
     return rid, result

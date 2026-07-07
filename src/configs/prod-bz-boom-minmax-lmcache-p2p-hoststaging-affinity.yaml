@@ -94,6 +94,11 @@ generation:
 
 output_log_mode: "summary"
 print_trace: false
+# Persist the full request body (messages + sampling params) into each logs.json
+# record under "request_body". Opt-in; off by default. request_body_max_bytes
+# caps each logged body (0 = unlimited).
+# log_request_body: true
+# request_body_max_bytes: 16384
 
 metrics:
   enabled: true
@@ -136,6 +141,12 @@ helm:
   router_owner_source: "lookup"
   router_lookup_max_blocks: 512
   router_log_block_hashes: true
+  # Store the full request body (messages + sampling params) in the router's
+  # /latency_log ring -> router_logs.json / logs.json when collect_router_log is
+  # on. Opt-in; off by default. Bodies ride the bounded ring; max_bytes caps each
+  # (0 = unlimited).
+  # router_log_request_body: true
+  # router_log_request_body_max_bytes: 16384
   router_measure_prefix: true
   router_affinity_mode: "hard"
   router_affinity_ttl_s: 86400   # 24h. Memory-neutral today (prune() not wired -> lazy

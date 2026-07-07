@@ -1059,6 +1059,8 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             "router.ownerSource": str(getattr(h, "router_owner_source", "lookup")).strip().lower(),
             "router.lookupMaxBlocks": int(getattr(h, "router_lookup_max_blocks", 512)),
             "router.logBlockHashes": bool(getattr(h, "router_log_block_hashes", False)),
+            "router.logRequestBody": bool(getattr(h, "router_log_request_body", False)),
+            "router.logRequestBodyMaxBytes": int(getattr(h, "router_log_request_body_max_bytes", 16384)),
             "router.measurePrefix": bool(getattr(h, "router_measure_prefix", False)),
             "router.kvAware": bool(getattr(h, "router_kv_aware", True)),
             "router.lenAware": bool(getattr(h, "router_len_aware", True)),

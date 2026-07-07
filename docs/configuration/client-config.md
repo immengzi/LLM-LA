@@ -422,7 +422,18 @@ per-request log file (`logs.json`).
 - `"preview"`
 - `"full"`  
 
+- `log_request_body: bool` (default `false`)
 
+When `true`, the full request body (messages + sampling params, i.e. the exact
+wire payload) is written into each `logs.json` record under `request_body`.
+Opt-in; off by default so existing runs are unchanged. For proxy backends
+(boom/litellm/aibrix) this is the OpenAI chat JSON actually sent; for the router
+backend it is the `/enqueue` wire payload (`prompt` + `meta` + SLO fields).
+
+- `request_body_max_bytes: int` (default `16384`)
+
+Caps each logged body. Bodies whose JSON exceeds this are replaced by a bounded
+marker `{"_truncated": true, "bytes": N, "preview": "..."}`. `0` means unlimited.
 
 ---
 

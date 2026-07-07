@@ -120,6 +120,33 @@ def _record_latency(entry: Dict[str, Any]) -> None:
         _latency_ring.append(entry)
     _latency_logger.info(json.dumps(entry, default=str))
 
+
+def _truncate_body_for_log(obj: Any) -> Any:
+    """Return obj as-is when it serializes within the configured byte cap, else
+    a bounded marker. Cap of 0 (or negative) means unlimited. Mirrors the
+    client-side _truncate_body so logs.json bodies have a consistent shape."""
+    max_bytes = int(getattr(_cfg, "ROUTER_LOG_REQUEST_BODY_MAX_BYTES", 0) or 0)
+    try:
+        s = json.dumps(obj, default=str, ensure_ascii=False)
+    except Exception:
+        s = str(obj)
+    if max_bytes > 0:
+        encoded = s.encode("utf-8")
+        if len(encoded) > max_bytes:
+            return {"_truncated": True, "bytes": len(encoded), "preview": s[:max_bytes]}
+    return obj
+
+
+def _request_body_field(body: Any) -> Dict[str, Any]:
+    """Return {"request_body": <truncated>} when ROUTER_LOG_REQUEST_BODY is on
+    and a body is available; otherwise {} so callers can splat it into the ring
+    entry with **_request_body_field(...)."""
+    if not getattr(_cfg, "ROUTER_LOG_REQUEST_BODY", False):
+        return {}
+    if body is None:
+        return {}
+    return {"request_body": _truncate_body_for_log(body)}
+
 # ============================================================
 # Pydantic models for OpenAI-compatible /v1/chat/completions
 # ============================================================
@@ -2023,6 +2050,7 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
                     "completion_tokens": int(u.get("completion_tokens", 0)) if u else 0,
                     **x_lat,
                     **_routing_fields(rid),
+                    **_request_body_field(chat_request_body),
                 })
                 return x_lat
 
@@ -2225,6 +2253,7 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
         "completion_tokens": completion_tokens,
         **x_latency,
         **_routing_fields(rid),
+        **_request_body_field(chat_request_body),
     })
 
     message: Dict[str, Any] = {
