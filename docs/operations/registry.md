@@ -404,6 +404,7 @@ Current images:
 | `boom-gateway` | BooM Gateway (Rust, auth + routing proxy) |
 | `vllm-cpu-hash` | Prefix hash computation service |
 | `ascend/vllm-ascend` | vLLM with Ascend NPU support |
+| `lmcache-ascend` | vLLM + LMCache for P2P/host-staging (`hccl-p2p` tag; needs [image patches](image-patches.md) baked in) |
 | `litellm` | LiteLLM proxy (legacy, replaced by BooM) |
 | `lws/lws` | LeaderWorkerSet controller |
 | `redis` | Redis for KV metadata |

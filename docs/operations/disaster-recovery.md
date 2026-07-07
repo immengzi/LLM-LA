@@ -611,7 +611,7 @@ Not yet documented (no procedure exists in the repo today):
 
 - **etcd backup/restore** and full control-plane disaster recovery
 - **Node bare-metal rebuild** / re-join automation beyond
-  [cluster-setup.md](cluster-setup.md) + [infra/](../../infra/README.md)
+  [cluster-setup.md](cluster-setup.md) + [cluster-prep-automation.md](cluster-prep-automation.md)
 - **Automated alerting** for disk pressure, NPU leaks, and calico-node restart
   spikes (currently manual via Prometheus dashboards)
 
