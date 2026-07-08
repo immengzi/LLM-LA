@@ -1,9 +1,15 @@
-# prod + ROUTER KEY AFFINITY: MiniMax-M2.7 — BooM + LLM-LA (router), DP2 +
-# LMCache in **P2P / host-staging mode** (the direct142 design), BZ cluster.
-# Router conversation key-affinity enabled (HARD mode) so all turns of a chat
-# stay on the same vLLM pod for prefix-cache reuse.
+# prod + ROUTER KEY AFFINITY + PERSISTENT (Redis-backed) MAP: MiniMax-M2.7 —
+# BooM + LLM-LA (router), DP2 + LMCache in **P2P / host-staging mode** (the
+# direct142 design), BZ cluster. Router conversation key-affinity enabled (HARD
+# mode) so all turns of a chat stay on the same vLLM pod for prefix-cache reuse.
 #
-# BZ equivalent of prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity.yaml.
+# REDIS VARIANT of prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity.yaml:
+# identical to that config EXCEPT the router persists its conversation→pod map
+# to Redis (router_affinity_persist_enabled=true), so pins survive router
+# restarts/redeploys (startup warm from Redis + request-time read on a memory
+# miss). Pinned to the persist-affinity router build. See
+# docs/internal/persistent-affinity-map.md.
+#
 # 142 lineage: LMCacheAscendConnector + engine-to-engine HCCL P2P + host-staging
 # (bounded 8 GiB registered arena, avoids the >10 GB device-registration crash) +
 # a standalone lmcache_controller. NO Mooncake, NO NDS.
@@ -24,12 +30,9 @@
 switch_cluster: bz
 backend: "boom"
 
-# Long-running multi-turn soak: consume the whole codeflowbench pool. The det
-# schedule dispatches min(rate_rps*duration_s, total_requests) conversations and
-# there is NO sampling with replacement (result = pool[:n]), so the run length is
-# governed by the filtered pool (<= max_pool_size, after min_user_turns>=3), not
-# by this cap. total_requests is set far above the pool so the FULL pool is used.
-total_requests: 100000
+# Small validation run (NOT a soak): send a handful of conversations to exercise
+# the persistent-affinity write/read/warm paths. Intentionally 5 — do not bump.
+total_requests: 5
 prompt_source: "codeflow"
 
 file_prompts:
@@ -94,11 +97,6 @@ generation:
 
 output_log_mode: "summary"
 print_trace: false
-# Persist the full request body (messages + sampling params) into each logs.json
-# record under "request_body". Opt-in; off by default. request_body_max_bytes
-# caps each logged body (0 = unlimited).
-# log_request_body: true
-# request_body_max_bytes: 16384
 
 metrics:
   enabled: true
@@ -140,21 +138,24 @@ helm:
   # routing here); kept explicit so a switch to prefix/both is drop-in.
   router_owner_source: "lookup"
   router_lookup_max_blocks: 512
-  # Whole-block strip of Claude Code's x-anthropic-billing-header attribution
-  # (rotating cc_version + per-request cch counter) router-side for byte-stable
-  # KV-prefix matching. Chart default is OFF. Requires the remove-cc-header router
-  # build. Left commented. Idempotent: safe even if BooM Gateway also strips (the
-  # second pass finds nothing and no-ops) — enabling both is redundant, not harmful.
-  # router_strip_cch: "1"
+  # Strip the whole Claude Code x-anthropic-billing-header attribution block
+  # (rotating cc_version + per-request cch counter) router-side so KV-prefix
+  # matching is byte-stable across requests. Chart default is OFF ("0"); opt in
+  # here. Requires the remove-cc-header router build (whole-block strip).
+  router_strip_cch: "1"
   router_log_block_hashes: true
-  # Store the full request body (messages + sampling params) in the router's
-  # /latency_log ring -> router_logs.json / logs.json when collect_router_log is
-  # on. Opt-in; off by default. Bodies ride the bounded ring; max_bytes caps each
-  # (0 = unlimited).
-  # router_log_request_body: true
-  # router_log_request_body_max_bytes: 16384
   router_measure_prefix: true
+  # Optionally store each request's full body (messages + sampling params) under
+  # "request_body" in the /latency_log ring, so prod_latency_collector.py logs
+  # the requests themselves. Bounded ring (auto-evicts); max_bytes caps each
+  # body (0 = unlimited). Disabled for now — flip to true to capture bodies again.
+  router_log_request_body: false
+  router_log_request_body_max_bytes: 16384
   router_affinity_mode: "hard"
+  # Redis-backed persistent affinity map: the conversation→pod map is persisted
+  # to Redis and survives router restarts/redeploys (startup warm + request-time
+  # read on a memory miss). Default-off elsewhere; enabled here.
+  router_affinity_persist_enabled: true
   router_affinity_ttl_s: 86400   # 24h. Memory-neutral today (prune() not wired -> lazy
   # expiry only), so a long TTL just retains locality across idle gaps. Real memory
   # bound is unique conversations since restart, not TTL; watch router_affinity_map_size.
@@ -252,3 +253,17 @@ helm:
   # Pin the controller to a real BZ node whose IP == controller_pull_url host.
   values:
     lmcacheController.nodeName: "k8s-worker1"
+    # router: remove-cc-header build (digest e407aab5…f0a5b). Adds whole-block
+    # stripping of Claude Code's `x-anthropic-billing-header` attribution block
+    # (STRIP_CCH), matching BooM Gateway/vLLM PR #36829 — restores cross-request
+    # KV-prefix cache hits that the old narrow `; cch=` regex never fixed.
+    # boom: == bz default; kept explicit for reproducibility.
+    boom.image: "boom-gateway:v5"
+    # sidecar: left on clusters.yaml default kv-sidecar:latest — persist-affinity
+    # is router-side; the only sidecar edit on this branch is comment-only, so
+    # latest is behavior-compatible with the router above.
+    # Redis on-disk durability (AOF + PVC) intentionally NOT enabled this round —
+    # Redis is EPHEMERAL. The write/read/warm paths are validated with ephemeral
+    # Redis (they never restart the Redis pod); AOF/PVC (to survive a Redis pod
+    # restart) is a deferred follow-up and needs a bindable StorageClass on BZ.
+    # redis.persistence.enabled: true   # (deferred)

@@ -89,7 +89,15 @@ Key settings in `configs/4-2-template-boom-claude-glm.yaml`:
 
 1. Ensure vLLM pods are running and accessible at `http://7.216.57.215:30401`
 2. Ensure the Boom service is running
-3. Local dataset at `./data/codeflowbench` (Arrow files)
+3. Local dataset at `./data/codeflowbench` (Arrow files). Download it with the
+   helper in [`infra/datasets/download_codeflowbench.py`](../../infra/datasets/download_codeflowbench.py)
+   (needs the `datasets` package). Run it from `src/` so the Arrow files land at
+   `src/data/codeflowbench`, where the config expects them:
+
+   ```bash
+   cd <repo-root>/src
+   python ../infra/datasets/download_codeflowbench.py   # writes ./data/codeflowbench
+   ```
 
 ### Basic Run
 

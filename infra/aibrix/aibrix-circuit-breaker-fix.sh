@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# fix_aibrix_circuit_breakers.sh
+# aibrix-circuit-breaker-fix.sh
 #
 # Diagnoses and fixes Envoy circuit breaker overflow on
 # original_destination_cluster, which causes ConnectionResetError(104)
@@ -16,8 +16,8 @@
 #   limits high enough to never be the bottleneck.
 #
 # Usage:
-#   chmod +x fix_aibrix_circuit_breakers.sh
-#   ./fix_aibrix_circuit_breakers.sh
+#   chmod +x infra/aibrix/aibrix-circuit-breaker-fix.sh
+#   ./infra/aibrix/aibrix-circuit-breaker-fix.sh
 # =============================================================================
 
 set -euo pipefail

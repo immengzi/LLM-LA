@@ -580,6 +580,15 @@ def get_config() -> RouterConfig:
     if "ROUTER_MEASURE_PREFIX" in os.environ:
         cfg.ROUTER_MEASURE_PREFIX = os.getenv("ROUTER_MEASURE_PREFIX", "false").lower() == "true"
 
+    if "ROUTER_LOG_REQUEST_BODY" in os.environ:
+        cfg.ROUTER_LOG_REQUEST_BODY = os.getenv("ROUTER_LOG_REQUEST_BODY", "false").lower() == "true"
+
+    if "ROUTER_LOG_REQUEST_BODY_MAX_BYTES" in os.environ:
+        try:
+            cfg.ROUTER_LOG_REQUEST_BODY_MAX_BYTES = int(os.getenv("ROUTER_LOG_REQUEST_BODY_MAX_BYTES"))
+        except (TypeError, ValueError):
+            pass
+
     if "TRACE_SAMPLING_RATE" in os.environ:
         try:
             r = float(os.getenv("TRACE_SAMPLING_RATE"))
