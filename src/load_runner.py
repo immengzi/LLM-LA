@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Tuple
+import os
+import subprocess
 import threading
 import time
 import json
@@ -2461,4 +2463,239 @@ def run_open_loop_load(
     print(
         f"[load_runner] Done. Submitted {total} requests in {elapsed:.3f}s. "
         f"completed={int(done_counter.get('done', 0))} lost={lost}"
+    )
+
+
+# ============================================================
+# Closed-loop "users" load driving the real ``claude`` CLI
+#
+# Distinct from the open-loop run_open_loop_load above: instead of an arrival
+# schedule, this models N concurrent *users*, each running K conversations
+# sequentially (with an interval between conversations). Every turn shells out
+# to the real ``claude`` binary so Claude Code's own system prompt + growing
+# history hit the BooM Anthropic gateway -- exactly the traffic that exercises
+# conversation affinity and KV-prefix reuse. KV truth is captured out-of-band
+# by the router /latency_log collector; here we only log client-side timing,
+# token usage, and the CLI-reported cache-read tokens.
+# ============================================================
+
+def _build_claude_cmd(claude_cfg: Any, prompt: str, session_id: Optional[str]) -> List[str]:
+    cmd = [str(getattr(claude_cfg, "claude_bin", "claude")), "-p", prompt,
+           "--output-format", "json"]
+    if session_id:
+        cmd += ["--resume", session_id]
+    model = str(getattr(claude_cfg, "model", "") or "")
+    if model:
+        cmd += ["--model", model]
+    if bool(getattr(claude_cfg, "bare", False)):
+        cmd += ["--bare"]
+    if not bool(getattr(claude_cfg, "enable_tools", False)):
+        # Text-only, no file/shell tools, no permission prompts.
+        cmd += ["--tools", ""]
+    else:
+        cmd += ["--dangerously-skip-permissions"]
+    return cmd
+
+
+def _claude_env(claude_cfg: Any) -> Dict[str, str]:
+    env = dict(os.environ)
+    base_url = str(getattr(claude_cfg, "base_url", "") or "")
+    if base_url:
+        env["ANTHROPIC_BASE_URL"] = base_url
+    api_key = str(getattr(claude_cfg, "api_key", "") or "")
+    if api_key:
+        # Claude Code reads ANTHROPIC_AUTH_TOKEN (bearer); set API_KEY too for
+        # gateways that expect x-api-key.
+        env["ANTHROPIC_AUTH_TOKEN"] = api_key
+        env["ANTHROPIC_API_KEY"] = api_key
+    return env
+
+
+def _run_claude_turn(claude_cfg: Any, env: Dict[str, str], prompt: str,
+                     session_id: Optional[str]) -> Dict[str, Any]:
+    cmd = _build_claude_cmd(claude_cfg, prompt, session_id)
+    timeout_s = float(getattr(claude_cfg, "timeout_s", 300.0) or 300.0)
+    t0 = time.time()
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, env=env, timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "wall_s": time.time() - t0,
+                "error": f"timeout>{timeout_s}s"}
+    except FileNotFoundError:
+        return {"ok": False, "wall_s": time.time() - t0,
+                "error": f"claude binary not found: {getattr(claude_cfg, 'claude_bin', 'claude')}"}
+
+    wall = time.time() - t0
+    if proc.returncode != 0:
+        msg = (proc.stderr.strip() or f"exit {proc.returncode}")[:300]
+        return {"ok": False, "wall_s": wall, "error": msg}
+
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {"ok": False, "wall_s": wall, "error": "non-JSON claude output"}
+
+    if isinstance(data, list):  # stream-json fallback: take last object
+        data = data[-1] if data else {}
+    usage = data.get("usage") or {}
+    is_error = bool(data.get("is_error", False))
+    result: Dict[str, Any] = {
+        "ok": not is_error,
+        "wall_s": wall,
+        "duration_ms": data.get("duration_ms"),
+        "api_ms": data.get("duration_api_ms"),
+        "session_id": data.get("session_id"),
+        "prompt_tokens": usage.get("input_tokens"),
+        "completion_tokens": usage.get("output_tokens"),
+        "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
+        "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
+        "output": data.get("result") if isinstance(data.get("result"), str) else None,
+    }
+    if is_error:
+        result["error"] = str(data.get("result") or data.get("subtype") or "is_error")[:300]
+    return result
+
+
+def _claude_user_thread(
+    user_id: int,
+    conv_indices: List[int],
+    conversations: List[List[str]],
+    claude_cfg: Any,
+    users_cfg: Any,
+    env: Dict[str, str],
+    logger: Optional[ExperimentLogger],
+    output_log_mode: str,
+) -> None:
+    ramp_s = float(getattr(users_cfg, "ramp_s", 0.0) or 0.0)
+    if ramp_s > 0:
+        time.sleep(user_id * ramp_s)
+
+    interval_s = float(getattr(users_cfg, "interval_between_convs_s", 0.0) or 0.0)
+
+    for k, cid in enumerate(conv_indices):
+        turns = conversations[cid]
+        num_turns = len(turns)
+        session_id: Optional[str] = None
+
+        for turn_idx, turn_text in enumerate(turns):
+            now_send = time.time()
+            print(
+                f"[client][SEND][c{cid}t{turn_idx}] user={user_id} conv={cid} "
+                f"turn={turn_idx}/{num_turns}"
+            )
+            r = _run_claude_turn(claude_cfg, env, turn_text, session_id)
+            if r.get("session_id"):
+                session_id = r["session_id"]  # chain the rest of this conversation
+
+            wall = float(r.get("wall_s", 0.0))
+            ok = bool(r.get("ok", False))
+            cr = r.get("cache_read_input_tokens")
+            print(
+                f"[client][RECV][c{cid}t{turn_idx}] {'OK' if ok else 'FAIL'} "
+                f"wall={wall:.2f}s in={r.get('prompt_tokens')} "
+                f"out={r.get('completion_tokens')} cache_read={cr}"
+                + ("" if ok else f" err={r.get('error')}")
+            )
+
+            if logger is not None:
+                record: Dict[str, Any] = {
+                    "idx": f"c{cid}t{turn_idx}",
+                    "conversation_id": cid,
+                    "user_id": user_id,
+                    "turn_idx": turn_idx,
+                    "num_turns": num_turns,
+                    "prompt": turn_text,
+                    "transport": "claude",
+                    "actual_send_ts_wall": now_send,
+                    "end_to_end_s": wall,
+                    "session_id": session_id,
+                }
+                if ok:
+                    for key in (
+                        "duration_ms", "api_ms", "prompt_tokens", "completion_tokens",
+                        "cache_read_input_tokens", "cache_creation_input_tokens",
+                    ):
+                        if r.get(key) is not None:
+                            record[key] = r[key]
+                    out = r.get("output")
+                    if out and output_log_mode != "none":
+                        if output_log_mode != "full" and len(out) > 120:
+                            out = out[:117] + "..."
+                        record["output"] = out
+                    record["finish_reason"] = "stop"
+                else:
+                    record["send_failed"] = True
+                    record["error"] = r.get("error")
+
+                logger.log_request(record)
+
+            if not ok:
+                # Abandon the rest of this conversation on a failed turn.
+                break
+
+        if k < len(conv_indices) - 1 and interval_s > 0:
+            time.sleep(interval_s)
+
+
+def run_users_claude_load(
+    *,
+    conversations: List[List[str]],
+    claude_cfg: Any,
+    users_cfg: Any,
+    logger: Optional[ExperimentLogger] = None,
+    output_log_mode: str = "summary",
+) -> None:
+    """Closed-loop users load: N users x K conversations via the real claude CLI.
+
+    ``conversations`` is a list of per-conversation user-turn strings (length
+    should be num_users * convs_per_user). Conversations are assigned to users
+    contiguously: user ``u`` runs conversations ``[u*K, (u+1)*K)``.
+    """
+    num_users = max(1, int(getattr(users_cfg, "num_users", 1)))
+    convs_per_user = max(1, int(getattr(users_cfg, "convs_per_user", 1)))
+    total_convs = len(conversations)
+    if total_convs == 0:
+        print("[load_runner] claude users: no conversations to run.")
+        return
+
+    env = _claude_env(claude_cfg)
+    print(
+        f"[load_runner] claude users model: {num_users} users x {convs_per_user} "
+        f"conversations = {total_convs} available, "
+        f"interval={getattr(users_cfg, 'interval_between_convs_s', 0)}s "
+        f"ramp={getattr(users_cfg, 'ramp_s', 0)}s "
+        f"(tools={'on' if getattr(claude_cfg, 'enable_tools', False) else 'off'}, "
+        f"model={getattr(claude_cfg, 'model', '') or 'inherit'}, "
+        f"base_url={getattr(claude_cfg, 'base_url', '') or 'inherit'})"
+    )
+
+    threads: List[threading.Thread] = []
+    t0_wall = time.time()
+    for u in range(num_users):
+        conv_indices = [
+            u * convs_per_user + k
+            for k in range(convs_per_user)
+            if (u * convs_per_user + k) < total_convs
+        ]
+        if not conv_indices:
+            continue
+        t = threading.Thread(
+            target=_claude_user_thread,
+            args=(u, conv_indices, conversations, claude_cfg, users_cfg, env,
+                  logger, output_log_mode),
+            daemon=True,
+            name=f"claude-user-{u}",
+        )
+        t.start()
+        threads.append(t)
+
+    for t in threads:
+        t.join()
+
+    elapsed = time.time() - t0_wall
+    print(
+        f"[load_runner] Done. Ran {total_convs} conversations across "
+        f"{len(threads)} users in {elapsed:.3f}s"
     )

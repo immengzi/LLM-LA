@@ -97,7 +97,27 @@
 # prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
 
-prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
+# prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
+#   - pull
+
+# ── CLAUDE-CLI PREFIX-CACHE STRATEGY COMPARISON (closed-loop "users" load) ──
+# ACTIVE: drives the real `claude` CLI (transport.mode=claude): 10 users x 2
+# conversations from CodeFlowBench, replayed identically across every routing
+# strategy. Each config is a FULL cold redeploy (do NOT pass --skip-vllm) so every
+# strategy runs on a clean KV/affinity slate. Each run captures the router
+# /latency_log (router_logs.json, KV truth), a live Redis KV-ownership timeline
+# (redis_kv_watch.jsonl), and a Redis block-hash verification (redis_verify.json).
+# Run all five back-to-back in one shot:
+#   cd src && python sweep_methods.py --config 1-master_config
+prod-bz-claude-none:
+  - pull
+prod-bz-claude-prefix:
+  - pull
+prod-bz-claude-affinity-hard:
+  - pull
+prod-bz-claude-affinity-soft:
+  - pull
+prod-bz-claude-both:
   - pull
 
 # ── YZ shadow pool (parallel to prod, release/ns vllm-shadow) ──

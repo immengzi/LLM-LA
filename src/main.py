@@ -15,12 +15,25 @@ from prompts import (
     load_replay_output_lengths,
     build_conversations_from_lmsys,
     build_conversations_from_codeflowbench,
+    build_claude_conversations_from_codeflowbench,
     load_replay_conversation_lengths,
 )
 from scheduler import build_schedule
-from load_runner import run_open_loop_load
+from load_runner import run_open_loop_load, run_users_claude_load
 from experiment_io import init_experiment
 from trace_utils import summarize_endpoint_tokens
+
+# Optional Redis KV-block ownership watcher (writes redis_kv_watch.jsonl)
+try:
+    from redis_watch import RedisKVWatcher
+except Exception:
+    RedisKVWatcher = None  # type: ignore
+
+# Optional Redis block-hash verifier (writes redis_verify.json)
+try:
+    from redis_verify import verify_router_logs
+except Exception:
+    verify_router_logs = None  # type: ignore
 
 # Optional router /latency_log collector (BooM-proof endpoint + prefix/KV logging)
 try:
@@ -82,12 +95,35 @@ def main():
     if args.n is not None:
         cfg.total_requests = int(args.n)
 
+    # Detect the integrated claude-CLI transport (closed-loop "users" load).
+    _tcfg = getattr(cfg, "transport", None)
+    claude_mode = (
+        str(getattr(_tcfg, "mode", "sync") if _tcfg is not None else "sync").lower()
+        == "claude"
+    )
+
     # Build prompts
     output_tokens_per_request = None
     conversations = None
     conv_output_tokens = None
+    claude_conversations = None  # list of per-conversation user-turn strings
 
-    if cfg.prompt_source == "file":
+    if claude_mode:
+        # Closed-loop users model: build N*K deterministic conversations of raw
+        # user turns (Claude Code supplies its own system prompt per turn).
+        ucfg = cfg.users
+        n_convs = int(ucfg.num_users) * int(ucfg.convs_per_user)
+        claude_conversations = build_claude_conversations_from_codeflowbench(
+            cfg.hf_lmsys, n_conversations=n_convs,
+        )
+        prompts = [c[0] for c in claude_conversations if c]  # first-turn view for counts
+        total_turns = sum(len(c) for c in claude_conversations)
+        print(
+            f"[client] claude users: {len(claude_conversations)} conversations "
+            f"({ucfg.num_users} users x {ucfg.convs_per_user}), "
+            f"{total_turns} total user turns"
+        )
+    elif cfg.prompt_source == "file":
         prompts = load_prompts_from_file(
             path=cfg.file_prompts.path,
             variant=cfg.file_prompts.variant,
@@ -308,34 +344,62 @@ def main():
         print(f"[client] WARN: event podmap logger failed to start: {e}")
         podmap_logger = None
 
-    # Build schedule
-    lp = cfg.load_pattern
-    plan_times = build_schedule(
-        pattern=lp.pattern,
-        total_items=total,
-        rate_rps=lp.rate_rps,
-        duration_s=lp.duration_s,
-        burst_on_s=lp.burst_on_s,
-        burst_off_s=lp.burst_off_s,
-        burst_rps_on=lp.burst_rps_on,
-        burst_rps_off=lp.burst_rps_off,
-        step_schedule=lp.step_schedule,
-        rand_rps_min=lp.rand_rps_min,
-        rand_rps_max=lp.rand_rps_max,
-        rand_epoch_s=lp.rand_epoch_s,
-        seed=lp.loadgen_seed,
-    )
+    # Build schedule (open-loop only; the claude "users" model is closed-loop and
+    # does not use an arrival schedule).
+    plan_times = []
+    if not claude_mode:
+        lp = cfg.load_pattern
+        plan_times = build_schedule(
+            pattern=lp.pattern,
+            total_items=total,
+            rate_rps=lp.rate_rps,
+            duration_s=lp.duration_s,
+            burst_on_s=lp.burst_on_s,
+            burst_off_s=lp.burst_off_s,
+            burst_rps_on=lp.burst_rps_on,
+            burst_rps_off=lp.burst_rps_off,
+            step_schedule=lp.step_schedule,
+            rand_rps_min=lp.rand_rps_min,
+            rand_rps_max=lp.rand_rps_max,
+            rand_epoch_s=lp.rand_epoch_s,
+            seed=lp.loadgen_seed,
+        )
 
-    if len(plan_times) < total:
-        prompts = prompts[: len(plan_times)]
-        if output_tokens_per_request is not None:
-            output_tokens_per_request = output_tokens_per_request[: len(plan_times)]
-        if conversations is not None:
-            conversations = conversations[: len(plan_times)]
-        if conv_output_tokens is not None:
-            conv_output_tokens = conv_output_tokens[: len(plan_times)]
-        total = len(prompts)
-        print(f"[client] schedule shorter than prompts; trimming to {total} events")
+        if len(plan_times) < total:
+            prompts = prompts[: len(plan_times)]
+            if output_tokens_per_request is not None:
+                output_tokens_per_request = output_tokens_per_request[: len(plan_times)]
+            if conversations is not None:
+                conversations = conversations[: len(plan_times)]
+            if conv_output_tokens is not None:
+                conv_output_tokens = conv_output_tokens[: len(plan_times)]
+            total = len(prompts)
+            print(f"[client] schedule shorter than prompts; trimming to {total} events")
+
+    # Start Redis KV-block ownership watcher (best-effort; opt-in via config).
+    redis_watcher = None
+    rw = getattr(cfg, "redis_watch", None)
+    if rw is not None and getattr(rw, "enabled", False):
+        if RedisKVWatcher is None:
+            print("[redis-watch] enabled but redis_watch.py not available; skipping.")
+        else:
+            try:
+                redis_watcher = RedisKVWatcher(
+                    out_path=Path(exp_dir) / "redis_kv_watch.jsonl",
+                    host=rw.node_ip,
+                    port=rw.port,
+                    model=rw.model,
+                    db=rw.db,
+                    password=rw.password,
+                    interval_s=rw.interval_s,
+                    max_keys=rw.max_keys,
+                    scan_count=rw.scan_count,
+                )
+                if not redis_watcher.start():
+                    redis_watcher = None
+            except Exception as e:
+                print(f"[redis-watch] failed to start: {e}")
+                redis_watcher = None
 
     # Start metrics (best-effort)
     metrics_started = False
@@ -358,29 +422,38 @@ def main():
     t_end_load = None
 
     try:
-        run_open_loop_load(
-            router_url=cfg.router_url,
-            prompts=prompts,
-            plan_times=plan_times,
-            gen_cfg=cfg.generation,
-            output_tokens_per_request=output_tokens_per_request,
-            warmup_reqs=cfg.load_pattern.warmup_reqs,
-            logger=run_logger,
-            output_log_mode=cfg.output_log_mode,
-            print_trace=cfg.print_trace,
-            log_request_body=getattr(cfg, "log_request_body", False),
-            request_body_max_bytes=getattr(cfg, "request_body_max_bytes", 16384),
-            transport=getattr(cfg, "transport", None),
-            backend=backend,
-            aibrix=getattr(cfg, "aibrix", None),
-            litellm=getattr(cfg, "litellm", None),
-            boom=getattr(cfg, "boom", None),
-            slo=getattr(cfg, "slo", None),
-            conversations=conversations,
-            conv_output_tokens=conv_output_tokens,
-            multi_model=cfg.multi_model,
-            claude_code_injection=getattr(cfg, "claude_code_injection", None),
-        )
+        if claude_mode:
+            run_users_claude_load(
+                conversations=claude_conversations,
+                claude_cfg=cfg.claude,
+                users_cfg=cfg.users,
+                logger=run_logger,
+                output_log_mode=cfg.output_log_mode,
+            )
+        else:
+            run_open_loop_load(
+                router_url=cfg.router_url,
+                prompts=prompts,
+                plan_times=plan_times,
+                gen_cfg=cfg.generation,
+                output_tokens_per_request=output_tokens_per_request,
+                warmup_reqs=cfg.load_pattern.warmup_reqs,
+                logger=run_logger,
+                output_log_mode=cfg.output_log_mode,
+                print_trace=cfg.print_trace,
+                log_request_body=getattr(cfg, "log_request_body", False),
+                request_body_max_bytes=getattr(cfg, "request_body_max_bytes", 16384),
+                transport=getattr(cfg, "transport", None),
+                backend=backend,
+                aibrix=getattr(cfg, "aibrix", None),
+                litellm=getattr(cfg, "litellm", None),
+                boom=getattr(cfg, "boom", None),
+                slo=getattr(cfg, "slo", None),
+                conversations=conversations,
+                conv_output_tokens=conv_output_tokens,
+                multi_model=cfg.multi_model,
+                claude_code_injection=getattr(cfg, "claude_code_injection", None),
+            )
     finally:
         t_end_load = time.time()
 
@@ -391,6 +464,14 @@ def main():
                 print("[metrics] collection stopped")
             except Exception as e:
                 print(f"[metrics] failed to stop metrics collection: {e}")
+
+        # Stop Redis KV watcher (does a final scan) before closing logs.
+        if redis_watcher is not None:
+            try:
+                redis_watcher.stop()
+                print("[redis-watch] stopped")
+            except Exception as e:
+                print(f"[redis-watch] failed to stop: {e}")
 
         # stop event-driven podmap logger
         if podmap_logger is not None:
@@ -411,21 +492,59 @@ def main():
         exp_logger.close()
 
     logs_path = str(Path(exp_dir) / "logs.json")
+    router_logs_path = str(Path(exp_dir) / "router_logs.json")
 
     # Authoritative end-of-run join: rewrite logs.json so every record carries
     # the serving endpoint + prefix/KV fields recorded by the router.
+    #
+    # The claude "users" transport drives the real CLI, which does not surface
+    # the router's request id, so there is no req_id to join on. In that mode the
+    # router /latency_log (router_logs.json) is the standalone KV-truth source, so
+    # we summarize routing directly from it instead of joining into logs.json.
     routing_summary = None
     if router_collector is not None and join_logs_with_router is not None:
-        router_logs_path = str(Path(exp_dir) / "router_logs.json")
+        if claude_mode:
+            try:
+                routing_summary = summarize_routing(router_logs_path)
+                print("[router-log] claude mode: routing summarized from router_logs.json")
+            except Exception as e:
+                print(f"[router-log] WARN: routing summary failed: {e}")
+        else:
+            try:
+                stats = join_logs_with_router(logs_path, router_logs_path)
+                print(
+                    f"[router-log] joined logs.json: matched={stats['matched']}/"
+                    f"{stats['total']} (missing={stats['missing']})"
+                )
+                routing_summary = summarize_routing(logs_path)
+            except Exception as e:
+                print(f"[router-log] WARN: end-of-run join failed: {e}")
+
+    # Confirm Redis stores the block hashes the router computed (writes
+    # redis_verify.json). Runs against the router's own truth (router_logs.json).
+    # Scoped to the claude "users" comparison so existing configs are unchanged.
+    redis_verify_summary = None
+    if claude_mode and verify_router_logs is not None and Path(router_logs_path).is_file():
         try:
-            stats = join_logs_with_router(logs_path, router_logs_path)
-            print(
-                f"[router-log] joined logs.json: matched={stats['matched']}/"
-                f"{stats['total']} (missing={stats['missing']})"
+            rw = getattr(cfg, "redis_watch", None)
+            model_default = ""
+            if rw is not None and getattr(rw, "model", ""):
+                model_default = rw.model
+            elif getattr(cfg, "boom", None) is not None:
+                model_default = getattr(cfg.boom, "model", "") or ""
+            redis_verify_summary = verify_router_logs(
+                router_logs_path,
+                str(Path(exp_dir) / "redis_verify.json"),
+                namespace=os.environ.get("PODMAP_NAMESPACE", "vllm"),
+                model_default=model_default,
             )
-            routing_summary = summarize_routing(logs_path)
+            print(
+                f"[redis-verify] checked={redis_verify_summary.get('checked')} "
+                f"hashes_match={redis_verify_summary.get('hashes_match')} "
+                f"missing={redis_verify_summary.get('missing')}"
+            )
         except Exception as e:
-            print(f"[router-log] WARN: end-of-run join failed: {e}")
+            print(f"[redis-verify] WARN: verification failed: {e}")
 
     token_summary_path = str(Path(exp_dir) / "endpoint_tokens.json")
     summarize_endpoint_tokens(logs_path, save_path=token_summary_path)
@@ -470,6 +589,16 @@ def main():
     }
     if routing_summary is not None:
         run_summary["routing"] = routing_summary
+    if redis_verify_summary is not None:
+        run_summary["redis_verify"] = redis_verify_summary
+    if claude_mode:
+        run_summary["users"] = {
+            "num_users": cfg.users.num_users,
+            "convs_per_user": cfg.users.convs_per_user,
+            "interval_between_convs_s": cfg.users.interval_between_convs_s,
+            "ramp_s": cfg.users.ramp_s,
+        }
+        run_summary["claude_model"] = getattr(cfg.claude, "model", None)
     try:
         with (Path(exp_dir) / "run_summary.json").open("w", encoding="utf-8") as f:
             json.dump(run_summary, f, indent=2, sort_keys=True)

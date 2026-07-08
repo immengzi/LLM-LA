@@ -64,6 +64,24 @@ class LoadPatternConfig:
     loadgen_seed: int = 12345
 
 
+@dataclass
+class UsersLoadConfig:
+    """Closed-loop "users" load model (used when transport.mode == "claude").
+
+    Instead of an open-loop arrival rate (LoadPatternConfig), this models N
+    concurrent *users*, each running ``convs_per_user`` conversations
+    sequentially with ``interval_between_convs_s`` seconds between them. Each
+    conversation is a distinct multi-turn chat; turns within a conversation fire
+    back-to-back (no intra-conversation delay). Total conversations = num_users *
+    convs_per_user.
+    """
+    num_users: int = 10
+    convs_per_user: int = 2
+    interval_between_convs_s: float = 5.0
+    # Stagger each user's start by user_index * ramp_s (0 = all start together).
+    ramp_s: float = 0.0
+
+
 # =========================
 # Generation parameters
 # =========================
@@ -114,6 +132,30 @@ class PrometheusMetricsConfig:
     include_debug_metrics: bool = False
     model_name: Optional[str] = None
     max_instances: Optional[int] = None
+
+
+@dataclass
+class RedisWatchConfig:
+    """Live Redis KV-block ownership watcher.
+
+    When enabled, a background thread periodically SCANs ``<model>:kvblock:*`` in
+    Redis and appends a per-tick summary (key count, unique owners, shared-block
+    distribution, top owners) to ``redis_kv_watch.jsonl`` in the experiment dir,
+    in parallel with the load run (wired into main.py like the Prometheus
+    collector). Off by default.
+
+    ``node_ip`` empty -> derive the host from ``router_url``. ``model`` empty ->
+    fall back to boom.model / the served model prefix.
+    """
+    enabled: bool = False
+    node_ip: str = ""          # Redis host (k8s node IP for NodePort); empty -> router_url host
+    port: int = 30079
+    db: int = 0
+    password: Optional[str] = None
+    interval_s: float = 2.0
+    model: str = ""            # key prefix <model>:kvblock:* ; empty -> boom.model
+    max_keys: int = 5000
+    scan_count: int = 500
 
 
 # =========================
@@ -172,6 +214,30 @@ class TransportConfig:
     # TTL bounds memory; size cap bounds worst-case.
     orphan_ttl_s: float = 300.0
     orphan_max: int = 100000
+
+
+@dataclass
+class ClaudeTransportConfig:
+    """Runtime config for the integrated real-``claude``-CLI transport.
+
+    Active when ``transport.mode == "claude"``. Each conversation turn shells out
+    to the ``claude`` binary (``claude -p <turn> --output-format json
+    [--resume <session_id>]``) so the real Claude Code request envelope (its own
+    system prompt + growing history) hits the BooM Anthropic-compatible gateway.
+
+    ``base_url`` / ``model`` / ``api_key`` default from the ``boom`` block when
+    left empty, so auth/endpoint work exactly like current BooM access:
+      - ANTHROPIC_BASE_URL = base_url (no ``/v1``)
+      - ANTHROPIC_AUTH_TOKEN = api_key (e.g. ``sk-boom-master``)
+    Tools are OFF by default (text-only, safe).
+    """
+    claude_bin: str = "claude"
+    base_url: str = ""          # empty -> boom.base_url
+    model: str = ""             # empty -> boom.model
+    api_key: str = ""           # empty -> boom.api_key
+    bare: bool = False
+    enable_tools: bool = False
+    timeout_s: float = 300.0
 
 
 # =========================
@@ -771,6 +837,8 @@ class ClientConfig:
     file_prompts: FilePromptsConfig = field(default_factory=FilePromptsConfig)
     hf_lmsys: HFLmsysConfig = field(default_factory=HFLmsysConfig)
     load_pattern: LoadPatternConfig = field(default_factory=LoadPatternConfig)
+    # Closed-loop "users" load model (used when transport.mode == "claude").
+    users: UsersLoadConfig = field(default_factory=UsersLoadConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
 
     # Output / tracing
@@ -799,8 +867,14 @@ class ClientConfig:
     # Metrics
     metrics: PrometheusMetricsConfig = field(default_factory=PrometheusMetricsConfig)
 
+    # Live Redis KV-block ownership watcher (opt-in; writes redis_kv_watch.jsonl)
+    redis_watch: RedisWatchConfig = field(default_factory=RedisWatchConfig)
+
     # Router transport config
     transport: TransportConfig = field(default_factory=TransportConfig)
+
+    # Integrated claude-CLI transport (active when transport.mode == "claude")
+    claude: ClaudeTransportConfig = field(default_factory=ClaudeTransportConfig)
 
     # AIBrix runtime config
     aibrix: AIBrixConfig = field(default_factory=AIBrixConfig)
@@ -966,11 +1040,14 @@ def load_config(path: str) -> ClientConfig:
         hf_lmsys_raw["dataset_profile"] = None
     hf_lmsys = _merge_dataclass(HFLmsysConfig, hf_lmsys_raw)
     load_pattern = _merge_dataclass(LoadPatternConfig, raw.get("load_pattern", {}))
+    users = _merge_dataclass(UsersLoadConfig, raw.get("users", {}))
     generation = _merge_dataclass(GenerationConfig, raw.get("generation", {}))
     metrics = _merge_dataclass(PrometheusMetricsConfig, raw.get("metrics", {}))
+    redis_watch = _merge_dataclass(RedisWatchConfig, raw.get("redis_watch", {}))
 
     # backend-specific config
     transport = _merge_dataclass(TransportConfig, raw.get("transport", {}))
+    claude = _merge_dataclass(ClaudeTransportConfig, raw.get("claude", {}))
     aibrix = _merge_dataclass(AIBrixConfig, raw.get("aibrix", {}))
     litellm = _merge_dataclass(LiteLLMConfig, raw.get("litellm", {}))
     boom = _merge_dataclass(BooMConfig, raw.get("boom", {}))
@@ -1108,6 +1185,84 @@ def load_config(path: str) -> ClientConfig:
             boom.timeout_s = 7200.0
         boom.timeout_s = max(1.0, boom.timeout_s)
 
+    # -----------------------------
+    # Normalize claude transport + closed-loop "users" load model
+    # -----------------------------
+    if str(transport.mode).lower() == "claude":
+        # Endpoint/model/auth default from the boom block so the claude CLI talks
+        # to the same BooM Anthropic-compatible gateway with the same credentials.
+        if not str(claude.base_url or "").strip():
+            claude.base_url = boom.base_url
+        claude.base_url = str(claude.base_url or "").rstrip("/")
+        if not str(claude.model or "").strip():
+            claude.model = boom.model
+        if not str(claude.api_key or "").strip():
+            claude.api_key = boom.api_key
+        claude.claude_bin = str(claude.claude_bin or "claude")
+        claude.bare = bool(claude.bare)
+        claude.enable_tools = bool(claude.enable_tools)
+        try:
+            claude.timeout_s = float(claude.timeout_s)
+        except Exception:
+            claude.timeout_s = 300.0
+        claude.timeout_s = max(1.0, claude.timeout_s)
+
+        # Closed-loop users model bounds.
+        try:
+            users.num_users = int(users.num_users)
+        except Exception:
+            users.num_users = 10
+        users.num_users = max(1, users.num_users)
+        try:
+            users.convs_per_user = int(users.convs_per_user)
+        except Exception:
+            users.convs_per_user = 2
+        users.convs_per_user = max(1, users.convs_per_user)
+        try:
+            users.interval_between_convs_s = float(users.interval_between_convs_s)
+        except Exception:
+            users.interval_between_convs_s = 5.0
+        users.interval_between_convs_s = max(0.0, users.interval_between_convs_s)
+        try:
+            users.ramp_s = float(users.ramp_s)
+        except Exception:
+            users.ramp_s = 0.0
+        users.ramp_s = max(0.0, users.ramp_s)
+
+    # -----------------------------
+    # Normalize Redis watcher
+    # -----------------------------
+    if redis_watch.enabled:
+        if not str(redis_watch.node_ip or "").strip():
+            try:
+                redis_watch.node_ip = urlparse(router_url).hostname or "127.0.0.1"
+            except Exception:
+                redis_watch.node_ip = "127.0.0.1"
+        if not str(redis_watch.model or "").strip():
+            # Prefer the claude/boom served model; else the metrics model name.
+            redis_watch.model = (
+                str(claude.model or "").strip()
+                or str(boom.model or "").strip()
+                or str(metrics.model_name or "").strip()
+            )
+        try:
+            redis_watch.port = int(redis_watch.port)
+        except Exception:
+            redis_watch.port = 30079
+        try:
+            redis_watch.interval_s = float(redis_watch.interval_s)
+        except Exception:
+            redis_watch.interval_s = 2.0
+        redis_watch.interval_s = max(0.5, redis_watch.interval_s)
+        try:
+            redis_watch.max_keys = int(redis_watch.max_keys)
+        except Exception:
+            redis_watch.max_keys = 5000
+        try:
+            redis_watch.scan_count = int(redis_watch.scan_count)
+        except Exception:
+            redis_watch.scan_count = 500
+
     # Shadow deployment overrides (top-level keys)
     vllm_node_selector = raw.get("vllm_node_selector", None)
     vllm_avoid_label = str(raw.get("vllm_avoid_label", "") or "").strip()
@@ -1127,6 +1282,7 @@ def load_config(path: str) -> ClientConfig:
         file_prompts=file_prompts,
         hf_lmsys=hf_lmsys,
         load_pattern=load_pattern,
+        users=users,
         generation=generation,
         output_log_mode=output_log_mode,
         print_trace=print_trace,
@@ -1136,7 +1292,9 @@ def load_config(path: str) -> ClientConfig:
         collect_router_log=collect_router_log,
         router_log_url=router_log_url,
         metrics=metrics,
+        redis_watch=redis_watch,
         transport=transport,
+        claude=claude,
         aibrix=aibrix,
         litellm=litellm,
         boom=boom,
