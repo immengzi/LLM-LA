@@ -553,6 +553,7 @@ async def _maybe_register_kv_blocks(
     is_pull_mode: bool,
     messages: Optional[List[Dict[str, Any]]] = None,
     tools: Optional[List[Any]] = None,
+    model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Best-effort inline KV-block computation.
@@ -625,16 +626,19 @@ async def _maybe_register_kv_blocks(
 
         register_request_blocks(req_id, block_hashes)
 
-        # Targeted, fresh ownership prefetch for routing: HGETALL exactly this
-        # request's block hashes so prefix_len() is exact and eviction-aware.
-        # Only needed when KV routing is on; failures fall back to affinity.
+        # Targeted, fresh ownership prefetch: HGETALL exactly this request's
+        # block hashes so prefix_len() is exact and eviction-aware. Runs when KV
+        # routing is on, or when measuring prefix hits for logging only (so
+        # affinity/none strategies still get an exact, eviction-aware kv_hit
+        # instead of the stale background-scan approximation). Failures fall back
+        # to affinity / the watcher map.
         if (
-            _cfg.KV_AWARE
+            (_cfg.KV_AWARE or getattr(_cfg, "ROUTER_MEASURE_PREFIX", False))
             and block_hashes
             and getattr(_cfg, "KV_OWNER_SOURCE", "lookup") == "lookup"
         ):
             try:
-                owners = await owner_lookup.fetch_block_owners(block_hashes)
+                owners = await owner_lookup.fetch_block_owners(block_hashes, model=model)
                 set_request_owners(req_id, owners)
             except Exception:
                 pass
@@ -989,8 +993,12 @@ async def _startup():
     print("[router] KVWatcher started.")
     sys.stdout.flush()
 
-    # Targeted per-request block-owner lookup (preferred routing source).
-    if getattr(_cfg, "KV_AWARE", False) and getattr(_cfg, "KV_OWNER_SOURCE", "lookup") == "lookup":
+    # Targeted per-request block-owner lookup (preferred routing source; also
+    # used for exact, eviction-aware kv_hit measurement when only measuring).
+    if (
+        (getattr(_cfg, "KV_AWARE", False) or getattr(_cfg, "ROUTER_MEASURE_PREFIX", False))
+        and getattr(_cfg, "KV_OWNER_SOURCE", "lookup") == "lookup"
+    ):
         try:
             await owner_lookup.init_owner_lookup()
             print(
@@ -1728,6 +1736,7 @@ async def _enqueue_and_wait(
             is_pull_mode=is_pull_mode,
             messages=chat_messages,
             tools=chat_tools,
+            model=resolved_model,
         )
         if _is_push_mode():
             if _push_router is None:
@@ -2047,6 +2056,7 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
                 is_pull_mode=not _is_push_mode(),
                 messages=chat_messages,
                 tools=chat_tools,
+                model=resolved_model,
             )
             if _is_push_mode():
                 if _push_router is None:

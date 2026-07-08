@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
-# fix_aibrix_timeout.sh
+# aibrix-timeout.sh
 #
 # Applies (or re-applies) the AIBrix 300s timeout fix by patching the
 # existing original_route in Envoy via EnvoyPatchPolicy, then verifies
 # that the patch is live in the running Envoy config.
 #
 # Usage:
-#   chmod +x fix_aibrix_timeout.sh
-#   ./fix_aibrix_timeout.sh
+#   chmod +x infra/aibrix/aibrix-timeout.sh
+#   ./infra/aibrix/aibrix-timeout.sh
 # =============================================================================
 
 set -euo pipefail

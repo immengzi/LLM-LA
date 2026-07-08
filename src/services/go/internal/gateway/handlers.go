@@ -287,10 +287,12 @@ func (s *Server) registerKVBlocks(rid, prompt string, meta map[string]interface{
 
 	s.kv.registerRequestBlocks(rid, hashes)
 
-	// Targeted, fresh ownership prefetch for routing: HGETALL exactly this
-	// request's block hashes so prefixLen is exact and eviction-aware. Only
-	// needed when KV routing is on; failures fall back to affinity.
-	if s.cfg.KVAware && len(hashes) > 0 && s.cfg.KVOwnerSource == "lookup" && s.ownerLookup != nil {
+	// Targeted, fresh ownership prefetch: HGETALL exactly this request's block
+	// hashes so prefixLen is exact and eviction-aware. Runs when KV routing is
+	// on, or when measuring prefix hits for logging only (so affinity/none
+	// strategies get an exact, eviction-aware kv_hit instead of the stale
+	// background-scan approximation). Failures fall back to affinity.
+	if (s.cfg.KVAware || s.cfg.MeasurePrefix) && len(hashes) > 0 && s.cfg.KVOwnerSource == "lookup" && s.ownerLookup != nil {
 		if owners := s.ownerLookup.FetchBlockOwners(s.cfg.ModelName, hashes); owners != nil {
 			s.kv.setRequestOwners(rid, owners)
 		}

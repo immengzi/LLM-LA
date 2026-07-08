@@ -48,9 +48,10 @@ func main() {
 
 	srv := gateway.NewServer(cfg, queue, results, kv, hashClient, registry, kvWatcher, pushRouter)
 
-	// Targeted per-request block-owner lookup (preferred routing source).
+	// Targeted per-request block-owner lookup (preferred routing source; also
+	// used for exact, eviction-aware kv_hit measurement when only measuring).
 	var ownerLookup *gateway.OwnerLookup
-	if cfg.KVAware && cfg.KVOwnerSource == "lookup" {
+	if (cfg.KVAware || cfg.MeasurePrefix) && cfg.KVOwnerSource == "lookup" {
 		ownerLookup = gateway.NewOwnerLookup(cfg)
 		srv.SetOwnerLookup(ownerLookup)
 		log.Printf("[router] KV owner lookup ready (targeted Redis, max_blocks=%d).", cfg.KVLookupMaxBlocks)

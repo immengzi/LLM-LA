@@ -80,6 +80,32 @@ Modify the existing `original_route` in place by updating only:
 
 while keeping the rest of the route unchanged.
 
+## Automated scripts
+-----------------
+Two ready-to-run scripts live in `infra/aibrix/` and perform the diagnose →
+patch → verify loop described below (they port-forward the Envoy admin API,
+apply the `EnvoyPatchPolicy`, wait for `Accepted`/`Programmed`, and re-dump the
+config to confirm the fix is live):
+
+- [`infra/aibrix/aibrix-timeout.sh`](../../infra/aibrix/aibrix-timeout.sh) —
+  the timeout fix documented on this page (sets `timeout`/`idle_timeout` on
+  `original_route` while preserving the ext-proc routing filter).
+- [`infra/aibrix/aibrix-circuit-breaker-fix.sh`](../../infra/aibrix/aibrix-circuit-breaker-fix.sh)
+  — the companion fix for `ConnectionResetError(104)` under high concurrency:
+  raises the `original_destination_cluster` circuit-breaker limits
+  (`max_connections`/`max_pending_requests`/`max_requests`) above Envoy's
+  default `1024`, which otherwise trips `upstream_cx_overflow` and resets
+  overflow connections.
+
+```bash
+chmod +x infra/aibrix/aibrix-timeout.sh infra/aibrix/aibrix-circuit-breaker-fix.sh
+./infra/aibrix/aibrix-timeout.sh
+./infra/aibrix/aibrix-circuit-breaker-fix.sh   # run during/after a load test to see live overflow counts
+```
+
+The rest of this section documents the timeout patch that
+`aibrix-timeout.sh` applies, for reference / manual application.
+
 ## Implementation
 --------------
 Apply the following EnvoyPatchPolicy.

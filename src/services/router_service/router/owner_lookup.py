@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Set
 
 import redis.asyncio as aioredis
 
-from .config import get_config
+from .config import get_config, get_model_registry
 
 _cfg = get_config()
 
@@ -45,16 +45,37 @@ async def close_owner_lookup() -> None:
         _redis = None
 
 
-def _key_prefix() -> str:
-    # Single-model deployments use MODEL_NAME as the Redis key prefix, matching
-    # kv_watcher's scan pattern and the sidecar's MODEL_NAME_REDIS. Multi-model
-    # setups would need the per-model prefix from the model registry.
-    model = _cfg.MODEL_NAME
+def _key_prefix(model: Optional[str] = None) -> str:
+    """Redis key prefix for a request's blocks, matching the sidecar's
+    ``MODEL_NAME_REDIS`` (== servedModelName) and kv_watcher's scan pattern.
+
+    Resolution order:
+      1. The explicit per-request ``model`` (the resolved/served model name).
+      2. In a multi-model deployment with a single served model, that model
+         from the registry -- so the prefix is correct even when callers don't
+         thread the model through (the registry key IS the served name, whereas
+         ``MODEL_NAME`` is often the chart default "served-model").
+      3. ``MODEL_NAME`` (true single-model deployments with no registry).
+    """
+    if not model:
+        try:
+            registry = get_model_registry()
+        except Exception:
+            registry = None
+        if registry and len(registry) == 1:
+            model = next(iter(registry))
+        else:
+            model = _cfg.MODEL_NAME
     return f"{model}:" if model else ""
 
 
-async def fetch_block_owners(block_hashes: List[int]) -> Dict[int, Set[str]]:
+async def fetch_block_owners(
+    block_hashes: List[int], model: Optional[str] = None
+) -> Dict[int, Set[str]]:
     """Return ``{block_hash: {owner_pod, ...}}`` for a request's leading blocks.
+
+    ``model`` is the request's resolved (served) model name; it selects the
+    Redis key prefix so lookups hit the same namespace the sidecar writes under.
 
     Only the leading prefix matters for routing, so the fan-out is capped at
     ``KV_LOOKUP_MAX_BLOCKS``. Returns an empty dict on any error or when the
@@ -68,7 +89,7 @@ async def fetch_block_owners(block_hashes: List[int]) -> Dict[int, Set[str]]:
     if cap > 0:
         block_hashes = block_hashes[:cap]
 
-    prefix = _key_prefix()
+    prefix = _key_prefix(model)
     try:
         pipe = _redis.pipeline(transaction=False)
         for h in block_hashes:

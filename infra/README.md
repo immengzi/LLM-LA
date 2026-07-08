@@ -16,6 +16,8 @@ LA-Boom. **The documentation lives in the docs tree:**
 | `preflight.sh` | Read-only cluster preflight checks (`make verify`). |
 | `grafana-dashboards/` | Dashboards deployed by the `monitoring` layer. |
 | `patches/` | Source patches baked into the vLLM/LMCache-Ascend image — see [image-patches.md](../docs/operations/image-patches.md). |
+| `aibrix/` | AIBrix Envoy-gateway ops fixes (timeout + circuit-breaker EnvoyPatchPolicies) — see [aibrix-long-running-requests.md](../docs/operations/aibrix-long-running-requests.md). |
+| `datasets/` | Dataset download helpers (e.g. CodeFlowBench) — see [codeflowbench.md](../docs/benchmarking/codeflowbench.md). |
 
 Quick start:
 
