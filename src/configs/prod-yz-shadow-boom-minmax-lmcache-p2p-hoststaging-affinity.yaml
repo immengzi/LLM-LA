@@ -217,6 +217,23 @@ helm:
   # Pin the controller to node3 (co-located with the DP leader; host IP 10.50.156.65).
   values:
     lmcacheController.nodeName: "node3"
+    # Reserve CPU + host RAM for the vLLM engine container so LMCache's host-RAM
+    # "local_cpu" tier is not CPU-starved / OOM-killed at peak load (the engine
+    # otherwise requests ONLY the Ascend NPU + ephemeral-storage). Requests only,
+    # no memory limit -> guaranteed floor without a hard OOM-kill ceiling.
+    # Memory sizing: lmcache_max_local_cpu_size (100) x TP workers (8) ~= 800 GiB
+    # local tier + host-staging + engine overhead => ~900Gi on the ~1509 GiB node.
+    # Node has 192 cores; reserve ~half (96) as the engine floor. No cpu limit, so
+    # it can still burst to all 192 under load. Drop memory if the node is smaller.
+    vllm.engineResources.requests.cpu: "96"
+    vllm.engineResources.requests.memory: "900Gi"
+    # lmcache_controller runs on its own node (node3), off the engine nodes, so
+    # give it a generous reservation (vs the 2/4Gi chart default) to handle P2P
+    # block-owner lookups at peak without becoming the bottleneck.
+    lmcacheController.resources.requests.cpu: "16"
+    lmcacheController.resources.requests.memory: "32Gi"
+    lmcacheController.resources.limits.cpu: "64"
+    lmcacheController.resources.limits.memory: "64Gi"
 
   models:
     - name: minimax-m2

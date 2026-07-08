@@ -302,6 +302,19 @@ vllm:
   leaderNodeSelector: {}
   workerNodeSelector: {}
 
+  # Optional CPU / memory reservations for the vLLM engine container (the one that
+  # hosts the LMCache connector + its host-RAM "local_cpu" offload tier). By
+  # default the engine only requests the Ascend NPU + ephemeral-storage, so its
+  # CPU and host RAM are UNRESERVED -- at peak load LMCache can be CPU-starved or
+  # OOM-killed by co-tenants. Set requests here to reserve a floor (Burstable QoS).
+  # Prefer requests WITHOUT memory limits: a memory limit below LMCache's actual
+  # footprint would make the kernel OOM-kill the engine, which is worse than the
+  # problem. Empty by default => behaviour unchanged. Injected into all three
+  # engine containers (non-DP, DP-leader, DP-worker).
+  engineResources:
+    requests: {}   # e.g. { cpu: "16", memory: "200Gi" }
+    limits: {}     # e.g. { cpu: "64" }   (avoid a memory limit unless you must)
+
   # Memory / performance
   kvCacheDtype: "auto"             # "auto", "fp8", "fp8_e4m3" — fp8 halves KV cache memory
   cpuOffloadGb: null               # null = off; set to e.g. 3 to offload model weights to CPU for more KV cache
@@ -548,6 +561,18 @@ lmcacheController:
   # (only safe if you don't hardcode the controller IP).
   nodeName: ""
   tolerations: []
+
+  # Resource requests/limits for the standalone lmcache_controller pod (the P2P
+  # lookup directory). It runs on its own node, off the engine nodes, so it can
+  # take a generous reservation without competing with the vLLM engines. Override
+  # per deployment via helm.values (lmcacheController.resources.*).
+  resources:
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
 
 # -----------------------------------------------------------------------
 # Redis persistence (for the durable, Redis-backed affinity map).

@@ -318,9 +318,21 @@ spec:
               requests:
                 huawei.com/Ascend: {{ $tp }}
                 ephemeral-storage: "2Gi"
+                {{- with $.Values.vllm.engineResources.requests.cpu }}
+                cpu: {{ . | quote }}
+                {{- end }}
+                {{- with $.Values.vllm.engineResources.requests.memory }}
+                memory: {{ . | quote }}
+                {{- end }}
               limits:
                 huawei.com/Ascend: {{ $tp }}
                 ephemeral-storage: "4Gi"
+                {{- with $.Values.vllm.engineResources.limits.cpu }}
+                cpu: {{ . | quote }}
+                {{- end }}
+                {{- with $.Values.vllm.engineResources.limits.memory }}
+                memory: {{ . | quote }}
+                {{- end }}
 
           {{- if $needsSidecar }}
           - name: kv-sidecar
@@ -694,9 +706,21 @@ spec:
               requests:
                 huawei.com/Ascend: {{ $tp }}
                 ephemeral-storage: "2Gi"
+                {{- with $.Values.vllm.engineResources.requests.cpu }}
+                cpu: {{ . | quote }}
+                {{- end }}
+                {{- with $.Values.vllm.engineResources.requests.memory }}
+                memory: {{ . | quote }}
+                {{- end }}
               limits:
                 huawei.com/Ascend: {{ $tp }}
                 ephemeral-storage: "4Gi"
+                {{- with $.Values.vllm.engineResources.limits.cpu }}
+                cpu: {{ . | quote }}
+                {{- end }}
+                {{- with $.Values.vllm.engineResources.limits.memory }}
+                memory: {{ . | quote }}
+                {{- end }}
 
         volumes:
           - name: fingerprint-mw
@@ -1017,9 +1041,21 @@ spec:
             requests:
               huawei.com/Ascend: {{ $tp }}
               ephemeral-storage: "2Gi"
+              {{- with $.Values.vllm.engineResources.requests.cpu }}
+              cpu: {{ . | quote }}
+              {{- end }}
+              {{- with $.Values.vllm.engineResources.requests.memory }}
+              memory: {{ . | quote }}
+              {{- end }}
             limits:
               huawei.com/Ascend: {{ $tp }}
               ephemeral-storage: "4Gi"
+              {{- with $.Values.vllm.engineResources.limits.cpu }}
+              cpu: {{ . | quote }}
+              {{- end }}
+              {{- with $.Values.vllm.engineResources.limits.memory }}
+              memory: {{ . | quote }}
+              {{- end }}
 
         {{- if $needsSidecar }}
         - name: kv-sidecar
