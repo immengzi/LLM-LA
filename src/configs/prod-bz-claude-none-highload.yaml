@@ -30,10 +30,14 @@
 switch_cluster: bz
 backend: "boom"
 
-# Claude-CLI strategy comparison: 10 users x 2 conversations = 20 conversations
-# (closed-loop "users" model; see transport.mode / users below). total_requests
-# is informational here -- the users model controls the conversation count.
-total_requests: 20
+# Claude-CLI strategy comparison -- HIGH LOAD: 96 users x 3 conversations = 288
+# conversations (~1021 requests/turns) (closed-loop "users" model; see
+# transport.mode / users below). Offered concurrency (~96 users, one in-flight
+# turn each) exceeds pod capacity (batchSize 32 x 2 pods = 64 sequences), so the
+# router pull-queue / affinity backpressure is actually exercised here -- unlike
+# the 10-user light-load run where avg_requests_waiting stayed 0. total_requests
+# is informational; the users model controls the conversation count.
+total_requests: 288
 prompt_source: "codeflow"
 
 file_prompts:
@@ -120,14 +124,17 @@ transport:
 claude:
   bare: true            # skip hooks / CLAUDE.md for reproducibility
   enable_tools: false   # text-only; no file/shell tools, no permission prompts
-  timeout_s: 300.0
+  timeout_s: 900.0      # raised from 300s: under backpressure per-turn e2e tails
+                        # exceed 300s (light-load p99 was already ~254s). Stays
+                        # under the router RESULT_TIMEOUT_S=1000s hard ceiling.
 
 # N users, each running K conversations sequentially with an interval between them.
 users:
-  num_users: 10
-  convs_per_user: 2
-  interval_between_convs_s: 5.0
-  ramp_s: 0.0
+  num_users: 96             # > 64-seq pod capacity (batchSize 32 x 2) => backpressure
+  convs_per_user: 3         # longer soak / more cache churn than the light run (2)
+  interval_between_convs_s: 2.0
+  ramp_s: 0.1               # PER-USER stagger (sleep = user_idx * ramp_s): 96 users
+                            # spread over ~9.6s, then hold full concurrency
 
 # Live Redis KV-block ownership timeline -> redis_kv_watch.jsonl. node_ip empty
 # derives the host from router_url; port is the redis NodePort.
@@ -152,8 +159,9 @@ helm:
   autoscaling_min: 1
   autoscaling_max: 1
 
-  # Router routing = BOTH (KV prefix + conversation affinity), HARD affinity.
-  router_strategy: "both"
+  # Router routing = NONE (length-only/round-robin baseline; no KV, no affinity).
+  # kv_hits/block_hashes are still logged (measure_prefix below) for comparison.
+  router_strategy: "none"
   router_len_aware: true
   router_len_policy: "short_first"
   # Block-owner source for prefix routing. Inert under affinity (no effect on

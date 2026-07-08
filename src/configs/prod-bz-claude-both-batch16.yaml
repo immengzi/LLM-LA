@@ -1,3 +1,10 @@
+# RATE-LIMIT-TO-AFFINED-NODE scenario, "both" strategy (KV-aware + hard affinity).
+# Clone of prod-bz-claude-both.yaml with TWO changes: models[].batchSize 32->16
+# and router_affinity_hard_timeout_s 600->800. Same throttle idea as
+# prod-bz-claude-affinity-hard-batch16, but with router_strategy=both so the pull
+# also orders by KV-prefix overlap on top of the hard-affinity hold. Confirms the
+# batch-16 + longer-hold rate limit works under "both" too, not just affinity.
+#
 # prod + ROUTER KEY AFFINITY + PERSISTENT (Redis-backed) MAP: MiniMax-M2.7 —
 # BooM + LLM-LA (router), DP2 + LMCache in **P2P / host-staging mode** (the
 # direct142 design), BZ cluster. Router conversation key-affinity enabled (HARD
@@ -190,11 +197,13 @@ helm:
   # longer for the pinned pod preserves prefix locality at the cost of tail latency
   # (this is what the flat-hit-rate "142" router effectively does). Bump
   # incrementally while watching releases_total, the 命中率 panel, and p99 latency.
-  # 600: strongly favors prefix locality (near-"142" never-spill). Hard ceiling is
-  # RESULT_TIMEOUT_S=1000s (router waits that long end-to-end INCLUDING this hold, then
-  # 504s), so 600 leaves ~400s for pull+inference. Higher also slows failover: requests
-  # pinned to a dead/restarting pod wait this long before spilling to a healthy one.
-  router_affinity_hard_timeout_s: 600
+  # 800: rate-limit variant holds LONGER than the baseline 600 so queued turns
+  # keep waiting for their pinned pod under the batch-16 backpressure instead of
+  # spilling. Hard ceiling is RESULT_TIMEOUT_S=1000s (router waits that long
+  # end-to-end INCLUDING this hold, then 504s), so 800 leaves ~200s for
+  # pull+inference. Higher also slows failover: requests pinned to a
+  # dead/restarting pod wait this long before spilling to a healthy one.
+  router_affinity_hard_timeout_s: 800
 
   expose_per_pod: true
 
@@ -247,8 +256,14 @@ helm:
       streamingMode: true
       modelSubPath: MiniMax-M2.7-w8a8-QuaRot
       tensorParallelSize: 8
-      # 16 chosen over the 142 reference's 32 — better observed results.
-      batchSize: 32
+      # RATE-LIMIT-TO-AFFINED-NODE variant: batchSize 32 -> 16 (vLLM --max-num-seqs).
+      # Fewer concurrent seqs per engine = less GPU KV eviction (prefixes survive)
+      # AND smaller sidecar pull `want` (BATCH_SIZE = batchSize*dp) = more router-
+      # queue backpressure, so bursts WAIT instead of spilling. Paired with the
+      # longer hard-affinity hold below, queued turns wait for their pinned pod
+      # (near the "142" never-spill regime). Trade-off: per-pod throughput ceiling
+      # halves; under sustained overload the queue grows until RESULT_TIMEOUT_S.
+      batchSize: 16
       sidecarPrefetch: 2
       dataParallel:
         enabled: true

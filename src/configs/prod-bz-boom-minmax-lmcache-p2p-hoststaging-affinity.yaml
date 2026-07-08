@@ -222,8 +222,15 @@ helm:
       streamingMode: true
       modelSubPath: MiniMax-M2.7-w8a8-QuaRot
       tensorParallelSize: 8
-      # 16 chosen over the 142 reference's 32 — better observed results.
-      batchSize: 32
+      # Lowered 32 -> 16 (max-num-seqs): fewer concurrent sequences per engine =
+      # less GPU KV eviction (prefixes survive on-GPU longer) AND smaller sidecar
+      # pull `want` (BATCH_SIZE = batchSize*dp) = more backpressure in the router
+      # queue, so bursts wait instead of being rejected. Pairs with the longer
+      # hard-affinity hold below to keep each conversation on its warm pod
+      # (KV-preserving rate limit, near the "142" never-spill regime). Trade-off:
+      # per-pod throughput ceiling halves -- fine under moderate load, but under
+      # sustained overload the queue grows until requests hit RESULT_TIMEOUT_S.
+      batchSize: 16
       sidecarPrefetch: 2
       dataParallel:
         enabled: true

@@ -1,7 +1,7 @@
 # prod + ROUTER KEY AFFINITY: MiniMax-M2.7 — BooM + LLM-LA (router), DP2 +
 # LMCache in **P2P / host-staging mode** (the direct142 design). Router
 # conversation key-affinity enabled so all turns of a chat stay on the same vLLM
-# pod for prefix-cache reuse. Router routing = affinity ONLY, HARD affinity mode.
+# pod for prefix-cache reuse. Router routing = BOTH (KV prefix + hard affinity).
 #
 # This is the 142 lineage (NOT the 33/218 Mooncake lineage):
 #   - LMCache connector = LMCacheAscendConnector (native, no Mooncake remote store)
@@ -124,8 +124,11 @@ helm:
   autoscaling_min: 1
   autoscaling_max: 1
 
-  # Router routing = affinity only, HARD mode (time-bounded pin).
-  router_strategy: "affinity"
+  # Router routing = BOTH (KV prefix + conversation affinity), HARD mode. Switched
+  # from affinity-only per the claude strategy comparison (both beat affinity on
+  # engine prefix-hit 0.55 vs 0.48, throughput, and p99 at equal 1.0 stickiness).
+  # owner_source=lookup below is now LIVE (was inert under affinity-only).
+  router_strategy: "both"
   router_len_aware: true
   router_len_policy: "short_first"
   # Block-owner source for prefix routing. Inert under affinity (no effect on
@@ -134,17 +137,19 @@ helm:
   router_lookup_max_blocks: 512
   # Whole-block strip of Claude Code's x-anthropic-billing-header attribution
   # (rotating cc_version + per-request cch counter) router-side for byte-stable
-  # KV-prefix matching. Chart default is OFF. Requires the remove-cc-header router
-  # build. Left commented. Idempotent: safe even if BooM Gateway also strips (the
-  # second pass finds nothing and no-ops) — enabling both is redundant, not harmful.
-  # router_strip_cch: "1"
+  # KV-prefix matching. ENABLED: this deployment serves Claude, so without it the
+  # rotating header bytes sit in the prefix and the KV-prefix cache never hits
+  # across requests (prefix/both would then buy nothing). REQUIRES the remove-cc-
+  # header router build -- VERIFY YZ `kv-router:latest` IS that build (BZ digest
+  # e407aab5…f0a5b) or pin it in values below, else this is a silent no-op and the
+  # KV-hit rate collapses. Idempotent: safe even if BooM Gateway also strips.
+  router_strip_cch: "1"
   router_log_block_hashes: true
   # Store the full request body (messages + sampling params) in the router's
   # /latency_log ring -> router_logs.json / logs.json when collect_router_log is
-  # on. Opt-in; off by default. Bodies ride the bounded ring; max_bytes caps each
-  # (0 = unlimited).
+  # on. OFF: we do not want to log request content for this deployment. (kv_hits/
+  # block_hashes/endpoint are still logged; only the raw body is withheld.)
   # router_log_request_body: true
-  # router_log_request_body_max_bytes: 16384
   router_measure_prefix: true
   router_affinity_mode: "hard"
   router_affinity_ttl_s: 86400   # 24h. Memory-neutral today (prune() not wired -> lazy
@@ -156,11 +161,13 @@ helm:
   # longer for the pinned pod preserves prefix locality at the cost of tail latency
   # (this is what the flat-hit-rate "142" router effectively does). Bump
   # incrementally while watching releases_total, the 命中率 panel, and p99 latency.
-  # 600: strongly favors prefix locality (near-"142" never-spill). Hard ceiling is
+  # 800 (rate-limit pairing): with batchSize 16 halving per-pod concurrency, the
+  # longer hold makes queued turns wait for their warm pod instead of spilling, so
+  # the throttle preserves prefix locality rather than scattering it. Hard ceiling is
   # RESULT_TIMEOUT_S=1000s (router waits that long end-to-end INCLUDING this hold, then
-  # 504s), so 600 leaves ~400s for pull+inference. Higher also slows failover: requests
+  # 504s), so 800 leaves ~200s for pull+inference. Higher also slows failover: requests
   # pinned to a dead/restarting pod wait this long before spilling to a healthy one.
-  router_affinity_hard_timeout_s: 600
+  router_affinity_hard_timeout_s: 800
 
   expose_per_pod: true
 
@@ -228,9 +235,12 @@ helm:
       streamingMode: true
       modelSubPath: MiniMax-M2.7-w8a8-QuaRot
       tensorParallelSize: 8
-      # 32 to match the 142 reference (max-num-seqs 32). Host-staging (not lowering
-      # concurrency) is what fixes the memory-registration crash.
-      batchSize: 32
+      # 16 (rate-limit-to-affined-node): halve per-pod concurrency vs the 142
+      # reference's 32 to cap KV pressure/eviction so queued turns wait for their
+      # warm pod (hard affinity) instead of spilling. Host-staging fixes the memory-
+      # registration crash independently of this. Blunt/static cap -- revisit from
+      # the high-load KV-usage data (batch-32 vs batch-16 sweep).
+      batchSize: 16
       sidecarPrefetch: 2
       dataParallel:
         enabled: true

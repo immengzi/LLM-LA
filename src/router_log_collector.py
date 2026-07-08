@@ -72,7 +72,12 @@ def normalize_rid(req_id: Optional[str]) -> str:
 def routing_fields_from_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     """Extract just the enrichment fields (endpoint + kv/prefix) from a ring entry."""
     out: Dict[str, Any] = {}
+    # Raw /latency_log ring entries carry "endpoint"; already-persisted
+    # router_logs.json records carry the renamed "endpoint_id". Accept both so
+    # this works for live lookups and the end-of-run content join alike.
     ep = entry.get("endpoint")
+    if ep is None:
+        ep = entry.get("endpoint_id")
     if ep is not None:
         out["endpoint_id"] = ep
     for k in _KV_FIELDS:
@@ -366,6 +371,185 @@ def join_logs_with_router(
 
     tmp_path.replace(logs_path)
     return {"matched": matched, "total": total, "missing": missing}
+
+
+def _last_user_text(entry: Dict[str, Any]) -> Optional[str]:
+    """Return the last user-message text from a ring entry's request_body.
+
+    Requires the router to have emitted request bodies (ROUTER_LOG_REQUEST_BODY).
+    The router normalises content-block arrays into plain strings, so content is
+    usually a str; we still tolerate the list form defensively.
+    """
+    rb = entry.get("request_body")
+    if not isinstance(rb, dict):
+        return None
+    msgs = rb.get("messages")
+    if not isinstance(msgs, list):
+        return None
+    for m in reversed(msgs):
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            return c
+        if isinstance(c, list):
+            parts = [
+                b.get("text", "")
+                for b in c
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            return "\n".join(p for p in parts if p)
+    return None
+
+
+def _norm_ws(s: Any) -> str:
+    """Whitespace-insensitive normalisation for robust substring matching."""
+    return "".join(str(s).split())
+
+
+# Claude per-turn client fields worth carrying onto the router-truth record as
+# "extra info for the claude" (best-effort, attached by content match).
+_CLAUDE_EXTRA_FIELDS = (
+    "conversation_id",
+    "user_id",
+    "turn_idx",
+    "num_turns",
+    "session_id",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def build_claude_logs_from_router(
+    logs_path: str | Path,
+    router_logs_path: str | Path,
+    *,
+    client_logs_out: str = "claude_client_logs.json",
+    drop_request_body: bool = True,
+    core_len: int = 160,
+) -> Dict[str, int]:
+    """Make the claude ``logs.json`` identical to prod_latency_collector output.
+
+    The claude CLI talks straight to the BooM gateway and never surfaces the
+    router request id, so ``logs.json`` is written live with client-side turn
+    records only. This rebuilds ``logs.json`` straight from the router
+    ``/latency_log`` truth (``router_logs.json``) -- i.e. the exact records
+    ``prod_latency_collector.py`` emits, with endpoint + kv_hits/total_blocks/
+    matched_tokens/kv_hit/block_hashes. The live client turn records are
+    preserved to ``<client_logs_out>`` in the same directory, and the claude
+    per-turn extras (conversation_id/user_id/turn_idx/cache tokens/session_id)
+    are attached onto the router record by content match where available.
+
+    Request bodies (captured for the content match) are stripped from
+    ``logs.json`` by default so it stays as clean as the older client logs; they
+    remain in ``router_logs.json``.
+
+    Returns ``{router_records, client_records, extras_attached}``.
+    """
+    logs_path = Path(logs_path)
+    router_logs_path = Path(router_logs_path)
+
+    # 1) Preserve the live client turn records, and index them for extras.
+    client_records: List[Dict[str, Any]] = []
+    if logs_path.is_file():
+        with logs_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    client_records.append(json.loads(line))
+                except Exception:
+                    pass
+    if client_records:
+        client_out = logs_path.parent / client_logs_out
+        try:
+            with client_out.open("w", encoding="utf-8") as fout:
+                for rec in client_records:
+                    fout.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+        except Exception as e:
+            print(f"[router-log] WARN: could not write {client_out}: {e}")
+
+    # Index client turns by whitespace-insensitive prompt signature.
+    client_index: List[Dict[str, Any]] = []
+    for rec in client_records:
+        prompt = rec.get("prompt")
+        if not prompt:
+            continue
+        core = _norm_ws(prompt)[:core_len]
+        if not core:
+            continue
+        completion = float(rec.get("actual_send_ts_wall") or 0.0) + float(
+            rec.get("end_to_end_s") or 0.0
+        )
+        client_index.append({
+            "core": core,
+            "completion": completion,
+            "extras": {k: rec[k] for k in _CLAUDE_EXTRA_FIELDS if k in rec},
+            "client_wall_s": rec.get("end_to_end_s"),
+            "claimed": False,
+        })
+
+    # 2) Read router-truth records (already in prod_latency_collector schema).
+    router_records: List[Dict[str, Any]] = []
+    seen: set = set()
+    if router_logs_path.is_file():
+        with router_logs_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                rid = e.get("req_id") or e.get("rid") or ""
+                dedup = f"{rid}:{e.get('t1_wall') or e.get('ts')}"
+                if dedup in seen:
+                    continue
+                seen.add(dedup)
+                router_records.append(e)
+
+    # 3) Attach claude extras onto each router record by content match.
+    extras_attached = 0
+    for e in router_records:
+        lu = _last_user_text(e)
+        lu_norm = _norm_ws(lu) if lu else ""
+        e["transport"] = "claude"
+        if lu_norm and client_index:
+            comp = float(e.get("t1_wall") or e.get("ts") or 0.0)
+            best = None
+            best_dt = None
+            for c in client_index:
+                if c["claimed"]:
+                    continue
+                if c["core"] in lu_norm:
+                    dt = abs(float(c["completion"]) - comp)
+                    if best is None or dt < best_dt:
+                        best = c
+                        best_dt = dt
+            if best is not None:
+                best["claimed"] = True
+                for k, v in best["extras"].items():
+                    e[k] = v
+                if best.get("client_wall_s") is not None:
+                    e["client_wall_s"] = best["client_wall_s"]
+                extras_attached += 1
+        if drop_request_body:
+            e.pop("request_body", None)
+
+    # 4) Write logs.json = router-truth records (prod_latency_collector style).
+    tmp_path = logs_path.with_suffix(logs_path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as fout:
+        for e in router_records:
+            fout.write(json.dumps(e, ensure_ascii=False, default=str) + "\n")
+    tmp_path.replace(logs_path)
+
+    return {
+        "router_records": len(router_records),
+        "client_records": len(client_records),
+        "extras_attached": extras_attached,
+    }
 
 
 def summarize_routing(logs_path: str | Path) -> Dict[str, Any]:

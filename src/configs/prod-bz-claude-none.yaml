@@ -171,8 +171,11 @@ helm:
   # Optionally store each request's full body (messages + sampling params) under
   # "request_body" in the /latency_log ring, so prod_latency_collector.py logs
   # the requests themselves. Bounded ring (auto-evicts); max_bytes caps each
-  # body (0 = unlimited). Disabled for now — flip to true to capture bodies again.
-  router_log_request_body: false
+  # body (0 = unlimited). ENABLED for the claude comparison: the claude CLI does
+  # not surface the router rid, so main.py content-matches each turn to its
+  # /latency_log entry via the last user message to restore kv_hits/block_hashes
+  # in logs.json. logs.json stays body-free (only router_logs.json holds bodies).
+  router_log_request_body: true
   router_log_request_body_max_bytes: 16384
   router_affinity_mode: "hard"
   # Redis-backed persistent affinity map: the conversation→pod map is persisted

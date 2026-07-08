@@ -7,11 +7,12 @@ run and appends a per-tick summary to ``redis_kv_watch.jsonl`` in the experiment
 directory (started/stopped by main.py, mirroring the Prometheus collector).
 
 It periodically SCANs ``<model>:kvblock:*`` -- Redis hashes whose fields are the
-owning vLLM pods -- and records, per tick: the number of blocks, the number of
-unique owners, the shared-block distribution (blocks owned by 2, 3, ... pods),
-and the top owners by block count. This gives a timeline of how KV ownership
-builds up and spreads across pods under load, alongside the router's own kv_hit
-truth in router_logs.json.
+owning vLLM pods -- and records, per tick: the number of blocks (kv_blocks), the
+number of unique owners, the shared-block distribution (blocks owned by 2, 3,
+... pods), the top owners by block count, and a bounded KV-cache *snapshot* --
+the block-hash -> owner-pods map (capped at snapshot_max_blocks). This gives a
+timeline of how KV ownership builds up and spreads across pods under load,
+alongside the router's own kv_hit truth in router_logs.json.
 
 Promoted from debug/watch_redis_kv.py; connects to Redis directly (NodePort or
 port-forward). Fully best-effort: any connection/scan failure is logged and the
@@ -52,6 +53,7 @@ class RedisKVWatcher:
         max_keys: int = 5000,
         scan_count: int = 500,
         top_n: int = 10,
+        snapshot_max_blocks: int = 200,
     ):
         self._out_path = Path(out_path)
         self._host = host
@@ -63,7 +65,9 @@ class RedisKVWatcher:
         self._max_keys = max(1, int(max_keys))
         self._scan_count = max(1, int(scan_count))
         self._top_n = max(1, int(top_n))
+        self._snapshot_max_blocks = max(0, int(snapshot_max_blocks))
         self._pattern = f"{model}:kvblock:*"
+        self._key_prefix = f"{model}:kvblock:"
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -188,10 +192,22 @@ class RedisKVWatcher:
             "tick": self._tick,
             "scan_s": round(scan_s, 4),
             "keys": len(cur),
+            "kv_blocks": len(cur),          # blocks currently owned in Redis
             "unique_owners": len(owner_set),
             "shared_blocks": {str(k): int(v) for k, v in sorted(shared_counts.items())},
             "top_owners": [[o, int(c)] for o, c in owner_counts.most_common(self._top_n)],
         }
+
+        # KV-cache snapshot: bounded block-hash -> owner-pods map so the log
+        # carries the actual cache contents (the "kv_block" detail), not just
+        # aggregate counts. Sorted for determinism; capped at snapshot_max_blocks.
+        if self._snapshot_max_blocks > 0 and cur:
+            blocks: Dict[str, list] = {}
+            for k in sorted(cur.keys())[: self._snapshot_max_blocks]:
+                bh = k[len(self._key_prefix):] if k.startswith(self._key_prefix) else k
+                blocks[bh] = list(cur[k])
+            summary["blocks"] = blocks
+            summary["blocks_truncated"] = len(cur) > self._snapshot_max_blocks
         try:
             self._fh.write(json.dumps(summary, ensure_ascii=False) + "\n")
             self._fh.flush()

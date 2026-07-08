@@ -30,9 +30,14 @@
 switch_cluster: bz
 backend: "boom"
 
-# Small validation run (NOT a soak): send a handful of conversations to exercise
-# the persistent-affinity write/read/warm paths. Intentionally 5 — do not bump.
-total_requests: 5
+# Claude-CLI strategy comparison -- HIGH LOAD: 96 users x 3 conversations = 288
+# conversations (~1021 requests/turns) (closed-loop "users" model; see
+# transport.mode / users below). Offered concurrency (~96 users, one in-flight
+# turn each) exceeds pod capacity (batchSize 32 x 2 pods = 64 sequences), so the
+# router pull-queue / affinity backpressure is actually exercised here -- unlike
+# the 10-user light-load run where avg_requests_waiting stayed 0. total_requests
+# is informational; the users model controls the conversation count.
+total_requests: 288
 prompt_source: "codeflow"
 
 file_prompts:
@@ -98,6 +103,11 @@ generation:
 output_log_mode: "summary"
 print_trace: false
 
+# Capture the router /latency_log (KV/prefix truth) alongside the run, so each
+# request's kv_hits/block_hashes/endpoint are recorded even though the claude CLI
+# does not surface the router request id.
+collect_router_log: true
+
 metrics:
   enabled: true
   scrape_interval_s: 1.0
@@ -106,13 +116,32 @@ metrics:
   model_name: null
   max_instances: null
 
+# Integrated claude-CLI transport (closed-loop "users" load). The claude binary
+# talks to the BooM Anthropic gateway; endpoint/model/auth default from `boom`.
 transport:
-  mode: "async_pubsub"
-  submit_path: "/submit"
-  topic: "results"
-  run_id: null
-  idle_timeout_s: 1000.0
-  idle_zero_running_s: 300.0   # tolerate inter-turn gaps so the long soak isn't cut short
+  mode: "claude"
+
+claude:
+  bare: true            # skip hooks / CLAUDE.md for reproducibility
+  enable_tools: false   # text-only; no file/shell tools, no permission prompts
+  timeout_s: 900.0      # raised from 300s: under backpressure per-turn e2e tails
+                        # exceed 300s (light-load p99 was already ~254s). Stays
+                        # under the router RESULT_TIMEOUT_S=1000s hard ceiling.
+
+# N users, each running K conversations sequentially with an interval between them.
+users:
+  num_users: 96             # > 64-seq pod capacity (batchSize 32 x 2) => backpressure
+  convs_per_user: 3         # longer soak / more cache churn than the light run (2)
+  interval_between_convs_s: 2.0
+  ramp_s: 0.1               # PER-USER stagger (sleep = user_idx * ramp_s): 96 users
+                            # spread over ~9.6s, then hold full concurrency
+
+# Live Redis KV-block ownership timeline -> redis_kv_watch.jsonl. node_ip empty
+# derives the host from router_url; port is the redis NodePort.
+redis_watch:
+  enabled: true
+  port: 30079
+  interval_s: 2.0
 
 boom:
   chat_path: "/v1/chat/completions"
@@ -130,7 +159,7 @@ helm:
   autoscaling_min: 1
   autoscaling_max: 1
 
-  # Router routing = affinity only, HARD mode (time-bounded pin).
+  # Router routing = affinity only, SOFT mode (prefer the pinned pod, spill freely).
   router_strategy: "affinity"
   router_len_aware: true
   router_len_policy: "short_first"
@@ -145,11 +174,20 @@ helm:
   router_strip_cch: "1"
   router_log_block_hashes: true
   router_measure_prefix: true
-  router_affinity_mode: "hard"
+  # Optionally store each request's full body (messages + sampling params) under
+  # "request_body" in the /latency_log ring, so prod_latency_collector.py logs
+  # the requests themselves. Bounded ring (auto-evicts); max_bytes caps each
+  # body (0 = unlimited). ENABLED for the claude comparison: the claude CLI does
+  # not surface the router rid, so main.py content-matches each turn to its
+  # /latency_log entry via the last user message to restore kv_hits/block_hashes
+  # in logs.json. logs.json stays body-free (only router_logs.json holds bodies).
+  router_log_request_body: true
+  router_log_request_body_max_bytes: 16384
+  router_affinity_mode: "soft"
   # Redis-backed persistent affinity map: the conversation→pod map is persisted
   # to Redis and survives router restarts/redeploys (startup warm + request-time
   # read on a memory miss). Default-off elsewhere; enabled here.
-  router_affinity_persist_enabled: true
+  router_affinity_persist_enabled: false  # off: clean affinity slate per strategy redeploy
   router_affinity_ttl_s: 86400   # 24h. Memory-neutral today (prune() not wired -> lazy
   # expiry only), so a long TTL just retains locality across idle gaps. Real memory
   # bound is unique conversations since restart, not TTL; watch router_affinity_map_size.
@@ -251,7 +289,6 @@ helm:
     # stripping of Claude Code's `x-anthropic-billing-header` attribution block
     # (STRIP_CCH), matching BooM Gateway/vLLM PR #36829 — restores cross-request
     # KV-prefix cache hits that the old narrow `; cch=` regex never fixed.
-    images.router: "kv-router:remove-cc-header"
     # boom: == bz default; kept explicit for reproducibility.
     boom.image: "boom-gateway:v5"
     # sidecar: left on clusters.yaml default kv-sidecar:latest — persist-affinity
