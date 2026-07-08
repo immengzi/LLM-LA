@@ -101,23 +101,61 @@
 #   - pull
 
 # ── CLAUDE-CLI PREFIX-CACHE STRATEGY COMPARISON (closed-loop "users" load) ──
-# ACTIVE: drives the real `claude` CLI (transport.mode=claude): 10 users x 2
+# Drives the real `claude` CLI (transport.mode=claude): 10 users x 2
 # conversations from CodeFlowBench, replayed identically across every routing
 # strategy. Each config is a FULL cold redeploy (do NOT pass --skip-vllm) so every
 # strategy runs on a clean KV/affinity slate. Each run captures the router
 # /latency_log (router_logs.json, KV truth), a live Redis KV-ownership timeline
 # (redis_kv_watch.jsonl), and a Redis block-hash verification (redis_verify.json).
-# Run all five back-to-back in one shot:
+# Run back-to-back in one shot:
 #   cd src && python sweep_methods.py --config 1-master_config
-prod-bz-claude-none:
+#
+# Baseline strategy comparison (batch 32 / hold 600, 10 users x 2) -- already run:
+# prod-bz-claude-none:
+#   - pull
+# prod-bz-claude-prefix:
+#   - pull
+# prod-bz-claude-affinity-hard:
+#   - pull
+# prod-bz-claude-affinity-soft:
+#   - pull
+# prod-bz-claude-both:
+#   - pull
+#
+# Rate-limit-to-affined-node scenario (batchSize 16 vs 32 + longer hard hold 800s
+# vs 600s) under hard-affinity + both -- already run, commented out:
+# prod-bz-claude-affinity-hard-batch16:
+#   - pull
+# prod-bz-claude-both-batch16:
+#   - pull
+#
+# ACTIVE: HIGH-LOAD re-run of the baseline strategy comparison. Same dataset /
+# strategies as the light run above, but 96 users x 3 conversations (2s interval,
+# 0.1s per-user ramp). Offered concurrency (~96) exceeds pod capacity (batchSize
+# 32 x 2 pods = 64 seqs) so router pull-queue / affinity backpressure is actually
+# exercised. Claude per-turn timeout raised to 900s (< router 1000s ceiling).
+# Full cold redeploy per strategy (do NOT pass --skip-vllm). Analyse alongside the
+# light run in analysis-notebooks/claude-strategy-comparison.ipynb.
+prod-bz-claude-none-highload:
   - pull
-prod-bz-claude-prefix:
+prod-bz-claude-prefix-highload:
   - pull
-prod-bz-claude-affinity-hard:
+prod-bz-claude-affinity-hard-highload:
   - pull
-prod-bz-claude-affinity-soft:
+prod-bz-claude-affinity-soft-highload:
   - pull
-prod-bz-claude-both:
+prod-bz-claude-both-highload:
+  - pull
+#
+# HIGH-LOAD rate-limit-to-affined-node feature (batchSize 16 + hard hold 800s) --
+# runs alongside the batch-32 baselines above so the notebook can compute the
+# feature deltas under real backpressure: affinity-hard-highload -> this, and
+# both-highload -> this. At batch 16 the pod capacity is 32 seqs vs ~96 users
+# (~3x), so the throttle/queue-to-warm-pod path is fully exercised. Analyse in
+# analysis-notebooks/claude-ratelimit-batch16.ipynb.
+prod-bz-claude-affinity-hard-batch16-highload:
+  - pull
+prod-bz-claude-both-batch16-highload:
   - pull
 
 # ── YZ shadow pool (parallel to prod, release/ns vllm-shadow) ──

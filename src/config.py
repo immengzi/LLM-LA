@@ -156,6 +156,9 @@ class RedisWatchConfig:
     model: str = ""            # key prefix <model>:kvblock:* ; empty -> boom.model
     max_keys: int = 5000
     scan_count: int = 500
+    # Per-tick KV-cache snapshot: dump up to this many block-hash -> owner-pods
+    # entries alongside the summary counts (0 disables the block-level detail).
+    snapshot_max_blocks: int = 200
 
 
 # =========================
@@ -1262,6 +1265,10 @@ def load_config(path: str) -> ClientConfig:
             redis_watch.scan_count = int(redis_watch.scan_count)
         except Exception:
             redis_watch.scan_count = 500
+        try:
+            redis_watch.snapshot_max_blocks = max(0, int(redis_watch.snapshot_max_blocks))
+        except Exception:
+            redis_watch.snapshot_max_blocks = 200
 
     # Shadow deployment overrides (top-level keys)
     vllm_node_selector = raw.get("vllm_node_selector", None)

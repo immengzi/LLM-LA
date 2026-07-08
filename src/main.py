@@ -41,12 +41,14 @@ try:
         RouterLogCollector,
         EnrichingLogger,
         join_logs_with_router,
+        build_claude_logs_from_router,
         summarize_routing,
     )
 except Exception:
     RouterLogCollector = None  # type: ignore
     EnrichingLogger = None     # type: ignore
     join_logs_with_router = None  # type: ignore
+    build_claude_logs_from_router = None  # type: ignore
     summarize_routing = None      # type: ignore
 
 # event-driven pod->node mapping snapshots (autoscaler / churn)
@@ -394,6 +396,7 @@ def main():
                     interval_s=rw.interval_s,
                     max_keys=rw.max_keys,
                     scan_count=rw.scan_count,
+                    snapshot_max_blocks=getattr(rw, "snapshot_max_blocks", 200),
                 )
                 if not redis_watcher.start():
                     redis_watcher = None
@@ -504,11 +507,34 @@ def main():
     routing_summary = None
     if router_collector is not None and join_logs_with_router is not None:
         if claude_mode:
+            # The claude CLI does not surface the router rid, so logs.json is
+            # rebuilt straight from the router /latency_log truth -- the same
+            # records prod_latency_collector.py emits (endpoint + kv_hits/
+            # total_blocks/matched_tokens/kv_hit/block_hashes). Live client turn
+            # records are preserved to claude_client_logs.json; claude per-turn
+            # extras are attached by content match. Then summarize from logs.json.
             try:
-                routing_summary = summarize_routing(router_logs_path)
-                print("[router-log] claude mode: routing summarized from router_logs.json")
+                if build_claude_logs_from_router is not None:
+                    stats = build_claude_logs_from_router(logs_path, router_logs_path)
+                    print(
+                        f"[router-log] claude logs.json rebuilt from router truth: "
+                        f"router_records={stats['router_records']} "
+                        f"client_records={stats['client_records']} "
+                        f"extras_attached={stats['extras_attached']}"
+                    )
+                    if stats["router_records"] == 0:
+                        print(
+                            "[router-log] WARN: no router records -- ensure "
+                            "collect_router_log=true and the router /latency_log "
+                            "is reachable."
+                        )
+                routing_summary = summarize_routing(logs_path)
             except Exception as e:
-                print(f"[router-log] WARN: routing summary failed: {e}")
+                print(f"[router-log] WARN: claude logs rebuild failed: {e}")
+                try:
+                    routing_summary = summarize_routing(router_logs_path)
+                except Exception:
+                    pass
         else:
             try:
                 stats = join_logs_with_router(logs_path, router_logs_path)
