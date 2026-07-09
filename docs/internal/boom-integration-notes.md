@@ -75,7 +75,7 @@ Duck typing makes this work: `BooMConfig` has the same fields as
 | `configs/boom_master.yaml` | Sweep master config mapping boom.yaml → methods |
 | `vllm-kv-stack/templates/75-boom.yaml` | Helm template: ConfigMap + Deployment + Service (gated by `boom.enabled`) |
 | `docs/gateways/boom/overview.md` | Full documentation |
-| `src/boom-integration/Dockerfile` | Container image (host-compiled binary + openeuler) |
+| `src/core/boom-integration/Dockerfile` | Container image (host-compiled binary + openeuler) |
 
 ---
 
@@ -95,10 +95,10 @@ All changes are fully backward compatible:
 
 ```bash
 # Single experiment
-python main.py --config boom
+python src/client/main.py --config boom
 
 # Sweep
-python sweep_methods.py --config boom_master --skip-vllm
+python src/client/sweep_methods.py --config boom_master --skip-vllm
 ```
 
 ## Config reference

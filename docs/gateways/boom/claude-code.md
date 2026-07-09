@@ -68,10 +68,10 @@ Then run:
 
 ```bash
 # Full deploy (vLLM + router + BooM with Claude aliases)
-python sweep_methods.py --config 1-master_config
+python src/client/sweep_methods.py --config 1-master_config
 
 # Or skip vLLM if pods are already running
-python sweep_methods.py --config 1-master_config --skip-vllm
+python src/client/sweep_methods.py --config 1-master_config --skip-vllm
 ```
 
 This uses `configs/boom-claude.yaml` which sets `helm.boom_claude_aliases: true`.

@@ -137,7 +137,7 @@ PR #36829. Still gated by `STRIP_CCH=1`; BooM Gateway is not modified.
 ### Build & rollout
 
 - Image: `reg.local:32000/kv-router:remove-cc-header` (digest `e407aab5…f0a5b`).
-- Adopted in `src/configs/prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity-redis.yaml`
+- Adopted in `src/client/configs/prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity-redis.yaml`
   via `helm.values.images.router`.
 
 ### Validation (2026-07-07)

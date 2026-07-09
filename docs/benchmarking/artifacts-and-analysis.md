@@ -6,7 +6,7 @@ What each experiment produces and how to analyze it. For how runs are launched, 
 
 Each run is written to a numbered directory under the experiments root. The run ID is the highest existing numeric subdirectory plus one.
 
-> Roots differ between entry points: `main.py`/`experiment_io.init_experiment()` default to `/home/data/saeid/experiments`, while `sweep_methods.py` detects new run directories under `src/experiments` (`REPO_ROOT/experiments`). Out of the box these don't match, so a sweep may not auto-detect the run unless you align the roots (e.g. symlink). Adjust before relying on sweep artifact collection.
+> Roots differ between entry points: `main.py`/`experiment_io.init_experiment()` default to `/home/data/saeid/experiments`, while `sweep_methods.py` detects new run directories under `src/client/experiments` (`CLIENT_DIR/experiments`). Out of the box these don't match, so a sweep may not auto-detect the run unless you align the roots (e.g. symlink). Adjust before relying on sweep artifact collection.
 
 ```
 <experiments-root>/<N>/
@@ -52,7 +52,7 @@ Multi-turn runs add `conversation_id`, `turn_idx`, and streaming runs add `ttft_
 
 Set `collect_router_log: true` in the client config to capture the router's own
 per-request routing decision independent of the response body (so it survives the
-BooM hop). During the run, [`router_log_collector.py`](../../src/router_log_collector.py)
+BooM hop). During the run, [`router_log_collector.py`](../../src/client/router_log_collector.py)
 polls the router's `/latency_log` ring and writes `router_logs.json` (the router
 truth), while live-enriching `logs.json` records with `endpoint_id` and the
 prefix/KV fields above. At shutdown an authoritative join rewrites `logs.json`

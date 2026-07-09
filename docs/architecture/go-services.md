@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Go services (`src/services/go`) are a **near-parity port** of the Python
+The Go services (`src/core/services/go`) are a **near-parity port** of the Python
 `router_service` and `sidecar`. They expose the same HTTP endpoints, read the
 same environment variables, write the same Redis keys, emit the same Prometheus
 metrics (names/labels/buckets), speak the same ZMQ wire formats, and return
@@ -81,7 +81,7 @@ services/go/
 ## Building Docker Images
 
 ```bash
-cd src/services/go
+cd src/core/services/go
 ./build.sh
 # -> reg.local:32000/kv-router-go:latest
 # -> reg.local:32000/kv-sidecar-go:latest
@@ -134,13 +134,13 @@ Use any config with `helm.service_impl: "go"`, e.g.
 `configs/non-prod/router-go.yaml` or `configs/prod-yz-shadow-boom-minmax-lmcache-hq-go.yaml`:
 
 ```bash
-python sweep_methods.py --config <master_config>
+python src/client/sweep_methods.py --config <master_config>
 ```
 
 ### Direct Helm override
 
 ```bash
-helm upgrade --install vllm ./src/vllm-kv-stack \
+helm upgrade --install vllm ./src/core/vllm-kv-stack \
   --set serviceImpl=go
 ```
 

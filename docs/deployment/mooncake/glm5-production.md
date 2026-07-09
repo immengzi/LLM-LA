@@ -95,13 +95,13 @@ Proceed only if output ends with `READY`.
 Run your sweep/deploy entrypoint (example):
 
 ```bash
-python3 sweep_methods.py --config 1-master_config
+python3 src/client/sweep_methods.py --config 1-master_config
 ```
 
 Or run against one specific production config:
 
 ```bash
-python3 sweep_methods.py --config 5-2-template-boom-claude-glm-mooncake.yaml
+python3 src/client/sweep_methods.py --config 5-2-template-boom-claude-glm-mooncake.yaml
 ```
 
 ### Step 3: Wait for workload readiness

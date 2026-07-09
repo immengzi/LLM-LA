@@ -15,8 +15,8 @@ A walkthrough of the anatomy of a single run: what `deploy_vllm.py` and `main.py
 ## Step 1 — Deploy vLLM
 
 ```bash
-cd <repo-root>/src
-python deploy_vllm.py --config configs/router-tp8-qwen.yaml
+cd <repo-root>
+python src/client/deploy_vllm.py --config configs/router-tp8-qwen.yaml
 ```
 
 This renders the Helm chart with only the vLLM Deployment (or LeaderWorkerSet) and its co-located sidecar, then waits for pods to be Ready. The model subpath is derived from `helm.nfs_path` in the config.
@@ -24,7 +24,7 @@ This renders the Helm chart with only the vLLM Deployment (or LeaderWorkerSet) a
 ## Step 2 — Run the load test
 
 ```bash
-python main.py --config router-tp8-qwen --n 200
+python src/client/main.py --config router-tp8-qwen --n 200
 ```
 
 What happens inside `main.py`:

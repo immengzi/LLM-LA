@@ -6,7 +6,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 
 - **New user** → [Getting Started](#getting-started) then [Architecture overview](architecture/overview.md)
 - **Operator** → [Operations](#operations) and [Helm values reference](configuration/helm-values.md)
-- **Benchmarker** → [Benchmarking](#benchmarking) and [Client config reference](configuration/client-config.md)
+- **Benchmarker** → [Benchmark harness](benchmarking/harness.md), [Benchmarking](#benchmarking), and [Client config reference](configuration/client-config.md)
 - **Researcher** → [Architecture](#architecture) and [Comparisons](#comparisons-research)
 
 ## Getting started
@@ -86,6 +86,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 
 | Doc | Description |
 |-----|-------------|
+| [harness.md](benchmarking/harness.md) | The client: load generator, sweep runner, deploy helper, external observer |
 | [load-patterns.md](benchmarking/load-patterns.md) | RPS schedules and the open-loop load model |
 | [multi-turn.md](benchmarking/multi-turn.md) | Multi-turn conversation benchmarking |
 | [codeflowbench.md](benchmarking/codeflowbench.md) | CodeFlowBench dataset experiments |

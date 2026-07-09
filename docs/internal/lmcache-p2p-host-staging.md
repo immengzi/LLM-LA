@@ -36,8 +36,8 @@ to before. Verify with:
 
 ```bash
 # render an unchanged Mooncake config on the OLD chart vs the NEW chart and diff
-helm template vllm src/vllm-kv-stack -f <rendered mooncake values> > /tmp/new.yaml
-git stash && helm template vllm src/vllm-kv-stack -f <same values> > /tmp/old.yaml && git stash pop
+helm template vllm src/core/vllm-kv-stack -f <rendered mooncake values> > /tmp/new.yaml
+git stash && helm template vllm src/core/vllm-kv-stack -f <same values> > /tmp/old.yaml && git stash pop
 diff /tmp/old.yaml /tmp/new.yaml   # MUST be empty
 ```
 
@@ -171,7 +171,7 @@ points at it (9800/9900). Replaces the Mooncake master as the coordinator.
 
 ## 3. Current chart state and the gap
 
-`src/vllm-kv-stack/templates/13-lmcache-config.yaml` is hardwired to the
+`src/core/vllm-kv-stack/templates/13-lmcache-config.yaml` is hardwired to the
 Mooncake/`P2PHANDSHAKE` mode — it always emits:
 
 ```yaml
@@ -243,7 +243,7 @@ extra_config:
 
 ## 5. File-by-file (as implemented)
 
-1. `src/vllm-kv-stack/values.yaml`
+1. `src/core/vllm-kv-stack/values.yaml`
    - `lmcache.mode: "mooncake"` (default; other value `"p2p"`).
    - `lmcache.p2p:` block: `tpSize: 8`, `transferChannel: "hccl"`, `useNpu`,
      `pullMode`, `delayPull`, `npuBufferSize: 134217728`, `initPortBase: 9950`,
@@ -257,7 +257,7 @@ extra_config:
      engines use the `controllerPullUrl`/`ReplyUrl` knobs. No Service — see D8.)
    - `deploy.lmcacheController: true`.
 
-2. `src/vllm-kv-stack/templates/13-lmcache-config.yaml`
+2. `src/core/vllm-kv-stack/templates/13-lmcache-config.yaml`
    - `{{ if eq .Values.lmcache.mode "p2p" }}` … `{{ else }}` … `{{ end }}`.
    - **p2p branch** emits the 142 shape: no `remote_url`; `enable_p2p: True`,
      `p2p_host: "__P2P_HOST__"`, `transfer_channel`, `p2p_use_npu/pull_mode/
@@ -268,7 +268,7 @@ extra_config:
      `lookup_backoff_time`, `use_host_staging`, `os_staging_bytes`.
    - **else branch** is the historical Mooncake template, unchanged.
 
-3. `src/vllm-kv-stack/templates/14-lmcache-controller.yaml` (NEW)
+3. `src/core/vllm-kv-stack/templates/14-lmcache-controller.yaml` (NEW)
    - Deployment **only** (no Service). `hostNetwork: true`,
      `dnsPolicy: ClusterFirstWithHostNet`, optional `nodeAffinity` from
      `lmcacheController.nodeName`, optional `tolerations`, tcpSocket
@@ -279,13 +279,13 @@ extra_config:
      mooncake master). Gated on
      `lmcache.enabled && lmcache.mode == "p2p" && deploy.lmcacheController`.
 
-4. `src/vllm-kv-stack/templates/40-vllm-unified.yaml` (3 spots: leader/worker/single)
+4. `src/core/vllm-kv-stack/templates/40-vllm-unified.yaml` (3 spots: leader/worker/single)
    - Connector: nested `{{ if eq .mode "p2p" }}` emits `LMCacheAscendConnector`
      (no module path); `{{ else }}` keeps `...V1Dynamic`.
    - `sed` line extended with `-e "s/__P2P_HOST__/${NODE_IP}/"` and
      `-e "s/__LMCACHE_INSTANCE_ID__/${POD_NAME}/"` (no-ops in Mooncake mode).
 
-5. `src/config.py` (`HelmConfig`)
+5. `src/client/config.py` (`HelmConfig`)
    - Added: `lmcache_mode: str = "mooncake"`, `lmcache_use_host_staging`,
      `lmcache_os_staging_bytes`, `lmcache_p2p_controller_pull_url`,
      `lmcache_p2p_controller_reply_url`, `deploy_lmcache_controller`,
@@ -293,12 +293,12 @@ extra_config:
      defaults (they match 142 and rarely change; override via `helm.values` if
      ever needed).
 
-6. `src/sweep_methods.py`
+6. `src/client/sweep_methods.py`
    - Maps the new fields to `set_values` in the existing lmcache block. Echoes the
      active mode. In `p2p` mode: forces `deploy.mooncakeMaster=false`, sets
      `deploy.lmcacheController`, and warns if the controller URLs are unset.
 
-7. `src/configs/prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity.yaml` (NEW)
+7. `src/client/configs/prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity.yaml` (NEW)
    - Branched from `prod-yz-boom-minmax-lmcache-local-hq-affinity.yaml`: keeps
      per-role node pinning + hard affinity + `enablePromptTokensDetails`. Sets
      `lmcache_mode: p2p`, host-staging on (8 GiB), controller on (`node7` /
@@ -306,11 +306,11 @@ extra_config:
      100` (matches ref; host-staging removes the registration-driven RAM driver).
      `vllm_image` + controller image → `reg.local:32000/lmcache-ascend:hccl-p2p`.
 
-8. `src/configs/prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity.yaml` (NEW)
+8. `src/client/configs/prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity.yaml` (NEW)
    - Same shape, bz paths, no NDS. Controller IP/nodeName are **placeholders**
      (`192.168.0.42` / `k8s-worker1`) — confirm real bz values before deploy.
 
-9. `src/configs/1-master_config.yaml`
+9. `src/client/configs/1-master_config.yaml`
    - Both new keys added **commented out** (active deploy unchanged).
 
 10. Docs: `docs/configuration/helm-values.md` (new "mode `mooncake` vs `p2p`"

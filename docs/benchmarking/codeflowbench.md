@@ -102,15 +102,15 @@ Key settings in `configs/4-2-template-boom-claude-glm.yaml`:
 ### Basic Run
 
 ```bash
-cd <repo-root>/src
-python main.py --config 4-2-template-boom-claude-glm
+cd <repo-root>
+python src/client/main.py --config 4-2-template-boom-claude-glm
 ```
 
 ### Override Parameters
 
 ```bash
 # Run with custom number of requests
-python main.py --config 4-2-template-boom-claude-glm --n 1000
+python src/client/main.py --config 4-2-template-boom-claude-glm --n 1000
 
 # Or use an inline override
 ```
@@ -176,8 +176,8 @@ The `multiturn-workload-generation` branch adds CodeFlowBench configs that
 combine multi-turn conversations with the Claude Code-style injection described
 in [Multi-turn benchmarking](multi-turn.md):
 
-- `src/configs/non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml`
-- `src/configs/non-prod/21-2-template-boom-claude-glm-stability-system-prompts.yaml`
+- `src/client/configs/non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml`
+- `src/client/configs/non-prod/21-2-template-boom-claude-glm-stability-system-prompts.yaml`
 
 Both use:
 
@@ -187,7 +187,7 @@ hf_lmsys:
   multi_turn: true
 claude_code_injection:
   enabled: true
-  template_dir: "/home/haiting/llm-la/src/multiturn-generation"
+  template_dir: "/home/haiting/llm-la/src/client/multiturn-generation"
   inject_system_blocks: true
   inject_system_reminders: true
   inject_tools: true
@@ -199,7 +199,7 @@ deeper conversations before selecting requests. This is useful when validating
 prefix-cache behavior under sustained context growth rather than short
 two-turn cases.
 
-The template directory is part of the runtime tree (`src/multiturn-generation/`)
+The template directory is part of the runtime tree (`src/client/multiturn-generation/`)
 so the load generator can read the system blocks, reminders, and tool schemas
 without depending on the old `debug-scripts/` location.
 
@@ -215,4 +215,4 @@ without depending on the old `debug-scripts/` location.
 | How to disable multi-turn? | Set `multi_turn: false` or remove from config |
 | Default max output tokens? | 1024 |
 | Default rate? | 0.3 RPS |
-| Where are Claude Code injection templates? | `src/multiturn-generation/` |
+| Where are Claude Code injection templates? | `src/client/multiturn-generation/` |

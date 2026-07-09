@@ -251,19 +251,19 @@ These came from chrooting into the host environment and did not affect
 ### BZ mirrored chart images
 
 After the registry was validated, images referenced by
-`src/vllm-kv-stack/values.yaml` and the Helm templates were rebuilt or mirrored
+`src/core/vllm-kv-stack/values.yaml` and the Helm templates were rebuilt or mirrored
 into `reg.local:32000`.
 
 Local images rebuilt from this codebase:
 
 | Image | Source |
 | --- | --- |
-| `reg.local:32000/kv-router:latest` | `src/services/router_service/Dockerfile` |
-| `reg.local:32000/kv-sidecar:latest` | `src/services/sidecar/Dockerfile` |
-| `reg.local:32000/vllm-cpu-hash:latest` | `src/services/prefix_hash/Dockerfile` |
-| `reg.local:32000/kv-router-go:latest` | `src/services/go/Dockerfile.router` |
-| `reg.local:32000/kv-sidecar-go:latest` | `src/services/go/Dockerfile.sidecar` |
-| `reg.local:32000/boom-gateway:v5` | `src/boom-integration/Dockerfile` |
+| `reg.local:32000/kv-router:latest` | `src/core/services/router_service/Dockerfile` |
+| `reg.local:32000/kv-sidecar:latest` | `src/core/services/sidecar/Dockerfile` |
+| `reg.local:32000/vllm-cpu-hash:latest` | `src/core/services/prefix_hash/Dockerfile` |
+| `reg.local:32000/kv-router-go:latest` | `src/core/services/go/Dockerfile.router` |
+| `reg.local:32000/kv-sidecar-go:latest` | `src/core/services/go/Dockerfile.sidecar` |
+| `reg.local:32000/boom-gateway:v5` | `src/core/boom-integration/Dockerfile` |
 
 External images mirrored for the chart:
 
@@ -318,8 +318,8 @@ Helm render checks confirmed that rendered image references line up with
 registry contents:
 
 ```bash
-helm template image-check src/vllm-kv-stack \
-  -f src/vllm-kv-stack/values.yaml \
+helm template image-check src/core/vllm-kv-stack \
+  -f src/core/vllm-kv-stack/values.yaml \
   --set modelVolume.modelSubPath=qwen3-8b \
   --set cacheWarm.enabled=true \
   --set litellm.enabled=true \
@@ -348,7 +348,7 @@ cacheWarm:
 The BZ `switch_cluster` profile is the right place for cluster-local defaults:
 endpoints, model paths, image names, image pull policies, and node pinning.
 
-Because the chart images referenced by `src/vllm-kv-stack/values.yaml` have
+Because the chart images referenced by `src/core/vllm-kv-stack/values.yaml` have
 been rebuilt or mirrored into `reg.local:32000`, the BZ profile can use:
 
 ```yaml
@@ -510,7 +510,7 @@ ctr -n k8s.io images pull --plain-http reg.local:32000/kv-sidecar:latest
 ### Build and push an image
 
 ```bash
-cd <repo-root>/src/services/sidecar
+cd <repo-root>/src/core/services/sidecar
 docker build -t reg.local:32000/kv-sidecar:latest .
 docker push reg.local:32000/kv-sidecar:latest
 ```

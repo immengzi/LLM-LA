@@ -1,6 +1,6 @@
 # Building BooM Gateway
 
-The BooM Gateway Rust source lives at `<repo-root>/boom-gateway`, and the minimal Dockerfile at `<repo-root>/src/boom-integration/Dockerfile`.
+The BooM Gateway Rust source lives at `<repo-root>/boom-gateway`, and the minimal Dockerfile at `<repo-root>/src/core/boom-integration/Dockerfile`.
 
 > The steps below are from a network-restricted environment (corporate MITM proxy, no direct internet). Proxy/mirror values are environment-specific; adjust for yours.
 
@@ -65,14 +65,14 @@ The binary lands at `target/release/boom-gateway`.
 Copy the Dockerfile into the BooM Gateway repo root (if not already there):
 
 ```bash
-cp <repo-root>/src/boom-integration/Dockerfile <repo-root>/boom-gateway/
+cp <repo-root>/src/core/boom-integration/Dockerfile <repo-root>/boom-gateway/
 ```
 
 Build and push:
 
 ```bash
 cd <repo-root>/boom-gateway
-docker build -t reg.local:32000/boom-gateway:v5 -f <repo-root>/src/boom-integration/Dockerfile .
+docker build -t reg.local:32000/boom-gateway:v5 -f <repo-root>/src/core/boom-integration/Dockerfile .
 docker push reg.local:32000/boom-gateway:v5
 ```
 
@@ -108,7 +108,7 @@ If BooM Gateway source code is updated:
 ```bash
 cd <repo-root>/boom-gateway
 cargo build --release -p boom-main         # incremental, fast
-docker build -t reg.local:32000/boom-gateway:v5 -f <repo-root>/src/boom-integration/Dockerfile .
+docker build -t reg.local:32000/boom-gateway:v5 -f <repo-root>/src/core/boom-integration/Dockerfile .
 docker push reg.local:32000/boom-gateway:v5
 ```
 

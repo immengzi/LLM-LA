@@ -164,7 +164,7 @@ Soft affinity is a within-tier reorder; hard affinity withholds before tiering.
 Select the strategy with one knob. The modifiers apply only when affinity is on.
 
 ```yaml
-# client config (src/configs/*.yaml)
+# client config (src/client/configs/*.yaml)
 helm:
   router_strategy: "both"        # none | prefix | affinity | both
   router_affinity_mode: "soft"   # soft | hard (only when affinity is on)

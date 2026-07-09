@@ -1,6 +1,6 @@
 # Helm values reference
 
-Reference for the `vllm-kv-stack` Helm chart (`src/vllm-kv-stack/values.yaml`). Defaults shown are the chart defaults; cluster-specific values (registry, NFS server, node names) should be overridden for your environment.
+Reference for the `vllm-kv-stack` Helm chart (`src/core/vllm-kv-stack/values.yaml`). Defaults shown are the chart defaults; cluster-specific values (registry, NFS server, node names) should be overridden for your environment.
 
 ## How values are set
 
