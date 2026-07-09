@@ -34,6 +34,29 @@ ROUTER_DISPATCH_REQUESTS_TOTAL = Counter(
     ["endpoint"],
 )
 
+# Current requests dispatched to each endpoint that have not yet returned a
+# result (pull mode, always-on regardless of SLO). This is the router's logical
+# "requests in flight per pod" view and surfaces pull-mode load imbalance.
+ROUTER_ENDPOINT_INFLIGHT = Gauge(
+    "router_endpoint_inflight",
+    "Requests currently in flight (dispatched, not yet completed) per endpoint",
+    ["endpoint"],
+)
+
+# Pull-mode fairness liveness signals (only updated when STUCK_PULL_SECONDS > 0).
+ROUTER_ENDPOINT_LAST_PULL_SECONDS = Gauge(
+    "router_endpoint_last_pull_seconds",
+    "Seconds since each endpoint last issued a /pull",
+    ["endpoint"],
+)
+
+ROUTER_ENDPOINT_STUCK = Gauge(
+    "router_endpoint_stuck",
+    "1 when an endpoint has not pulled within ROUTER_STUCK_PULL_SECONDS while the "
+    "central queue is backed up, else 0",
+    ["endpoint"],
+)
+
 # -------------------------------------------------
 # Key-affinity routing metrics
 # -------------------------------------------------
@@ -197,6 +220,27 @@ def inc_admission() -> None:
 def inc_dispatch(endpoint: str) -> None:
     try:
         ROUTER_DISPATCH_REQUESTS_TOTAL.labels(endpoint=str(endpoint)).inc()
+    except Exception:
+        pass
+
+
+def set_endpoint_inflight(endpoint: str, n: int) -> None:
+    try:
+        ROUTER_ENDPOINT_INFLIGHT.labels(endpoint=str(endpoint)).set(int(n))
+    except Exception:
+        pass
+
+
+def set_endpoint_last_pull_seconds(endpoint: str, seconds: float) -> None:
+    try:
+        ROUTER_ENDPOINT_LAST_PULL_SECONDS.labels(endpoint=str(endpoint)).set(float(seconds))
+    except Exception:
+        pass
+
+
+def set_endpoint_stuck(endpoint: str, v: int) -> None:
+    try:
+        ROUTER_ENDPOINT_STUCK.labels(endpoint=str(endpoint)).set(int(v))
     except Exception:
         pass
 

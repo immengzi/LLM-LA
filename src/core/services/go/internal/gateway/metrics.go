@@ -30,6 +30,25 @@ var (
 		Help: "Total requests dispatched from router to sidecars",
 	}, []string{"endpoint"})
 
+	// Current requests dispatched to each endpoint that have not yet returned a
+	// result (pull mode, always-on regardless of SLO). Mirrors Python's
+	// router_endpoint_inflight gauge.
+	RouterEndpointInflight = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "router_endpoint_inflight",
+		Help: "Requests currently in flight (dispatched, not yet completed) per endpoint",
+	}, []string{"endpoint"})
+
+	// Pull-mode fairness liveness signals (only updated when STUCK_PULL_SECONDS > 0).
+	RouterEndpointLastPullSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "router_endpoint_last_pull_seconds",
+		Help: "Seconds since each endpoint last issued a /pull",
+	}, []string{"endpoint"})
+
+	RouterEndpointStuck = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "router_endpoint_stuck",
+		Help: "1 when an endpoint has not pulled within ROUTER_STUCK_PULL_SECONDS while the central queue is backed up, else 0",
+	}, []string{"endpoint"})
+
 	// Key-affinity routing metrics.
 	RouterAffinityHitsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "router_affinity_hits_total",
@@ -132,6 +151,9 @@ func RegisterMetrics() {
 		RouterCentralQueueLengthByModel,
 		RouterAdmissionRequestsTotal,
 		RouterDispatchRequestsTotal,
+		RouterEndpointInflight,
+		RouterEndpointLastPullSeconds,
+		RouterEndpointStuck,
 		RouterAffinityHitsTotal,
 		RouterAffinityHoldsTotal,
 		RouterAffinityReleasesTotal,
@@ -163,6 +185,15 @@ func setCentralQueueLengthByModel(model string, n int) {
 }
 func incAdmission()                { RouterAdmissionRequestsTotal.Inc() }
 func incDispatch(endpoint string)  { RouterDispatchRequestsTotal.WithLabelValues(endpoint).Inc() }
+func setEndpointInflight(endpoint string, n int) {
+	RouterEndpointInflight.WithLabelValues(endpoint).Set(float64(n))
+}
+func setEndpointLastPullSeconds(endpoint string, seconds float64) {
+	RouterEndpointLastPullSeconds.WithLabelValues(endpoint).Set(seconds)
+}
+func setEndpointStuck(endpoint string, v int) {
+	RouterEndpointStuck.WithLabelValues(endpoint).Set(float64(v))
+}
 func incAffinityHit(n int)         { RouterAffinityHitsTotal.Add(float64(n)) }
 func incAffinityHold(n int)        { RouterAffinityHoldsTotal.Add(float64(n)) }
 func incAffinityRelease(n int)     { RouterAffinityReleasesTotal.Add(float64(n)) }

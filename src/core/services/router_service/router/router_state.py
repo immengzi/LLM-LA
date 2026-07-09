@@ -22,6 +22,9 @@ from .metrics import (
     set_central_queue_length,
     set_central_queue_length_by_model,
     inc_dispatch,
+    set_endpoint_inflight,
+    set_endpoint_last_pull_seconds,
+    set_endpoint_stuck,
     inc_affinity_hit,
     inc_affinity_hold,
     inc_affinity_release,
@@ -164,6 +167,20 @@ class RouterState:
         # mappings to stale/absent (e.g. post-redeploy renamed) pods as misses.
         self._seen_endpoints: Dict[str, float] = {}
 
+        # Always-on per-endpoint in-flight count for pull mode: number of items
+        # dispatched to each endpoint that have not yet returned a /result.
+        # Maintained regardless of SLO_AWARE (the SLO BatchSizeEstimator only
+        # tracks this when SLO is on). Incremented at pull dispatch, decremented
+        # on /result. This is the router's logical view of "requests currently
+        # being served per pod" and is what surfaces pull-mode load imbalance.
+        self._inflight_by_endpoint: Dict[str, int] = {}
+
+        # Per-endpoint last /pull wall-clock timestamp (always recorded). Feeds
+        # the pull-mode fairness liveness signal (a pod that stops pulling while
+        # the queue is backed up is "stuck") and is the denominator source for
+        # the fleet in-flight average used by the fairness throttle.
+        self._last_pull_ts: Dict[str, float] = {}
+
         # initialize gauge
         set_central_queue_length(0)
 
@@ -233,6 +250,40 @@ class RouterState:
     # Pull (KV-aware + length-aware)
     # -------------------------------------------------------
 
+    def inc_endpoint_inflight(self, endpoint: str, n: int = 1) -> None:
+        """Increment the always-on per-endpoint in-flight count (pull mode)."""
+        if not endpoint or n <= 0:
+            return
+        with self._lock:
+            new_val = self._inflight_by_endpoint.get(endpoint, 0) + int(n)
+            self._inflight_by_endpoint[endpoint] = new_val
+        set_endpoint_inflight(endpoint, new_val)
+
+    def dec_endpoint_inflight(self, endpoint: str, n: int = 1) -> None:
+        """Decrement the always-on per-endpoint in-flight count (on /result)."""
+        if not endpoint or n <= 0:
+            return
+        with self._lock:
+            cur = self._inflight_by_endpoint.get(endpoint, 0)
+            new_val = max(0, cur - int(n))
+            self._inflight_by_endpoint[endpoint] = new_val
+        set_endpoint_inflight(endpoint, new_val)
+
+    def get_endpoint_inflight(self, endpoint: str) -> int:
+        """Current in-flight count for one endpoint (0 if unknown)."""
+        with self._lock:
+            return int(self._inflight_by_endpoint.get(endpoint, 0))
+
+    def endpoint_inflight_snapshot(self) -> Dict[str, int]:
+        """Copy of the per-endpoint in-flight map for inspection/logging."""
+        with self._lock:
+            return dict(self._inflight_by_endpoint)
+
+    def last_pull_snapshot(self) -> Dict[str, float]:
+        """Copy of the per-endpoint last-/pull timestamp map."""
+        with self._lock:
+            return dict(self._last_pull_ts)
+
     def pull_for_endpoint(self, endpoint: str, want: int, model: str = "") -> List[JobItem]:
         if want <= 0:
             return []
@@ -252,6 +303,11 @@ class RouterState:
             # See docs/internal/persistent-affinity-map.md.
             if self._affinity_persist and endpoint:
                 self._seen_endpoints[endpoint] = time.time()
+
+            # Always record the last-pull time (used by fairness liveness +
+            # the fleet-average denominator). Cheap; independent of persistence.
+            if endpoint:
+                self._last_pull_ts[endpoint] = time.time()
 
             q = self._get_queue(model or _DEFAULT_MODEL)
             if not q:
@@ -325,6 +381,14 @@ class RouterState:
                 effective_want = self._apply_admission_throttle(
                     effective_want, endpoint,
                 )
+
+            # Step 7b: Pull-mode fairness (load-aware grant throttle). No-op
+            # unless FAIR_PULL is on. Composes as a further cap on the grant
+            # count and only trims the movable/unpinned tail (self-pinned items
+            # are always kept), so KV/affinity ordering is never overridden.
+            ordered, effective_want = self._apply_fair_throttle(
+                endpoint, want, effective_want, ordered,
+            )
 
             # 5) Choose
             kv_enabled = bool(_cfg.KV_AWARE)
@@ -421,6 +485,12 @@ class RouterState:
                 # Step 7: increment inflight for admission tracking
                 if _batch_estimator is not None:
                     _batch_estimator.increment_inflight(endpoint, len(chosen))
+
+            # Always-on per-endpoint in-flight bookkeeping (independent of SLO):
+            # count these dispatched items as now being served by this endpoint.
+            # Routed through the helper so the Prometheus gauge is updated too
+            # (self._lock is an RLock, so re-entry here is safe).
+            self.inc_endpoint_inflight(endpoint, len(chosen))
 
             # Prom: outgoing dispatch (router -> sidecar) for each assigned item
             for _rid, _prompt, _ts, _meta in chosen:
@@ -680,6 +750,79 @@ class RouterState:
     # -------------------------------------------------------
     # Admission throttle (Step 7)
     # -------------------------------------------------------
+
+    def _apply_fair_throttle(
+        self,
+        endpoint: str,
+        want: int,
+        effective_want: int,
+        ordered: List[Tuple[str, str, float, dict]],
+    ) -> Tuple[List[Tuple[str, str, float, dict]], int]:
+        """Pull-mode fairness: load-aware grant throttle (call under lock).
+
+        Returns (possibly-reordered ordered, new effective_want).
+
+        Policy (only when ``_cfg.FAIR_PULL``):
+          * ceiling = FAIR_MARGIN x fleet-average in-flight.
+          * A pod may fill up to that ceiling; the movable grant is
+            ``clamp(ceiling - my_inflight, FAIR_FLOOR, effective_want)``.
+          * Self-pinned (affinity) items are ALWAYS granted -- they are moved to
+            the front and never counted against the movable budget -- so
+            KV/affinity ordering is never overridden.
+          * When the pod is underloaded (movable room >= effective_want) this is
+            a no-op and ``ordered``/``effective_want`` are returned unchanged
+            (byte-identical to the non-fairness path).
+        """
+        if not bool(getattr(_cfg, "FAIR_PULL", False)) or not endpoint or effective_want <= 0:
+            return ordered, effective_want
+
+        snap = self._inflight_by_endpoint
+        # Denominator: every endpoint we know about (has pulled and/or has
+        # in-flight), including this one, so a fresh/cold pod counts as 0.
+        active = set(snap.keys())
+        active.update(self._last_pull_ts.keys())
+        active.add(endpoint)
+        n = max(1, len(active))
+        avg = sum(int(snap.get(e, 0)) for e in active) / float(n)
+        me = int(snap.get(endpoint, 0))
+
+        margin = max(1.0, float(getattr(_cfg, "FAIR_MARGIN", 1.25)))
+        floor = max(0, int(getattr(_cfg, "FAIR_FLOOR", 1)))
+        ceiling = margin * avg
+
+        # Movable budget = how many more (unpinned) items this pod may take to
+        # fill up to the ceiling. int() truncates toward zero; when negative the
+        # floor clamp applies below.
+        movable_room = int(ceiling - me)
+        if movable_room >= effective_want:
+            # Underloaded / at-or-below the line: no trimming, no reorder.
+            return ordered, effective_want
+        if movable_room < floor:
+            movable_room = floor
+
+        # Split into self-pinned (always honored) vs movable, preserving order.
+        pinned: List[Tuple[str, str, float, dict]] = []
+        rest: List[Tuple[str, str, float, dict]] = []
+        for it in ordered:
+            _rid, _p, _t, meta = it
+            if self._affinity_match(endpoint, meta):
+                pinned.append(it)
+            else:
+                rest.append(it)
+
+        new_ordered = pinned + rest
+        new_effective = min(effective_want, len(pinned) + movable_room)
+        if new_effective < 0:
+            new_effective = 0
+
+        if new_effective != effective_want:
+            _log_req(
+                f"fair throttle endpoint={endpoint} me={me} avg={avg:.1f} "
+                f"ceiling={ceiling:.1f} pinned={len(pinned)} "
+                f"movable_room={movable_room} eff {effective_want}->{new_effective}",
+                level="summary",
+            )
+        return new_ordered, new_effective
 
     def _apply_admission_throttle(self, current_want: int, endpoint: str) -> int:
         """Dynamic admission throttling via binary search on predicted TPOT."""
@@ -945,6 +1088,36 @@ class RouterState:
         """
         set_central_queue_length(self._total_size())
         set_central_queue_length_by_model({m: len(q) for m, q in self._queues.items()})
+        self._publish_liveness_metrics()
+
+    def _publish_liveness_metrics(self) -> None:
+        """Publish fairness liveness gauges (call under lock).
+
+        No-op unless STUCK_PULL_SECONDS > 0. A pod is "stuck" when it has not
+        pulled within the threshold while the central queue is backed up.
+        """
+        thr = int(getattr(_cfg, "STUCK_PULL_SECONDS", 0))
+        if thr <= 0:
+            return
+        now = time.time()
+        backed_up = self._total_size() > 0
+        for ep, last in self._last_pull_ts.items():
+            age = now - last
+            set_endpoint_last_pull_seconds(ep, age)
+            set_endpoint_stuck(ep, 1 if (backed_up and age > thr) else 0)
+
+    def _is_endpoint_stuck(self, endpoint: str) -> bool:
+        """True when a pod has not pulled within STUCK_PULL_SECONDS while work
+        is queued (call under lock). Used only for RELEASE_ON_STUCK."""
+        thr = int(getattr(_cfg, "STUCK_PULL_SECONDS", 0))
+        if thr <= 0 or not endpoint:
+            return False
+        if self._total_size() <= 0:
+            return False
+        last = self._last_pull_ts.get(endpoint)
+        if last is None:
+            return True
+        return (time.time() - last) > thr
 
     # -------------------------------------------------------
     # Key affinity helpers (call under lock)
@@ -972,6 +1145,11 @@ class RouterState:
         grace timer. ``_seen_endpoints`` repopulates naturally from post-restart
         pulls — nothing is seeded at warm() time.
         """
+        # Optional fairness liveness: a stuck pod (no recent pull while work is
+        # queued) is treated as unavailable so its affinity pins release to LB
+        # via the normal unavailable-target path. Opt-in; off by default.
+        if getattr(_cfg, "AFFINITY_RELEASE_ON_STUCK", False) and self._is_endpoint_stuck(endpoint):
+            return False
         if not self._affinity_persist:
             return True
         if not endpoint:

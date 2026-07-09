@@ -157,6 +157,17 @@ spec:
               value: {{ ternary "true" "false" .Values.router.admissionThrottle | quote }}
             - name: FIXED_BATCH_SIZE
               value: {{ quote (toString .Values.router.fixedBatchSize) }}
+            # ---- pull-mode fairness (load-aware grant throttle) ----
+            - name: ROUTER_FAIR_PULL
+              value: {{ ternary "true" "false" (.Values.router.fairPull | default false) | quote }}
+            - name: ROUTER_FAIR_MARGIN
+              value: {{ quote (toString (.Values.router.fairMargin | default 1.25)) }}
+            - name: ROUTER_FAIR_FLOOR
+              value: {{ quote (toString (.Values.router.fairFloor | default 1)) }}
+            - name: ROUTER_STUCK_PULL_SECONDS
+              value: {{ quote (toString (.Values.router.stuckPullSeconds | default 0)) }}
+            - name: ROUTER_AFFINITY_RELEASE_ON_STUCK
+              value: {{ ternary "true" "false" (.Values.router.affinityReleaseOnStuck | default false) | quote }}
             - name: OUTPUT_LEN_PREDICTOR
               value: {{ quote .Values.router.outputLenPredictor }}
             - name: BATCH_SIZE_ESTIMATE

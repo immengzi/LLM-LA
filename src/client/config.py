@@ -539,6 +539,23 @@ class HelmConfig:
     router_slo_with_kv: bool = True
     router_admission_throttle: bool = False
     router_fixed_batch_size: int = 0
+
+    # ---- pull-mode fairness (load-aware grant throttle; maps to values.router.fair*) ----
+    # When router_fair_pull is on, each /pull grant is modulated by fleet
+    # in-flight load: a pod may fill up to router_fair_margin x the fleet-average
+    # in-flight, underloaded pods get their full want, overloaded pods are
+    # trimmed (movable/unpinned items only -- self-pinned affinity items are
+    # always granted, so KV/affinity is never overridden). router_fair_floor is
+    # the minimum movable items an overloaded pod still gets so a dead pod cannot
+    # stall the queue. Optional liveness: router_stuck_pull_seconds flags a pod
+    # that stopped pulling while the queue is backed up (0 = off);
+    # router_affinity_release_on_stuck lets a stuck pod's affinity pins spill to
+    # other pods. All default OFF.
+    router_fair_pull: bool = False
+    router_fair_margin: float = 1.25
+    router_fair_floor: int = 1
+    router_stuck_pull_seconds: int = 0
+    router_affinity_release_on_stuck: bool = False
     router_output_len_predictor: str = "simple"
     router_batch_size_estimate: str = "fixed"
     router_fixed_batch_estimate: int = 8

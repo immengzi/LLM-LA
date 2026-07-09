@@ -276,6 +276,28 @@ class RouterConfig:
     ADMISSION_THROTTLE: bool = False
     FIXED_BATCH_SIZE: int = 0               # 0 = no cap
 
+    # --------------------------------------------------------------------
+    # PULL-MODE FAIRNESS (load-aware grant throttle)
+    # --------------------------------------------------------------------
+    # When FAIR_PULL is on, each /pull grant is modulated by fleet in-flight
+    # load: a pod may fill up to a dynamic ceiling of FAIR_MARGIN x the fleet
+    # average in-flight. Underloaded pods get their full `want`; pods near/above
+    # the ceiling are trimmed and the held items requeue to the front for the
+    # next (underloaded) puller. Only the movable/unpinned tail is trimmed --
+    # self-pinned (affinity) items are always granted -- so KV/affinity is never
+    # overridden. FAIR_FLOOR is the minimum movable items an overloaded pod is
+    # still granted so a dead/non-pulling pod can never stall the queue.
+    # All default OFF (byte-identical to today when FAIR_PULL is false).
+    FAIR_PULL: bool = False
+    FAIR_MARGIN: float = 1.25
+    FAIR_FLOOR: int = 1
+    # Optional liveness: flag a pod stuck when it has not pulled for this many
+    # seconds while the queue is backed up (0 = off). When RELEASE_ON_STUCK is
+    # on, a stuck pod is treated as unavailable for affinity targeting so its
+    # pins release to LB via the existing unavailable-target path.
+    STUCK_PULL_SECONDS: int = 0
+    AFFINITY_RELEASE_ON_STUCK: bool = False
+
     # Output length predictor
     OUTPUT_LEN_PREDICTOR: str = "simple"    # simple | distribution | regression | hint_only
     # Batch size estimation
@@ -540,6 +562,17 @@ def get_config() -> RouterConfig:
     cfg.ADMISSION_THROTTLE = os.getenv("ADMISSION_THROTTLE", str(cfg.ADMISSION_THROTTLE)).lower() == "true"
     cfg.FIXED_BATCH_SIZE = int(os.getenv("FIXED_BATCH_SIZE", cfg.FIXED_BATCH_SIZE))
     cfg.FIXED_BATCH_SIZE = max(0, cfg.FIXED_BATCH_SIZE)
+
+    # Pull-mode fairness knobs
+    cfg.FAIR_PULL = os.getenv("ROUTER_FAIR_PULL", str(cfg.FAIR_PULL)).lower() == "true"
+    cfg.FAIR_MARGIN = float(os.getenv("ROUTER_FAIR_MARGIN", cfg.FAIR_MARGIN))
+    if cfg.FAIR_MARGIN < 1.0:
+        cfg.FAIR_MARGIN = 1.0
+    cfg.FAIR_FLOOR = max(0, int(os.getenv("ROUTER_FAIR_FLOOR", cfg.FAIR_FLOOR)))
+    cfg.STUCK_PULL_SECONDS = max(0, int(os.getenv("ROUTER_STUCK_PULL_SECONDS", cfg.STUCK_PULL_SECONDS)))
+    cfg.AFFINITY_RELEASE_ON_STUCK = (
+        os.getenv("ROUTER_AFFINITY_RELEASE_ON_STUCK", str(cfg.AFFINITY_RELEASE_ON_STUCK)).lower() == "true"
+    )
 
     cfg.OUTPUT_LEN_PREDICTOR = os.getenv("OUTPUT_LEN_PREDICTOR", cfg.OUTPUT_LEN_PREDICTOR)
     olp = _norm_mode(cfg.OUTPUT_LEN_PREDICTOR)

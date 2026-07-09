@@ -162,6 +162,38 @@ reference (modes, metrics, interactions, and source map).
 
 ---
 
+## 5c. Pull-Mode Fairness (Conceptual)
+
+Fairness is an **off-by-default, load-aware grant throttle** for pull mode. It
+addresses pod-load imbalance without ever overriding KV/affinity decisions.
+
+Because `/pull` returns immediately (no long-poll), the router cannot choose
+between waiting pods; ordering also does not control balance (each puller still
+takes its own `want`). The only affinity-safe lever is **how many items each
+pull is granted**. When `ROUTER_FAIR_PULL` is on, on every pull the router:
+
+- reads the fleet in-flight snapshot (the always-on `router_endpoint_inflight`
+  counter) and computes `ceiling = ROUTER_FAIR_MARGIN x fleet-average`,
+- grants an underloaded pod its full `want`, and trims a pod at/above the
+  ceiling so it only fills the remaining gap (`ceiling - its_inflight`), never
+  below `ROUTER_FAIR_FLOOR` movable items,
+- trims **only the movable/unpinned tail** — self-pinned (affinity) items are
+  always granted and moved to the front — so KV tiers and affinity pins are
+  never overridden. Trimmed items requeue to the front for the next puller.
+
+Interaction with strategies: full-strength under `none`/`prefix`/soft affinity;
+under `hard`/`both` it only rebalances the unpinned overflow (imbalance caused
+by hard pins is intentionally not overridden). A floor guarantees an overloaded
+pod always makes progress, so a dead/non-pulling pod can never stall the queue.
+
+Optional liveness: `ROUTER_STUCK_PULL_SECONDS` flags a pod that stopped pulling
+while the queue is backed up (exposed as `router_endpoint_stuck` /
+`router_endpoint_last_pull_seconds`); with `ROUTER_AFFINITY_RELEASE_ON_STUCK`,
+a stuck pod's pins release to load balancing via the existing
+unavailable-target path.
+
+---
+
 ## 6. Configuration (High-Level)
 
 Most behavior is controlled via environment variables loaded into
@@ -179,6 +211,12 @@ Most behavior is controlled via environment variables loaded into
   only*, even when KV routing is off (so `none`/`affinity` still report
   `kv_hits_len`/`total_blocks`/`kv_hit`). Decoupled from the routing decision.
 - `ROUTER_LOG_BLOCK_HASHES` – also emit the raw `block_hashes` list per request.
+- `ROUTER_FAIR_PULL` – enable the pull-mode fairness grant throttle (see 5c).
+  `ROUTER_FAIR_MARGIN` (default 1.25) sets the ceiling as a multiple of the
+  fleet-average in-flight; `ROUTER_FAIR_FLOOR` (default 1) is the min movable
+  items an overloaded pod still gets. `ROUTER_STUCK_PULL_SECONDS` (0 = off) and
+  `ROUTER_AFFINITY_RELEASE_ON_STUCK` are the optional stuck-pod controls. All
+  default off; never override KV/affinity.
 - `ROUTER_LOG_REQUEST_BODY` – also store each request's full body (messages +
   sampling params) under `request_body` in the `/latency_log` ring. Opt-in, off
   by default; the body rides the bounded ring so it evicts automatically.
@@ -189,8 +227,10 @@ Most behavior is controlled via environment variables loaded into
 
 The Go gateway and the Python router are kept at parity: both honor
 `ROUTER_STRATEGY`, `ROUTER_MEASURE_PREFIX`, `ROUTER_LOG_BLOCK_HASHES`,
-`ROUTER_LOG_REQUEST_BODY`, and `KV_BLOCK_SIZE`, and both enrich `/latency_log`
-with the same prefix/KV fields.
+`ROUTER_LOG_REQUEST_BODY`, `KV_BLOCK_SIZE`, and the pull-mode fairness knobs
+(`ROUTER_FAIR_PULL`, `ROUTER_FAIR_MARGIN`, `ROUTER_FAIR_FLOOR`,
+`ROUTER_STUCK_PULL_SECONDS`, `ROUTER_AFFINITY_RELEASE_ON_STUCK`), and both
+enrich `/latency_log` with the same prefix/KV fields.
 - `REDIS_HOST`, `REDIS_PORT`, `MODEL_NAME` – KV watcher’s view of Redis keys.
 - `NAMESPACE`, `LABEL_SELECTOR`, `SIDECAR_PORT` – how to find sidecars in K8s.
 - `RESULT_TIMEOUT_S` – how long `/enqueue` will wait for a result.

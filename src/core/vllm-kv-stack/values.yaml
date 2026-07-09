@@ -185,6 +185,17 @@ router:
   sloWithKv: true
   admissionThrottle: false
   fixedBatchSize: 0
+  # Pull-mode fairness (load-aware grant throttle; disabled by default).
+  # fairPull on -> each /pull grant is capped so a pod fills up to
+  # fairMargin x fleet-average in-flight; only movable/unpinned items are
+  # trimmed (affinity is never overridden); fairFloor is the min movable items
+  # an overloaded pod still gets. stuckPullSeconds/affinityReleaseOnStuck are
+  # the optional liveness/stuck-pod controls.
+  fairPull: false
+  fairMargin: 1.25
+  fairFloor: 1
+  stuckPullSeconds: 0
+  affinityReleaseOnStuck: false
   outputLenPredictor: simple
   batchSizeEstimate: fixed
   fixedBatchEstimate: 8

@@ -878,6 +878,14 @@ def _ingest_result_payload(payload: dict) -> None:
 
     router_state.store_result(rid, result)
 
+    # Always-on per-endpoint in-flight bookkeeping (pull mode), independent of
+    # SLO: a result arrived for this endpoint, so it is serving one fewer request.
+    if endpoint:
+        try:
+            router_state.dec_endpoint_inflight(str(endpoint))
+        except Exception:
+            pass
+
     # Feed actuals to SLO registry + prediction error logging
     try:
         _ingest_slo_actuals(rid, result)
