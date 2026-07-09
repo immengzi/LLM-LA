@@ -97,13 +97,13 @@ set in `values.yaml`, the image reference is automatically prefixed.
 ### 1. Deploy vLLM (if not already running)
 
 ```bash
-python deploy_vllm.py --config configs/boom.yaml
+python src/client/deploy_vllm.py --config configs/boom.yaml
 ```
 
 ### 2. Run the sweep
 
 ```bash
-python sweep_methods.py --config boom_master --skip-vllm
+python src/client/sweep_methods.py --config boom_master --skip-vllm
 ```
 
 Where `configs/boom_master.yaml` contains:
@@ -121,7 +121,7 @@ The sweep runner will:
 ### 3. Single experiment (without sweep)
 
 ```bash
-python main.py --config boom
+python src/client/main.py --config boom
 ```
 
 ---

@@ -105,7 +105,7 @@ injects a realistic Claude Code CLI prefix into each outgoing turn so prefix
 caching and KV-aware routing can be tested with the large, stable system context
 that real Claude Code sessions carry.
 
-Template assets live under `src/multiturn-generation/`:
+Template assets live under `src/client/multiturn-generation/`:
 
 - `system_blocks.json` — system prompt blocks, joined into one OpenAI
   `role: system` message.
@@ -119,7 +119,7 @@ Example config:
 ```yaml
 claude_code_injection:
   enabled: true
-  template_dir: "/home/haiting/llm-la/src/multiturn-generation"
+  template_dir: "/home/haiting/llm-la/src/client/multiturn-generation"
   inject_system_blocks: true
   inject_system_reminders: true
   inject_tools: true
@@ -219,5 +219,5 @@ from the prior `logs.json` and overrides each turn's output length.
 | `load_runner.py` | `ConversationTask` dataclass, `_request_thread_conversation()`, multi-turn dispatch |
 | `main.py` | Multi-turn loading, scheduling, and replay wiring |
 | `configs/16-1-template-boom-direct-multiturn-qwen.yaml` | Sample config |
-| `src/multiturn-generation/` | Claude Code-style system prompt, reminder, and tool templates |
+| `src/client/multiturn-generation/` | Claude Code-style system prompt, reminder, and tool templates |
 | `configs/non-prod/21-2-template-boom-claude-glm-*-system-prompts*.yaml` | Claude Code injection examples |

@@ -279,7 +279,7 @@ For 1 group of 2: `1 × 2 = 2 nodes` (16 NPUs total).
 Same workflow as single-node configs:
 
 ```bash
-python sweep_methods.py --config llm-la-claude-glm-dp-r2-b8
+python src/client/sweep_methods.py --config llm-la-claude-glm-dp-r2-b8
 ```
 
 This will:

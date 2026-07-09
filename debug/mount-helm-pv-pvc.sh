@@ -1,6 +1,6 @@
 kubectl delete pvc qwen-local-pvc -n vllm
 kubectl delete pv qwen-local-pv
-helm upgrade vllm src/vllm-kv-stack -n vllm \
+helm upgrade vllm src/core/vllm-kv-stack -n vllm \
     --set modelVolume.create=true \
     --set deploy.vllm=false \
     --set deploy.router=false \

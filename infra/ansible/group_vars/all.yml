@@ -94,23 +94,23 @@ lws_manifest: "{{ repo_root }}/docs/deployment/lws-manifests.yaml"
 
 # ---- Repo / chart locations (resolved on control_plane & build hosts) ----
 repo_root: "/home/saeid/microservice"
-chart_path: "{{ repo_root }}/src/vllm-kv-stack"
+chart_path: "{{ repo_root }}/src/core/vllm-kv-stack"
 
 # ---- Images (docs §9, registry.md) ----
 # Built from the repo on the build host, then pushed to the registry.
 build_images:
-  - { name: "kv-router",     context: "{{ repo_root }}/src/services/router_service", dockerfile: "Dockerfile" }
-  - { name: "kv-sidecar",    context: "{{ repo_root }}/src/services/sidecar",        dockerfile: "Dockerfile" }
-  - { name: "vllm-cpu-hash", context: "{{ repo_root }}/src/services/prefix_hash",    dockerfile: "Dockerfile" }
+  - { name: "kv-router",     context: "{{ repo_root }}/src/core/services/router_service", dockerfile: "Dockerfile" }
+  - { name: "kv-sidecar",    context: "{{ repo_root }}/src/core/services/sidecar",        dockerfile: "Dockerfile" }
+  - { name: "vllm-cpu-hash", context: "{{ repo_root }}/src/core/services/prefix_hash",    dockerfile: "Dockerfile" }
 build_scripts:                            # repo scripts that build+push themselves
-  - "{{ repo_root }}/src/services/go/build.sh"        # kv-router-go, kv-sidecar-go
+  - "{{ repo_root }}/src/core/services/go/build.sh"        # kv-router-go, kv-sidecar-go
 # External images to mirror into the private registry (source -> repo path).
 mirror_images:
   - { src: "redis:7-alpine",                         dest: "redis:7-alpine" }
   - { src: "quay.io/ascend/vllm-ascend:glm5-openeuler", dest: "ascend/vllm-ascend:glm5-openeuler" }
 
 # ---- Autoscaling (KEDA) ----
-# KEDA drives the chart's ScaledObjects (src/vllm-kv-stack 60-keda-scaledobject).
+# KEDA drives the chart's ScaledObjects (src/core/vllm-kv-stack 60-keda-scaledobject).
 # Optional: only needed when you deploy with autoscaling.enabled=true.
 keda_namespace: "keda"
 keda_chart_version: "2.15.1"               # helm chart version; pin for reproducibility

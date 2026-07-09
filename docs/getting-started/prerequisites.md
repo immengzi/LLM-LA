@@ -17,7 +17,7 @@ What you need before deploying LA-Boom and running experiments. For full cluster
 | `kubectl` | Kubernetes CLI |
 | `helm` (>= 3.12) | Chart install / upgrade |
 | `python` (>= 3.10) | Load client (`main.py`), sweep runner (`sweep_methods.py`), deploy script |
-| Python deps | `pip install -r <repo-root>/src/requirements.txt` (includes `pyyaml`, `requests`, `click`) |
+| Python deps | `pip install -r <repo-root>/src/client/requirements.txt` (includes `pyyaml`, `requests`, `click`) |
 
 ## Model storage
 

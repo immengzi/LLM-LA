@@ -18,7 +18,7 @@ Full details: [prerequisites.md](prerequisites.md).
 Run once per cluster (not per experiment) to create the model `PersistentVolume`/`PersistentVolumeClaim` over your model storage. After this, `modelVolume.create` stays `false` in all later deploys.
 
 ```bash
-helm upgrade --install vllm ./vllm-kv-stack -n vllm --create-namespace \
+helm upgrade --install vllm ./src/core/vllm-kv-stack -n vllm --create-namespace \
   --set modelVolume.create=true \
   --set modelVolume.modelSubPath=placeholder
 ```
@@ -28,7 +28,7 @@ helm upgrade --install vllm ./vllm-kv-stack -n vllm --create-namespace \
 Deploy only the vLLM pods (router, Redis, and prefix-hash are not deployed here) from a client config YAML:
 
 ```bash
-python deploy_vllm.py --config configs/router-tp8-glm.yaml
+python src/client/deploy_vllm.py --config configs/router-tp8-glm.yaml
 ```
 
 Flags:
@@ -50,7 +50,7 @@ kubectl logs -f <vllm-pod> -n vllm   # watch model load progress
 With vLLM Ready, run one open-loop load experiment against the router:
 
 ```bash
-python main.py --config router --n 500
+python src/client/main.py --config router --n 500
 ```
 
 - `--config <name>` resolves to `configs/<name>.yaml` (a path with a directory or `.yaml` suffix is used as-is).
@@ -63,7 +63,7 @@ Results are written to the experiments directory (see [artifacts & analysis](../
 To deploy and measure several routing methods in sequence, use the sweep runner. Use `--skip-vllm` to preserve already-running vLLM pods and only redeploy the routing stack (router + Redis + prefix-hash) between experiments:
 
 ```bash
-python sweep_methods.py --config 1-master_config --skip-vllm
+python src/client/sweep_methods.py --config 1-master_config --skip-vllm
 ```
 
 Without `--skip-vllm`, the full stack (including vLLM) is uninstalled and reinstalled before each experiment — slower, but guaranteed-clean state.

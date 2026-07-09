@@ -112,7 +112,7 @@ sorts tools (serde_json `BTreeMap` behaviour).
 > Opt-in only, via `KV_HASH_SOURCE=external`. The default (`inline`) needs no
 > external pod. Use this only if you specifically want to offload hashing.
 
-`src/services/prefix_hash/prefix_hash_service.py` packages a CPU-only HTTP hasher
+`src/core/services/prefix_hash/prefix_hash_service.py` packages a CPU-only HTTP hasher
 (the `vllm-cpu-hash` image, deployed by `templates/20-cpu-hash.yaml`). When
 `KV_HASH_SOURCE=external`, both routers call its `POST /compute_hashes` over HTTP
 and treat any error as "no hashes" (best-effort, fail-open).

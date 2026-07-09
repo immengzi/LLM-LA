@@ -213,7 +213,7 @@ images must be present in the registry before deploying:
 | `kv-sidecar` | `services/sidecar/build.sh` |
 | `vllm-cpu-hash` (legacy external hasher) | `services/prefix_hash/build.sh` (only needed for `router.hashSource=external`) |
 | `kv-router-go`, `kv-sidecar-go` | `services/go/build.sh` |
-| `boom-gateway` | `boom-gateway/` — `cargo build --release -p boom-main`, then package with `src/boom-integration/Dockerfile` |
+| `boom-gateway` | `boom-gateway/` — `cargo build --release -p boom-main`, then package with `src/core/boom-integration/Dockerfile` |
 | `ascend/vllm-ascend` | Pull from `quay.io/ascend/vllm-ascend`, retag, push |
 | `redis:7-alpine` | Pull from Docker Hub, retag, push |
 | `litellm:main-stable` | `services/litellm-image.sh` |

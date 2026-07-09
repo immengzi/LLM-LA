@@ -239,7 +239,7 @@ helm upgrade --install vllm ./vllm-kv-stack \
 Or via the sweep runner:
 
 ```bash
-python sweep_methods.py --master configs/multi-model-master.yaml
+python src/client/sweep_methods.py --master configs/multi-model-master.yaml
 ```
 
 ### Verify

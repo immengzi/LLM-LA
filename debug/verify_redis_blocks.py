@@ -52,7 +52,7 @@ import urllib.error
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
-DEFAULT_ROOT_CANDIDATES = ["/data/experiments", "src/experiments", "experiments"]
+DEFAULT_ROOT_CANDIDATES = ["/data/experiments", "src/client/experiments", "experiments"]
 
 
 # --------------------------------------------------------------------------- #

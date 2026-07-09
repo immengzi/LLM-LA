@@ -6,8 +6,8 @@ How client configs, the master config, and the sweep runner fit together to depl
 
 | Layer | File(s) | Role |
 |-------|---------|------|
-| Client config | `src/configs/*.yaml` | One workload definition: prompts, RPS, generation params, backend, transport, and a `helm:` section of deployment knobs |
-| Master sweep config | `src/configs/1-master_config.yaml` | Maps client configs to the list of routing methods to sweep |
+| Client config | `src/client/configs/*.yaml` | One workload definition: prompts, RPS, generation params, backend, transport, and a `helm:` section of deployment knobs |
+| Master sweep config | `src/client/configs/1-master_config.yaml` | Maps client configs to the list of routing methods to sweep |
 
 A client config drives a single `main.py` run. The master config drives a `sweep_methods.py` run across many `(client_config, method)` jobs.
 
@@ -78,17 +78,17 @@ In BooM direct mode (`helm.boom_route_via: direct`), the sweep also disables the
 4. `helm upgrade --install` with a temporary `models[]` overlay.
 5. Waits for the stack to be Ready (up to 3 redeploy retries).
 6. Snapshots `vllm-k8s.yaml` and `helm-effective-values.yaml`.
-7. Runs `python main.py` against the deployment via a temp job config.
-8. Detects the new experiment directory (under `src/experiments`) and writes `sweep_meta.json`, `deployment-info.txt`, and `helm-effective-values.yaml` into it.
+7. Runs `python src/client/main.py` against the deployment via a temp job config.
+8. Detects the new experiment directory (under `src/client/experiments`) and writes `sweep_meta.json`, `deployment-info.txt`, and `helm-effective-values.yaml` into it.
 
-> Detection relies on `main.py` writing into the same root the sweep watches. By default `main.py` writes to `/home/data/saeid/experiments` while the sweep watches `src/experiments`; align these roots or sweep artifact collection won't find the run (see [artifacts & analysis](../benchmarking/artifacts-and-analysis.md)).
+> Detection relies on `main.py` writing into the same root the sweep watches. By default `main.py` writes to `/home/data/saeid/experiments` while the sweep watches `src/client/experiments`; align these roots or sweep artifact collection won't find the run (see [artifacts & analysis](../benchmarking/artifacts-and-analysis.md)).
 
 ```bash
 # Full sweep (uninstalls + redeploys the whole stack per job)
-python sweep_methods.py --config 1-master_config
+python src/client/sweep_methods.py --config 1-master_config
 
 # Fast sweep: keep running vLLM pods, only redeploy the routing stack
-python sweep_methods.py --config 1-master_config --skip-vllm
+python src/client/sweep_methods.py --config 1-master_config --skip-vllm
 ```
 
 ## Recommended flow for long-running models
@@ -96,8 +96,8 @@ python sweep_methods.py --config 1-master_config --skip-vllm
 Deploy vLLM once, then iterate quickly on routing methods:
 
 ```bash
-python deploy_vllm.py --config configs/router-tp8-glm.yaml
-python sweep_methods.py --config 1-master_config --skip-vllm
+python src/client/deploy_vllm.py --config configs/router-tp8-glm.yaml
+python src/client/sweep_methods.py --config 1-master_config --skip-vllm
 ```
 
 ## Sweep artifacts

@@ -69,8 +69,8 @@ Notes:
 - A client may override derivation by passing `meta.affinity_key` explicitly
   (used by some load-test scenarios). This takes precedence over the derived key.
 
-Derivation lives in [`router/affinity.py`](../../src/services/router_service/router/affinity.py)
-(`derive_affinity_key`) and [`internal/gateway/affinity.go`](../../src/services/go/internal/gateway/affinity.go)
+Derivation lives in [`router/affinity.py`](../../src/core/services/router_service/router/affinity.py)
+(`derive_affinity_key`) and [`internal/gateway/affinity.go`](../../src/core/services/go/internal/gateway/affinity.go)
 (`deriveAffinityKey`).
 
 ---
@@ -159,7 +159,7 @@ its four-way table are documented once in
 whenever the chosen strategy includes affinity.
 
 ```yaml
-# client config (src/configs/*.yaml)
+# client config (src/client/configs/*.yaml)
 helm:
   router_strategy: "affinity"   # none | prefix | affinity | both
   router_affinity_mode: "soft"  # soft | hard (only when affinity is on)

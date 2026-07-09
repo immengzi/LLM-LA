@@ -16,14 +16,14 @@ total_requests: 1
 prompt_source: "file"
 ```
 
-Then keep cluster-dependent values out of the experiment YAML unless the experiment intentionally overrides them. A full example is available in `src/configs/1-1-boom-qwen-mooncake-bz.yaml`.
+Then keep cluster-dependent values out of the experiment YAML unless the experiment intentionally overrides them. A full example is available in `src/client/configs/1-1-boom-qwen-mooncake-bz.yaml`.
 
 ## Profile Location
 
-Profiles are loaded from `clusters.yaml` in the same directory as the experiment config being loaded. For configs under `src/configs`, the active profile file is:
+Profiles are loaded from `clusters.yaml` in the same directory as the experiment config being loaded. For configs under `src/client/configs`, the active profile file is:
 
 ```text
-src/configs/clusters.yaml
+src/client/configs/clusters.yaml
 ```
 
 The file can either contain a top-level `clusters:` mapping or be a direct mapping of cluster names. The current file uses:
@@ -119,7 +119,7 @@ If a profile value does not appear to take effect, check whether the experiment 
 
 ## Validation Notes
 
-- Manual `bz` smoke: `completed=1 lost=0`, experiment `src/experiments/1`.
-- `switch_cluster: bz` smoke: `completed=1 lost=0`, experiment `src/experiments/2`.
+- Manual `bz` smoke: `completed=1 lost=0`, experiment `src/client/experiments/1`.
+- `switch_cluster: bz` smoke: `completed=1 lost=0`, experiment `src/client/experiments/2`.
 - Default chart render compatibility check passed against commit `c451232` with `modelVolume.modelSubPath=qwen3-8b`: `DEFAULT_HELM_TEMPLATE_MATCH`.
 

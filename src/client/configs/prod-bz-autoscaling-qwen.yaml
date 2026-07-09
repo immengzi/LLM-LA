@@ -1,0 +1,147 @@
+# prod-bz-autoscaling-qwen: KEDA autoscaling validation on the BZ cluster.
+#
+# Deploys a dense Qwen3-8B (TP=1, 1 NPU/replica) as an ISOLATED release
+# ("vllm-bz-autoscale" in namespace "vllm-bz-autoscale", portOffset=100) so it
+# runs alongside the prod MiniMax stack (release "vllm" / ns "vllm") WITHOUT
+# touching it. switch_cluster: bz pulls the cluster endpoints, local registry,
+# image pull policy and Ascend driver mounts from clusters.yaml.
+#
+# A dense model is used on purpose: it can genuinely scale 1->N, whereas a DP
+# LeaderWorkerSet would need an extra RoCE pair per group. This is the
+# autoscaling smoke test for the Deployment scale target.
+#
+# Pre-requisites (see docs/operations/autoscaling.md):
+#   - Qwen3-8B staged at /data/models/qwen3-8b on the nodes (else edit
+#     nfs_path / modelSubPath below to match where the dense model lives).
+#   - All chart images present in reg.local:32000 (global.imageRegistry rewrites
+#     every image, including redis and the Ascend vLLM image).
+#   - monitoring stack:  cd infra && make monitoring
+#   - KEDA (+ LWS RBAC): cd infra && make keda
+#   - Spare NPUs for the qwen replicas. This isolates K8s objects by namespace,
+#     but pods still compete for NPUs with prod unless you steer them with a
+#     node selector (see the commented vllm_node_selector block below).
+#
+# Run via the sweep runner (autoscaling is applied on the full-stack deploy):
+#   cd src/client && python sweep_methods.py --config 1-master_config   # add the entry
+# Watch it react (note the isolated namespace):
+#   kubectl -n vllm-bz-autoscale get scaledobjects,hpa,pods -w
+
+switch_cluster: bz
+backend: "router"
+
+# Isolated router endpoint = bz router NodePort (30080) + port_offset (100).
+router_url: "http://192.168.0.79:30180"
+total_requests: 300
+prompt_source: "hf-lmsys"
+
+hf_lmsys:
+  dataset_name: "/data/gateway/gateway/data/lmsys_conversations_hf"
+  split: "train"
+  tokenizer_name: "/data/models/qwen3-8b"
+  streaming: false
+  min_input_tokens: 256
+  max_input_tokens: 10000000
+  repeat_each: 1
+
+# Step schedule: idle -> burst (drives the per-model queue up to trigger
+# scale-up) -> idle (observe scale-down after the cooldown window).
+load_pattern:
+  pattern: "steps"
+  rate_rps: 5
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:2,60:25,240:2"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  max_tokens: 8192
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+
+output_log_mode: "summary"
+print_trace: false
+
+metrics:
+  enabled: true
+  # prometheus_base_url comes from the bz profile (http://192.168.0.79:31190).
+  scrape_interval_s: 1.0
+  window_s: 2.0
+  include_debug_metrics: false
+  model_name: "served-model"
+  max_instances: null
+
+transport:
+  mode: "async_pubsub"
+  submit_path: "/submit"
+  # Isolated results ZMQ = bz base (30559) + port_offset (100).
+  results_zmq: "tcp://192.168.0.79:30659"
+  topic: "results"
+  run_id: null
+  idle_timeout_s: 1000.0
+  idle_zero_running_s: 10.0
+
+# --- Optional: keep the qwen pods off the prod NPU nodes ---
+# Label the node(s) you want this to land on and uncomment:
+#   kubectl label node <node> vllm-pool=autoscale --overwrite
+# vllm_node_selector:
+#   vllm-pool: autoscale
+
+helm:
+  release: vllm-bz-autoscale
+  namespace: vllm-bz-autoscale
+  port_offset: 100
+
+  expose_per_pod: true
+
+  # ---- Autoscaling under test ----
+  autoscaling_enabled: true
+  autoscaling_signal: "queue"          # per-model router central queue
+  autoscaling_min: 1
+  autoscaling_max: 4
+  autoscaling_threshold: "8"           # scale up when per-model queue depth > 8
+  autoscaling_polling_interval: 10
+  autoscaling_cooldown_period: 120     # shorter than prod default for quicker observation
+  autoscaling_prometheus_server_address: "http://kube-prometheus-stack-prometheus.monitoring.svc:9090"
+  # autoscaling_vllm_threshold: "0.8"  # only used when autoscaling_signal: vllm
+
+  router_kv_aware: false
+  router_len_aware: true
+  router_len_policy: "short_first"
+  router_api_key: "ZhongRuanChuangXin!"
+
+  # BZ model layout: model_host_path/<modelSubPath>. Mooncake/LMCache stay OFF
+  # for the dense autoscaling target.
+  nfs_path: "/data/models/qwen3-8b"
+  model_host_path: "/data/models"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+  sidecar_prefetch: 2
+
+  models:
+    - name: qwen3-8b
+      servedModelName: served-model
+      replicas: 1
+      modelSubPath: qwen3-8b
+      tensorParallelSize: 1
+      batchSize: 8
+      sidecarPrefetch: 2
+      dataParallel:
+        enabled: false
+      vllm:
+        gpuMemoryUtilization: 0.95
+        trustRemoteCode: true
+        seed: 1924

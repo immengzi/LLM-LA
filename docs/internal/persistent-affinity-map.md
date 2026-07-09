@@ -88,7 +88,7 @@ Design guarantees:
 
 ## 4. Configuration
 
-Client config (`src/configs/*.yaml`, under `helm:`) → chart values
+Client config (`src/client/configs/*.yaml`, under `helm:`) → chart values
 (`values.router.*`) → router env:
 
 | helm config key | values.router.* | env | default | purpose |
@@ -151,9 +151,9 @@ fatal.
 |---|---|
 | Durable store (writer, warm, get) | `router/affinity_store.py` |
 | Map integration (claim/lookup/prefetch/warm/close, cache bound) | `router/affinity.py::AffinityMap` |
-| Config knobs | `router/config.py`; `src/config.py`; `src/sweep_methods.py` |
+| Config knobs | `router/config.py`; `src/client/config.py`; `src/client/sweep_methods.py` |
 | Wiring (admission prefetch, startup warm, shutdown close, availability) | `router/api.py`, `router/router_state.py` |
-| Redis persistence manifest | `src/vllm-kv-stack/templates/10-redis.yaml`, `values.yaml` (`redis:`) |
+| Redis persistence manifest | `src/core/vllm-kv-stack/templates/10-redis.yaml`, `values.yaml` (`redis:`) |
 | Tests | `tests/test_affinity_persist.py` |
 | Readiness anchor / invariant | §8 below; `_seen_endpoints` in `router/router_state.py`; sidecar health gates in `sidecar/router_client.py`, `go/internal/sidecar/pull_worker.go` |
 

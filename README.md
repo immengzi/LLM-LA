@@ -19,12 +19,9 @@
 
 ---
 
-One repository, two systems that fit together:
+**LA-Boom is a distributed serving platform for vLLM on Kubernetes** — a KV-, length-, and SLO-aware router with per-pod sidecars wrapped around unmodified vLLM, deployed by a single Helm chart. Route for cache reuse, autoscale per model, and front it with a gateway for auth and spend.
 
-- **A distributed serving platform** — a KV-, length-, and SLO-aware router with per-pod sidecars wrapped around vLLM.
-- **A reproducible benchmark harness** — an open-loop load generator plus an automated Helm sweep runner.
-
-Deploy it, route through it, and systematically prove which strategy wins — all on Kubernetes, all reproducible.
+It ships with a reproducible **benchmark harness** — an open-loop load generator plus an automated Helm sweep runner — so you can prove which routing strategy wins, apples-to-apples. See [docs/benchmarking/harness.md](docs/benchmarking/harness.md).
 
 ## 🤔 Why LA-Boom
 
@@ -32,14 +29,15 @@ Deploy it, route through it, and systematically prove which strategy wins — al
 
 - **Most routers are cache-blind.** LA-Boom scores every queued request against each replica's *live* KV-block ownership and places it for maximum prefix reuse — higher hit rates, lower TTFT.
 - **Length and deadlines are first-class.** Routing is length-aware (short-first / long-first batching) and SLO-aware (slack-based deadline scheduling), not an afterthought.
-- **Claims need receipts.** One `sweep_methods.py` run deploys each strategy via Helm, drives *identical* open-loop traffic, and archives per-request logs, Prometheus metrics, and rendered manifests — apples-to-apples, every time.
+- **Kubernetes-native, one chart.** Router, sidecars, Redis, vLLM, gateways, and per-model KEDA autoscaling all deploy from the [`vllm-kv-stack`](src/core/vllm-kv-stack) Helm chart — no engine fork.
+- **Claims need receipts.** The bundled [benchmark harness](docs/benchmarking/harness.md) deploys each strategy via Helm, drives *identical* open-loop traffic, and archives per-request logs, Prometheus metrics, and rendered manifests — apples-to-apples, every time.
 
 ## 🏗️ Architecture
 
 ```mermaid
 flowchart TB
   subgraph clients [Clients]
-    Bench["Benchmark harness<br/>main.py / sweep_methods.py"]
+    Bench["Benchmark harness<br/>src/client (main.py / sweep_methods.py)"]
     App["Apps / Claude Code"]
   end
 
@@ -85,7 +83,7 @@ flowchart TB
 - **Routing** — pull (capacity-gated, default) and push (`push-rr`, `push-random`, `push-leastq`); KV-aware prefix-tier ordering; length-aware batching (`short_first`, `long_first`); SLO-aware slack scheduling.
 - **Serving** — many models from one cluster; multi-node data parallel via [LeaderWorkerSet](docs/deployment/data-parallel-lws.md) with expert parallel for MoE models (e.g. GLM-5); cross-node KV transfer via [Mooncake / LMCache](docs/deployment/mooncake/helm-integration.md).
 - **Autoscaling** — per-model [KEDA autoscaling](docs/operations/autoscaling.md) across every topology (dense, multi-model, data-parallel LWS) on router-queue or vLLM KV-cache signals; off by default, fully backward compatible.
-- **Benchmarking** — open-loop load generator with `det`, `poisson`, `bursty`, `steps`, and `rand` patterns; multi-turn conversations; streaming TTFT/TPOT measurement; automated Helm sweeps with full artifact capture.
+- **Benchmarking** — a bundled client harness with an open-loop load generator and automated Helm sweeps that capture full artifacts; see [docs/benchmarking/harness.md](docs/benchmarking/harness.md).
 - **Gateways** — [BooM Gateway](docs/gateways/boom/overview.md) (Rust) and LiteLLM (Python) for auth, virtual keys, rate limiting, and spend tracking; Claude Code support.
 - **Observability** — Prometheus metrics, per-request [tracing](docs/architecture/trace.md), and live Redis KV-state inspection.
 
@@ -112,18 +110,17 @@ LA-Boom is a routing/benchmark layer around **unmodified vLLM**, so it inherits 
 
 ```bash
 # 1. One-time: create the model PV/PVC
-helm upgrade --install vllm ./src/vllm-kv-stack -n vllm --create-namespace \
+helm upgrade --install vllm ./src/core/vllm-kv-stack -n vllm --create-namespace \
   --set modelVolume.create=true --set modelVolume.modelSubPath=placeholder
 
-# 2. Deploy vLLM
-cd src
-python deploy_vllm.py --config configs/router-tp8-glm.yaml
+# 2. Deploy the platform (vLLM + sidecar) for a model
+python src/client/deploy_vllm.py --config configs/router-tp8-glm.yaml
 
-# 3. Run a load experiment
-python main.py --config router --n 500
+# 3. Send some load (via the benchmark harness)
+python src/client/main.py --config router --n 500
 ```
 
-Then read the results like a pro → [full walkthrough](docs/getting-started/quickstart.md).
+The load test uses the bundled harness — see [docs/benchmarking/harness.md](docs/benchmarking/harness.md) for sweeps and analysis. Then read the results like a pro → [full walkthrough](docs/getting-started/quickstart.md).
 
 ## Documentation
 
@@ -137,7 +134,7 @@ Everything lives in the **[documentation index](docs/README.md)**. Jump by role:
 | Ship to production | [BooM Gateway](docs/gateways/boom/overview.md) |
 | Deploy at scale | [Multi-model serving](docs/deployment/multi-model.md) · [GLM-5 reference ("HQ") deployment](docs/deployment/docker-reference/glm5-dp-docker.md) |
 | Operate the cluster | [Cluster setup](docs/operations/cluster-setup.md) · [Registry & image builds](docs/operations/registry.md) · [Image patches](docs/operations/image-patches.md) |
-| Benchmark & analyze | [Load patterns](docs/benchmarking/load-patterns.md) · [Artifacts & analysis](docs/benchmarking/artifacts-and-analysis.md) |
+| Benchmark & analyze | [Benchmark harness](docs/benchmarking/harness.md) · [Load patterns](docs/benchmarking/load-patterns.md) · [Artifacts & analysis](docs/benchmarking/artifacts-and-analysis.md) |
 | See the roadmap | [docs/internal/](docs/internal/) |
 
 ## Repository layout
@@ -149,13 +146,18 @@ Everything lives in the **[documentation index](docs/README.md)**. Jump by role:
 ├── analysis-notebooks/       # Post-experiment analysis notebooks
 ├── infra/                    # Cluster-prep automation (docs: docs/operations/cluster-prep-automation.md)
 └── src/
-    ├── main.py               # Load experiment entry point
-    ├── sweep_methods.py      # Automated Helm sweep runner
-    ├── deploy_vllm.py        # vLLM-only deployment
-    ├── config.py             # Client + Helm configuration schema
-    ├── configs/              # Client and sweep YAML configs
-    ├── services/             # Router, sidecar (Python + Go), prefix-hash
-    └── vllm-kv-stack/        # Helm chart (Redis, router, vLLM, gateways, ...)
+    ├── core/                 # The deployed serving platform
+    │   ├── services/         # Router, sidecar (Python + Go), prefix-hash
+    │   ├── vllm-kv-stack/    # Helm chart (Redis, router, vLLM, gateways, ...)
+    │   ├── boom-integration/ # BooM Gateway image build
+    │   └── mutil-node-operations/  # Registry / multi-node setup scripts
+    └── client/               # The benchmark harness (see docs/benchmarking/harness.md)
+        ├── main.py           # Load experiment entry point
+        ├── sweep_methods.py  # Automated Helm sweep runner
+        ├── deploy_vllm.py    # vLLM-only deployment
+        ├── config.py         # Client + Helm configuration schema
+        ├── configs/          # Client and sweep YAML configs
+        └── multiturn-generation/  # Claude Code injection templates
 ```
 
 ---
