@@ -49,6 +49,17 @@ type CentralQueue struct {
 	// req_id -> endpoint that pulled it (streaming identity / push notify).
 	reqEndpoint map[string]string
 
+	// Always-on per-endpoint in-flight count for pull mode: items dispatched to
+	// each endpoint that have not yet returned a /result. Maintained regardless
+	// of SLO_AWARE (the SLO batchSizeEstimator only tracks this under SLO).
+	// Incremented at pull dispatch, decremented on /result. Mirrors
+	// RouterState._inflight_by_endpoint in router_state.py.
+	inflightByEndpoint map[string]int
+
+	// Per-endpoint last /pull wall-clock timestamp. Feeds the fairness liveness
+	// signal + the fleet-average denominator. Mirrors RouterState._last_pull_ts.
+	lastPullByEndpoint map[string]float64
+
 	// req_id -> streaming chunk channel (SSE).
 	chunkMu     sync.Mutex
 	chunkQueues map[string]chan map[string]interface{}
@@ -61,14 +72,16 @@ func NewCentralQueue(cfg *Config, kv *kvAware) *CentralQueue {
 		aff = NewAffinityMap(cfg.AffinityTTLS)
 	}
 	return &CentralQueue{
-		cfg:          cfg,
-		kv:           kv,
-		pred:         getLengthPredictor(cfg),
-		defaultModel: cfg.ModelName,
-		queues:       make(map[string][]queueItem),
-		affinity:     aff,
-		reqEndpoint:  make(map[string]string),
-		chunkQueues:  make(map[string]chan map[string]interface{}),
+		cfg:                cfg,
+		kv:                 kv,
+		pred:               getLengthPredictor(cfg),
+		defaultModel:       cfg.ModelName,
+		queues:             make(map[string][]queueItem),
+		affinity:           aff,
+		reqEndpoint:        make(map[string]string),
+		inflightByEndpoint: make(map[string]int),
+		lastPullByEndpoint: make(map[string]float64),
+		chunkQueues:        make(map[string]chan map[string]interface{}),
 	}
 }
 
@@ -155,6 +168,131 @@ func (q *CentralQueue) publishQueueMetricsLocked() {
 	for model, ql := range q.queues {
 		setCentralQueueLengthByModel(model, len(ql))
 	}
+	q.publishLivenessLocked()
+}
+
+// publishLivenessLocked sets fairness liveness gauges (must hold q.mu). No-op
+// unless StuckPullSeconds > 0. A pod is "stuck" when it has not pulled within
+// the threshold while the central queue is backed up.
+func (q *CentralQueue) publishLivenessLocked() {
+	thr := q.cfg.StuckPullSeconds
+	if thr <= 0 {
+		return
+	}
+	now := nowS()
+	backedUp := q.totalSizeLocked() > 0
+	for ep, last := range q.lastPullByEndpoint {
+		age := now - last
+		setEndpointLastPullSeconds(ep, age)
+		if backedUp && age > float64(thr) {
+			setEndpointStuck(ep, 1)
+		} else {
+			setEndpointStuck(ep, 0)
+		}
+	}
+}
+
+// isEndpointStuckLocked reports whether a pod has not pulled within
+// StuckPullSeconds while work is queued (must hold q.mu). Used for
+// RELEASE_ON_STUCK affinity fallback.
+func (q *CentralQueue) isEndpointStuckLocked(endpoint string) bool {
+	thr := q.cfg.StuckPullSeconds
+	if thr <= 0 || endpoint == "" {
+		return false
+	}
+	if q.totalSizeLocked() <= 0 {
+		return false
+	}
+	last, ok := q.lastPullByEndpoint[endpoint]
+	if !ok {
+		return true
+	}
+	return (nowS() - last) > float64(thr)
+}
+
+// applyFairThrottleLocked applies the pull-mode fairness throttle (must hold
+// q.mu). Returns the possibly-reordered pool plus the new effective want.
+// Mirrors RouterState._apply_fair_throttle.
+func (q *CentralQueue) applyFairThrottleLocked(endpoint string, want, effectiveWant int, ordered []queueItem) ([]queueItem, int) {
+	if !q.cfg.FairPull || endpoint == "" || effectiveWant <= 0 {
+		return ordered, effectiveWant
+	}
+
+	// Denominator: every endpoint we know about (in-flight and/or has pulled),
+	// including this one, so a fresh/cold pod counts as 0.
+	active := make(map[string]struct{})
+	for ep := range q.inflightByEndpoint {
+		active[ep] = struct{}{}
+	}
+	for ep := range q.lastPullByEndpoint {
+		active[ep] = struct{}{}
+	}
+	active[endpoint] = struct{}{}
+	n := len(active)
+	if n < 1 {
+		n = 1
+	}
+	total := 0
+	for ep := range active {
+		total += q.inflightByEndpoint[ep]
+	}
+	avg := float64(total) / float64(n)
+	me := q.inflightByEndpoint[endpoint]
+
+	margin := q.cfg.FairMargin
+	if margin < 1.0 {
+		margin = 1.0
+	}
+	floor := q.cfg.FairFloor
+	if floor < 0 {
+		floor = 0
+	}
+	ceiling := margin * avg
+
+	// Movable budget = how many more (unpinned) items this pod may take to fill
+	// up to the ceiling. Truncate toward zero; clamp to floor below.
+	movableRoom := int(ceiling - float64(me))
+	if movableRoom >= effectiveWant {
+		return ordered, effectiveWant
+	}
+	if movableRoom < floor {
+		movableRoom = floor
+	}
+
+	// Split into self-pinned (always honored) vs movable, preserving order.
+	pinned := make([]queueItem, 0, len(ordered))
+	rest := make([]queueItem, 0, len(ordered))
+	for _, it := range ordered {
+		if q.affinityMatch(endpoint, it.meta) {
+			pinned = append(pinned, it)
+		} else {
+			rest = append(rest, it)
+		}
+	}
+	newOrdered := append(pinned, rest...)
+	newEffective := len(pinned) + movableRoom
+	if newEffective > effectiveWant {
+		newEffective = effectiveWant
+	}
+	if newEffective < 0 {
+		newEffective = 0
+	}
+	if newEffective != effectiveWant {
+		q.logReq("fair throttle endpoint=%s me=%d avg=%.1f ceiling=%.1f pinned=%d movable_room=%d eff %d->%d",
+			endpoint, me, avg, ceiling, len(pinned), movableRoom, effectiveWant, newEffective)
+	}
+	return newOrdered, newEffective
+}
+
+// LastPullSnapshot returns a copy of the per-endpoint last-/pull timestamp map.
+func (q *CentralQueue) LastPullSnapshot() map[string]float64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := make(map[string]float64, len(q.lastPullByEndpoint))
+	for k, v := range q.lastPullByEndpoint {
+		out[k] = v
+	}
+	return out
 }
 
 // Enqueue appends a request to the per-model queue.
@@ -203,6 +341,11 @@ func (q *CentralQueue) Pull(endpoint string, want int, model string) []JobItem {
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
+
+	// Always record last-pull time (fairness liveness + fleet-average source).
+	if endpoint != "" {
+		q.lastPullByEndpoint[endpoint] = nowS()
+	}
 
 	m := q.getQueueLocked(model)
 	ql := q.queues[m]
@@ -253,6 +396,11 @@ func (q *CentralQueue) Pull(endpoint string, want int, model string) []JobItem {
 		effectiveWant = q.slo.applyAdmissionThrottle(effectiveWant, endpoint, allItems)
 	}
 
+	// Pull-mode fairness (load-aware grant throttle). No-op unless FairPull is
+	// on; only trims the movable/unpinned tail (self-pinned items are kept), so
+	// KV/affinity ordering is never overridden. Mirrors _apply_fair_throttle.
+	ordered, effectiveWant = q.applyFairThrottleLocked(endpoint, want, effectiveWant, ordered)
+
 	takeN := effectiveWant
 	if takeN > len(ordered) {
 		takeN = len(ordered)
@@ -293,6 +441,13 @@ func (q *CentralQueue) Pull(endpoint string, want int, model string) []JobItem {
 		q.slo.onDispatch(endpoint, chosen, kvHits)
 		q.slo.incrementInflight(endpoint, len(chosen))
 	}
+
+	// Always-on per-endpoint in-flight bookkeeping (independent of SLO): count
+	// these dispatched items as now being served by this endpoint. Held under
+	// q.mu (Pull holds it), so update the map inline and publish the gauge.
+	// Mirrors router_state.py.
+	q.inflightByEndpoint[endpoint] += len(chosen)
+	setEndpointInflight(endpoint, q.inflightByEndpoint[endpoint])
 
 	// Dispatch metrics + endpoint tracking. Also capture the per-request routing
 	// decision (independent of TRACE) so recordLatency can enrich /latency_log.
@@ -447,6 +602,12 @@ func (q *CentralQueue) affinityFilterHard(pool []queueItem, endpoint string) ([]
 			available = append(available, it)
 			continue
 		}
+		// Optional fairness liveness: a stuck target releases its pins to LB.
+		if q.cfg.AffinityReleaseOnStuck && q.isEndpointStuckLocked(target) {
+			available = append(available, it)
+			releases++
+			continue
+		}
 		affTS := it.tEnq
 		if v, ok := it.meta["__affinity_ts__"].(float64); ok {
 			affTS = v
@@ -565,6 +726,53 @@ func (q *CentralQueue) ForgetReqEndpoint(reqID string) {
 	q.mu.Lock()
 	delete(q.reqEndpoint, reqID)
 	q.mu.Unlock()
+}
+
+// IncEndpointInflight increments the always-on per-endpoint in-flight count.
+func (q *CentralQueue) IncEndpointInflight(endpoint string, n int) {
+	if endpoint == "" || n <= 0 {
+		return
+	}
+	q.mu.Lock()
+	q.inflightByEndpoint[endpoint] += n
+	v := q.inflightByEndpoint[endpoint]
+	q.mu.Unlock()
+	setEndpointInflight(endpoint, v)
+}
+
+// DecEndpointInflight decrements the always-on per-endpoint in-flight count
+// (clamped at 0), called when a result arrives for the endpoint.
+func (q *CentralQueue) DecEndpointInflight(endpoint string, n int) {
+	if endpoint == "" || n <= 0 {
+		return
+	}
+	q.mu.Lock()
+	cur := q.inflightByEndpoint[endpoint]
+	v := cur - n
+	if v < 0 {
+		v = 0
+	}
+	q.inflightByEndpoint[endpoint] = v
+	q.mu.Unlock()
+	setEndpointInflight(endpoint, v)
+}
+
+// GetEndpointInflight returns the current in-flight count for one endpoint.
+func (q *CentralQueue) GetEndpointInflight(endpoint string) int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.inflightByEndpoint[endpoint]
+}
+
+// EndpointInflightSnapshot returns a copy of the per-endpoint in-flight map.
+func (q *CentralQueue) EndpointInflightSnapshot() map[string]int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := make(map[string]int, len(q.inflightByEndpoint))
+	for k, v := range q.inflightByEndpoint {
+		out[k] = v
+	}
+	return out
 }
 
 // Size returns total queued items (optionally for a single model).

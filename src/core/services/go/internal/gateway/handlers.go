@@ -609,6 +609,12 @@ func (s *Server) ingestResultPayload(payload map[string]interface{}) {
 		s.pushRouter.NotifyResult(endpoint)
 	}
 
+	// Always-on per-endpoint in-flight bookkeeping (pull mode), independent of
+	// SLO: a result arrived for this endpoint, so it is serving one fewer request.
+	if endpoint != "" {
+		s.queue.DecEndpointInflight(endpoint, 1)
+	}
+
 	if s.cfg.TraceEnabled {
 		tr := traceOf(result)
 		tr["t_router_result_recv"] = nowS()

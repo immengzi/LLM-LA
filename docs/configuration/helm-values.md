@@ -67,6 +67,11 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 | `sloWithKv` | `true` | Reward KV cache hits within SLO sort |
 | `admissionThrottle` | `false` | Dynamic admission control |
 | `fixedBatchSize` | `0` | Cap per-pull admit (0 = off) |
+| `fairPull` | `false` | Pull-mode fairness: load-aware grant throttle; caps a pod's grant to fill up to `fairMargin × fleet-average` in-flight, trimming only movable/unpinned items (never overrides KV/affinity) ([details](../architecture/router.md)) |
+| `fairMargin` | `1.25` | Overloaded threshold as a multiple of fleet-average in-flight (ceiling) |
+| `fairFloor` | `1` | Min movable items an overloaded pod still gets (prevents a dead pod stalling the queue) |
+| `stuckPullSeconds` | `0` | Liveness: flag a pod that hasn't pulled this long while the queue is backed up (0 = off; exposes `router_endpoint_stuck`) |
+| `affinityReleaseOnStuck` | `false` | Let a stuck pod's affinity pins release to LB via the existing unavailable-target path |
 | `outputLenPredictor` | `simple` | Output-length predictor |
 | `batchSizeEstimate` / `fixedBatchEstimate` | `fixed` / `8` | Batch-size estimation for SLO |
 | `latencyPredictor` | `linear` | Latency model |

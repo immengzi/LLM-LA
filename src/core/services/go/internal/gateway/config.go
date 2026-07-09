@@ -108,6 +108,14 @@ type Config struct {
 	AdmissionThrottle bool
 	FixedBatchSize    int
 
+	// Pull-mode fairness (load-aware grant throttle). Off by default; mirrors
+	// FAIR_* in src/core/services/router_service/router/config.py.
+	FairPull               bool
+	FairMargin             float64
+	FairFloor              int
+	StuckPullSeconds       int
+	AffinityReleaseOnStuck bool
+
 	OutputLenPredictor string
 	BatchSizeEstimate  string
 	FixedBatchEstimate int
@@ -210,6 +218,12 @@ func LoadConfig() *Config {
 		SLOWithKV:         common.EnvBool("SLO_WITH_KV", true),
 		AdmissionThrottle: common.EnvBool("ADMISSION_THROTTLE", false),
 		FixedBatchSize:    common.EnvInt("FIXED_BATCH_SIZE", 0),
+
+		FairPull:               common.EnvBool("ROUTER_FAIR_PULL", false),
+		FairMargin:             common.EnvFloat("ROUTER_FAIR_MARGIN", 1.25),
+		FairFloor:              common.EnvInt("ROUTER_FAIR_FLOOR", 1),
+		StuckPullSeconds:       common.EnvInt("ROUTER_STUCK_PULL_SECONDS", 0),
+		AffinityReleaseOnStuck: common.EnvBool("ROUTER_AFFINITY_RELEASE_ON_STUCK", false),
 
 		OutputLenPredictor: common.EnvStr("OUTPUT_LEN_PREDICTOR", "simple"),
 		BatchSizeEstimate:  common.EnvStr("BATCH_SIZE_ESTIMATE", "fixed"),
@@ -340,6 +354,15 @@ func (c *Config) normalize() {
 	if c.FixedBatchSize < 0 {
 		c.FixedBatchSize = 0
 	}
+	if c.FairMargin < 1.0 {
+		c.FairMargin = 1.0
+	}
+	if c.FairFloor < 0 {
+		c.FairFloor = 0
+	}
+	if c.StuckPullSeconds < 0 {
+		c.StuckPullSeconds = 0
+	}
 	if c.FixedBatchEstimate < 1 {
 		c.FixedBatchEstimate = 1
 	}
@@ -446,6 +469,11 @@ func (c *Config) PrintBanner() {
 		"SLO_WITH_KV":             c.SLOWithKV,
 		"ADMISSION_THROTTLE":      c.AdmissionThrottle,
 		"FIXED_BATCH_SIZE":        c.FixedBatchSize,
+		"ROUTER_FAIR_PULL":               c.FairPull,
+		"ROUTER_FAIR_MARGIN":             c.FairMargin,
+		"ROUTER_FAIR_FLOOR":              c.FairFloor,
+		"ROUTER_STUCK_PULL_SECONDS":      c.StuckPullSeconds,
+		"ROUTER_AFFINITY_RELEASE_ON_STUCK": c.AffinityReleaseOnStuck,
 		"OUTPUT_LEN_PREDICTOR":    c.OutputLenPredictor,
 		"BATCH_SIZE_ESTIMATE":     c.BatchSizeEstimate,
 		"FIXED_BATCH_ESTIMATE":    c.FixedBatchEstimate,

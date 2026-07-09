@@ -1095,6 +1095,13 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             "router.sloWithKv": bool(getattr(h, "router_slo_with_kv", True)),
             "router.admissionThrottle": bool(getattr(h, "router_admission_throttle", False)),
             "router.fixedBatchSize": int(getattr(h, "router_fixed_batch_size", 0)),
+
+            # Pull-mode fairness (load-aware grant throttle)
+            "router.fairPull": bool(getattr(h, "router_fair_pull", False)),
+            "router.fairMargin": float(getattr(h, "router_fair_margin", 1.25)),
+            "router.fairFloor": int(getattr(h, "router_fair_floor", 1)),
+            "router.stuckPullSeconds": int(getattr(h, "router_stuck_pull_seconds", 0)),
+            "router.affinityReleaseOnStuck": bool(getattr(h, "router_affinity_release_on_stuck", False)),
             "router.outputLenPredictor": str(getattr(h, "router_output_len_predictor", "simple")),
             "router.batchSizeEstimate": str(getattr(h, "router_batch_size_estimate", "fixed")),
             "router.fixedBatchEstimate": int(getattr(h, "router_fixed_batch_estimate", 8)),

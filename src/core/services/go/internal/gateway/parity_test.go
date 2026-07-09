@@ -139,6 +139,92 @@ func TestEnrichRoutingFields(t *testing.T) {
 	}
 }
 
+func cloneFleet(m map[string]int) map[string]int {
+	out := make(map[string]int, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// mkFairItems builds bare queue items with optional affinity keys in meta.
+func mkFairItems(ids ...string) []queueItem {
+	out := make([]queueItem, len(ids))
+	for i, id := range ids {
+		out[i] = queueItem{reqID: id, meta: map[string]interface{}{}}
+	}
+	return out
+}
+
+// TestFairThrottle verifies the pull-mode fairness grant throttle mirrors
+// _apply_fair_throttle: underloaded pods keep full want, near-ceiling pods fill
+// exactly the gap, overloaded pods drop to the floor.
+func TestFairThrottle(t *testing.T) {
+	// Fleet A=40, B=20, C=0 -> avg 20, ceiling 1.25*20 = 25.
+	newQ := func(fleet map[string]int) *CentralQueue {
+		cfg := &Config{FairPull: true, FairMargin: 1.25, FairFloor: 1}
+		q := NewCentralQueue(cfg, newKVAware())
+		q.inflightByEndpoint = fleet
+		return q
+	}
+
+	fleet := map[string]int{"A": 40, "B": 20, "C": 0}
+	ord := mkFairItems("1", "2", "3", "4", "5", "6", "7", "8")
+
+	// Underloaded C (me=0): unchanged.
+	if _, eff := newQ(cloneFleet(fleet)).applyFairThrottleLocked("C", 8, 8, ord); eff != 8 {
+		t.Fatalf("underloaded C eff=%d, want 8", eff)
+	}
+	// Overloaded A (me=40 > 25): floor.
+	if _, eff := newQ(cloneFleet(fleet)).applyFairThrottleLocked("A", 8, 8, ord); eff != 1 {
+		t.Fatalf("overloaded A eff=%d, want 1 (floor)", eff)
+	}
+	// Near-ceiling: fleet X=22,Y=18 -> avg 20, ceiling 25, me=22 -> room 3.
+	nearQ := newQ(map[string]int{"X": 22, "Y": 18})
+	if _, eff := nearQ.applyFairThrottleLocked("X", 8, 8, ord); eff != 3 {
+		t.Fatalf("near-ceiling X eff=%d, want 3", eff)
+	}
+	// Disabled switch: no-op even when overloaded.
+	offCfg := &Config{FairPull: false, FairMargin: 1.25, FairFloor: 1}
+	offQ := NewCentralQueue(offCfg, newKVAware())
+	offQ.inflightByEndpoint = cloneFleet(fleet)
+	if _, eff := offQ.applyFairThrottleLocked("A", 8, 8, ord); eff != 8 {
+		t.Fatalf("FairPull off eff=%d, want 8 (no-op)", eff)
+	}
+}
+
+// TestFairThrottlePinnedExempt verifies self-pinned (affinity) items are always
+// granted and moved to the front; only the movable tail is trimmed.
+func TestFairThrottlePinnedExempt(t *testing.T) {
+	cfg := &Config{FairPull: true, FairMargin: 1.25, FairFloor: 1, AffinityEnabled: true, AffinityMode: "soft", AffinityTTLS: 300}
+	q := NewCentralQueue(cfg, newKVAware())
+	// A is badly overloaded -> movable budget clamps to floor (1).
+	q.inflightByEndpoint = map[string]int{"A": 40, "B": 0}
+	q.affinity.Claim("k1", "A")
+	q.affinity.Claim("k2", "A")
+
+	pin := func(id, key string) queueItem {
+		return queueItem{reqID: id, meta: map[string]interface{}{"__affinity_key__": key}}
+	}
+	// Two pinned-to-A items interleaved with movable ones (pinned at the tail).
+	ord := []queueItem{
+		{reqID: "u1", meta: map[string]interface{}{}},
+		{reqID: "u2", meta: map[string]interface{}{}},
+		{reqID: "u3", meta: map[string]interface{}{}},
+		pin("p1", "k1"),
+		pin("p2", "k2"),
+	}
+	got, eff := q.applyFairThrottleLocked("A", 5, 5, ord)
+	// 2 pinned always honored + floor 1 movable = 3.
+	if eff != 3 {
+		t.Fatalf("pinned-exempt eff=%d, want 3", eff)
+	}
+	// Pinned items must be at the front so ordered[:eff] keeps them.
+	if got[0].reqID != "p1" || got[1].reqID != "p2" {
+		t.Fatalf("pinned not front-loaded: %s,%s", got[0].reqID, got[1].reqID)
+	}
+}
+
 // TestSplitWordTokensLossless verifies the SSE tokenizer reconstructs the input
 // exactly when its tokens are concatenated.
 func TestSplitWordTokensLossless(t *testing.T) {
