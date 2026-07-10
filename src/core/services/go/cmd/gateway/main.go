@@ -37,8 +37,9 @@ func main() {
 		time.Duration(cfg.PollCleanupIntervalS*float64(time.Second)),
 	)
 
+	// PushRouter is used for pod discovery + delivery by push-* AND central-push.
 	var pushRouter *gateway.PushDispatcher
-	if cfg.IsPushMode() {
+	if cfg.UsesPushDelivery() {
 		pushRouter = gateway.NewPushDispatcher(cfg, kv)
 		pushRouter.RefreshEndpoints()
 		log.Printf("[router] PushRouter started in mode=%s", cfg.RouterMode)
@@ -66,6 +67,16 @@ func main() {
 		srv.SetPushDispatch(pushDispatch)
 		defer pushDispatch.Stop()
 		log.Printf("[router] push-dispatch decoupling enabled (workers=%d, queue_max=%d)", cfg.PushDispatchWorkers, cfg.PushDispatchQueueMax)
+	}
+
+	// Central-push: router-driven dispatch from the central queue. No legacy
+	// push-dispatch workers (those are for queue-less push-*).
+	if cfg.IsCentralPush() && pushRouter != nil {
+		centralPush := gateway.NewCentralPushDispatcher(queue, pushRouter, cfg.CentralPushCap, cfg.CentralPushIntervalS)
+		centralPush.Start()
+		srv.SetCentralPush(centralPush)
+		defer centralPush.Stop()
+		log.Printf("[router] CentralPushDispatch started (cap=%d interval_s=%.3f)", cfg.CentralPushCap, cfg.CentralPushIntervalS)
 	}
 
 	// SLO subsystem: the registry always exists (so requests carrying SLO

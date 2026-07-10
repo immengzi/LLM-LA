@@ -556,6 +556,15 @@ class HelmConfig:
     router_fair_floor: int = 1
     router_stuck_pull_seconds: int = 0
     router_affinity_release_on_stuck: bool = False
+
+    # ---- central-push mode (maps to values.router.centralPush*) ----
+    # Central-push admits into the central queue like pull (so KV-affinity,
+    # fairness and SLO scheduling all apply), but the router -- not the sidecar
+    # -- dispatches CAP - in-flight items per pod via POST /push. Selected by
+    # setting the router method/mode to "central-push". CAP should track the
+    # sidecar batchSize + prefetch; interval is the periodic dispatch tick.
+    router_central_push_cap: int = 8
+    router_central_push_interval_s: float = 0.05
     router_output_len_predictor: str = "simple"
     router_batch_size_estimate: str = "fixed"
     router_fixed_batch_estimate: int = 8

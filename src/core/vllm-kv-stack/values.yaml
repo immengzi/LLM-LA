@@ -67,7 +67,7 @@ sidecar:
   streamingMode: false
 
 router:
-  # pull | push-rr | push-random | push-leastq
+  # pull | push-rr | push-random | push-leastq | central-push
   mode: pull
 
   # API key for /v1/chat/completions (empty = no auth)
@@ -196,6 +196,12 @@ router:
   fairFloor: 1
   stuckPullSeconds: 0
   affinityReleaseOnStuck: false
+  # Central-push mode (only used when mode: central-push). The router dispatches
+  # centralPushCap - in-flight items per pod via POST /push every
+  # centralPushIntervalS (and on each enqueue). centralPushCap should track the
+  # sidecar batchSize + prefetch so a pod is kept busy without overrunning it.
+  centralPushCap: 8
+  centralPushIntervalS: 0.05
   outputLenPredictor: simple
   batchSizeEstimate: fixed
   fixedBatchEstimate: 8

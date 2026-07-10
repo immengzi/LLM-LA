@@ -369,6 +369,103 @@ func (pd *PushDispatcher) RouteAndPush(reqID, prompt string, meta map[string]int
 	return fmt.Errorf("push failed")
 }
 
+// EndpointsSnapshot returns the current discovered pod names (refreshing if
+// stale). Used by the central-push dispatcher to iterate delivery targets.
+func (pd *PushDispatcher) EndpointsSnapshot() []string {
+	pd.mu.Lock()
+	pd.refreshLocked(false)
+	out := append([]string{}, pd.endpoints...)
+	pd.mu.Unlock()
+	return out
+}
+
+// PushToEndpoint delivers a single pre-selected request to a specific sidecar
+// via POST {url}/push. Unlike RouteAndPush, the target endpoint is chosen by
+// the central scheduler (Pull), so there is no pickEndpoint. Returns an error
+// on failure so the caller can requeue + release in-flight. Mirrors
+// PushRouter.push_to_endpoint.
+func (pd *PushDispatcher) PushToEndpoint(endpoint, reqID, prompt string, meta map[string]interface{}) error {
+	pd.mu.Lock()
+	url := pd.urls[endpoint]
+	if url == "" {
+		pd.refreshLocked(true)
+		url = pd.urls[endpoint]
+	}
+	pd.mu.Unlock()
+	if url == "" {
+		return fmt.Errorf("No sidecar URL for endpoint %s", endpoint)
+	}
+
+	incDispatch(endpoint)
+
+	sendMeta := meta
+	if pd.cfg.TraceEnabled {
+		sendMeta = cloneMeta(meta)
+		tr := traceOf(sendMeta)
+		if _, ok := tr["endpoint"]; !ok {
+			tr["endpoint"] = endpoint
+		}
+		if _, ok := tr["router_mode"]; !ok {
+			tr["router_mode"] = pd.cfg.RouterMode
+		}
+		tr["t_dispatch_router"] = nowS()
+		if pd.cfg.KVAware && pd.kv != nil {
+			blocks := pd.kv.getRequestBlocks(reqID)
+			ifaces := make([]interface{}, len(blocks))
+			for i, b := range blocks {
+				ifaces[i] = b
+			}
+			tr["kv_block_hashes"] = ifaces
+		}
+		sendMeta["__trace__"] = tr
+	}
+
+	// Per-request routing decision (independent of TRACE) for /latency_log.
+	if pd.kv != nil {
+		blocks := pd.kv.getRequestBlocks(reqID)
+		info := routingInfo{endpoint: endpoint, kvHitsLen: pd.kv.prefixLen(endpoint, reqID), totalBlocks: len(blocks)}
+		if meta != nil {
+			if ak, ok := meta["__affinity_key__"].(string); ok && ak != "" {
+				info.affinityKey, info.hasAffinity = ak, true
+			}
+		}
+		if pd.cfg.LogBlockHashes {
+			info.blockHashes, info.hasBlocks = blocks, true
+		}
+		pd.kv.recordRouting(reqID, info)
+	}
+
+	payload := map[string]interface{}{
+		"req_id":   reqID,
+		"prompt":   prompt,
+		"meta":     sendMeta,
+		"endpoint": endpoint,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(pd.cfg.PushHTTPTimeoutS*float64(time.Second)))
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url+"/push", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := pd.client.Do(req)
+	if err != nil {
+		return err
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("push to %s failed: status %d", endpoint, resp.StatusCode)
+	}
+	return nil
+}
+
 // NotifyResult decrements the logical inflight counter for an endpoint when a
 // result arrives (only meaningful in leastq-local mode).
 func (pd *PushDispatcher) NotifyResult(endpoint string) {

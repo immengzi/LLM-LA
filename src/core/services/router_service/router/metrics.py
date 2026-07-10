@@ -112,6 +112,40 @@ ROUTER_PUSH_DISPATCH_DROPPED_TOTAL = Counter(
 
 
 # -------------------------------------------------
+# Central-push dispatch metrics
+# -------------------------------------------------
+
+ROUTER_CENTRAL_PUSH_PASSES_TOTAL = Counter(
+    "router_central_push_passes_total",
+    "Total central-push dispatch passes executed",
+)
+
+ROUTER_CENTRAL_PUSH_PUSHED_TOTAL = Counter(
+    "router_central_push_pushed_total",
+    "Total items delivered to sidecars by the central-push dispatcher",
+    ["endpoint"],
+)
+
+ROUTER_CENTRAL_PUSH_REQUEUED_TOTAL = Counter(
+    "router_central_push_requeued_total",
+    "Total items requeued after a failed central-push delivery",
+    ["endpoint"],
+)
+
+ROUTER_CENTRAL_PUSH_FAILED_TOTAL = Counter(
+    "router_central_push_failed_total",
+    "Total failed central-push deliveries (connection error / non-200)",
+    ["endpoint"],
+)
+
+ROUTER_CENTRAL_PUSH_WANT = Gauge(
+    "router_central_push_want",
+    "Most recent central-push computed want (cap - in-flight) per endpoint",
+    ["endpoint"],
+)
+
+
+# -------------------------------------------------
 # SLO-aware routing metrics
 # -------------------------------------------------
 
@@ -312,6 +346,45 @@ def inc_push_dispatch_failed() -> None:
 def inc_push_dispatch_dropped() -> None:
     try:
         ROUTER_PUSH_DISPATCH_DROPPED_TOTAL.inc()
+    except Exception:
+        pass
+
+
+# -------------------------------------------------
+# Central-push helpers
+# -------------------------------------------------
+
+def inc_central_push_pass() -> None:
+    try:
+        ROUTER_CENTRAL_PUSH_PASSES_TOTAL.inc()
+    except Exception:
+        pass
+
+
+def inc_central_push_pushed(endpoint: str, n: int = 1) -> None:
+    try:
+        ROUTER_CENTRAL_PUSH_PUSHED_TOTAL.labels(endpoint=str(endpoint)).inc(int(n))
+    except Exception:
+        pass
+
+
+def inc_central_push_requeued(endpoint: str, n: int = 1) -> None:
+    try:
+        ROUTER_CENTRAL_PUSH_REQUEUED_TOTAL.labels(endpoint=str(endpoint)).inc(int(n))
+    except Exception:
+        pass
+
+
+def inc_central_push_failed(endpoint: str, n: int = 1) -> None:
+    try:
+        ROUTER_CENTRAL_PUSH_FAILED_TOTAL.labels(endpoint=str(endpoint)).inc(int(n))
+    except Exception:
+        pass
+
+
+def set_central_push_want(endpoint: str, want: int) -> None:
+    try:
+        ROUTER_CENTRAL_PUSH_WANT.labels(endpoint=str(endpoint)).set(int(want))
     except Exception:
         pass
 

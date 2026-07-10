@@ -89,6 +89,28 @@ var (
 		Help: "Total number of push-dispatch tasks dropped due to full dispatch queue",
 	})
 
+	// Central-push dispatch metrics.
+	RouterCentralPushPassesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "router_central_push_passes_total",
+		Help: "Total central-push dispatch passes executed",
+	})
+	RouterCentralPushPushedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_central_push_pushed_total",
+		Help: "Total items delivered to sidecars by the central-push dispatcher",
+	}, []string{"endpoint"})
+	RouterCentralPushRequeuedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_central_push_requeued_total",
+		Help: "Total items requeued after a failed central-push delivery",
+	}, []string{"endpoint"})
+	RouterCentralPushFailedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_central_push_failed_total",
+		Help: "Total failed central-push deliveries (connection error / non-200)",
+	}, []string{"endpoint"})
+	RouterCentralPushWant = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "router_central_push_want",
+		Help: "Most recent central-push computed want (cap - in-flight) per endpoint",
+	}, []string{"endpoint"})
+
 	// SLO-aware routing metrics.
 	RouterSLOSlackHistogram = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name:    "router_slo_slack_seconds",
@@ -163,6 +185,11 @@ func RegisterMetrics() {
 		RouterPushDispatchStartedTotal,
 		RouterPushDispatchFailedTotal,
 		RouterPushDispatchDroppedTotal,
+		RouterCentralPushPassesTotal,
+		RouterCentralPushPushedTotal,
+		RouterCentralPushRequeuedTotal,
+		RouterCentralPushFailedTotal,
+		RouterCentralPushWant,
 		RouterSLOSlackHistogram,
 		RouterSLOPredictedMissTotal,
 		RouterSLOActualMissTotal,
@@ -179,12 +206,12 @@ func RegisterMetrics() {
 
 // ---- helpers mirroring metrics.py ----
 
-func setCentralQueueLength(n int)  { RouterCentralQueueLength.Set(float64(n)) }
+func setCentralQueueLength(n int) { RouterCentralQueueLength.Set(float64(n)) }
 func setCentralQueueLengthByModel(model string, n int) {
 	RouterCentralQueueLengthByModel.WithLabelValues(model).Set(float64(n))
 }
-func incAdmission()                { RouterAdmissionRequestsTotal.Inc() }
-func incDispatch(endpoint string)  { RouterDispatchRequestsTotal.WithLabelValues(endpoint).Inc() }
+func incAdmission()               { RouterAdmissionRequestsTotal.Inc() }
+func incDispatch(endpoint string) { RouterDispatchRequestsTotal.WithLabelValues(endpoint).Inc() }
 func setEndpointInflight(endpoint string, n int) {
 	RouterEndpointInflight.WithLabelValues(endpoint).Set(float64(n))
 }
@@ -194,23 +221,38 @@ func setEndpointLastPullSeconds(endpoint string, seconds float64) {
 func setEndpointStuck(endpoint string, v int) {
 	RouterEndpointStuck.WithLabelValues(endpoint).Set(float64(v))
 }
-func incAffinityHit(n int)         { RouterAffinityHitsTotal.Add(float64(n)) }
-func incAffinityHold(n int)        { RouterAffinityHoldsTotal.Add(float64(n)) }
-func incAffinityRelease(n int)     { RouterAffinityReleasesTotal.Add(float64(n)) }
-func setAffinityMapSize(n int)     { RouterAffinityMapSize.Set(float64(n)) }
+func incAffinityHit(n int)             { RouterAffinityHitsTotal.Add(float64(n)) }
+func incAffinityHold(n int)            { RouterAffinityHoldsTotal.Add(float64(n)) }
+func incAffinityRelease(n int)         { RouterAffinityReleasesTotal.Add(float64(n)) }
+func setAffinityMapSize(n int)         { RouterAffinityMapSize.Set(float64(n)) }
 func setPushDispatchQueueLength(n int) { RouterPushDispatchQueueLength.Set(float64(n)) }
-func incPushDispatchEnqueued()     { RouterPushDispatchEnqueuedTotal.Inc() }
-func incPushDispatchStarted()      { RouterPushDispatchStartedTotal.Inc() }
-func incPushDispatchFailed()       { RouterPushDispatchFailedTotal.Inc() }
-func incPushDispatchDropped()      { RouterPushDispatchDroppedTotal.Inc() }
-func observeSLOSlack(s float64)    { RouterSLOSlackHistogram.Observe(s) }
-func incSLOPredictedMiss()         { RouterSLOPredictedMissTotal.Inc() }
-func incSLOActualMiss()            { RouterSLOActualMissTotal.Inc() }
-func incSLOActualMet()             { RouterSLOActualMetTotal.Inc() }
-func observeOutputLenError(r float64) { RouterOutputLenErrorRatio.Observe(r) }
-func observeTTFTPredictionError(e float64) { RouterTTFTPredictionError.Observe(e) }
-func observeE2EPredictionError(e float64)  { RouterE2EPredictionError.Observe(e) }
-func setSLORegistrySize(n int)     { RouterSLORegistrySize.Set(float64(n)) }
+func incCentralPushPass()              { RouterCentralPushPassesTotal.Inc() }
+func incCentralPushPushed(endpoint string, n int) {
+	RouterCentralPushPushedTotal.WithLabelValues(endpoint).Add(float64(n))
+}
+func incCentralPushRequeued(endpoint string, n int) {
+	RouterCentralPushRequeuedTotal.WithLabelValues(endpoint).Add(float64(n))
+}
+func incCentralPushFailed(endpoint string, n int) {
+	RouterCentralPushFailedTotal.WithLabelValues(endpoint).Add(float64(n))
+}
+func setCentralPushWant(endpoint string, want int) {
+	RouterCentralPushWant.WithLabelValues(endpoint).Set(float64(want))
+}
+func incPushDispatchEnqueued()                   { RouterPushDispatchEnqueuedTotal.Inc() }
+func incPushDispatchStarted()                    { RouterPushDispatchStartedTotal.Inc() }
+func incPushDispatchFailed()                     { RouterPushDispatchFailedTotal.Inc() }
+func incPushDispatchDropped()                    { RouterPushDispatchDroppedTotal.Inc() }
+func observeSLOSlack(s float64)                  { RouterSLOSlackHistogram.Observe(s) }
+func incSLOPredictedMiss()                       { RouterSLOPredictedMissTotal.Inc() }
+func incSLOActualMiss()                          { RouterSLOActualMissTotal.Inc() }
+func incSLOActualMet()                           { RouterSLOActualMetTotal.Inc() }
+func observeOutputLenError(r float64)            { RouterOutputLenErrorRatio.Observe(r) }
+func observeTTFTPredictionError(e float64)       { RouterTTFTPredictionError.Observe(e) }
+func observeE2EPredictionError(e float64)        { RouterE2EPredictionError.Observe(e) }
+func setSLORegistrySize(n int)                   { RouterSLORegistrySize.Set(float64(n)) }
 func observeRequestTTFT(s float64, model string) { RouterRequestTTFT.WithLabelValues(model).Observe(s) }
-func observeRequestTPOTAvg(s float64, model string) { RouterRequestTPOTAvg.WithLabelValues(model).Observe(s) }
+func observeRequestTPOTAvg(s float64, model string) {
+	RouterRequestTPOTAvg.WithLabelValues(model).Observe(s)
+}
 func observeRequestE2E(s float64, model string) { RouterRequestE2E.WithLabelValues(model).Observe(s) }

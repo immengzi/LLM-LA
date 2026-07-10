@@ -181,6 +181,20 @@ class RouterState:
         # the fleet in-flight average used by the fairness throttle.
         self._last_pull_ts: Dict[str, float] = {}
 
+        # req_id -> endpoint the request was dispatched to. Enables idempotent
+        # in-flight release: whoever pops the entry first (the /result path or the
+        # wait-timeout reconcile) performs the single decrement, so a lost push
+        # (200 then pod dies) or a client timeout can never permanently leak
+        # in-flight count and starve central-push (want = CAP - in-flight).
+        self._req_endpoint: Dict[str, str] = {}
+
+        # Per-endpoint last-successful-result wall-clock timestamp. In central-push
+        # the sidecar never pulls (so _last_pull_ts is stamped by the dispatcher,
+        # not the sidecar), and this becomes the liveness signal: a pod holding
+        # in-flight work but not draining results while the queue is backed up is
+        # "stuck". In pull mode this is informational only.
+        self._last_result_ts: Dict[str, float] = {}
+
         # initialize gauge
         set_central_queue_length(0)
 
@@ -219,6 +233,25 @@ class RouterState:
             q.append((rid, prompt, ts, meta or {}))
             self._publish_queue_metrics()
             return rid
+
+    def requeue_front(
+        self,
+        model: str,
+        items: List[Tuple[str, str, float, dict]],
+    ) -> None:
+        """Put items back at the FRONT of a model queue, order-preserving.
+
+        Used by the central-push dispatcher when a delivery fails: the item was
+        already removed by pull_for_endpoint, so it must be re-admitted for a
+        subsequent dispatch pass. Caller is responsible for the matching
+        dec_endpoint_inflight (pull_for_endpoint incremented on selection).
+        """
+        if not items:
+            return
+        with self._lock:
+            q = self._get_queue(model or _DEFAULT_MODEL)
+            q.extendleft(reversed(list(items)))
+            self._publish_queue_metrics()
 
     def update_meta(self, req_id: str, meta: dict) -> None:
         """
@@ -267,7 +300,25 @@ class RouterState:
             cur = self._inflight_by_endpoint.get(endpoint, 0)
             new_val = max(0, cur - int(n))
             self._inflight_by_endpoint[endpoint] = new_val
+            # Liveness signal for central-push stuck detection: a result drained.
+            self._last_result_ts[endpoint] = time.time()
         set_endpoint_inflight(endpoint, new_val)
+
+    def release_inflight(self, req_id: str, endpoint_hint: Optional[str] = None) -> None:
+        """Idempotently release the in-flight slot for a request.
+
+        Pops the req_id -> endpoint mapping (recorded at dispatch) and, if found,
+        decrements that endpoint's in-flight count exactly once. Safe to call
+        from both the /result path and the wait-timeout reconcile: whichever runs
+        first performs the decrement; the later call is a no-op. ``endpoint_hint``
+        is used only when the request was never tracked here (e.g. push-* modes
+        that do not use this counter), in which case it is still a harmless no-op
+        because those modes never incremented it.
+        """
+        with self._lock:
+            ep = self._req_endpoint.pop(str(req_id), None)
+        if ep:
+            self.dec_endpoint_inflight(ep)
 
     def get_endpoint_inflight(self, endpoint: str) -> int:
         """Current in-flight count for one endpoint (0 if unknown)."""
@@ -283,6 +334,17 @@ class RouterState:
         """Copy of the per-endpoint last-/pull timestamp map."""
         with self._lock:
             return dict(self._last_pull_ts)
+
+    def active_models(self) -> List[str]:
+        """Model queue keys currently known (for the central-push dispatcher to
+        iterate). Always includes the default MODEL_NAME so a fresh process with
+        no enqueues yet still has a target queue."""
+        with self._lock:
+            models = list(self._queues.keys())
+        default = str(getattr(_cfg, "MODEL_NAME", "") or "")
+        if default and default not in models:
+            models.append(default)
+        return models
 
     def pull_for_endpoint(self, endpoint: str, want: int, model: str = "") -> List[JobItem]:
         if want <= 0:
@@ -492,9 +554,12 @@ class RouterState:
             # (self._lock is an RLock, so re-entry here is safe).
             self.inc_endpoint_inflight(endpoint, len(chosen))
 
-            # Prom: outgoing dispatch (router -> sidecar) for each assigned item
+            # Prom: outgoing dispatch (router -> sidecar) for each assigned item.
+            # Also remember which endpoint each request went to, for idempotent
+            # in-flight release on result/timeout.
             for _rid, _prompt, _ts, _meta in chosen:
                 inc_dispatch(endpoint)
+                self._req_endpoint[_rid] = endpoint
 
             # Affinity: record where each keyed conversation was dispatched so
             # subsequent turns follow the cache to this endpoint.
@@ -1026,6 +1091,13 @@ class RouterState:
         try:
             return await asyncio.wait_for(fut, timeout=float(timeout_s))
         except asyncio.TimeoutError:
+            # Reconcile in-flight: if the request was dispatched but never
+            # returned (lost push / dead pod), release its slot so the endpoint's
+            # capacity is not permanently consumed. Idempotent with /result.
+            try:
+                self.release_inflight(req_id)
+            except Exception:
+                pass
             return None
         finally:
             with self._lock:
@@ -1090,31 +1162,46 @@ class RouterState:
         set_central_queue_length_by_model({m: len(q) for m, q in self._queues.items()})
         self._publish_liveness_metrics()
 
+    def _liveness_ts_map(self) -> Dict[str, float]:
+        """Which per-endpoint timestamp map backs stuck detection.
+
+        In central-push the router (not the sidecar) drives dispatch, so
+        _last_pull_ts is stamped every tick and no longer reflects sidecar
+        liveness. Use last-successful-result instead: a pod holding in-flight
+        work but not draining results while the queue is backed up is stuck.
+        Pull mode keeps the original last-/pull semantics.
+        """
+        if str(getattr(_cfg, "ROUTER_MODE", "pull")) == "central-push":
+            return self._last_result_ts
+        return self._last_pull_ts
+
     def _publish_liveness_metrics(self) -> None:
         """Publish fairness liveness gauges (call under lock).
 
-        No-op unless STUCK_PULL_SECONDS > 0. A pod is "stuck" when it has not
-        pulled within the threshold while the central queue is backed up.
+        No-op unless STUCK_PULL_SECONDS > 0. A pod is "stuck" when its liveness
+        signal (last /pull, or last result under central-push) is older than the
+        threshold while the central queue is backed up.
         """
         thr = int(getattr(_cfg, "STUCK_PULL_SECONDS", 0))
         if thr <= 0:
             return
         now = time.time()
         backed_up = self._total_size() > 0
-        for ep, last in self._last_pull_ts.items():
+        for ep, last in self._liveness_ts_map().items():
             age = now - last
             set_endpoint_last_pull_seconds(ep, age)
             set_endpoint_stuck(ep, 1 if (backed_up and age > thr) else 0)
 
     def _is_endpoint_stuck(self, endpoint: str) -> bool:
-        """True when a pod has not pulled within STUCK_PULL_SECONDS while work
-        is queued (call under lock). Used only for RELEASE_ON_STUCK."""
+        """True when a pod's liveness signal is older than STUCK_PULL_SECONDS
+        while work is queued (call under lock). Used only for RELEASE_ON_STUCK.
+        Liveness = last /pull (pull mode) or last result (central-push)."""
         thr = int(getattr(_cfg, "STUCK_PULL_SECONDS", 0))
         if thr <= 0 or not endpoint:
             return False
         if self._total_size() <= 0:
             return False
-        last = self._last_pull_ts.get(endpoint)
+        last = self._liveness_ts_map().get(endpoint)
         if last is None:
             return True
         return (time.time() - last) > thr

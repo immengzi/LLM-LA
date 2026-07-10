@@ -1102,6 +1102,10 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             "router.fairFloor": int(getattr(h, "router_fair_floor", 1)),
             "router.stuckPullSeconds": int(getattr(h, "router_stuck_pull_seconds", 0)),
             "router.affinityReleaseOnStuck": bool(getattr(h, "router_affinity_release_on_stuck", False)),
+
+            # Central-push mode (router-driven capacity dispatch from the queue)
+            "router.centralPushCap": int(getattr(h, "router_central_push_cap", 8)),
+            "router.centralPushIntervalS": float(getattr(h, "router_central_push_interval_s", 0.05)),
             "router.outputLenPredictor": str(getattr(h, "router_output_len_predictor", "simple")),
             "router.batchSizeEstimate": str(getattr(h, "router_batch_size_estimate", "fixed")),
             "router.fixedBatchEstimate": int(getattr(h, "router_fixed_batch_estimate", 8)),

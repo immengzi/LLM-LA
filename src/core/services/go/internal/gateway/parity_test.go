@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-func strp(s string) *string    { return &s }
-func f64p(f float64) *float64   { return &f }
-func intp(i int) *int           { return &i }
+func strp(s string) *string   { return &s }
+func f64p(f float64) *float64 { return &f }
+func intp(i int) *int         { return &i }
 
 // TestPrefixLen verifies longest-prefix matching against block ownership.
 func TestPrefixLen(t *testing.T) {
@@ -320,5 +320,160 @@ func TestBayesianUpdate(t *testing.T) {
 	}
 	if math.IsNaN(after) || math.IsInf(after, 0) {
 		t.Fatalf("bayesian TTFT not finite: %g", after)
+	}
+}
+
+// TestCentralPushModePredicates verifies the mode allowlist/aliases and the
+// pull/push-delivery predicates for central-push mirror the Python config.
+func TestCentralPushModePredicates(t *testing.T) {
+	for _, alias := range []string{"central-push", "central_push", "centralpush", "CENTRAL-PUSH"} {
+		c := &Config{RouterMode: alias}
+		c.normalize()
+		if c.RouterMode != "central-push" {
+			t.Fatalf("alias %q normalized to %q, want central-push", alias, c.RouterMode)
+		}
+		if !c.IsCentralPush() {
+			t.Fatalf("IsCentralPush false for %q", alias)
+		}
+		if !c.UsesCentralQueue() {
+			t.Fatalf("central-push must use the central queue")
+		}
+		if !c.UsesPushDelivery() {
+			t.Fatalf("central-push must use push delivery")
+		}
+		if c.IsPushMode() {
+			t.Fatalf("central-push must not report IsPushMode")
+		}
+	}
+
+	// pull: central queue, no push delivery.
+	pull := &Config{RouterMode: "pull"}
+	pull.normalize()
+	if !pull.UsesCentralQueue() || pull.UsesPushDelivery() {
+		t.Fatalf("pull predicates wrong: queue=%v delivery=%v", pull.UsesCentralQueue(), pull.UsesPushDelivery())
+	}
+	// push-rr: push delivery, no central queue.
+	push := &Config{RouterMode: "push-rr"}
+	push.normalize()
+	if push.UsesCentralQueue() || !push.UsesPushDelivery() {
+		t.Fatalf("push-rr predicates wrong: queue=%v delivery=%v", push.UsesCentralQueue(), push.UsesPushDelivery())
+	}
+
+	// Cap/interval sanitation.
+	c := &Config{RouterMode: "central-push", CentralPushCap: 0, CentralPushIntervalS: 0}
+	c.normalize()
+	if c.CentralPushCap != 1 {
+		t.Fatalf("CentralPushCap floor = %d, want 1", c.CentralPushCap)
+	}
+	if c.CentralPushIntervalS != 0.05 {
+		t.Fatalf("CentralPushIntervalS default = %v, want 0.05", c.CentralPushIntervalS)
+	}
+}
+
+// TestActiveModelsIncludesDefault verifies ActiveModels always includes the
+// default model queue key so a fresh dispatcher still has a target.
+func TestActiveModelsIncludesDefault(t *testing.T) {
+	cfg := &Config{RouterMode: "central-push", ModelName: "m0"}
+	cfg.normalize()
+	q := NewCentralQueue(cfg, newKVAware())
+	models := q.ActiveModels()
+	found := false
+	for _, m := range models {
+		if m == "m0" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ActiveModels %v missing default m0", models)
+	}
+	// After enqueue to a second model, both appear once.
+	q.Enqueue("p", 0, nil, "r1", "m1")
+	seen := map[string]int{}
+	for _, m := range q.ActiveModels() {
+		seen[m]++
+	}
+	if seen["m0"] != 1 || seen["m1"] != 1 {
+		t.Fatalf("ActiveModels dedup wrong: %v", seen)
+	}
+}
+
+// TestReleaseInflightIdempotent verifies ReleaseInflight decrements exactly once
+// even when called twice (result path + timeout reconcile).
+func TestReleaseInflightIdempotent(t *testing.T) {
+	cfg := &Config{RouterMode: "central-push", ModelName: "m0"}
+	cfg.normalize()
+	q := NewCentralQueue(cfg, newKVAware())
+
+	// Simulate a dispatch: record mapping + in-flight.
+	q.IncEndpointInflight("epA", 1)
+	q.mu.Lock()
+	q.reqEndpoint["r1"] = "epA"
+	q.mu.Unlock()
+
+	if got := q.GetEndpointInflight("epA"); got != 1 {
+		t.Fatalf("inflight before = %d, want 1", got)
+	}
+	q.ReleaseInflight("r1", "epA")
+	if got := q.GetEndpointInflight("epA"); got != 0 {
+		t.Fatalf("inflight after first release = %d, want 0", got)
+	}
+	// Second release is a no-op (map entry already gone).
+	q.ReleaseInflight("r1", "epA")
+	if got := q.GetEndpointInflight("epA"); got != 0 {
+		t.Fatalf("inflight after second release = %d, want 0 (idempotent)", got)
+	}
+}
+
+// TestRequeueFrontOrder verifies RequeueFront re-admits items at the front,
+// order-preserving, so a failed central-push delivery is retried first.
+func TestRequeueFrontOrder(t *testing.T) {
+	cfg := &Config{RouterMode: "central-push", ModelName: "m0"}
+	cfg.normalize()
+	q := NewCentralQueue(cfg, newKVAware())
+
+	q.Enqueue("p-existing", 0, nil, "existing", "m0")
+	q.RequeueFront("m0", []JobItem{
+		{ReqID: "a", Prompt: "pa", Meta: map[string]interface{}{}},
+		{ReqID: "b", Prompt: "pb", Meta: map[string]interface{}{}},
+	})
+
+	// Pull everything (no fairness/affinity), verify a,b come before existing.
+	items := q.Pull("epA", 10, "m0")
+	if len(items) != 3 {
+		t.Fatalf("pulled %d items, want 3", len(items))
+	}
+	if items[0].ReqID != "a" || items[1].ReqID != "b" || items[2].ReqID != "existing" {
+		t.Fatalf("requeue order wrong: %s,%s,%s", items[0].ReqID, items[1].ReqID, items[2].ReqID)
+	}
+}
+
+// TestCentralPushLivenessSignal verifies stuck detection uses last-result under
+// central-push (not last-pull, which the dispatcher stamps every tick).
+func TestCentralPushLivenessSignal(t *testing.T) {
+	cfg := &Config{RouterMode: "central-push", ModelName: "m0", StuckPullSeconds: 1}
+	cfg.normalize()
+	q := NewCentralQueue(cfg, newKVAware())
+
+	// Back up the queue so stuck detection is active.
+	q.Enqueue("p", 0, nil, "r1", "m0")
+
+	// A recent /pull but stale result should still be flagged stuck under
+	// central-push (the pull map is not the liveness source).
+	q.mu.Lock()
+	q.lastPullByEndpoint["epA"] = nowS()           // fresh pull
+	q.lastResultByEndpoint["epA"] = nowS() - 100.0 // stale result
+	stuck := q.isEndpointStuckLocked("epA")
+	q.mu.Unlock()
+	if !stuck {
+		t.Fatal("central-push: endpoint with stale result should be stuck despite fresh pull")
+	}
+
+	// Fresh result -> not stuck.
+	q.mu.Lock()
+	q.lastResultByEndpoint["epA"] = nowS()
+	stuck = q.isEndpointStuckLocked("epA")
+	q.mu.Unlock()
+	if stuck {
+		t.Fatal("central-push: endpoint with fresh result should not be stuck")
 	}
 }
