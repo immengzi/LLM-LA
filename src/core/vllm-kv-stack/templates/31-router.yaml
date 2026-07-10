@@ -168,6 +168,11 @@ spec:
               value: {{ quote (toString (.Values.router.stuckPullSeconds | default 0)) }}
             - name: ROUTER_AFFINITY_RELEASE_ON_STUCK
               value: {{ ternary "true" "false" (.Values.router.affinityReleaseOnStuck | default false) | quote }}
+            # ---- central-push mode (only used when mode: central-push) ----
+            - name: ROUTER_CENTRAL_PUSH_CAP
+              value: {{ quote (toString (.Values.router.centralPushCap | default 8)) }}
+            - name: ROUTER_CENTRAL_PUSH_INTERVAL_S
+              value: {{ quote (toString (.Values.router.centralPushIntervalS | default 0.05)) }}
             - name: OUTPUT_LEN_PREDICTOR
               value: {{ quote .Values.router.outputLenPredictor }}
             - name: BATCH_SIZE_ESTIMATE

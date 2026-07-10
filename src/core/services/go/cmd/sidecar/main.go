@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -94,6 +95,39 @@ func main() {
 	})
 	r.Handle("/metrics", promhttp.Handler())
 
+	// Cached vLLM readiness probe for the push gate. Uses the pull worker's
+	// signal when present (pull mode); otherwise a cached off-path probe
+	// (push / central-push, where there is no RouterPullWorker).
+	var (
+		vllmProbeMu      sync.Mutex
+		vllmLastProbe    time.Time
+		vllmHealthyCache = true
+	)
+	vllmHealthyCached := func() bool {
+		if puller != nil {
+			return puller.VLLMHealthy()
+		}
+		vllmProbeMu.Lock()
+		if time.Since(vllmLastProbe) < time.Second {
+			cached := vllmHealthyCache
+			vllmProbeMu.Unlock()
+			return cached
+		}
+		vllmLastProbe = time.Now() // set before probing to avoid a stampede
+		vllmProbeMu.Unlock()
+
+		c := &http.Client{Timeout: 2 * time.Second}
+		ok := false
+		if resp, err := c.Get(cfg.VLLMURL + "/health"); err == nil {
+			ok = resp.StatusCode == 200
+			resp.Body.Close()
+		}
+		vllmProbeMu.Lock()
+		vllmHealthyCache = ok
+		vllmProbeMu.Unlock()
+		return ok
+	}
+
 	r.Post("/push", func(w http.ResponseWriter, r *http.Request) {
 		var item struct {
 			ReqID  string         `json:"req_id"`
@@ -105,15 +139,30 @@ func main() {
 			return
 		}
 
+		st := queue.State()
+		logicalBefore := st.Pending + st.Inflight
+
+		// Readiness + backpressure gate (central-push / push): give the router a
+		// signal to requeue instead of overrunning a warming/full pod.
+		if !vllmHealthyCached() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]any{"status": "unavailable", "reason": "vllm_unhealthy"})
+			return
+		}
+		if cap := cfg.PullCap(); cap > 0 && logicalBefore >= cap {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]any{"status": "busy", "reason": "queue_full", "logical": logicalBefore})
+			return
+		}
+
 		sidecar.ReceivedRequests.WithLabelValues(endpointID).Inc()
 
 		meta := item.Meta
 		if meta == nil {
 			meta = map[string]any{}
 		}
-
-		st := queue.State()
-		logicalBefore := st.Pending + st.Inflight
 
 		if cfg.TraceEnabled {
 			nowPush := float64(time.Now().UnixNano()) / 1e9

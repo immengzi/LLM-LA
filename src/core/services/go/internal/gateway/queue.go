@@ -34,11 +34,11 @@ type sloEngine interface {
 // FIFO queues with KV-aware + length-aware (and optional SLO-aware) pull
 // scheduling. Result waiters live in ResultStore.
 type CentralQueue struct {
-	mu     sync.Mutex
-	cfg    *Config
-	kv     *kvAware
-	pred   OutputLengthPredictor
-	slo    sloEngine // nil unless SLO_AWARE
+	mu   sync.Mutex
+	cfg  *Config
+	kv   *kvAware
+	pred OutputLengthPredictor
+	slo  sloEngine // nil unless SLO_AWARE
 
 	defaultModel string
 	queues       map[string][]queueItem
@@ -60,6 +60,12 @@ type CentralQueue struct {
 	// signal + the fleet-average denominator. Mirrors RouterState._last_pull_ts.
 	lastPullByEndpoint map[string]float64
 
+	// Per-endpoint last-successful-result wall-clock timestamp. Under central-push
+	// the dispatcher (not the sidecar) stamps lastPullByEndpoint every tick, so
+	// this becomes the stuck-detection liveness signal instead. Mirrors
+	// RouterState._last_result_ts.
+	lastResultByEndpoint map[string]float64
+
 	// req_id -> streaming chunk channel (SSE).
 	chunkMu     sync.Mutex
 	chunkQueues map[string]chan map[string]interface{}
@@ -72,16 +78,17 @@ func NewCentralQueue(cfg *Config, kv *kvAware) *CentralQueue {
 		aff = NewAffinityMap(cfg.AffinityTTLS)
 	}
 	return &CentralQueue{
-		cfg:                cfg,
-		kv:                 kv,
-		pred:               getLengthPredictor(cfg),
-		defaultModel:       cfg.ModelName,
-		queues:             make(map[string][]queueItem),
-		affinity:           aff,
-		reqEndpoint:        make(map[string]string),
-		inflightByEndpoint: make(map[string]int),
-		lastPullByEndpoint: make(map[string]float64),
-		chunkQueues:        make(map[string]chan map[string]interface{}),
+		cfg:                  cfg,
+		kv:                   kv,
+		pred:                 getLengthPredictor(cfg),
+		defaultModel:         cfg.ModelName,
+		queues:               make(map[string][]queueItem),
+		affinity:             aff,
+		reqEndpoint:          make(map[string]string),
+		inflightByEndpoint:   make(map[string]int),
+		lastPullByEndpoint:   make(map[string]float64),
+		lastResultByEndpoint: make(map[string]float64),
+		chunkQueues:          make(map[string]chan map[string]interface{}),
 	}
 }
 
@@ -171,9 +178,21 @@ func (q *CentralQueue) publishQueueMetricsLocked() {
 	q.publishLivenessLocked()
 }
 
+// livenessTSMapLocked returns which per-endpoint timestamp map backs stuck
+// detection. In central-push the router (not the sidecar) drives dispatch, so
+// lastPullByEndpoint is stamped every tick and no longer reflects sidecar
+// liveness; use last-successful-result instead. Pull mode keeps last-/pull.
+func (q *CentralQueue) livenessTSMapLocked() map[string]float64 {
+	if q.cfg.IsCentralPush() {
+		return q.lastResultByEndpoint
+	}
+	return q.lastPullByEndpoint
+}
+
 // publishLivenessLocked sets fairness liveness gauges (must hold q.mu). No-op
-// unless StuckPullSeconds > 0. A pod is "stuck" when it has not pulled within
-// the threshold while the central queue is backed up.
+// unless StuckPullSeconds > 0. A pod is "stuck" when its liveness signal (last
+// /pull, or last result under central-push) is older than the threshold while
+// the central queue is backed up.
 func (q *CentralQueue) publishLivenessLocked() {
 	thr := q.cfg.StuckPullSeconds
 	if thr <= 0 {
@@ -181,7 +200,7 @@ func (q *CentralQueue) publishLivenessLocked() {
 	}
 	now := nowS()
 	backedUp := q.totalSizeLocked() > 0
-	for ep, last := range q.lastPullByEndpoint {
+	for ep, last := range q.livenessTSMapLocked() {
 		age := now - last
 		setEndpointLastPullSeconds(ep, age)
 		if backedUp && age > float64(thr) {
@@ -192,9 +211,10 @@ func (q *CentralQueue) publishLivenessLocked() {
 	}
 }
 
-// isEndpointStuckLocked reports whether a pod has not pulled within
+// isEndpointStuckLocked reports whether a pod's liveness signal is older than
 // StuckPullSeconds while work is queued (must hold q.mu). Used for
-// RELEASE_ON_STUCK affinity fallback.
+// RELEASE_ON_STUCK affinity fallback. Liveness = last /pull (pull mode) or
+// last result (central-push).
 func (q *CentralQueue) isEndpointStuckLocked(endpoint string) bool {
 	thr := q.cfg.StuckPullSeconds
 	if thr <= 0 || endpoint == "" {
@@ -203,7 +223,7 @@ func (q *CentralQueue) isEndpointStuckLocked(endpoint string) bool {
 	if q.totalSizeLocked() <= 0 {
 		return false
 	}
-	last, ok := q.lastPullByEndpoint[endpoint]
+	last, ok := q.livenessTSMapLocked()[endpoint]
 	if !ok {
 		return true
 	}
@@ -753,8 +773,65 @@ func (q *CentralQueue) DecEndpointInflight(endpoint string, n int) {
 		v = 0
 	}
 	q.inflightByEndpoint[endpoint] = v
+	// Liveness signal for central-push stuck detection: a result drained.
+	q.lastResultByEndpoint[endpoint] = nowS()
 	q.mu.Unlock()
 	setEndpointInflight(endpoint, v)
+}
+
+// ReleaseInflight idempotently releases the in-flight slot for a request. Pops
+// the req_id -> endpoint mapping (recorded at dispatch) and decrements that
+// endpoint's count exactly once. Safe to call from both the /result path and
+// the wait-timeout reconcile: whichever runs first performs the decrement.
+// Mirrors RouterState.release_inflight. endpointHint is unused when the request
+// was tracked here; kept for signature parity / push-* no-op safety.
+func (q *CentralQueue) ReleaseInflight(reqID, endpointHint string) {
+	q.mu.Lock()
+	ep, ok := q.reqEndpoint[reqID]
+	if ok {
+		delete(q.reqEndpoint, reqID)
+	}
+	q.mu.Unlock()
+	if ep != "" {
+		q.DecEndpointInflight(ep, 1)
+	}
+}
+
+// ActiveModels returns the model queue keys currently known (for the
+// central-push dispatcher), always including the default model.
+func (q *CentralQueue) ActiveModels() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := make([]string, 0, len(q.queues)+1)
+	seen := make(map[string]struct{})
+	for m := range q.queues {
+		out = append(out, m)
+		seen[m] = struct{}{}
+	}
+	if q.defaultModel != "" {
+		if _, ok := seen[q.defaultModel]; !ok {
+			out = append(out, q.defaultModel)
+		}
+	}
+	return out
+}
+
+// RequeueFront puts items back at the FRONT of a model queue, order-preserving.
+// Used by the central-push dispatcher when a delivery fails. Caller is
+// responsible for the matching in-flight release. Mirrors requeue_front.
+func (q *CentralQueue) RequeueFront(model string, items []JobItem) {
+	if len(items) == 0 {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	m := q.getQueueLocked(model)
+	qi := make([]queueItem, 0, len(items))
+	for _, it := range items {
+		qi = append(qi, queueItem{reqID: it.ReqID, prompt: it.Prompt, tEnq: it.TEnqClient, meta: it.Meta})
+	}
+	q.queues[m] = append(qi, q.queues[m]...)
+	q.publishQueueMetricsLocked()
 }
 
 // GetEndpointInflight returns the current in-flight count for one endpoint.

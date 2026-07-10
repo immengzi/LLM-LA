@@ -366,6 +366,22 @@ class _PushDispatcher:
 
 _push_dispatcher: Optional[_PushDispatcher] = None
 
+# Central-push dispatcher (only started in central-push mode). Imported lazily
+# to avoid a hard import cycle at module load.
+_central_push_dispatcher: Optional[Any] = None
+
+
+def _kick_central_push() -> None:
+    """Nudge the central-push dispatcher to run a dispatch pass now (coalesced).
+
+    No-op unless central-push mode is active and the dispatcher is running.
+    """
+    if _central_push_dispatcher is not None:
+        try:
+            _central_push_dispatcher.kick()
+        except Exception:
+            pass
+
 
 def _push_decouple_enabled() -> bool:
     """
@@ -407,8 +423,25 @@ def _store_and_maybe_publish_local_result(*, req_id: str, result: Any, endpoint:
 # ============================================================
 
 def _is_push_mode() -> bool:
-    """Return True if router is running a push-* mode."""
+    """Return True if router is running a push-* mode (queue-less push)."""
     return str(_cfg.ROUTER_MODE).startswith("push-")
+
+
+def _is_central_push() -> bool:
+    """Return True if router is running the central-push mode."""
+    return str(_cfg.ROUTER_MODE) == "central-push"
+
+
+def _uses_central_queue() -> bool:
+    """True when requests are admitted into the central queue (pull scheduling
+    path): pull and central-push. Push-* skip the queue entirely."""
+    return (not _is_push_mode())
+
+
+def _uses_push_delivery() -> bool:
+    """True when the router delivers to sidecars via POST /push (needs the
+    PushRouter + pod discovery): push-* and central-push."""
+    return _is_push_mode() or _is_central_push()
 
 
 def _resolve_model(model: str) -> str:
@@ -858,7 +891,13 @@ def _ingest_result_payload(payload: dict) -> None:
     if result is None:
         return
 
+    # Endpoint identity: sidecars post the pod name as result["endpoint_id"];
+    # older/push paths may set a top-level "endpoint". Accept either so the
+    # always-on per-endpoint in-flight counter actually decrements (this counter
+    # backs pull-mode fairness and central-push capacity).
     endpoint = payload.get("endpoint")
+    if not endpoint and isinstance(result, dict):
+        endpoint = result.get("endpoint_id")
 
     if endpoint and _push_router is not None:
         try:
@@ -878,13 +917,14 @@ def _ingest_result_payload(payload: dict) -> None:
 
     router_state.store_result(rid, result)
 
-    # Always-on per-endpoint in-flight bookkeeping (pull mode), independent of
-    # SLO: a result arrived for this endpoint, so it is serving one fewer request.
-    if endpoint:
-        try:
-            router_state.dec_endpoint_inflight(str(endpoint))
-        except Exception:
-            pass
+    # Always-on per-endpoint in-flight bookkeeping (pull / central-push),
+    # independent of SLO: a result arrived, so this endpoint is serving one fewer
+    # request. Idempotent release (pops the req->endpoint map) so a later
+    # wait-timeout reconcile can't double-decrement.
+    try:
+        router_state.release_inflight(rid, str(endpoint) if endpoint else None)
+    except Exception:
+        pass
 
     # Feed actuals to SLO registry + prediction error logging
     try:
@@ -949,7 +989,7 @@ def _ingest_result_payload(payload: dict) -> None:
 
 @app.on_event("startup")
 async def _startup():
-    global _kv_watcher, _push_router, _publisher, _push_dispatcher
+    global _kv_watcher, _push_router, _publisher, _push_dispatcher, _central_push_dispatcher
 
     print(f"[router] api.py version={_API_VERSION}")
     print_config(_cfg)
@@ -1017,12 +1057,31 @@ async def _startup():
             print(f"[router] WARNING: KV owner lookup init failed: {e!r}")
         sys.stdout.flush()
 
-    # Push router (optional)
-    if _is_push_mode():
+    # Push router (used by push-* and central-push for pod discovery + delivery)
+    if _uses_push_delivery():
         _push_router = PushRouter(mode=_cfg.ROUTER_MODE)
         print(f"[router] PushRouter started in mode={_cfg.ROUTER_MODE}")
 
-        if _push_decouple_enabled():
+        if _is_central_push():
+            # Central-push: router-driven dispatch from the central queue.
+            # No legacy push-dispatch workers (those are for queue-less push-*).
+            from .central_push import CentralPushDispatcher
+
+            cap = int(getattr(_cfg, "CENTRAL_PUSH_CAP", 8))
+            interval_s = float(getattr(_cfg, "CENTRAL_PUSH_INTERVAL_S", 0.05))
+            _central_push_dispatcher = CentralPushDispatcher(
+                router_state,
+                _push_router,
+                cap=cap,
+                interval_s=interval_s,
+            )
+            _central_push_dispatcher.start()
+            _push_dispatcher = None
+            print(
+                f"[router] CentralPushDispatch started (cap={cap} "
+                f"interval_s={interval_s})"
+            )
+        elif _push_decouple_enabled():
             qmax = int(getattr(_cfg, "PUSH_DISPATCH_QUEUE_MAX", 100000))
             workers = int(getattr(_cfg, "PUSH_DISPATCH_WORKERS", 32))
             max_delay_s = float(getattr(_cfg, "PUSH_DISPATCH_MAX_DELAY_S", 60.0))
@@ -1068,12 +1127,20 @@ async def _startup():
 
 @app.on_event("shutdown")
 async def _shutdown():
-    global _kv_watcher, _push_router, _publisher, _push_dispatcher
+    global _kv_watcher, _push_router, _publisher, _push_dispatcher, _central_push_dispatcher
 
     if _kv_watcher:
         _kv_watcher.stop()
         print("[router] KVWatcher stopped.")
         _kv_watcher = None
+
+    if _central_push_dispatcher is not None:
+        try:
+            await _central_push_dispatcher.stop()
+        except Exception:
+            pass
+        _central_push_dispatcher = None
+        print("[router] CentralPushDispatch stopped.")
 
     try:
         await owner_lookup.close_owner_lookup()
@@ -1392,6 +1459,9 @@ async def submit(req: EnqueueRequest):
             except Exception as e:
                 raise HTTPException(503, f"push failed: {e}")
 
+    if _is_central_push():
+        _kick_central_push()
+
     return Response(
         content=f'{{"req_id":"{rid}"}}',
         media_type="application/json",
@@ -1469,6 +1539,9 @@ async def enqueue(req: EnqueueRequest):
                 await _push_router.route_and_push(rid, req.prompt, meta)
             except Exception as e:
                 raise HTTPException(503, f"push failed: {e}")
+
+    if _is_central_push():
+        _kick_central_push()
 
     result = await router_state.wait_for_result_async(
         rid,
@@ -1753,6 +1826,9 @@ async def _enqueue_and_wait(
                 await _push_router.route_and_push(rid, prompt, meta)
             except Exception as e:
                 raise HTTPException(503, f"push failed: {e}")
+
+    if _is_central_push():
+        _kick_central_push()
 
     result = await router_state.wait_for_result_async(rid, _cfg.RESULT_TIMEOUT_S)
 
@@ -2073,6 +2149,9 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
                     await _push_router.route_and_push(rid, prompt, meta)
                 except Exception as e:
                     raise HTTPException(503, f"push failed: {e}")
+
+        if _is_central_push():
+            _kick_central_push()
 
         chunk_id = f"chatcmpl-{rid}"
         created = int(t_start)

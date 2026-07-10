@@ -181,8 +181,19 @@ class RouterConfig:
     # --------------------------------------------------------------------
     # Router mode + sidecar port
     # --------------------------------------------------------------------
-    ROUTER_MODE: str = "pull"        # "pull", "push-rr", "push-random", "push-leastq"
+    ROUTER_MODE: str = "pull"        # "pull", "push-rr", "push-random", "push-leastq", "central-push"
     SIDECAR_PORT: int = 9000         # sidecar FastAPI port
+
+    # --------------------------------------------------------------------
+    # CENTRAL-PUSH mode (admit like pull + deliver like push)
+    # --------------------------------------------------------------------
+    # In central-push the router keeps the central queue (so KV-affinity,
+    # fairness and SLO scheduling all apply exactly like pull), but the router
+    # -- not the sidecar -- decides when/how much to dispatch: a per-endpoint
+    # capacity of CAP - in-flight, delivered via POST /push. The sidecar never
+    # pulls. CENTRAL_PUSH_CAP should track the sidecar BATCH_SIZE + PREFETCH.
+    CENTRAL_PUSH_CAP: int = 8
+    CENTRAL_PUSH_INTERVAL_S: float = 0.05
 
     # --------------------------------------------------------------------
     # Synchronous response flow (existing /enqueue)
@@ -421,6 +432,15 @@ def get_config() -> RouterConfig:
     cfg.ROUTER_MODE = os.getenv("ROUTER_MODE", cfg.ROUTER_MODE)
     cfg.SIDECAR_PORT = int(os.getenv("SIDECAR_PORT", cfg.SIDECAR_PORT))
 
+    # Central-push knobs
+    cfg.CENTRAL_PUSH_CAP = int(os.getenv("ROUTER_CENTRAL_PUSH_CAP", cfg.CENTRAL_PUSH_CAP))
+    cfg.CENTRAL_PUSH_CAP = max(1, cfg.CENTRAL_PUSH_CAP)
+    cfg.CENTRAL_PUSH_INTERVAL_S = float(
+        os.getenv("ROUTER_CENTRAL_PUSH_INTERVAL_S", cfg.CENTRAL_PUSH_INTERVAL_S)
+    )
+    if cfg.CENTRAL_PUSH_INTERVAL_S <= 0:
+        cfg.CENTRAL_PUSH_INTERVAL_S = 0.05
+
     # Sync flow
     cfg.RESULT_TIMEOUT_S = float(os.getenv("RESULT_TIMEOUT_S", cfg.RESULT_TIMEOUT_S))
     cfg.RESULT_POLL_INTERVAL_S = float(
@@ -519,7 +539,10 @@ def get_config() -> RouterConfig:
     if rm in ("push-least-queue", "push_least_queue", "push-leastqueue", "push_leastqueue"):
         rm = "push-leastq"
 
-    if rm not in ("pull", "push-rr", "push-random", "push-leastq"):
+    if rm in ("central_push", "centralpush", "central-push"):
+        rm = "central-push"
+
+    if rm not in ("pull", "push-rr", "push-random", "push-leastq", "central-push"):
         rm = "pull"
     cfg.ROUTER_MODE = rm
 

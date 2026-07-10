@@ -50,7 +50,7 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `mode` | `pull` | `pull` \| `push-rr` \| `push-random` \| `push-leastq` |
+| `mode` | `pull` | `pull` \| `push-rr` \| `push-random` \| `push-leastq` \| `central-push` (admit like pull, dispatch centrally by capacity; [details](../architecture/router.md)) |
 | `apiKey` | `""` | Auth for `/v1/chat/completions` (empty = no auth) |
 | `strategy` | `""` | Unified selector: `none` \| `prefix` \| `affinity` \| `both`. When set, overrides `kvAware`/`affinityEnabled` ([details](../architecture/key-affinity.md)) |
 | `hashSource` | `inline` | KV-block hash source: `inline` (in-process/in-container `prefix_hash.py`) \| `external` (legacy `vllm-cpu-hash` pod, auto-deployed in this mode) ([details](../architecture/prefix-hash.md)) |
@@ -72,6 +72,8 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 | `fairFloor` | `1` | Min movable items an overloaded pod still gets (prevents a dead pod stalling the queue) |
 | `stuckPullSeconds` | `0` | Liveness: flag a pod that hasn't pulled this long while the queue is backed up (0 = off; exposes `router_endpoint_stuck`) |
 | `affinityReleaseOnStuck` | `false` | Let a stuck pod's affinity pins release to LB via the existing unavailable-target path |
+| `centralPushCap` | `8` | Central-push only: per-pod concurrency ceiling; router dispatches `cap − in-flight` items per pod. Track sidecar `batchSize + prefetch` |
+| `centralPushIntervalS` | `0.05` | Central-push only: periodic dispatch tick (also dispatched on every enqueue) |
 | `outputLenPredictor` | `simple` | Output-length predictor |
 | `batchSizeEstimate` / `fixedBatchEstimate` | `fixed` / `8` | Batch-size estimation for SLO |
 | `latencyPredictor` | `linear` | Latency model |
@@ -355,7 +357,7 @@ NodePorts marked with `+offset` add `portOffset`; LiteLLM/BooM NodePorts are fix
 
 | Sweep method | Helm value |
 |--------------|------------|
-| `pull` / `push-rr` / `push-random` / `push-leastq` | `router.mode` |
+| `pull` / `push-rr` / `push-random` / `push-leastq` / `central-push` | `router.mode` |
 | `round_robin` / `key_affinity` (BooM direct) | `boom.directRoutingStrategy` |
 | AIBrix strategies | `aibrix.routing_strategy` (client-side, not Helm) |
 

@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-from fastapi import FastAPI
-from fastapi.responses import Response
-from pydantic import BaseModel
-from typing import Dict, Any
+import asyncio
 import time
+from typing import Dict, Any
+
+import requests
+from fastapi import FastAPI
+from fastapi.responses import Response, JSONResponse
+from pydantic import BaseModel
 
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
@@ -17,6 +20,35 @@ app = FastAPI(title="vLLM Sidecar", version="0.1.0")
 
 _local_q: LocalQueue | None = None
 _pull_worker = None  # RouterPullWorker | None — set via bind_pull_worker
+
+# Cached vLLM health probe for push / central-push modes, where there is no
+# RouterPullWorker to maintain the health signal. Probed at most once per
+# interval so /push stays cheap under load.
+_VLLM_PROBE_INTERVAL_S = 1.0
+_vllm_last_probe = 0.0
+_vllm_healthy_cache = True
+
+
+def _probe_vllm_sync() -> bool:
+    try:
+        r = requests.get(f"{_cfg.VLLM_URL}/health", timeout=2.0)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def _vllm_healthy_cached() -> bool:
+    """Best-effort vLLM readiness. Uses the pull worker's signal when present
+    (pull mode); otherwise a cached off-thread probe (push / central-push)."""
+    global _vllm_last_probe, _vllm_healthy_cache
+    if _pull_worker is not None:
+        return bool(_pull_worker.vllm_healthy)
+    now = time.monotonic()
+    if now - _vllm_last_probe < _VLLM_PROBE_INTERVAL_S:
+        return _vllm_healthy_cache
+    _vllm_last_probe = now
+    _vllm_healthy_cache = await asyncio.to_thread(_probe_vllm_sync)
+    return _vllm_healthy_cache
 
 
 def bind_local_queue(q: LocalQueue):
@@ -80,17 +112,35 @@ async def push(item: PushItem) -> dict:
     if _local_q is None:
         return {"status": "error", "msg": "local queue not bound"}
 
+    # Snapshot queue state *before* enqueue (also used by the backpressure gate).
+    pending_before, inflight_before = _local_q.state()
+    logical_before = pending_before + inflight_before
+
+    # ------------------------------------------------------------------
+    # Readiness + backpressure gate (central-push / push).
+    #
+    # Pull mode self-regulates: a sidecar only pulls when vLLM is healthy and it
+    # has spare capacity. Central-push is router-driven, so gate here to give the
+    # router a signal to requeue instead of overrunning a warming/full pod:
+    #   - 503 when vLLM is not healthy (still loading / crashed)
+    #   - 503 when the local queue is already at capacity (BATCH_SIZE + PREFETCH)
+    # ------------------------------------------------------------------
+    if not await _vllm_healthy_cached():
+        return JSONResponse(
+            {"status": "unavailable", "reason": "vllm_unhealthy"},
+            status_code=503,
+        )
+    cap = int(getattr(_cfg, "BATCH_SIZE", 0)) + int(getattr(_cfg, "PREFETCH", 0))
+    if cap > 0 and logical_before >= cap:
+        return JSONResponse(
+            {"status": "busy", "reason": "queue_full", "logical": logical_before},
+            status_code=503,
+        )
+
     # Prom: received (router -> sidecar)
     inc_received(_cfg.CONTAINER_NAME)
 
     meta = dict(item.meta or {})
-
-    # Snapshot queue state *before* enqueue
-    pending_before = 0
-    inflight_before = 0
-    if _local_q is not None:
-        pending_before, inflight_before = _local_q.state()
-    logical_before = pending_before + inflight_before
 
     if getattr(_cfg, "TRACE_ENABLED", False):
         now_push = time.time()

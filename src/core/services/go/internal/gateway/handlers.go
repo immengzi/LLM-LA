@@ -38,18 +38,19 @@ const latencyLogMax = 2000
 
 // Server holds all dependencies for the HTTP handler layer.
 type Server struct {
-	cfg        *Config
-	queue      *CentralQueue
-	results    *ResultStore
-	kv          *kvAware
-	hashClient  *HashClient
-	registry    *ModelRegistry
-	kvWatcher   *KVWatcher
-	ownerLookup *OwnerLookup // nil unless KV_OWNER_SOURCE=lookup
-	pushRouter   *PushDispatcher    // nil in pull mode
-	pushDispatch *PushDispatchQueue // nil unless push + decouple dispatch
-	publisher    resultPublisher    // nil unless async_pubsub
-	slo          sloRegistry        // nil unless SLO
+	cfg          *Config
+	queue        *CentralQueue
+	results      *ResultStore
+	kv           *kvAware
+	hashClient   *HashClient
+	registry     *ModelRegistry
+	kvWatcher    *KVWatcher
+	ownerLookup  *OwnerLookup           // nil unless KV_OWNER_SOURCE=lookup
+	pushRouter   *PushDispatcher        // nil in pull mode
+	pushDispatch *PushDispatchQueue     // nil unless push + decouple dispatch
+	centralPush  *CentralPushDispatcher // nil unless central-push
+	publisher    resultPublisher        // nil unless async_pubsub
+	slo          sloRegistry            // nil unless SLO
 
 	ridRunIDMu sync.Mutex
 	ridToRunID map[string]string
@@ -75,10 +76,11 @@ func NewServer(cfg *Config, q *CentralQueue, rs *ResultStore, kv *kvAware, hc *H
 
 // SetPublisher / SetSLORegistry / SetPushDispatch wire optional subsystems
 // before serving.
-func (s *Server) SetPublisher(p resultPublisher)      { s.publisher = p }
-func (s *Server) SetSLORegistry(r sloRegistry)        { s.slo = r }
-func (s *Server) SetPushDispatch(d *PushDispatchQueue) { s.pushDispatch = d }
-func (s *Server) SetOwnerLookup(o *OwnerLookup)       { s.ownerLookup = o }
+func (s *Server) SetPublisher(p resultPublisher)          { s.publisher = p }
+func (s *Server) SetSLORegistry(r sloRegistry)            { s.slo = r }
+func (s *Server) SetPushDispatch(d *PushDispatchQueue)    { s.pushDispatch = d }
+func (s *Server) SetOwnerLookup(o *OwnerLookup)           { s.ownerLookup = o }
+func (s *Server) SetCentralPush(d *CentralPushDispatcher) { s.centralPush = d }
 
 // DispatchPushJob performs KV registration then pushes to a sidecar. Used as
 // the worker callback for the decoupled push dispatcher.
@@ -500,6 +502,10 @@ func (s *Server) dispatch(rid, prompt string, meta map[string]interface{}, isPul
 			s.results.Deliver(rid, map[string]interface{}{"error": fmt.Sprintf("push failed: %v", err)})
 		}
 	}
+	// Central-push: nudge the router-driven dispatcher to run a pass now.
+	if s.cfg.IsCentralPush() && s.centralPush != nil {
+		s.centralPush.Kick()
+	}
 }
 
 // --- POST /pull ---
@@ -604,16 +610,25 @@ func (s *Server) ingestResultPayload(payload map[string]interface{}) {
 		return
 	}
 
+	// Endpoint identity: sidecars post the pod name as result["endpoint_id"];
+	// older/push paths may set a top-level "endpoint". Accept either so the
+	// always-on per-endpoint in-flight counter actually decrements (this counter
+	// backs pull-mode fairness and central-push capacity).
 	endpoint, _ := payload["endpoint"].(string)
+	if endpoint == "" && result != nil {
+		if eid, ok := result["endpoint_id"].(string); ok {
+			endpoint = eid
+		}
+	}
 	if endpoint != "" && s.pushRouter != nil {
 		s.pushRouter.NotifyResult(endpoint)
 	}
 
-	// Always-on per-endpoint in-flight bookkeeping (pull mode), independent of
-	// SLO: a result arrived for this endpoint, so it is serving one fewer request.
-	if endpoint != "" {
-		s.queue.DecEndpointInflight(endpoint, 1)
-	}
+	// Always-on per-endpoint in-flight bookkeeping (pull / central-push),
+	// independent of SLO: a result arrived, so this endpoint is serving one fewer
+	// request. Idempotent release (pops the req->endpoint map) so a later
+	// wait-timeout reconcile can't double-decrement.
+	s.queue.ReleaseInflight(rid, endpoint)
 
 	if s.cfg.TraceEnabled {
 		tr := traceOf(result)

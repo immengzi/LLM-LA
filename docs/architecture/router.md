@@ -93,6 +93,67 @@ This is the default and is easy to reason about: workers pull work when ready.
 Results still come back via `/result`; from the client’s viewpoint `/enqueue`
 is the same.
 
+### Central-Push Mode (`"central-push"`)
+
+Central-push is a hybrid: **admit like pull, deliver like push.**
+
+- Requests are admitted into the **same central queue** as pull mode, so KV
+  awareness, conversation-key affinity, length awareness, SLO scheduling and
+  pull-mode fairness all apply **unchanged**.
+- But the **router**, not the sidecar, decides when and how much to dispatch.
+  A background dispatcher runs periodically (`ROUTER_CENTRAL_PUSH_INTERVAL_S`)
+  and is also *kicked* on every enqueue. On each pass it estimates each pod's
+  free capacity as `ROUTER_CENTRAL_PUSH_CAP − in-flight`, asks the scheduler for
+  exactly that many items (via the same code path `/pull` uses), and delivers
+  them to the pod with `POST /push`.
+- Sidecars run in **push mode** (no pull poller); they simply receive `/push`
+  and post results via `/result`.
+
+**Why central-push (vs. pull with capacity/fairness)?** Pull is worker-driven:
+capacity balancing only happens *when a pod chooses to pull*, so a slow, warming
+or wedged pod can under-pull and quietly distort the fleet-average signal, and
+the router can only react to pulls it receives. Central-push moves the decision
+to the router, which has a global, always-current view of in-flight counts. That
+gives:
+
+- **Deterministic, continuous rebalancing** – dispatch happens on a fixed tick
+  and on every admission, independent of pod pull timing.
+- **No pull round-trip / long-poll bookkeeping** on the hot path.
+- **A single global control point** for capacity, which composes cleanly with
+  fairness and SLO throttling (all still enforced inside the scheduler).
+
+The trade-off is that the router must estimate capacity (`CAP − in-flight`)
+rather than have each pod self-report via `want`; `ROUTER_CENTRAL_PUSH_CAP`
+should therefore track the sidecar's `batchSize + prefetch`. The sidecar `/push`
+handler also gates on vLLM readiness and local-queue capacity (returning `503`),
+so a mis-estimate or a warming pod causes the item to be **requeued to the front
+and retried on a later pass**, never dropped.
+
+**KV / affinity compatibility.** Because central-push admits through the pull
+path, block registration and owner lookup are identical to pull; the dispatcher
+selects items with the same KV-aware / affinity-aware scheduler, so every KV
+scenario (measure-only, KV-aware routing, soft/hard affinity) behaves exactly as
+in pull mode.
+
+**Rebalancing compatibility.** The capacity throttle and fairness throttle live
+inside the scheduler, so they apply to central-push dispatch unchanged. The only
+mode-specific detail is *stuck detection*: in pull mode a pod is "stuck" when it
+stops pulling, but under central-push the router stamps the last-pull time every
+tick, so stuck detection instead keys off the **last successful result** per pod
+(`ROUTER_STUCK_PULL_SECONDS` / `ROUTER_AFFINITY_RELEASE_ON_STUCK` still apply).
+
+**Streaming.** Streaming works unchanged: chunks are transported by `req_id`
+(`/result_chunk`) and the sidecar posts a final `/result`, exactly as in pull
+and push modes.
+
+**Robustness.** In-flight release is idempotent and keyed by `req_id`: whichever
+happens first — the `/result` callback or a client-timeout reconcile — performs
+the single decrement, so a lost delivery (e.g. a pod dies after a `200`) can
+never permanently consume a pod's capacity.
+
+Results still come back via `/result`; from the client’s viewpoint `/enqueue`
+is the same.
+
 ---
 
 ## 4. KV Awareness (Conceptual)
@@ -199,7 +260,12 @@ unavailable-target path.
 Most behavior is controlled via environment variables loaded into
 `RouterConfig`, for example:
 
-- `ROUTER_MODE` – `pull`, `push-rr`, `push-random`, `push-leastq`.
+- `ROUTER_MODE` – `pull`, `push-rr`, `push-random`, `push-leastq`, `central-push`.
+- `ROUTER_CENTRAL_PUSH_CAP` (default 8) – per-pod concurrency ceiling in
+  central-push mode; the router dispatches `CAP − in-flight` items per pod. Set
+  it to track the sidecar `batchSize + prefetch`.
+- `ROUTER_CENTRAL_PUSH_INTERVAL_S` (default 0.05) – central-push periodic
+  dispatch tick (dispatch is also triggered on every enqueue).
 - `KV_AWARE` – enable/disable KV-aware routing.
 - `LEN_AWARE`, `LEN_POLICY` – enable length awareness and choose policy.
 - `AFFINITY_ENABLED`, `AFFINITY_MODE`, `AFFINITY_TTL_S`, `AFFINITY_HARD_TIMEOUT_S`
@@ -227,10 +293,12 @@ Most behavior is controlled via environment variables loaded into
 
 The Go gateway and the Python router are kept at parity: both honor
 `ROUTER_STRATEGY`, `ROUTER_MEASURE_PREFIX`, `ROUTER_LOG_BLOCK_HASHES`,
-`ROUTER_LOG_REQUEST_BODY`, `KV_BLOCK_SIZE`, and the pull-mode fairness knobs
+`ROUTER_LOG_REQUEST_BODY`, `KV_BLOCK_SIZE`, the pull-mode fairness knobs
 (`ROUTER_FAIR_PULL`, `ROUTER_FAIR_MARGIN`, `ROUTER_FAIR_FLOOR`,
-`ROUTER_STUCK_PULL_SECONDS`, `ROUTER_AFFINITY_RELEASE_ON_STUCK`), and both
-enrich `/latency_log` with the same prefix/KV fields.
+`ROUTER_STUCK_PULL_SECONDS`, `ROUTER_AFFINITY_RELEASE_ON_STUCK`), and the
+central-push knobs (`ROUTER_MODE=central-push`, `ROUTER_CENTRAL_PUSH_CAP`,
+`ROUTER_CENTRAL_PUSH_INTERVAL_S`), and both enrich `/latency_log` with the same
+prefix/KV fields.
 - `REDIS_HOST`, `REDIS_PORT`, `MODEL_NAME` – KV watcher’s view of Redis keys.
 - `NAMESPACE`, `LABEL_SELECTOR`, `SIDECAR_PORT` – how to find sidecars in K8s.
 - `RESULT_TIMEOUT_S` – how long `/enqueue` will wait for a result.

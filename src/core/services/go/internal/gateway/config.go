@@ -73,6 +73,12 @@ type Config struct {
 	RouterMode  string
 	SidecarPort int
 
+	// Central-push mode (admit like pull + deliver like push). Router decides
+	// per-endpoint dispatch of CAP - in-flight items via POST /push; sidecar
+	// never pulls. CentralPushCap should track sidecar BATCH_SIZE + PREFETCH.
+	CentralPushCap       int
+	CentralPushIntervalS float64
+
 	PushLeastQMode       string
 	PushHTTPTimeoutS     float64
 	PushMaxKeepalive     int
@@ -184,6 +190,9 @@ func LoadConfig() *Config {
 		RouterMode:  common.EnvStr("ROUTER_MODE", "pull"),
 		SidecarPort: common.EnvInt("SIDECAR_PORT", 9000),
 
+		CentralPushCap:       common.EnvInt("ROUTER_CENTRAL_PUSH_CAP", 8),
+		CentralPushIntervalS: common.EnvFloat("ROUTER_CENTRAL_PUSH_INTERVAL_S", 0.05),
+
 		PushLeastQMode:       common.EnvStr("PUSH_LEASTQ_MODE", "health"),
 		PushHTTPTimeoutS:     common.EnvFloat("PUSH_HTTP_TIMEOUT_S", 2.0),
 		PushMaxKeepalive:     common.EnvInt("PUSH_MAX_KEEPALIVE", 200),
@@ -257,11 +266,22 @@ func (c *Config) normalize() {
 	case "push-least-queue", "push_least_queue", "push-leastqueue", "push_leastqueue", "push-lq":
 		rm = "push-leastq"
 	}
-	allowed := map[string]bool{"pull": true, "push-rr": true, "push-random": true, "push-leastq": true}
+	switch rm {
+	case "central_push", "centralpush":
+		rm = "central-push"
+	}
+	allowed := map[string]bool{"pull": true, "push-rr": true, "push-random": true, "push-leastq": true, "central-push": true}
 	if !allowed[rm] {
 		rm = "pull"
 	}
 	c.RouterMode = rm
+
+	if c.CentralPushCap < 1 {
+		c.CentralPushCap = 1
+	}
+	if c.CentralPushIntervalS <= 0 {
+		c.CentralPushIntervalS = 0.05
+	}
 
 	plq := strings.TrimSpace(strings.ToLower(c.PushLeastQMode))
 	if plq != "health" && plq != "local" {
@@ -403,6 +423,23 @@ func (c *Config) IsPushMode() bool {
 	return strings.HasPrefix(c.RouterMode, "push-")
 }
 
+// IsCentralPush reports whether the router runs the central-push mode.
+func (c *Config) IsCentralPush() bool {
+	return c.RouterMode == "central-push"
+}
+
+// UsesCentralQueue reports whether requests are admitted into the central
+// queue (pull scheduling path): pull and central-push. Push-* skip the queue.
+func (c *Config) UsesCentralQueue() bool {
+	return c.RouterMode == "pull" || c.RouterMode == "central-push"
+}
+
+// UsesPushDelivery reports whether the router delivers to sidecars via POST
+// /push (needs PushRouter/discovery): push-* and central-push.
+func (c *Config) UsesPushDelivery() bool {
+	return strings.HasPrefix(c.RouterMode, "push-") || c.RouterMode == "central-push"
+}
+
 // MeasurePrefixEnabled reports whether per-request prefix blocks should be
 // computed/registered. Mirrors the guard in
 // src/core/services/router_service/router/api.py: prefix blocks are needed when KV
@@ -415,75 +452,77 @@ func (c *Config) MeasurePrefixEnabled() bool {
 
 func (c *Config) PrintBanner() {
 	fields := map[string]interface{}{
-		"HOST":                    c.Host,
-		"PORT":                    c.Port,
-		"API_KEY":                 maskSecret(c.APIKey),
-		"REDIS_HOST":              c.RedisHost,
-		"REDIS_PORT":              c.RedisPort,
-		"MODEL_NAME":              c.ModelName,
-		"NAMESPACE":               c.Namespace,
-		"LABEL_SELECTOR":          c.LabelSelector,
-		"VLLM_PORT":               c.VLLMPort,
-		"KV_LOG_KEYS":             c.KVLogKeys,
-		"KV_WATCH_INTERVAL_S":     c.KVWatchIntervalS,
-		"KV_WATCH_MAX_KEYS":       c.KVWatchMaxKeys,
-		"KV_DISCOVERY_INTERVAL_S": c.KVDiscoveryIntervalS,
-		"KV_OWNER_SOURCE":         c.KVOwnerSource,
-		"KV_LOOKUP_MAX_BLOCKS":    c.KVLookupMaxBlocks,
-		"KV_HASH_SOURCE":          c.KVHashSource,
-		"HASH_SERVICE_URL":        c.HashServiceURL,
-		"HASH_TIMEOUT_S":          c.HashTimeoutS,
-		"KV_BLOCK_SIZE":           c.KVBlockSize,
-		"ROUTER_MEASURE_PREFIX":   c.MeasurePrefix,
-		"ROUTER_LOG_BLOCK_HASHES": c.LogBlockHashes,
-		"ROUTER_LOG_REQUEST_BODY": c.LogRequestBody,
+		"HOST":                              c.Host,
+		"PORT":                              c.Port,
+		"API_KEY":                           maskSecret(c.APIKey),
+		"REDIS_HOST":                        c.RedisHost,
+		"REDIS_PORT":                        c.RedisPort,
+		"MODEL_NAME":                        c.ModelName,
+		"NAMESPACE":                         c.Namespace,
+		"LABEL_SELECTOR":                    c.LabelSelector,
+		"VLLM_PORT":                         c.VLLMPort,
+		"KV_LOG_KEYS":                       c.KVLogKeys,
+		"KV_WATCH_INTERVAL_S":               c.KVWatchIntervalS,
+		"KV_WATCH_MAX_KEYS":                 c.KVWatchMaxKeys,
+		"KV_DISCOVERY_INTERVAL_S":           c.KVDiscoveryIntervalS,
+		"KV_OWNER_SOURCE":                   c.KVOwnerSource,
+		"KV_LOOKUP_MAX_BLOCKS":              c.KVLookupMaxBlocks,
+		"KV_HASH_SOURCE":                    c.KVHashSource,
+		"HASH_SERVICE_URL":                  c.HashServiceURL,
+		"HASH_TIMEOUT_S":                    c.HashTimeoutS,
+		"KV_BLOCK_SIZE":                     c.KVBlockSize,
+		"ROUTER_MEASURE_PREFIX":             c.MeasurePrefix,
+		"ROUTER_LOG_BLOCK_HASHES":           c.LogBlockHashes,
+		"ROUTER_LOG_REQUEST_BODY":           c.LogRequestBody,
 		"ROUTER_LOG_REQUEST_BODY_MAX_BYTES": c.LogRequestBodyMaxBytes,
-		"ROUTER_STRATEGY":         c.RouterStrategy,
-		"KV_AWARE":                c.KVAware,
-		"LEN_AWARE":               c.LenAware,
-		"LEN_POLICY":              c.LenPolicy,
-		"AFFINITY_ENABLED":        c.AffinityEnabled,
-		"AFFINITY_MODE":           c.AffinityMode,
-		"AFFINITY_TTL_S":          c.AffinityTTLS,
-		"AFFINITY_HARD_TIMEOUT_S": c.AffinityHardTimeoutS,
-		"POOL_FACTOR":             c.PoolFactor,
-		"DEFAULT_MAX_TOKENS":      c.DefaultMaxTokens,
-		"ROUTER_MODE":             c.RouterMode,
-		"SIDECAR_PORT":            c.SidecarPort,
-		"PUSH_LEASTQ_MODE":        c.PushLeastQMode,
-		"PUSH_HTTP_TIMEOUT_S":     c.PushHTTPTimeoutS,
-		"PUSH_DECOUPLE_DISPATCH":  c.PushDecoupleDispatch,
-		"PUSH_DISPATCH_WORKERS":   c.PushDispatchWorkers,
-		"RESULT_TIMEOUT_S":        c.ResultTimeoutS,
-		"POLL_RESULT_TTL_S":       c.PollResultTTLS,
-		"RESULT_TRANSPORT_MODE":   c.ResultTransportMode,
-		"RESULT_SUBMIT_PATH":      c.ResultSubmitPath,
-		"TRANSPORT_MODE":          c.TransportMode,
-		"SUBMIT_PATH":             c.SubmitPath,
-		"RESULTS_ZMQ_BIND":        c.ResultsZMQBind,
-		"RESULTS_ZMQ_TOPIC":       c.ResultsZMQTopic,
-		"RESULTS_ZMQ_HWM":         c.ResultsZMQHWM,
-		"REQ_LOG_MODE":            c.ReqLogMode,
-		"TRACE_ENABLED":           c.TraceEnabled,
-		"SLO_AWARE":               c.SLOAware,
-		"SLO_WITH_KV":             c.SLOWithKV,
-		"ADMISSION_THROTTLE":      c.AdmissionThrottle,
-		"FIXED_BATCH_SIZE":        c.FixedBatchSize,
-		"ROUTER_FAIR_PULL":               c.FairPull,
-		"ROUTER_FAIR_MARGIN":             c.FairMargin,
-		"ROUTER_FAIR_FLOOR":              c.FairFloor,
-		"ROUTER_STUCK_PULL_SECONDS":      c.StuckPullSeconds,
-		"ROUTER_AFFINITY_RELEASE_ON_STUCK": c.AffinityReleaseOnStuck,
-		"OUTPUT_LEN_PREDICTOR":    c.OutputLenPredictor,
-		"BATCH_SIZE_ESTIMATE":     c.BatchSizeEstimate,
-		"FIXED_BATCH_ESTIMATE":    c.FixedBatchEstimate,
-		"LATENCY_PREDICTOR":       c.LatencyPredictor,
-		"LATENCY_ONLINE_UPDATE":   c.LatencyOnlineUpdate,
-		"LATENCY_PROFILE_PATH":    c.LatencyProfilePath,
-		"QUEUE_WAIT_MODEL":        c.QueueWaitModel,
-		"CHUNKED_PREFILL_AWARE":   c.ChunkedPrefillAware,
-		"MAX_NUM_BATCHED_TOKENS":  c.MaxNumBatchedTokens,
-		"MODEL_CONFIG_PATH":       c.ModelConfigPath,
+		"ROUTER_STRATEGY":                   c.RouterStrategy,
+		"KV_AWARE":                          c.KVAware,
+		"LEN_AWARE":                         c.LenAware,
+		"LEN_POLICY":                        c.LenPolicy,
+		"AFFINITY_ENABLED":                  c.AffinityEnabled,
+		"AFFINITY_MODE":                     c.AffinityMode,
+		"AFFINITY_TTL_S":                    c.AffinityTTLS,
+		"AFFINITY_HARD_TIMEOUT_S":           c.AffinityHardTimeoutS,
+		"POOL_FACTOR":                       c.PoolFactor,
+		"DEFAULT_MAX_TOKENS":                c.DefaultMaxTokens,
+		"ROUTER_MODE":                       c.RouterMode,
+		"SIDECAR_PORT":                      c.SidecarPort,
+		"ROUTER_CENTRAL_PUSH_CAP":           c.CentralPushCap,
+		"ROUTER_CENTRAL_PUSH_INTERVAL_S":    c.CentralPushIntervalS,
+		"PUSH_LEASTQ_MODE":                  c.PushLeastQMode,
+		"PUSH_HTTP_TIMEOUT_S":               c.PushHTTPTimeoutS,
+		"PUSH_DECOUPLE_DISPATCH":            c.PushDecoupleDispatch,
+		"PUSH_DISPATCH_WORKERS":             c.PushDispatchWorkers,
+		"RESULT_TIMEOUT_S":                  c.ResultTimeoutS,
+		"POLL_RESULT_TTL_S":                 c.PollResultTTLS,
+		"RESULT_TRANSPORT_MODE":             c.ResultTransportMode,
+		"RESULT_SUBMIT_PATH":                c.ResultSubmitPath,
+		"TRANSPORT_MODE":                    c.TransportMode,
+		"SUBMIT_PATH":                       c.SubmitPath,
+		"RESULTS_ZMQ_BIND":                  c.ResultsZMQBind,
+		"RESULTS_ZMQ_TOPIC":                 c.ResultsZMQTopic,
+		"RESULTS_ZMQ_HWM":                   c.ResultsZMQHWM,
+		"REQ_LOG_MODE":                      c.ReqLogMode,
+		"TRACE_ENABLED":                     c.TraceEnabled,
+		"SLO_AWARE":                         c.SLOAware,
+		"SLO_WITH_KV":                       c.SLOWithKV,
+		"ADMISSION_THROTTLE":                c.AdmissionThrottle,
+		"FIXED_BATCH_SIZE":                  c.FixedBatchSize,
+		"ROUTER_FAIR_PULL":                  c.FairPull,
+		"ROUTER_FAIR_MARGIN":                c.FairMargin,
+		"ROUTER_FAIR_FLOOR":                 c.FairFloor,
+		"ROUTER_STUCK_PULL_SECONDS":         c.StuckPullSeconds,
+		"ROUTER_AFFINITY_RELEASE_ON_STUCK":  c.AffinityReleaseOnStuck,
+		"OUTPUT_LEN_PREDICTOR":              c.OutputLenPredictor,
+		"BATCH_SIZE_ESTIMATE":               c.BatchSizeEstimate,
+		"FIXED_BATCH_ESTIMATE":              c.FixedBatchEstimate,
+		"LATENCY_PREDICTOR":                 c.LatencyPredictor,
+		"LATENCY_ONLINE_UPDATE":             c.LatencyOnlineUpdate,
+		"LATENCY_PROFILE_PATH":              c.LatencyProfilePath,
+		"QUEUE_WAIT_MODEL":                  c.QueueWaitModel,
+		"CHUNKED_PREFILL_AWARE":             c.ChunkedPrefillAware,
+		"MAX_NUM_BATCHED_TOKENS":            c.MaxNumBatchedTokens,
+		"MODEL_CONFIG_PATH":                 c.ModelConfigPath,
 	}
 
 	keys := make([]string, 0, len(fields))

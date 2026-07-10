@@ -373,6 +373,76 @@ class PushRouter:
         raise RuntimeError("push failed")
 
     # ---------------------------------------------------------
+    # Central-push delivery (router-driven; endpoint chosen by the scheduler)
+    # ---------------------------------------------------------
+
+    def endpoints_snapshot(self) -> List[str]:
+        """Return the current discovered pod names (refreshing if stale).
+
+        Used by the central-push dispatcher to iterate delivery targets.
+        """
+        self._ensure_endpoints()
+        with self._lock:
+            return list(self._eps)
+
+    async def push_to_endpoint(self, endpoint: str, req_id: str, prompt: str, meta: dict) -> None:
+        """Deliver a single pre-selected request to a specific sidecar via
+        POST {url}/push. Unlike route_and_push(), the target endpoint is chosen
+        by the central scheduler (pull_for_endpoint), so no _pick_endpoint().
+
+        Raises on failure so the caller can requeue + decrement in-flight.
+        """
+        with self._lock:
+            url = self._urls.get(endpoint)
+        if not url:
+            # Endpoint may be stale; force a refresh once and retry lookup.
+            with self._lock:
+                self._refresh_endpoints_locked(force=True)
+                url = self._urls.get(endpoint)
+        if not url:
+            raise RuntimeError(f"No sidecar URL for endpoint {endpoint}")
+
+        # Prom: outgoing dispatch (router -> sidecar)
+        inc_dispatch(endpoint)
+
+        dispatch_ts = time.time()
+
+        # Capture routing decision (independent of TRACE) for /latency_log.
+        _blocks = get_request_blocks(req_id)
+        record_routing(
+            req_id,
+            endpoint=endpoint,
+            kv_hits_len=prefix_len(endpoint, req_id),
+            total_blocks=len(_blocks),
+            affinity_key=(meta or {}).get("__affinity_key__"),
+            block_hashes=_blocks if getattr(_cfg, "ROUTER_LOG_BLOCK_HASHES", False) else None,
+        )
+
+        if getattr(_cfg, "TRACE_ENABLED", False):
+            meta = dict(meta or {})
+            tr = dict(meta.get("__trace__") or {})
+            tr.setdefault("endpoint", endpoint)
+            tr.setdefault("router_mode", self.mode)
+            tr["t_dispatch_router"] = dispatch_ts
+            if _cfg.KV_AWARE:
+                tr["kv_block_hashes"] = get_request_blocks(req_id)
+            meta["__trace__"] = tr
+
+        payload = {
+            "req_id": req_id,
+            "prompt": str(prompt),
+            "meta": meta or {},
+            # Helps the sidecar/back-channel attribute results to this endpoint.
+            "endpoint": endpoint,
+        }
+
+        _log_req(f"central-push req_id={req_id} → {endpoint} ({url})", level="summary")
+
+        r = await self._push_client.post(f"{url}/push", json=payload)
+        if r.status_code != 200:
+            raise RuntimeError(f"push to {endpoint} failed: {r.status_code} {r.text}")
+
+    # ---------------------------------------------------------
     # Result notification (for local leastq mode)
     # ---------------------------------------------------------
 
