@@ -214,7 +214,7 @@ spec:
               value: "local"
 
             - name: RESULT_TIMEOUT_S
-              value: "1000.0"
+              value: "10000.0"
             - name: RESULT_POLL_INTERVAL_S
               value: "0.02"
 
