@@ -1,14 +1,17 @@
-# prod + ROUTER KEY AFFINITY + PERSISTENT (Redis-backed) MAP: MiniMax-M2.7 —
-# BooM + LLM-LA (router), DP2 + LMCache in **P2P / host-staging mode** (the
-# direct142 design), BZ cluster. Router conversation key-affinity enabled (HARD
-# mode) so all turns of a chat stay on the same vLLM pod for prefix-cache reuse.
+# CENTRAL-PUSH variant of benchmark-bz-pull-both.yaml.
 #
-# REDIS VARIANT of prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity.yaml:
-# identical to that config EXCEPT the router persists its conversation→pod map
-# to Redis (router_affinity_persist_enabled=true), so pins survive router
-# restarts/redeploys (startup warm from Redis + request-time read on a memory
-# miss). Pinned to the persist-affinity router build. See
-# docs/internal/persistent-affinity-map.md.
+# IDENTICAL to that config (same claude-CLI HIGH-LOAD workload: 96 users x 3
+# conversations, same deployment — MiniMax-M2.7, BooM + LLM-LA router, DP2 +
+# LMCache P2P host-staging, BZ cluster, batchSize 32, router_strategy=both with
+# HARD affinity, same router knobs) EXCEPT the routing METHOD:
+#   * router.mode: "central-push"  (router-driven capacity dispatch, not pull)
+#   * router_central_push_cap: 34  (= batchSize 32 + sidecarPrefetch 2)
+#
+# Central-push admits through the SAME central queue / pull path, so KV prefix
+# routing AND hard-affinity pins are identical to pull mode: pinned conversations
+# are only ever delivered to their pod, while the router capacity-balances the
+# unpinned overflow (CAP - in-flight per pod). Directly comparable to
+# benchmark-bz-pull-both (pull).
 #
 # 142 lineage: LMCacheAscendConnector + engine-to-engine HCCL P2P + host-staging
 # (bounded 8 GiB registered arena, avoids the >10 GB device-registration crash) +
@@ -27,18 +30,24 @@
 #   sysctl -w vm.swappiness=0
 #   sysctl -w kernel.numa_balancing=0
 
+# ── REBALANCING VARIANT (fairness throttle ON) ──
+# IDENTICAL to its vanilla sibling (drop "-fair" from the filename) EXCEPT
+# router_fair_pull is enabled (see the fairness block below). Clean A/B: same
+# workload, batchSize, central-push cap and affinity mode — only the fair throttle
+# (composed on top of the CAP - in-flight capacity dispatch) differs.
+
 switch_cluster: bz
 backend: "boom"
 
-# Claude-CLI strategy comparison: 80 users (1.25x capacity) x 15 conversations = 1200 (CALIBRATION)
+# Claude-CLI strategy comparison: 64 users (= capacity) x 15 conversations = 960 (CALIBRATION)
 # conversations (calibration run; single-round convs allowed, ~5249-conv pool) (closed-loop "users" model; see
-# transport.mode / users below). Offered concurrency (80 users, one in-flight
-# turn each) is ~1.25x pod capacity (batchSize 32 x 2 pods = 64 sequences): enough
-# sustained imbalance for rebalancing to matter, but below the 96-user collapse; the
+# transport.mode / users below). Offered concurrency (64 users, one in-flight
+# turn each) matches pod capacity (batchSize 32 x 2 pods = 64 sequences) for
+# near-zero timeouts (the 96-user run collapsed: median 261s, ~44% hit 900s); the
 # router pull-queue / affinity backpressure is actually exercised here -- unlike
 # the 10-user light-load run where avg_requests_waiting stayed 0. total_requests
 # is informational; the users model controls the conversation count.
-total_requests: 1200
+total_requests: 960
 prompt_source: "codeflow"
 
 file_prompts:
@@ -135,8 +144,8 @@ users:
   convs_per_user: 15        # CALIBRATION length; finalize for ~1.5h after a measured run
   interval_between_convs_s: 2.0        # min think time between a user's conversations
   interval_between_convs_max_s: 10.0   # random think time ~ U[2,10]s (per-user seeded)
-  ramp_window_s: 60.0       # realistic arrival: each user starts at a random time in
-                            # U[0,60]s (per-user seeded), not all at once / not an even ramp
+  ramp_s: 0.1               # PER-USER stagger (sleep = user_idx * ramp_s): 96 users
+                            # spread over ~9.6s, then hold full concurrency
 
 # Live Redis KV-block ownership timeline -> redis_kv_watch.jsonl. node_ip empty
 # derives the host from router_url; port is the redis NodePort.
@@ -161,8 +170,8 @@ helm:
   autoscaling_min: 1
   autoscaling_max: 1
 
-  # Router routing = affinity only, HARD mode (time-bounded pin).
-  router_strategy: "affinity"
+  # Router routing = BOTH (KV prefix + conversation affinity), HARD affinity.
+  router_strategy: "both"
   router_len_aware: true
   router_len_policy: "short_first"
   # Block-owner source for prefix routing. Inert under affinity (no effect on
@@ -204,6 +213,22 @@ helm:
   # 504s), so 600 leaves ~400s for pull+inference. Higher also slows failover: requests
   # pinned to a dead/restarting pod wait this long before spilling to a healthy one.
   router_affinity_hard_timeout_s: 600
+
+  # ---- central-push (the routing METHOD under test) ----
+  # Requests admitted through the SAME central queue as pull; the router dispatches
+  # CAP - in-flight movable items per pod on a periodic tick + on every enqueue.
+  # CAP tracks the sidecar batchSize + prefetch so a pod is kept busy without overrun.
+  router_central_push_cap: 34   # = batchSize 32 + sidecarPrefetch 2
+  router_central_push_interval_s: 0.05
+
+  # ---- rebalancing: fairness throttle (the ONLY diff vs the vanilla sibling) ----
+  # Composes ON TOP of central-push capacity dispatch: pull_for_endpoint applies the
+  # load-aware grant throttle (grant <= router_fair_margin x fleet-avg in-flight) to
+  # the CAP - in-flight want, further steering movable overflow to underloaded pods.
+  # Hard pins are never moved — affinity always takes precedence.
+  router_fair_pull: true
+  router_fair_margin: 1.15   # stricter (was 1.25): trim overflow at ~15% over fleet avg
+  router_fair_floor: 1
 
   expose_per_pod: true
 
@@ -286,6 +311,9 @@ helm:
 
   # Pin the controller to a real BZ node whose IP == controller_pull_url host.
   values:
+    # Router mode is not driven by the BooM method, so set it explicitly here.
+    # This also flips sidecars to push mode via vllmkv.sidecarMode.
+    router.mode: "central-push"
     lmcacheController.nodeName: "k8s-worker1"
     # router: remove-cc-header build (digest e407aab5…f0a5b). Adds whole-block
     # stripping of Claude Code's `x-anthropic-billing-header` attribution block

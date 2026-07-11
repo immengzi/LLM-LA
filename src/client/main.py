@@ -420,6 +420,25 @@ def main():
             except Exception as e:
                 print(f"[metrics] failed to start metrics collection: {e}")
 
+    # Start container log capture (vLLM/router/sidecar) -> exp_dir/vllm-logs/
+    # (in-process replacement for the manual container-logs.sh).
+    pod_log_streamer = None
+    if os.environ.get("CAPTURE_POD_LOGS", "1") not in ("0", "false", "False"):
+        try:
+            from pod_log_streamer import PodLogStreamer
+
+            pod_log_streamer = PodLogStreamer(
+                out_dir=Path(exp_dir) / "vllm-logs",
+                namespace=os.environ.get("PODMAP_NAMESPACE", "vllm"),
+            )
+            if not pod_log_streamer.start():
+                pod_log_streamer = None
+            else:
+                print(f"[pod-logs] capturing container logs -> {Path(exp_dir) / 'vllm-logs'}")
+        except Exception as e:
+            print(f"[pod-logs] failed to start: {e}")
+            pod_log_streamer = None
+
     t_start_wall = time.time()
     t_start_load = time.time()
     t_end_load = None
@@ -483,6 +502,13 @@ def main():
                 print("[client] event podmap logger stopped")
             except Exception:
                 pass
+
+        # Stop container log capture (flush + terminate kubectl streams).
+        if pod_log_streamer is not None:
+            try:
+                pod_log_streamer.stop()
+            except Exception as e:
+                print(f"[pod-logs] failed to stop: {e}")
 
         # Stop router-log collector (does a final poll) before closing logs.json.
         if router_collector is not None:

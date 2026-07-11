@@ -1534,12 +1534,19 @@ def cli(master_config: str, skip_vllm: bool) -> None:
 
         # ---- Pre-create experiment dir + start pod-log capture BEFORE deploy ----
         # So experiments/<id>/ and vllm-logs/ exist from the start of the sweep step
-        # and the collector streams the new pods' model-load phase live. This is safe
-        # because the pre-deploy `helm uninstall` above waits for the previous step's
-        # pods to fully terminate, so the namespace is clean before we attach. The pod
-        # lister also skips any Terminating straggler as a safety net. The client reuses
-        # this dir via FORCE_EXPERIMENT_DIR.
-        _collect_logs = bool(getattr(cfg, "collect_vllm_logs", False))
+        # and the collector streams the new pods' model-load phase live (from container
+        # creation, NOT after readiness). This is safe because the pre-deploy
+        # `helm uninstall` above waits for the previous step's pods to fully terminate,
+        # so the namespace is clean before we attach; the collector starts *after* that
+        # cleanup and is stopped *before* the next step's cleanup, so teardown is never
+        # captured. The pod lister also skips any Terminating straggler as a safety net.
+        # The client reuses this dir via FORCE_EXPERIMENT_DIR.
+        #
+        # Capture is ON by default (matching the manual container-logs.sh habit). Force
+        # on with cfg.collect_vllm_logs=true; disable entirely with CAPTURE_POD_LOGS=0.
+        _collect_logs = bool(getattr(cfg, "collect_vllm_logs", False)) or (
+            os.environ.get("CAPTURE_POD_LOGS", "1") not in ("0", "false", "False")
+        )
         exp_dir: Optional[Path] = None
         _log_collectors = None
         if _collect_logs:
@@ -1708,6 +1715,10 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         _client_env = dict(os.environ)
         if exp_dir is not None:
             _client_env["FORCE_EXPERIMENT_DIR"] = str(exp_dir)
+        if _log_collectors is not None:
+            # The sweep already captures pod logs early (from container creation);
+            # tell the client NOT to double-capture into the same vllm-logs/ dir.
+            _client_env["CAPTURE_POD_LOGS"] = "0"
 
         client_proc = subprocess.Popen(
             [sys.executable, str(CLIENT_DIR / "main.py"), "--config", str(tmp_cfg_path)],

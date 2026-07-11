@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import sys
 import threading
@@ -44,6 +45,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 import requests
+
+# Default experiments root: honor EXPERIMENTS_ROOT, else the client-relative
+# experiments/ dir (same location the sweep writes to). The old hard-coded
+# /home/data/... default is unwritable on most hosts.
+_DEFAULT_EXPERIMENTS_ROOT = os.environ.get("EXPERIMENTS_ROOT") or str(
+    Path(__file__).resolve().parent / "experiments"
+)
 
 from router_log_collector import (
     RouterLogCollector,
@@ -323,8 +331,9 @@ def main():
     )
     parser.add_argument("--router-url", default="http://10.50.156.65:30080",
                         help="Router base URL (default: http://10.50.156.65:30080)")
-    parser.add_argument("--experiments-root", default="/home/data/saeid/experiments",
-                        help="Root directory for experiment outputs (default: /home/data/saeid/experiments)")
+    parser.add_argument("--experiments-root", default=_DEFAULT_EXPERIMENTS_ROOT,
+                        help=f"Root directory for experiment outputs (default: {_DEFAULT_EXPERIMENTS_ROOT}; "
+                             f"override with $EXPERIMENTS_ROOT or this flag)")
     parser.add_argument("--poll-interval", type=float, default=5.0,
                         help="Seconds between polls (default: 5)")
     parser.add_argument("--prometheus-url", default="http://10.50.156.65:31190",
@@ -335,6 +344,14 @@ def main():
                         help="Number of records to fetch per poll (default: 2000)")
     parser.add_argument("--namespace", default=None,
                         help="K8s namespace filter for Prometheus queries (e.g. 'vllm')")
+    parser.add_argument("--capture-pod-logs", dest="capture_pod_logs",
+                        action="store_true", default=True,
+                        help="Stream all container logs into <exp_dir>/vllm-logs/ (default: on)")
+    parser.add_argument("--no-capture-pod-logs", dest="capture_pod_logs",
+                        action="store_false",
+                        help="Disable container log capture")
+    parser.add_argument("--pod-log-namespace", default=None,
+                        help="Namespace to capture container logs from (default: --namespace or 'vllm')")
     args = parser.parse_args()
 
     router_url = args.router_url.rstrip("/")
@@ -395,6 +412,25 @@ def main():
     print(f"[collector] polling {latency_url} every {args.poll_interval}s")
     print(f"[collector] press Ctrl+C to stop and write summary")
 
+    # Container log capture (vLLM/router/sidecar) -> <exp_dir>/vllm-logs/
+    pod_log_streamer = None
+    if args.capture_pod_logs:
+        try:
+            from pod_log_streamer import PodLogStreamer
+
+            pod_log_ns = args.pod_log_namespace or args.namespace or "vllm"
+            pod_log_streamer = PodLogStreamer(
+                out_dir=exp_dir / "vllm-logs",
+                namespace=pod_log_ns,
+            )
+            if not pod_log_streamer.start():
+                pod_log_streamer = None
+            else:
+                print(f"[collector] capturing container logs -> {exp_dir / 'vllm-logs'}")
+        except Exception as e:
+            print(f"[collector] WARN: failed to start pod log capture: {e}")
+            pod_log_streamer = None
+
     poll_count = 0
     while not shutdown.is_set():
         # --- Optional Prometheus scrape (latency polling runs in the collector) ---
@@ -411,6 +447,11 @@ def main():
 
     # ---- Shutdown: write summary files ----
     collector.stop()
+    if pod_log_streamer is not None:
+        try:
+            pod_log_streamer.stop()
+        except Exception as e:
+            print(f"[collector] WARN: failed to stop pod log capture: {e}")
     if metrics_fh:
         metrics_fh.close()
 

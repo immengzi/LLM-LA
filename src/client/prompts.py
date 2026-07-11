@@ -830,12 +830,32 @@ def build_claude_conversations_from_codeflowbench(
         ]
         rng = _random.Random(seed)
         rng.shuffle(pool)
-        result = pool[:n_conversations]
-        print(
-            f"[CodeFlowBench] Claude seeded selection: seed={seed}, "
-            f"pool={len(pool)}, selected={len(result)}, multi_turn={multi_turn}, "
-            f"min_turns={min_turns}"
-        )
+        if not pool or n_conversations <= len(pool):
+            result = pool[:n_conversations]
+            print(
+                f"[CodeFlowBench] Claude seeded selection: seed={seed}, "
+                f"pool={len(pool)}, selected={len(result)}, multi_turn={multi_turn}, "
+                f"min_turns={min_turns}"
+            )
+        else:
+            # Requested more conversations than the eligible pool holds (long soak
+            # on a small dataset). Cycle the pool with a fresh deterministic
+            # re-shuffle each pass so users don't line up on identical sequences.
+            # Deterministic (seed-based) => identical workload across a sweep.
+            result = list(pool)
+            cyc = 1
+            while len(result) < n_conversations:
+                chunk = list(pool)
+                _random.Random(seed + cyc).shuffle(chunk)
+                result.extend(chunk)
+                cyc += 1
+            result = result[:n_conversations]
+            print(
+                f"[CodeFlowBench] Claude seeded selection: seed={seed}, "
+                f"pool={len(pool)}, selected={len(result)} via {cyc} cycles "
+                f"(~{n_conversations/len(pool):.1f}x REUSE; dataset smaller than "
+                f"requested), multi_turn={multi_turn}, min_turns={min_turns}"
+            )
     else:
         result = []
         for turns in _iter_codeflow_user_turns(cfg, max_n=max(n_conversations * 20, n_conversations), multi_turn=multi_turn):

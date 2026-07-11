@@ -2568,11 +2568,33 @@ def _claude_user_thread(
     logger: Optional[ExperimentLogger],
     output_log_mode: str,
 ) -> None:
-    ramp_s = float(getattr(users_cfg, "ramp_s", 0.0) or 0.0)
-    if ramp_s > 0:
-        time.sleep(user_id * ramp_s)
+    # Startup arrival. Prefer a realistic randomized window (users trickle in at
+    # random over [0, ramp_window_s]); fall back to the even linear ramp otherwise.
+    ramp_window_s = getattr(users_cfg, "ramp_window_s", None)
+    try:
+        ramp_window_s = float(ramp_window_s) if ramp_window_s is not None else None
+    except Exception:
+        ramp_window_s = None
+    if ramp_window_s is not None and ramp_window_s > 0:
+        # Per-user seeded so arrivals are reproducible and identical across a sweep.
+        start_delay = _random.Random(0xA11CE + user_id).uniform(0.0, ramp_window_s)
+        if start_delay > 0:
+            time.sleep(start_delay)
+    else:
+        ramp_s = float(getattr(users_cfg, "ramp_s", 0.0) or 0.0)
+        if ramp_s > 0:
+            time.sleep(user_id * ramp_s)
 
     interval_s = float(getattr(users_cfg, "interval_between_convs_s", 0.0) or 0.0)
+    interval_max_s = getattr(users_cfg, "interval_between_convs_max_s", None)
+    try:
+        interval_max_s = float(interval_max_s) if interval_max_s is not None else None
+    except Exception:
+        interval_max_s = None
+    randomized = interval_max_s is not None and interval_max_s > interval_s
+    # Per-user seeded RNG: think times are reproducible and identical across a
+    # sweep (seed depends only on user_id, not on the routing config under test).
+    interval_rng = _random.Random(0x5EED + user_id)
 
     for k, cid in enumerate(conv_indices):
         turns = conversations[cid]
@@ -2635,8 +2657,10 @@ def _claude_user_thread(
                 # Abandon the rest of this conversation on a failed turn.
                 break
 
-        if k < len(conv_indices) - 1 and interval_s > 0:
-            time.sleep(interval_s)
+        if k < len(conv_indices) - 1:
+            pause = interval_rng.uniform(interval_s, interval_max_s) if randomized else interval_s
+            if pause > 0:
+                time.sleep(pause)
 
 
 def run_users_claude_load(
@@ -2661,11 +2685,24 @@ def run_users_claude_load(
         return
 
     env = _claude_env(claude_cfg)
+    _iv = float(getattr(users_cfg, "interval_between_convs_s", 0) or 0)
+    _iv_max = getattr(users_cfg, "interval_between_convs_max_s", None)
+    _iv_desc = (
+        f"{_iv}-{float(_iv_max)}s (random)"
+        if _iv_max is not None and float(_iv_max) > _iv
+        else f"{_iv}s (fixed)"
+    )
+    _rw = getattr(users_cfg, "ramp_window_s", None)
+    _ramp_desc = (
+        f"random U[0,{float(_rw)}]s"
+        if _rw is not None and float(_rw) > 0
+        else f"{getattr(users_cfg, 'ramp_s', 0)}s linear"
+    )
     print(
         f"[load_runner] claude users model: {num_users} users x {convs_per_user} "
         f"conversations = {total_convs} available, "
-        f"interval={getattr(users_cfg, 'interval_between_convs_s', 0)}s "
-        f"ramp={getattr(users_cfg, 'ramp_s', 0)}s "
+        f"interval={_iv_desc} "
+        f"ramp={_ramp_desc} "
         f"(tools={'on' if getattr(claude_cfg, 'enable_tools', False) else 'off'}, "
         f"model={getattr(claude_cfg, 'model', '') or 'inherit'}, "
         f"base_url={getattr(claude_cfg, 'base_url', '') or 'inherit'})"

@@ -74,12 +74,28 @@ class UsersLoadConfig:
     conversation is a distinct multi-turn chat; turns within a conversation fire
     back-to-back (no intra-conversation delay). Total conversations = num_users *
     convs_per_user.
+
+    Inter-conversation "think time" can be randomized: when
+    ``interval_between_convs_max_s`` is set (and > interval_between_convs_s), the
+    pause before each next conversation is drawn uniformly from
+    ``[interval_between_convs_s, interval_between_convs_max_s]`` (per-user seeded,
+    so the timing is reproducible and identical across a sweep). Left None (the
+    default), the interval is the fixed ``interval_between_convs_s`` as before.
     """
     num_users: int = 10
     convs_per_user: int = 2
     interval_between_convs_s: float = 5.0
+    # Optional upper bound for a RANDOM inter-conversation interval. None => fixed
+    # interval_between_convs_s. When set, each pause ~ U[interval_between_convs_s,
+    # interval_between_convs_max_s]. Set interval_between_convs_s: 0 for U[0, max].
+    interval_between_convs_max_s: Optional[float] = None
     # Stagger each user's start by user_index * ramp_s (0 = all start together).
     ramp_s: float = 0.0
+    # Realistic randomized arrival. When set (>0), each user's start is delayed by a
+    # per-user-seeded uniform draw from [0, ramp_window_s], so users trickle in at
+    # random over the window rather than all at once or on a perfectly even line.
+    # Takes precedence over ramp_s. None/0 => fall back to the linear ramp_s behavior.
+    ramp_window_s: Optional[float] = None
 
 
 # =========================
@@ -1252,11 +1268,32 @@ def load_config(path: str) -> ClientConfig:
         except Exception:
             users.interval_between_convs_s = 5.0
         users.interval_between_convs_s = max(0.0, users.interval_between_convs_s)
+        # Optional randomized upper bound. Only honored when > the (min) interval;
+        # otherwise coerced to None so behavior stays a fixed interval.
+        if users.interval_between_convs_max_s is not None:
+            try:
+                users.interval_between_convs_max_s = float(users.interval_between_convs_max_s)
+            except Exception:
+                users.interval_between_convs_max_s = None
+        if (
+            users.interval_between_convs_max_s is not None
+            and users.interval_between_convs_max_s <= users.interval_between_convs_s
+        ):
+            users.interval_between_convs_max_s = None
         try:
             users.ramp_s = float(users.ramp_s)
         except Exception:
             users.ramp_s = 0.0
         users.ramp_s = max(0.0, users.ramp_s)
+        # Optional randomized arrival window. Only honored when > 0; else None so the
+        # linear ramp_s behavior is used.
+        if users.ramp_window_s is not None:
+            try:
+                users.ramp_window_s = float(users.ramp_window_s)
+            except Exception:
+                users.ramp_window_s = None
+        if users.ramp_window_s is not None and users.ramp_window_s <= 0:
+            users.ramp_window_s = None
 
     # -----------------------------
     # Normalize Redis watcher
