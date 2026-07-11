@@ -30,14 +30,15 @@
 switch_cluster: bz
 backend: "boom"
 
-# Claude-CLI strategy comparison -- HIGH LOAD: 96 users x 3 conversations = 288
-# conversations (~1021 requests/turns) (closed-loop "users" model; see
-# transport.mode / users below). Offered concurrency (~96 users, one in-flight
-# turn each) exceeds pod capacity (batchSize 32 x 2 pods = 64 sequences), so the
+# Claude-CLI strategy comparison: 80 users (1.25x capacity) x 15 conversations = 1200 (CALIBRATION)
+# conversations (calibration run; single-round convs allowed, ~5249-conv pool) (closed-loop "users" model; see
+# transport.mode / users below). Offered concurrency (80 users, one in-flight
+# turn each) is ~1.25x pod capacity (batchSize 32 x 2 pods = 64 sequences): enough
+# sustained imbalance for rebalancing to matter, but below the 96-user collapse; the
 # router pull-queue / affinity backpressure is actually exercised here -- unlike
 # the 10-user light-load run where avg_requests_waiting stayed 0. total_requests
 # is informational; the users model controls the conversation count.
-total_requests: 288
+total_requests: 1200
 prompt_source: "codeflow"
 
 file_prompts:
@@ -53,7 +54,7 @@ hf_lmsys:
   repeat_each: 1
   seed: 314
   multi_turn: true
-  min_user_turns: 3
+  min_user_turns: 1
   max_pool_size: 99999
 
 # --- Previous single-turn lmsys dataset (swap back by restoring these and
@@ -130,11 +131,12 @@ claude:
 
 # N users, each running K conversations sequentially with an interval between them.
 users:
-  num_users: 96             # > 64-seq pod capacity (batchSize 32 x 2) => backpressure
-  convs_per_user: 3         # longer soak / more cache churn than the light run (2)
-  interval_between_convs_s: 2.0
-  ramp_s: 0.1               # PER-USER stagger (sleep = user_idx * ramp_s): 96 users
-                            # spread over ~9.6s, then hold full concurrency
+  num_users: 64             # = 64-seq pod capacity (batchSize 32 x 2): near-zero timeouts
+  convs_per_user: 15        # CALIBRATION length; finalize for ~1.5h after a measured run
+  interval_between_convs_s: 2.0        # min think time between a user's conversations
+  interval_between_convs_max_s: 10.0   # random think time ~ U[2,10]s (per-user seeded)
+  ramp_window_s: 60.0       # realistic arrival: each user starts at a random time in
+                            # U[0,60]s (per-user seeded), not all at once / not an even ramp
 
 # Live Redis KV-block ownership timeline -> redis_kv_watch.jsonl. node_ip empty
 # derives the host from router_url; port is the redis NodePort.

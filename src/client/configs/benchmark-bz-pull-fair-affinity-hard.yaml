@@ -27,18 +27,23 @@
 #   sysctl -w vm.swappiness=0
 #   sysctl -w kernel.numa_balancing=0
 
+# ── REBALANCING VARIANT (pull-mode fairness ON) ──
+# IDENTICAL to its vanilla sibling (drop "-fair" from the filename) EXCEPT
+# router_fair_pull is enabled (see the fairness block below). Clean A/B: same
+# workload, batchSize and affinity mode — only the load-aware grant throttle differs.
+
 switch_cluster: bz
 backend: "boom"
 
-# Claude-CLI strategy comparison: 80 users (1.25x capacity) x 15 conversations = 1200 (CALIBRATION)
+# Claude-CLI strategy comparison: 64 users (= capacity) x 15 conversations = 960 (CALIBRATION)
 # conversations (calibration run; single-round convs allowed, ~5249-conv pool) (closed-loop "users" model; see
-# transport.mode / users below). Offered concurrency (80 users, one in-flight
-# turn each) is ~1.25x pod capacity (batchSize 32 x 2 pods = 64 sequences): enough
-# sustained imbalance for rebalancing to matter, but below the 96-user collapse; the
+# transport.mode / users below). Offered concurrency (64 users, one in-flight
+# turn each) matches pod capacity (batchSize 32 x 2 pods = 64 sequences) for
+# near-zero timeouts (the 96-user run collapsed: median 261s, ~44% hit 900s); the
 # router pull-queue / affinity backpressure is actually exercised here -- unlike
 # the 10-user light-load run where avg_requests_waiting stayed 0. total_requests
 # is informational; the users model controls the conversation count.
-total_requests: 1200
+total_requests: 960
 prompt_source: "codeflow"
 
 file_prompts:
@@ -135,8 +140,8 @@ users:
   convs_per_user: 15        # CALIBRATION length; finalize for ~1.5h after a measured run
   interval_between_convs_s: 2.0        # min think time between a user's conversations
   interval_between_convs_max_s: 10.0   # random think time ~ U[2,10]s (per-user seeded)
-  ramp_window_s: 60.0       # realistic arrival: each user starts at a random time in
-                            # U[0,60]s (per-user seeded), not all at once / not an even ramp
+  ramp_s: 0.1               # PER-USER stagger (sleep = user_idx * ramp_s): 96 users
+                            # spread over ~9.6s, then hold full concurrency
 
 # Live Redis KV-block ownership timeline -> redis_kv_watch.jsonl. node_ip empty
 # derives the host from router_url; port is the redis NodePort.
@@ -204,6 +209,14 @@ helm:
   # 504s), so 600 leaves ~400s for pull+inference. Higher also slows failover: requests
   # pinned to a dead/restarting pod wait this long before spilling to a healthy one.
   router_affinity_hard_timeout_s: 600
+
+  # ---- rebalancing: pull-mode fairness (the ONLY diff vs the vanilla sibling) ----
+  # Load-aware grant throttle: caps each pod's grant at router_fair_margin x the
+  # fleet-average in-flight, steering movable/unpinned overflow toward underloaded
+  # pods. Hard pins are never moved — affinity always takes precedence.
+  router_fair_pull: true
+  router_fair_margin: 1.15   # stricter (was 1.25): trim overflow at ~15% over fleet avg
+  router_fair_floor: 1
 
   expose_per_pod: true
 

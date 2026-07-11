@@ -25,33 +25,64 @@
 # prod-yz-shadow-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
 
-# ── ACTIVE: claude-CLI HIGH-LOAD routing-strategy comparison (96 users x 3) ──
+# ── ACTIVE: claude-CLI HIGH-LOAD routing comparison (96 users x 180 convs, ~1h) ──
 # Drives the real `claude` CLI (transport.mode=claude) across every routing
 # strategy on an identical replay. Offered concurrency (~96) exceeds pod capacity
 # so router pull-queue / affinity backpressure is exercised. Full cold redeploy per
 # strategy (do NOT pass --skip-vllm). Analyse in
 # analysis-notebooks/claude-strategy-comparison.ipynb.
-# Each strategy runs as pull (active) with a matching ROUTER_MODE=central-push
-# variant (commented) right below it — router-driven capacity dispatch on the
-# SAME workload, for a pull-vs-central-push comparison per strategy. Uncomment a
-# central-push line to run it alongside (or instead of) its pull sibling.
+# 2x2x5 factorial over the SAME workload: METHOD {pull, central-push} x
+# REBALANCING {off (vanilla), on (-fair: router_fair_pull)} x STRATEGY {none,
+# prefix, affinity-hard, affinity-soft, both}. Each -fair config is byte-identical
+# to its vanilla sibling EXCEPT router_fair_pull=true. ALL 20 cells are ACTIVE
+# below for the full comparison; the sweep runs them sequentially and each is a
+# full cold redeploy + ~1h soak (budget ~1-1.5h per cell, ~24-36h total). Comment
+# out any block/line you want to skip.
+
+# ---- pull (vanilla) ----
 benchmark-bz-pull-none:
   - pull
-# benchmark-bz-central-push-none:
-#   - central-push
 benchmark-bz-pull-prefix:
   - pull
-# benchmark-bz-central-push-prefix:
-#   - central-push
 benchmark-bz-pull-affinity-hard:
   - pull
-# benchmark-bz-central-push-affinity-hard:
-#   - central-push
 benchmark-bz-pull-affinity-soft:
   - pull
-# benchmark-bz-central-push-affinity-soft:
-#   - central-push
 benchmark-bz-pull-both:
   - pull
-# benchmark-bz-central-push-both:
-#   - central-push
+
+# ---- pull (rebalancing / fairness ON) ----
+benchmark-bz-pull-fair-none:
+  - pull
+benchmark-bz-pull-fair-prefix:
+  - pull
+benchmark-bz-pull-fair-affinity-hard:
+  - pull
+benchmark-bz-pull-fair-affinity-soft:
+  - pull
+benchmark-bz-pull-fair-both:
+  - pull
+
+# ---- central-push (vanilla) ----
+benchmark-bz-central-push-none:
+  - central-push
+benchmark-bz-central-push-prefix:
+  - central-push
+benchmark-bz-central-push-affinity-hard:
+  - central-push
+benchmark-bz-central-push-affinity-soft:
+  - central-push
+benchmark-bz-central-push-both:
+  - central-push
+
+# ---- central-push (rebalancing / fairness ON) ----
+benchmark-bz-central-push-fair-none:
+  - central-push
+benchmark-bz-central-push-fair-prefix:
+  - central-push
+benchmark-bz-central-push-fair-affinity-hard:
+  - central-push
+benchmark-bz-central-push-fair-affinity-soft:
+  - central-push
+benchmark-bz-central-push-fair-both:
+  - central-push
