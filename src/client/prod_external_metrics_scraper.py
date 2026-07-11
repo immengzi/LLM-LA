@@ -354,9 +354,11 @@ def build_tick(
     raw_snapshot = {
         "counters": counters,
         "hists": hists,
+        "gauges": gauges,
     }
     prev_counters = (prev_raw or {}).get("counters", {})
     prev_hists = (prev_raw or {}).get("hists", {})
+    prev_gauges = (prev_raw or {}).get("gauges", {})
 
     # union of all series keys
     keys = set()
@@ -419,6 +421,22 @@ def build_tick(
             ext_hits / ext_q if (ext_hits is not None and ext_q and ext_q > 0) else None
         )
 
+        # Flow-balance incoming estimate. A bare vLLM has no router-admission
+        # counter, so we infer arrivals from conservation of requests in the
+        # engine: arrivals = departures + d(N)/dt, where departures is the
+        # success rate and N = running + waiting. None until we have a windowed
+        # pair of snapshots.
+        derived_rps = None
+        if rr is not None and rw is not None and dt > 0 and prev_raw is not None:
+            prev_rr = prev_gauges.get("vllm:num_requests_running", {}).get(key)
+            prev_rw = prev_gauges.get("vllm:num_requests_waiting", {}).get(key)
+            succ = rec.get("request_success_per_sec")
+            if prev_rr is not None and prev_rw is not None and succ is not None:
+                net_queue_growth = ((rr + rw) - (prev_rr + prev_rw)) / dt
+                derived_rps = succ + net_queue_growth
+                rec["net_queue_growth_per_sec"] = net_queue_growth
+        rec["derived_rps"] = derived_rps
+
         # histograms (avg + percentiles), TTFT first
         for base, prefix, avg_field in HISTOGRAMS:
             cur_g = hists[base].get(key)
@@ -466,7 +484,7 @@ def print_tick(tick: Dict[str, Any], quantiles: List[float]) -> None:
     print(
         f"{'instance':<24} {'run':>4} {'wait':>4} {'ttft_avg':>9} "
         + " ".join(f"{c:>9}" for c in qcols.split())
-        + f" {'tpot_avg':>9} {'e2e_avg':>9} {'gen_tok/s':>10} {'succ/s':>7}"
+        + f" {'tpot_avg':>9} {'e2e_avg':>9} {'gen_tok/s':>10} {'succ/s':>7} {'drps':>7}"
     )
     for s in tick["samples"]:
         inst = str(s.get("instance", "?"))[:24]
@@ -481,7 +499,8 @@ def print_tick(tick: Dict[str, Any], quantiles: List[float]) -> None:
             f"{_fmt(s.get('tpot_seconds_avg')):>9} "
             f"{_fmt(s.get('e2e_latency_seconds_avg')):>9} "
             f"{_fmt(s.get('gen_tokens_per_sec'),1):>10} "
-            f"{_fmt(s.get('request_success_per_sec'),2):>7}"
+            f"{_fmt(s.get('request_success_per_sec'),2):>7} "
+            f"{_fmt(s.get('derived_rps'),2):>7}"
         )
         print(row)
     print()
