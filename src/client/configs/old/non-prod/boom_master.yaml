@@ -1,0 +1,7 @@
+# NOTE: now under configs/old/non-prod/. Sweep resolves keys relative to configs/
+# root, so reference these by their full path (old/non-prod/<name>).
+old/non-prod/boom:
+  - pull
+  # - push-rr
+  # - push-random
+  # - push-least-queue

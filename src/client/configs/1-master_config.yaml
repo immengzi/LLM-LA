@@ -1,179 +1,57 @@
 # ── PROD master sweep config ──
-# Production MiniMax-M2.7 deployments. One active entry at a time; all run with
-# the `pull` method. Configs are prefixed by cluster: prod-bz-* (this machine)
-# and prod-yz-* (the yz/hq cluster, including its shadow pool). Non-prod /
-# benchmark plans live in non-prod/1-master_config.yaml and
-# non-prod/boom_master.yaml.
+# Maps client_config -> [methods...]. One (or a few) active entries at a time.
 #
 # Run:  cd src/client && python sweep_methods.py            # uses this file by default
 #       cd src/client && python sweep_methods.py --config 1-master_config
+#
+# Active deployments are the LMCache P2P host-staging line + the benchmark sweeps.
+# Legacy/superseded plans (Mooncake, pre-P2P LMCache, DP-multiturn checks, light
+# claude runs, shadow-pool, autoscaling) have been moved to configs/old/<category>/
+# and documented in configs/old/README.md. They still run by their relative path,
+# e.g.  old/mooncake/prod-bz-boom-minmax-mooncake:  [pull]
+# Non-prod / benchmark plans live in old/non-prod/1-master_config.yaml and
+# old/non-prod/boom_master.yaml.
 
-# ── BZ cluster (this machine) — MiniMax-M2.7, BooM + router, DP2 + Mooncake ──
-# prod-bz-boom-minmax-mooncake:
-#   - pull
-
-# BZ LOCAL-cache-first + router key-affinity: big local CPU cache (128 GiB/worker),
-# Mooncake OFF, no NDS. BZ port of the local-hq fix (see disaster-recovery.md §11).
-# NOTE: needs an LMCache-capable image and no cross-engine KV sharing — see the
-# config header.
-# prod-bz-boom-minmax-lmcache-local-hq-affinity:
-#   - pull
-
-# ── BZ 4-NODE AFFINITY CHECK: DP1 x 4 replicas, NO Mooncake (worker2 back) ──
-# k8s-worker2 networking is fixed and the node is un-tainted, so the 4 replicas
-# land one-per-node (master, worker, worker1, worker2) — quick test that worker2
-# now takes traffic. DP1 single TP=8 pod each; Mooncake off (external KV not
-# needed to validate routing). batchSize (32) and central router settings
-# UNCHANGED. Sweep none -> prefix -> affinity -> both back-to-back.
-# prod-bz-boom-minmax-multiturn-none-dp1:
-#   - pull
-# prod-bz-boom-minmax-multiturn-prefix-dp1:
-#   - pull
-# prod-bz-boom-minmax-multiturn-affinity-dp1:
-#   - pull
-# prod-bz-boom-minmax-multiturn-both-dp1:
-#   - pull
-
-# ── BZ 4-NODE DP2 AFFINITY CHECK: DP2 x 2 replicas, NO Mooncake ──
-# dataParallel enabled (2 DP ranks/replica, sizeLocal=1, RoCE-paired); replicas: 2
-# -> 2 replicas x 2 ranks = 4 nodes. Mooncake off; hard conversation affinity.
-# prod-bz-boom-minmax-multiturn-affinity-dp2:
-#   - pull
-
-# ── Full multi-turn router_strategy sweep (DP2 + Mooncake) ──
-# Re-enable once k8s-worker2 networking is fixed and the node is un-tainted:
-#   kubectl taint nodes k8s-worker2 network-broken:NoSchedule-
-# prod-bz-boom-minmax-mooncake-multiturn-none:
-#   - pull
-# prod-bz-boom-minmax-mooncake-multiturn-prefix:
-#   - pull
-# prod-bz-boom-minmax-mooncake-multiturn-affinity:
-#   - pull
-# prod-bz-boom-minmax-mooncake-multiturn-both:
-#   - pull
-
-# Single-config variant (router_strategy chosen inline). Use for ad-hoc runs.
-# prod-bz-boom-minmax-mooncake-multiturn:
-#   - pull
-
-# ── BZ KEDA autoscaling validation (dense Qwen3-8B), isolated release ──
-# Requires: make monitoring && make keda. See docs/operations/autoscaling.md.
-# prod-bz-autoscaling-qwen:
-#   - pull
-
-# ── YZ cluster — MiniMax-M2.7 variants ──
-# prod-yz-boom-minmax:
-#   - pull
-
-# prod-yz-boom-minmax-mooncake:
-#   - pull
-
-# prod-yz-boom-minmax-lmcache:
-#   - pull
-
-# Same as lmcache above + router affinity (hard) + prefix-hit logging knobs.
-# prod-yz-boom-minmax-lmcache-affinity:
-#   - pull
-
-# prod-yz-boom-minmax-lmcache-hq:
-#   - pull
-
-# prod-yz-boom-minmax-lmcache-hq-affinity:
-#   - pull
-
-# Same as lmcache-hq-affinity but LOCAL-cache-first: big local CPU cache (128
-# GiB/worker), Mooncake remote store OFF, NDS/P2P + router key-affinity kept on.
-# Runs 2 DP groups pinned per-role (vllm-role=leader/worker) with per-role NDS
-# xds paths. Fixes the peak-load prefix-cache collapse (see disaster-recovery.md
-# §11 + 142/ANALYSIS_kv_cache_drop.md). ACTIVE — intended deploy.
-# prod-yz-boom-minmax-lmcache-local-hq-affinity:
-#   - pull
-
-# 142 lineage: LMCache P2P + HOST-STAGING (bounded 8 GiB registered arena ->
-# avoids the >10 GB device-registration crash), lmcache_controller instead of
-# Mooncake, image lmcache-ascend:hccl-p2p. NO Mooncake, NO NDS. See
-# docs/internal/lmcache-p2p-host-staging.md. Enable ONE of these instead of
-# the local-hq-affinity above once the controller node/IP are confirmed.
-# prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity:
-#   - pull
-
+# ── ACTIVE p2p host-staging deployments (uncomment the one you want to run) ──
+# BZ (this machine) — affinity, and its fair-pull variant:
 # prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
-
-# ── CLAUDE-CLI PREFIX-CACHE STRATEGY COMPARISON (closed-loop "users" load) ──
-# Drives the real `claude` CLI (transport.mode=claude): 10 users x 2
-# conversations from CodeFlowBench, replayed identically across every routing
-# strategy. Each config is a FULL cold redeploy (do NOT pass --skip-vllm) so every
-# strategy runs on a clean KV/affinity slate. Each run captures the router
-# /latency_log (router_logs.json, KV truth), a live Redis KV-ownership timeline
-# (redis_kv_watch.jsonl), and a Redis block-hash verification (redis_verify.json).
-# Run back-to-back in one shot:
-#   cd src/client && python sweep_methods.py --config 1-master_config
-#
-# Baseline strategy comparison (batch 32 / hold 600, 10 users x 2) -- already run:
-# prod-bz-claude-none:
-#   - pull
-# prod-bz-claude-prefix:
-#   - pull
-# prod-bz-claude-affinity-hard:
-#   - pull
-# prod-bz-claude-affinity-soft:
-#   - pull
-# prod-bz-claude-both:
+# prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity-fair:
 #   - pull
 #
-# Rate-limit-to-affined-node scenario (batchSize 16 vs 32 + longer hard hold 800s
-# vs 600s) under hard-affinity + both -- already run, commented out:
-# prod-bz-claude-affinity-hard-batch16:
+# YZ primary + its shadow-pool equivalent:
+# prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
-# prod-bz-claude-both-batch16:
-#   - pull
-#
-# ACTIVE: HIGH-LOAD re-run of the baseline strategy comparison. Same dataset /
-# strategies as the light run above, but 96 users x 3 conversations (2s interval,
-# 0.1s per-user ramp). Offered concurrency (~96) exceeds pod capacity (batchSize
-# 32 x 2 pods = 64 seqs) so router pull-queue / affinity backpressure is actually
-# exercised. Claude per-turn timeout raised to 900s (< router 1000s ceiling).
-# Full cold redeploy per strategy (do NOT pass --skip-vllm). Analyse alongside the
-# light run in analysis-notebooks/claude-strategy-comparison.ipynb.
-prod-bz-claude-none-highload:
-  - pull
-prod-bz-claude-prefix-highload:
-  - pull
-prod-bz-claude-affinity-hard-highload:
-  - pull
-prod-bz-claude-affinity-soft-highload:
-  - pull
-prod-bz-claude-both-highload:
-  - pull
-#
-# HIGH-LOAD rate-limit-to-affined-node feature (batchSize 16 + hard hold 800s) --
-# runs alongside the batch-32 baselines above so the notebook can compute the
-# feature deltas under real backpressure: affinity-hard-highload -> this, and
-# both-highload -> this. At batch 16 the pod capacity is 32 seqs vs ~96 users
-# (~3x), so the throttle/queue-to-warm-pod path is fully exercised. Analyse in
-# analysis-notebooks/claude-ratelimit-batch16.ipynb.
-prod-bz-claude-affinity-hard-batch16-highload:
-  - pull
-prod-bz-claude-both-batch16-highload:
-  - pull
-
-# ── YZ shadow pool (parallel to prod, release/ns vllm-shadow) ──
-# prod-yz-shadow-boom-minmax-lmcache-hq:
-#   - pull
-
-# prod-yz-shadow-boom-minmax-lmcache-hq-affinity:
-#   - pull
-
-# prod-yz-shadow-boom-minmax-lmcache-hq-go:
-#   - pull
-
-# prod-yz-shadow-boom-minmax-lmcache-hq-go-affinity:
-#   - pull
-
-# Shadow of the 142 P2P + host-staging replica (controller pinned to node3).
 # prod-yz-shadow-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
 
-# prod-yz-shadow-autoscaling-qwen:
-#   - pull
+# ── ACTIVE: claude-CLI HIGH-LOAD routing-strategy comparison (96 users x 3) ──
+# Drives the real `claude` CLI (transport.mode=claude) across every routing
+# strategy on an identical replay. Offered concurrency (~96) exceeds pod capacity
+# so router pull-queue / affinity backpressure is exercised. Full cold redeploy per
+# strategy (do NOT pass --skip-vllm). Analyse in
+# analysis-notebooks/claude-strategy-comparison.ipynb.
+# Each strategy runs as pull (active) with a matching ROUTER_MODE=central-push
+# variant (commented) right below it — router-driven capacity dispatch on the
+# SAME workload, for a pull-vs-central-push comparison per strategy. Uncomment a
+# central-push line to run it alongside (or instead of) its pull sibling.
+benchmark-bz-pull-none:
+  - pull
+# benchmark-bz-central-push-none:
+#   - central-push
+benchmark-bz-pull-prefix:
+  - pull
+# benchmark-bz-central-push-prefix:
+#   - central-push
+benchmark-bz-pull-affinity-hard:
+  - pull
+# benchmark-bz-central-push-affinity-hard:
+#   - central-push
+benchmark-bz-pull-affinity-soft:
+  - pull
+# benchmark-bz-central-push-affinity-soft:
+#   - central-push
+benchmark-bz-pull-both:
+  - pull
+# benchmark-bz-central-push-both:
+#   - central-push

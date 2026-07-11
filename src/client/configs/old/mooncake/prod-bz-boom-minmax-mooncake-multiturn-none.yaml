@@ -1,8 +1,8 @@
 # prod: MiniMax-M2.7 - BooM + LLM-LA (router), DP2 + Mooncake, BZ multi-turn config.
-# router_strategy = prefix  (KV prefix-awareness only)
+# router_strategy = none  (baseline: prefix off, affinity off)
 #
 # Workload semantics are aligned with
-# non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml:
+# old/non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml:
 #   - CodeFlowBench multi-turn conversations
 #   - min_user_turns=3
 #   - Claude Code-style system blocks/reminders/tools injection
@@ -110,16 +110,12 @@ helm:
   #   prefix   -> KV prefix-awareness only
   #   affinity -> conversation key-affinity only
   #   both     -> prefix + affinity
-  # router_strategy: "none"
-  router_strategy: "prefix"
+  router_strategy: "none"
+  # router_strategy: "prefix"
   # router_strategy: "affinity"
   # router_strategy: "both"
   router_len_aware: true
   router_len_policy: "short_first"
-  # Block-owner source for prefix routing: lookup = targeted per-request Redis
-  # HGETALL at ingress (functional kv_hit); watcher = legacy background scan.
-  router_owner_source: "lookup"
-  router_lookup_max_blocks: 512
 
   expose_per_pod: true
 

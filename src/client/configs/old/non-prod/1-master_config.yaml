@@ -1,4 +1,8 @@
-# ── prod: ready-to-run production configs (see also ../1-master_config.yaml) ──
+# ── prod: ready-to-run production configs (see also ../../1-master_config.yaml) ──
+# NOTE: this plan now lives under configs/old/non-prod/. Sweep resolves config
+# keys relative to configs/ root, so archived entries need their full path, e.g.
+# old/non-prod/<template-name> or old/<category>/<prod-name> (as done for the
+# active entries below). Uncomment + prefix others the same way before running.
 
 # prod-yz-boom-minmax:
 #   - pull
@@ -9,7 +13,7 @@
 # prod-yz-boom-minmax-lmcache:
 #   - pull
 
-prod-yz-boom-minmax-lmcache-hq:
+old/lmcache-pre-p2p/prod-yz-boom-minmax-lmcache-hq:
   - pull
 
 # prod-yz-shadow-boom-minmax-lmcache-hq:
@@ -240,7 +244,7 @@ prod-yz-boom-minmax-lmcache-hq:
 # 1-1-boom-qwen-mooncake-bz:
 #   - pull
 
-prod-bz-boom-minmax-mooncake:
+old/mooncake/prod-bz-boom-minmax-mooncake:
   - pull
 
 # 11-1-template-boom-direct-multimodel:
