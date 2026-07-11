@@ -43,7 +43,7 @@ backend: "boom"
 # 18 x 2 pods = 36 sequences, so ~96 offered users is ~2.7x capacity: this is where
 # the rate-limit-to-affined-node behaviour (queue + wait for the warm pod instead
 # of spilling) is actually put under pressure -- unlike the 10-user light run.
-# Directly comparable to the batch-32 high-load runs (prod-bz-claude-*-highload).
+# Directly comparable to the batch-32 high-load runs (benchmark-bz-pull-*).
 # total_requests is informational; the users model controls the conversation count.
 total_requests: 288
 prompt_source: "codeflow"

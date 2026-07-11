@@ -176,8 +176,8 @@ The `multiturn-workload-generation` branch adds CodeFlowBench configs that
 combine multi-turn conversations with the Claude Code-style injection described
 in [Multi-turn benchmarking](multi-turn.md):
 
-- `src/client/configs/non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml`
-- `src/client/configs/non-prod/21-2-template-boom-claude-glm-stability-system-prompts.yaml`
+- `src/client/configs/old/non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml`
+- `src/client/configs/old/non-prod/21-2-template-boom-claude-glm-stability-system-prompts.yaml`
 
 Both use:
 
@@ -193,7 +193,7 @@ claude_code_injection:
   inject_tools: true
 ```
 
-`non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml` also sets
+`old/non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml` also sets
 `hf_lmsys.min_user_turns: 3`, which filters the sampled CodeFlowBench pool to
 deeper conversations before selecting requests. This is useful when validating
 prefix-cache behavior under sustained context growth rather than short

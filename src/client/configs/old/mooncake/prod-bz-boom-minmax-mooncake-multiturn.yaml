@@ -1,23 +1,20 @@
-# prod: MiniMax-M2.7 - BooM + LLM-LA (router), DP1, NO Mooncake, BZ multi-turn config.
-# router_strategy = none  (baseline: prefix off, affinity off)
-#
-# 4-NODE AFFINITY-CHECK variant (k8s-worker2 back/untainted):
-#   - dataParallel disabled (DP1): each replica is a single TP=8 pod on one node
-#   - replicas: 4 -> one pod per node (master, k8s-worker, k8s-worker1, k8s-worker2)
-#   - Mooncake DISABLED (external KV off); internal prefix caching + router
-#     prefix/affinity routing still active, so router_strategy stays meaningful.
-#   - batchSize (32) and central router settings UNCHANGED vs the mooncake variants.
+# prod: MiniMax-M2.7 - BooM + LLM-LA (router), DP2 + Mooncake, BZ multi-turn config.
 #
 # Workload semantics are aligned with
-# non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml:
+# old/non-prod/21-2-template-boom-claude-glm-system-prompts-minturns3.yaml:
 #   - CodeFlowBench multi-turn conversations
 #   - min_user_turns=3
 #   - Claude Code-style system blocks/reminders/tools injection
+#
+# Deployment semantics are aligned with prod-bz-boom-minmax-mooncake.yaml:
+#   - MiniMax-M2.7 served as served-model-minmax
+#   - BooM -> router -> vLLM sidecars
+#   - DP2 + Mooncake KV cache transfer on BZ
 
 switch_cluster: bz
 backend: "boom"
 
-total_requests: 10   # multi-turn conversations; enough to keep all 3 pods busy in steady state
+total_requests: 10   # = number of multi-turn conversations (each >= min_user_turns)
 prompt_source: "codeflow"
 
 file_prompts:
@@ -38,7 +35,7 @@ hf_lmsys:
 
 load_pattern:
   pattern: "det"
-  rate_rps: 5.0   # conversations/sec; pushes in-flight past a single pod (~34) so traffic spreads
+  rate_rps: 1.0   # conversations/sec arrival -> some concurrency so routing choice matters
   duration_s: 3000.0
   warmup_reqs: 0
 
@@ -55,17 +52,14 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
-  # Hard cap generated tokens per turn via max_tokens (NOT dataset length) so turns
-  # stay short. use_dataset_output_len:false -> ignore_eos off -> at most max_tokens
-  # per turn (stops earlier on EOS). temp=0 keeps it deterministic across strategies.
-  max_tokens: 64           # was 1024 (dataset-driven >=1024/turn ~= 40s/turn)
+  max_tokens: 1024
   temperature: 0.0
   length_mode: "legacy"
   target_output_tokens: null
   target_total_tokens: null
   think: false
-  use_dataset_output_len: false   # was true
-  min_output_tokens_floor: 1024   # unused while use_dataset_output_len=false
+  use_dataset_output_len: true
+  min_output_tokens_floor: 1024
   # replay_output_lengths_from: "305"
 
 output_log_mode: "summary"
@@ -73,11 +67,6 @@ print_trace: false
 
 # Stream kubectl logs of every pod/container into <exp_dir>/vllm-logs/<pod>/<container>.log
 collect_vllm_logs: true
-
-# Poll the router /latency_log ring -> router_logs.json, live-enrich logs.json with
-# the serving endpoint + prefix/KV-hit fields, and join authoritatively at shutdown.
-# BooM-proof (reads the router directly). router_log_url empty -> derived from router_url.
-collect_router_log: true
 
 metrics:
   enabled: true
@@ -117,19 +106,12 @@ helm:
   #   prefix   -> KV prefix-awareness only
   #   affinity -> conversation key-affinity only
   #   both     -> prefix + affinity
-  router_strategy: "none"
+  # router_strategy: "none"
   # router_strategy: "prefix"
   # router_strategy: "affinity"
-  # router_strategy: "both"
+  router_strategy: "both"
   router_len_aware: true
   router_len_policy: "short_first"
-  # Log the FULL per-request prefix block-hash list into /latency_log ->
-  # router_logs.json + logs.json (block_hashes field). Bulky; on here to test
-  # block-level prefix overlap. Hit counts are always logged regardless.
-  router_log_block_hashes: true
-  # Measure prefix-hit counts for logging even though KV routing is off here, so
-  # kv_hits_len/total_blocks/kv_hit are comparable across all four strategies.
-  router_measure_prefix: true
 
   expose_per_pod: true
 
@@ -140,11 +122,17 @@ helm:
   cache_warm_enabled: false
   sidecar_prefetch: 2
 
-  # --- Mooncake KV cache transfer: DISABLED for the 3-node affinity check ---
-  # (worker2 networking is broken; external cross-instance KV is not needed to
-  #  validate router prefix/affinity decisions. Re-enable with the mooncake variants.)
-  mooncake_enabled: false
-  deploy_mooncake_master: false
+  # --- Mooncake KV cache transfer ---
+  mooncake_enabled: true
+  mooncake_master_port: 50088
+  mooncake_master_server_address: "192.168.0.42:50088"
+  mooncake_global_segment_size: 140000000000
+  mooncake_eviction_high_watermark: 0.9
+  mooncake_eviction_ratio: 0.1
+  mooncake_ascend_buffer_pool: "4:8"
+  mooncake_lookup_rpc_port: "10010"
+  mooncake_host_network: true
+  deploy_mooncake_master: true
 
   # --- vLLM flags retained from the MiniMax/HQ template ---
   dtype: "bfloat16"
@@ -152,18 +140,25 @@ helm:
   model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":16}'
 
   vllm_image: "reg.local:32000/ascend/vllm-ascend:v0.18.0rc1-openeuler"
+  mooncake_master_image: "reg.local:32000/ascend/vllm-ascend:v0.18.0rc1-openeuler"
 
   models:
     - name: minimax-m2
       servedModelName: served-model-minmax
-      replicas: 4                # one TP=8 pod per node (worker2 back/untainted)
+      replicas: 2
       streamingMode: true
       modelSubPath: MiniMax-M2.7-w8a8-QuaRot
       tensorParallelSize: 8
-      batchSize: 32              # UNCHANGED
+      batchSize: 32
       sidecarPrefetch: 2
       dataParallel:
-        enabled: false           # DP1: single TP=8 rank per replica (was DP2)
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 8888
+        pairTopologyKey: roce-pair
+        hcclBuffSize: 1024
+        ompNumThreads: 16
       vllm:
         gpuMemoryUtilization: 0.92
         dtype: bfloat16
@@ -179,6 +174,9 @@ helm:
         reasoningParser: minimax_m2_append_think
         modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
         ascendEnableFlashcomm1: true
+
+  values:
+    pin.nodeName: "k8s-worker1"
 
 # Claude-Code-style request injection (Phase 3 feature toggle).
 # Injects a realistic Claude Code CLI prefix (system blocks + system-reminders +

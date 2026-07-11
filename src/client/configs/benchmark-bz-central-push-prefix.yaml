@@ -1,0 +1,313 @@
+# CENTRAL-PUSH variant of benchmark-bz-pull-prefix.yaml.
+#
+# IDENTICAL to that config (same claude-CLI HIGH-LOAD workload: 96 users x 3
+# conversations, same deployment — MiniMax-M2.7, BooM + LLM-LA router, DP2 +
+# LMCache P2P host-staging, BZ cluster, batchSize 32, router_strategy=prefix,
+# same router knobs) EXCEPT the routing METHOD:
+#   * router.mode: "central-push"  (router-driven capacity dispatch, not pull)
+#   * router_central_push_cap: 34  (= batchSize 32 + sidecarPrefetch 2)
+#
+# Central-push admits through the SAME central queue / pull path, so KV prefix
+# routing (block-owner lookup) is identical to pull mode; the router dispatches
+# CAP - in-flight movable items per pod. Directly comparable to
+# benchmark-bz-pull-prefix (pull).
+#
+# 142 lineage: LMCacheAscendConnector + engine-to-engine HCCL P2P + host-staging
+# (bounded 8 GiB registered arena, avoids the >10 GB device-registration crash) +
+# a standalone lmcache_controller. NO Mooncake, NO NDS.
+# See docs/internal/lmcache-p2p-host-staging.md.
+#
+# BZ-SPECIFIC CAVEATS — read before deploying:
+#   1. IMAGE: needs the lmcache-ascend:hccl-p2p image pushed to the BZ registry.
+#   2. CONTROLLER IP: set lmcache_p2p_controller_pull_url/reply_url and
+#      lmcacheController.nodeName to a REAL BZ node (placeholder below is the old
+#      mooncake IP 192.168.0.42 — CONFIRM before deploy).
+#   3. RAM: local tier lives in HOST RAM per TP worker. Verify BZ node `free -g`
+#      before trusting 100 GiB; lower if BZ nodes are smaller than YZ's 1.5 TB.
+#
+# Pre-requisite: run on each engine node before deploying:
+#   sysctl -w vm.swappiness=0
+#   sysctl -w kernel.numa_balancing=0
+
+switch_cluster: bz
+backend: "boom"
+
+# Claude-CLI strategy comparison -- HIGH LOAD: 96 users x 3 conversations = 288
+# conversations (~1021 requests/turns) (closed-loop "users" model; see
+# transport.mode / users below). Offered concurrency (~96 users, one in-flight
+# turn each) exceeds pod capacity (batchSize 32 x 2 pods = 64 sequences), so the
+# router pull-queue / affinity backpressure is actually exercised here -- unlike
+# the 10-user light-load run where avg_requests_waiting stayed 0. total_requests
+# is informational; the users model controls the conversation count.
+total_requests: 288
+prompt_source: "codeflow"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_profile: codeflowbench
+  split: "train"
+  streaming: false
+  min_input_tokens: 1
+  max_input_tokens: 3000
+  repeat_each: 1
+  seed: 314
+  multi_turn: true
+  min_user_turns: 3
+  max_pool_size: 99999
+
+# --- Previous single-turn lmsys dataset (swap back by restoring these and
+#     setting prompt_source: "hf-lmsys" + total_requests: 10 above; also set
+#     generation.max_tokens back to 8192) ---
+# total_requests: 10
+# prompt_source: "hf-lmsys"
+# hf_lmsys:
+#   dataset_name: "/data/gateway/gateway/data/lmsys_conversations_hf"
+#   split: "train"
+#   tokenizer_name: "/data/models/MiniMax-M2.7-w8a8-QuaRot"
+#   streaming: true
+#   min_input_tokens: 1
+#   max_input_tokens: 10000000
+#   repeat_each: 1
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 5.0   # conversations/sec; spreads in-flight across pods
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  # Cap generated tokens per turn (not dataset length) so turns stay short and
+  # many conversations keep flowing through the deployment during the soak.
+  max_tokens: 64
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+  use_dataset_output_len: false
+  min_output_tokens_floor: 1024   # unused while use_dataset_output_len=false
+
+output_log_mode: "summary"
+print_trace: false
+
+# Capture the router /latency_log (KV/prefix truth) alongside the run, so each
+# request's kv_hits/block_hashes/endpoint are recorded even though the claude CLI
+# does not surface the router request id.
+collect_router_log: true
+
+metrics:
+  enabled: true
+  scrape_interval_s: 1.0
+  window_s: 3.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+# Integrated claude-CLI transport (closed-loop "users" load). The claude binary
+# talks to the BooM Anthropic gateway; endpoint/model/auth default from `boom`.
+transport:
+  mode: "claude"
+
+claude:
+  bare: true            # skip hooks / CLAUDE.md for reproducibility
+  enable_tools: false   # text-only; no file/shell tools, no permission prompts
+  timeout_s: 900.0      # raised from 300s: under backpressure per-turn e2e tails
+                        # exceed 300s (light-load p99 was already ~254s). Stays
+                        # under the router RESULT_TIMEOUT_S=1000s hard ceiling.
+
+# N users, each running K conversations sequentially with an interval between them.
+users:
+  num_users: 96             # > 64-seq pod capacity (batchSize 32 x 2) => backpressure
+  convs_per_user: 3         # longer soak / more cache churn than the light run (2)
+  interval_between_convs_s: 2.0
+  ramp_s: 0.1               # PER-USER stagger (sleep = user_idx * ramp_s): 96 users
+                            # spread over ~9.6s, then hold full concurrency
+
+# Live Redis KV-block ownership timeline -> redis_kv_watch.jsonl. node_ip empty
+# derives the host from router_url; port is the redis NodePort.
+redis_watch:
+  enabled: true
+  port: 30079
+  interval_s: 2.0
+
+boom:
+  chat_path: "/v1/chat/completions"
+  model: "served-model-minmax"
+  api_key: "sk-boom-master"
+  timeout_s: 10000.0
+  stream: true
+
+helm:
+  boom_claude_aliases: true
+  boom_max_inflight: 1000
+  router_api_key: "ZhongRuanChuangXin!"
+
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 1
+
+  # Router routing = PREFIX (KV-aware prefix routing via Redis block owners).
+  router_strategy: "prefix"
+  router_len_aware: true
+  router_len_policy: "short_first"
+  # Block-owner source for prefix routing. Inert under affinity (no effect on
+  # routing here); kept explicit so a switch to prefix/both is drop-in.
+  router_owner_source: "lookup"
+  router_lookup_max_blocks: 512
+  # Strip the whole Claude Code x-anthropic-billing-header attribution block
+  # (rotating cc_version + per-request cch counter) router-side so KV-prefix
+  # matching is byte-stable across requests. Chart default is OFF ("0"); opt in
+  # here. Requires the remove-cc-header router build (whole-block strip).
+  router_strip_cch: "1"
+  router_log_block_hashes: true
+  router_measure_prefix: true
+  # Optionally store each request's full body (messages + sampling params) under
+  # "request_body" in the /latency_log ring, so prod_latency_collector.py logs
+  # the requests themselves. Bounded ring (auto-evicts); max_bytes caps each
+  # body (0 = unlimited). ENABLED for the claude comparison: the claude CLI does
+  # not surface the router rid, so main.py content-matches each turn to its
+  # /latency_log entry via the last user message to restore kv_hits/block_hashes
+  # in logs.json. logs.json stays body-free (only router_logs.json holds bodies).
+  router_log_request_body: true
+  router_log_request_body_max_bytes: 16384
+  router_affinity_mode: "hard"
+  # Redis-backed persistent affinity map: the conversation→pod map is persisted
+  # to Redis and survives router restarts/redeploys (startup warm + request-time
+  # read on a memory miss). Default-off elsewhere; enabled here.
+  router_affinity_persist_enabled: false  # off: clean affinity slate per strategy redeploy
+  router_affinity_ttl_s: 86400   # 24h. Memory-neutral today (prune() not wired -> lazy
+  # expiry only), so a long TTL just retains locality across idle gaps. Real memory
+  # bound is unique conversations since restart, not TTL; watch router_affinity_map_size.
+  # Hard-affinity spillover window. Default 5s spills ~1/3 of pinned
+  # conversations to other pods at peak (confirmed via router_affinity_releases_total
+  # jumping 0 -> peak), scattering prefixes -> KV hit-rate (命中率) cliff. Waiting
+  # longer for the pinned pod preserves prefix locality at the cost of tail latency
+  # (this is what the flat-hit-rate "142" router effectively does). Bump
+  # incrementally while watching releases_total, the 命中率 panel, and p99 latency.
+  # 600: strongly favors prefix locality (near-"142" never-spill). Hard ceiling is
+  # RESULT_TIMEOUT_S=1000s (router waits that long end-to-end INCLUDING this hold, then
+  # 504s), so 600 leaves ~400s for pull+inference. Higher also slows failover: requests
+  # pinned to a dead/restarting pod wait this long before spilling to a healthy one.
+  router_affinity_hard_timeout_s: 600
+
+  # ---- central-push (the routing METHOD under test) ----
+  # Requests admitted through the SAME central queue as pull; the router dispatches
+  # CAP - in-flight movable items per pod on a periodic tick + on every enqueue.
+  # CAP tracks the sidecar batchSize + prefetch so a pod is kept busy without overrun.
+  router_central_push_cap: 34   # = batchSize 32 + sidecarPrefetch 2
+  router_central_push_interval_s: 0.05
+
+  expose_per_pod: true
+
+  nfs_path: "/data/models/MiniMax-M2.7-w8a8-QuaRot"
+  model_host_path: "/data/models"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+  sidecar_prefetch: 2
+
+  # --- Mooncake: OFF (142 has no remote store). ---
+  mooncake_enabled: false
+  deploy_mooncake_master: false
+
+  # --- LMCache: P2P / host-staging mode (142) ---
+  lmcache_enabled: true
+  lmcache_mode: "p2p"
+  lmcache_chunk_size: 512
+  lmcache_max_local_cpu_size: 100   # GiB per TP worker — VERIFY vs BZ node RAM
+
+  lmcache_use_host_staging: true
+  lmcache_os_staging_bytes: 8589934592   # 8 GiB
+
+  # CONFIRM these against a real BZ node (placeholder = old mooncake IP).
+  lmcache_p2p_controller_pull_url: "192.168.0.42:9800"
+  lmcache_p2p_controller_reply_url: "192.168.0.42:9900"
+  deploy_lmcache_controller: true
+  lmcache_controller_image: "reg.local:32000/lmcache-ascend:hccl-p2p-metrics-fix"
+
+  # NDS absent on BZ (no /dev/md0); nothing to disable.
+  lmcache_nds_enabled: false
+
+  # --- vLLM flags ---
+  dtype: "bfloat16"
+  ascend_enable_flashcomm1: true
+  # 142 drops the custom LSched scheduler and the hccl-p2p image does not ship
+  # the `lsched` module, so setting this crashes EngineCore with
+  # "ModuleNotFoundError: No module named 'lsched'". Leave unset to use vLLM's
+  # default scheduler (matches the 142 reference run scripts).
+  # scheduler_cls: "lsched.lsched_vllm.LSchedVLLMAdapter"
+  model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":16}'
+
+  # Must be the lmcache-ascend:hccl-p2p image on the BZ registry (caveat 1).
+  vllm_image: "reg.local:32000/lmcache-ascend:hccl-p2p-metrics-fix"
+
+  models:
+    - name: minimax-m2
+      servedModelName: served-model-minmax
+      replicas: 2
+      streamingMode: true
+      modelSubPath: MiniMax-M2.7-w8a8-QuaRot
+      tensorParallelSize: 8
+      # 16 chosen over the 142 reference's 32 — better observed results.
+      batchSize: 32
+      sidecarPrefetch: 2
+      dataParallel:
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 8888
+        pairTopologyKey: roce-pair
+        hcclBuffSize: 1024
+        ompNumThreads: 16
+      vllm:
+        gpuMemoryUtilization: 0.92
+        dtype: bfloat16
+        enableExpertParallel: true
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 32768
+        enablePrefixCaching: true
+        enablePromptTokensDetails: true
+        toolCallParser: minimax_m2
+        reasoningParser: minimax_m2_append_think
+        # Dropped for p2p/142 — hccl-p2p image has no `lsched` module.
+        # schedulerCls: "lsched.lsched_vllm.LSchedVLLMAdapter"
+        modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
+        ascendEnableFlashcomm1: true
+
+  # Pin the controller to a real BZ node whose IP == controller_pull_url host.
+  values:
+    # Router mode is not driven by the BooM method, so set it explicitly here.
+    # This also flips sidecars to push mode via vllmkv.sidecarMode.
+    router.mode: "central-push"
+    lmcacheController.nodeName: "k8s-worker1"
+    # router: remove-cc-header build (digest e407aab5…f0a5b). Adds whole-block
+    # stripping of Claude Code's `x-anthropic-billing-header` attribution block
+    # (STRIP_CCH), matching BooM Gateway/vLLM PR #36829 — restores cross-request
+    # KV-prefix cache hits that the old narrow `; cch=` regex never fixed.
+    # boom: == bz default; kept explicit for reproducibility.
+    boom.image: "boom-gateway:v5"
+    # sidecar: left on clusters.yaml default kv-sidecar:latest — persist-affinity
+    # is router-side; the only sidecar edit on this branch is comment-only, so
+    # latest is behavior-compatible with the router above.
+    # Redis on-disk durability (AOF + PVC) intentionally NOT enabled this round —
+    # Redis is EPHEMERAL. The write/read/warm paths are validated with ephemeral
+    # Redis (they never restart the Redis pod); AOF/PVC (to survive a Redis pod
+    # restart) is a deferred follow-up and needs a bindable StorageClass on BZ.
+    # redis.persistence.enabled: true   # (deferred)

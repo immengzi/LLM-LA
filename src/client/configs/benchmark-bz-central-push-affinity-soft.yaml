@@ -1,22 +1,16 @@
-# RATE-LIMIT-TO-AFFINED-NODE scenario (batch-18 + longer hold). Clone of
-# prod-bz-claude-affinity-hard.yaml with TWO changes: models[].batchSize 32->18
-# and router_affinity_hard_timeout_s 600->800. Goal: throttle by reducing per-pod
-# concurrency (less GPU KV eviction + more router-queue backpressure) while a
-# longer hard-affinity hold keeps each conversation waiting for its warm pod
-# instead of spilling. Compare KV hit-rate / stickiness / latency against the
-# plain affinity-hard run.
+# CENTRAL-PUSH variant of benchmark-bz-pull-affinity-soft.yaml.
 #
-# prod + ROUTER KEY AFFINITY + PERSISTENT (Redis-backed) MAP: MiniMax-M2.7 —
-# BooM + LLM-LA (router), DP2 + LMCache in **P2P / host-staging mode** (the
-# direct142 design), BZ cluster. Router conversation key-affinity enabled (HARD
-# mode) so all turns of a chat stay on the same vLLM pod for prefix-cache reuse.
+# IDENTICAL to that config (same claude-CLI HIGH-LOAD workload: 96 users x 3
+# conversations, same deployment — MiniMax-M2.7, BooM + LLM-LA router, DP2 +
+# LMCache P2P host-staging, BZ cluster, batchSize 32, SOFT conversation affinity,
+# same router knobs) EXCEPT the routing METHOD:
+#   * router.mode: "central-push"  (router-driven capacity dispatch, not pull)
+#   * router_central_push_cap: 34  (= batchSize 32 + sidecarPrefetch 2)
 #
-# REDIS VARIANT of prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity.yaml:
-# identical to that config EXCEPT the router persists its conversation→pod map
-# to Redis (router_affinity_persist_enabled=true), so pins survive router
-# restarts/redeploys (startup warm from Redis + request-time read on a memory
-# miss). Pinned to the persist-affinity router build. See
-# docs/internal/persistent-affinity-map.md.
+# Central-push admits through the SAME central queue / pull path. Under SOFT
+# affinity the pinned pod is preferred but items spill freely, so effectively all
+# items are movable and the router capacity-balances CAP - in-flight per pod.
+# Directly comparable to benchmark-bz-pull-affinity-soft (pull).
 #
 # 142 lineage: LMCacheAscendConnector + engine-to-engine HCCL P2P + host-staging
 # (bounded 8 GiB registered arena, avoids the >10 GB device-registration crash) +
@@ -38,14 +32,13 @@
 switch_cluster: bz
 backend: "boom"
 
-# Claude-CLI rate-limit scenario -- HIGH LOAD: 96 users x 3 conversations = 288
+# Claude-CLI strategy comparison -- HIGH LOAD: 96 users x 3 conversations = 288
 # conversations (~1021 requests/turns) (closed-loop "users" model; see
-# transport.mode / users below). With batchSize 16 the per-pod capacity is only
-# 18 x 2 pods = 36 sequences, so ~96 offered users is ~2.7x capacity: this is where
-# the rate-limit-to-affined-node behaviour (queue + wait for the warm pod instead
-# of spilling) is actually put under pressure -- unlike the 10-user light run.
-# Directly comparable to the batch-32 high-load runs (prod-bz-claude-*-highload).
-# total_requests is informational; the users model controls the conversation count.
+# transport.mode / users below). Offered concurrency (~96 users, one in-flight
+# turn each) exceeds pod capacity (batchSize 32 x 2 pods = 64 sequences), so the
+# router pull-queue / affinity backpressure is actually exercised here -- unlike
+# the 10-user light-load run where avg_requests_waiting stayed 0. total_requests
+# is informational; the users model controls the conversation count.
 total_requests: 288
 prompt_source: "codeflow"
 
@@ -133,13 +126,13 @@ transport:
 claude:
   bare: true            # skip hooks / CLAUDE.md for reproducibility
   enable_tools: false   # text-only; no file/shell tools, no permission prompts
-  timeout_s: 900.0      # raised from 300s: batch-18 throttling deepens the queue
-                        # so per-turn e2e tails grow; stay under the router
-                        # RESULT_TIMEOUT_S=1000s hard ceiling.
+  timeout_s: 900.0      # raised from 300s: under backpressure per-turn e2e tails
+                        # exceed 300s (light-load p99 was already ~254s). Stays
+                        # under the router RESULT_TIMEOUT_S=1000s hard ceiling.
 
 # N users, each running K conversations sequentially with an interval between them.
 users:
-  num_users: 96             # ~2.7x the batch-18 pod capacity (18 x 2 = 36 seqs)
+  num_users: 96             # > 64-seq pod capacity (batchSize 32 x 2) => backpressure
   convs_per_user: 3         # longer soak / more cache churn than the light run (2)
   interval_between_convs_s: 2.0
   ramp_s: 0.1               # PER-USER stagger (sleep = user_idx * ramp_s): 96 users
@@ -168,8 +161,7 @@ helm:
   autoscaling_min: 1
   autoscaling_max: 1
 
-  # Router routing = affinity only, HARD mode (time-bounded pin). Rate-limit
-  # variant: batch-18 backpressure + longer hold (see header + batchSize below).
+  # Router routing = affinity only, SOFT mode (prefer the pinned pod, spill freely).
   router_strategy: "affinity"
   router_len_aware: true
   router_len_policy: "short_first"
@@ -193,7 +185,7 @@ helm:
   # in logs.json. logs.json stays body-free (only router_logs.json holds bodies).
   router_log_request_body: true
   router_log_request_body_max_bytes: 16384
-  router_affinity_mode: "hard"
+  router_affinity_mode: "soft"
   # Redis-backed persistent affinity map: the conversation→pod map is persisted
   # to Redis and survives router restarts/redeploys (startup warm + request-time
   # read on a memory miss). Default-off elsewhere; enabled here.
@@ -207,13 +199,18 @@ helm:
   # longer for the pinned pod preserves prefix locality at the cost of tail latency
   # (this is what the flat-hit-rate "142" router effectively does). Bump
   # incrementally while watching releases_total, the 命中率 panel, and p99 latency.
-  # 800: rate-limit variant holds LONGER than the baseline 600 so queued turns
-  # keep waiting for their pinned pod under the batch-18 backpressure instead of
-  # spilling. Hard ceiling is RESULT_TIMEOUT_S=1000s (router waits that long
-  # end-to-end INCLUDING this hold, then 504s), so 800 leaves ~200s for
-  # pull+inference. Higher also slows failover: requests pinned to a
-  # dead/restarting pod wait this long before spilling to a healthy one.
-  router_affinity_hard_timeout_s: 800
+  # 600: strongly favors prefix locality (near-"142" never-spill). Hard ceiling is
+  # RESULT_TIMEOUT_S=1000s (router waits that long end-to-end INCLUDING this hold, then
+  # 504s), so 600 leaves ~400s for pull+inference. Higher also slows failover: requests
+  # pinned to a dead/restarting pod wait this long before spilling to a healthy one.
+  router_affinity_hard_timeout_s: 600
+
+  # ---- central-push (the routing METHOD under test) ----
+  # Requests admitted through the SAME central queue as pull; the router dispatches
+  # CAP - in-flight movable items per pod on a periodic tick + on every enqueue.
+  # CAP tracks the sidecar batchSize + prefetch so a pod is kept busy without overrun.
+  router_central_push_cap: 34   # = batchSize 32 + sidecarPrefetch 2
+  router_central_push_interval_s: 0.05
 
   expose_per_pod: true
 
@@ -266,14 +263,8 @@ helm:
       streamingMode: true
       modelSubPath: MiniMax-M2.7-w8a8-QuaRot
       tensorParallelSize: 8
-      # RATE-LIMIT-TO-AFFINED-NODE variant: batchSize 32 -> 18 (vLLM --max-num-seqs).
-      # Fewer concurrent seqs per engine = less GPU KV eviction (prefixes survive)
-      # AND smaller sidecar pull `want` (BATCH_SIZE = batchSize*dp) = more router-
-      # queue backpressure, so bursts WAIT instead of spilling. Paired with the
-      # longer hard-affinity hold below, queued turns wait for their pinned pod
-      # (near the "142" never-spill regime). Trade-off: per-pod throughput ceiling
-      # halves; under sustained overload the queue grows until RESULT_TIMEOUT_S.
-      batchSize: 18
+      # 16 chosen over the 142 reference's 32 — better observed results.
+      batchSize: 32
       sidecarPrefetch: 2
       dataParallel:
         enabled: true
@@ -302,6 +293,9 @@ helm:
 
   # Pin the controller to a real BZ node whose IP == controller_pull_url host.
   values:
+    # Router mode is not driven by the BooM method, so set it explicitly here.
+    # This also flips sidecars to push mode via vllmkv.sidecarMode.
+    router.mode: "central-push"
     lmcacheController.nodeName: "k8s-worker1"
     # router: remove-cc-header build (digest e407aab5…f0a5b). Adds whole-block
     # stripping of Claude Code's `x-anthropic-billing-header` attribution block

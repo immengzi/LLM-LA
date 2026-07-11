@@ -218,7 +218,7 @@ visible (we export none today; 142 does).
   keeps repeats on the engine that holds them.
 - BZ caveats: needs an LMCache-capable image; no NDS on BZ nodes; verify BZ node RAM before 128.
 
-**Deploy:** `python src/client/deploy_vllm.py --config configs/prod-yz-boom-minmax-lmcache-local-hq-affinity.yaml`
+**Deploy:** `python src/client/deploy_vllm.py --config configs/old/lmcache-pre-p2p/prod-yz-boom-minmax-lmcache-local-hq-affinity.yaml`
 
 **Expected after warmup:** retrieve hit → ~100%, GPU KV off 99%, waiting → 0, preemptions
 stop, prefix-hit curve flat like `direct142`. If GPU KV is still tight, cap `max_num_seqs`.
