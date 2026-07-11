@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import signal
 import sys
@@ -95,6 +96,10 @@ _METRICS_CATALOG = [
     ("kv_cache_usage_perc", "vllm:gpu_cache_usage_perc",    "instance+engine"),
     # --- vLLM counter rates ---
     ("request_success_per_sec",  "rate(vllm:request_success_total[{w}])",  "instance+engine"),
+    # Cumulative (all-time) finished-request counter, summed across the
+    # finished_reason label in _vec_to_map so it matches the external scraper's
+    # absolute request count (not just the windowed rate above).
+    ("request_success_total",    "vllm:request_success_total",             "instance+engine"),
     ("preemptions_per_sec",      "rate(vllm:num_preemptions_total[{w}])",  "instance+engine"),
     ("gen_tokens_per_sec",       "rate(vllm:generation_tokens_total[{w}])",       "instance+engine"),
     ("prefill_tokens_per_sec",   "rate(vllm:prompt_tokens_total[{w}])",           "instance+engine"),
@@ -178,9 +183,20 @@ def _vec_to_map(results: List[Dict[str, Any]], label_key: str) -> Dict[str, floa
             key = primary
         val = r.get("value", [None, None])
         try:
-            out[key] = float(val[1])
+            v = float(val[1])
         except (TypeError, ValueError, IndexError):
             continue
+        # Sum series that collapse to the same key (e.g. counters split by an
+        # extra label like finished_reason on request_success_total). Metrics
+        # with one series per key are unaffected. A lone NaN (e.g. a 0/0 average)
+        # is preserved, but a real value wins over / adds past a NaN.
+        if key in out:
+            if math.isnan(out[key]):
+                out[key] = v
+            elif not math.isnan(v):
+                out[key] += v
+        else:
+            out[key] = v
     return out
 
 
@@ -275,6 +291,46 @@ def _scrape_prometheus(prom_url: str, namespace: Optional[str] = None) -> Option
         "instances": instances_ordered,
         "samples": [per_inst[k] for k in instances_ordered],
     }
+
+
+def _augment_derived_rps(
+    snapshot: Dict[str, Any],
+    prev_nq: Dict[str, tuple],
+    now_ts: float,
+) -> None:
+    """
+    Add a flow-balance ``derived_rps`` to each vLLM sample, in-place.
+
+    This mirrors the estimate in prod_external_metrics_scraper.py so the two
+    tools produce a comparable incoming-rate series. It is *independent* of the
+    router-side ``router_admission_rps`` (which is kept as-is): here we infer
+    arrivals purely from engine conservation:
+
+        arrivals = departures + d(N)/dt,   N = running + waiting
+
+    where departures is ``request_success_per_sec``. ``prev_nq`` carries the
+    previous (N, ts) per instance across scrapes; the first tick yields None.
+    """
+    for rec in snapshot.get("samples", []):
+        inst = rec.get("instance")
+        rr = rec.get("requests_running")
+        rw = rec.get("requests_waiting")
+        succ = rec.get("request_success_per_sec")
+
+        n_now = (rr + rw) if (rr is not None and rw is not None) else None
+        derived = None
+        prev = prev_nq.get(inst) if inst is not None else None
+        if n_now is not None and succ is not None and prev is not None:
+            n_prev, t_prev = prev
+            dt = now_ts - t_prev
+            if dt > 0:
+                net_queue_growth = (n_now - n_prev) / dt
+                derived = succ + net_queue_growth
+                rec["net_queue_growth_per_sec"] = net_queue_growth
+        rec["derived_rps"] = derived
+
+        if inst is not None and n_now is not None:
+            prev_nq[inst] = (n_now, now_ts)
 
 
 # ============================================================
@@ -400,6 +456,7 @@ def main():
 
     shutdown = threading.Event()
     last_prom_scrape = 0.0
+    prev_nq: Dict[str, tuple] = {}  # instance -> (running+waiting, ts) for derived_rps
 
     def _handle_signal(signum, frame):
         print(f"\n[collector] caught signal {signum}, shutting down...")
@@ -438,6 +495,7 @@ def main():
         if metrics_fh and args.prometheus_url and (now - last_prom_scrape) >= args.prom_interval:
             snapshot = _scrape_prometheus(args.prometheus_url, namespace=args.namespace)
             if snapshot:
+                _augment_derived_rps(snapshot, prev_nq, now)
                 metrics_fh.write(json.dumps(snapshot, default=str) + "\n")
                 metrics_fh.flush()
             last_prom_scrape = now
