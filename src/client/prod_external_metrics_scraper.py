@@ -525,8 +525,11 @@ def main() -> None:
                     help="External vLLM /metrics URL (default: %(default)s)")
     ap.add_argument("--experiments-root", default="/home/data/saeid/experiments",
                     help="Root dir for experiment outputs (default: %(default)s)")
-    ap.add_argument("--interval", type=float, default=5.0,
-                    help="Seconds between scrapes (default: 5)")
+    ap.add_argument("--interval", type=float, default=30.0,
+                    help="Seconds between scrapes; this is also the rate window "
+                         "(deltas are computed between consecutive scrapes). "
+                         "30s matches the collector's 30s rate window for "
+                         "apples-to-apples comparison (default: 30)")
     ap.add_argument("--once", action="store_true",
                     help="Single cumulative snapshot, then exit")
     ap.add_argument("--duration", type=float, default=0.0,
