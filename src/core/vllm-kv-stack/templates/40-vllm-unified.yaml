@@ -356,11 +356,11 @@ spec:
               - name: PULL_INTERVAL_S
                 value: "0.05"
               - name: ROUTER_PULL_TIMEOUT_S
-                value: "1000.0"
+                value: "10000.0"
               - name: VLLM_TIMEOUT_S
                 value: "7200.0"
               - name: ROUTER_RESULT_TIMEOUT_S
-                value: "1000.0"
+                value: "10000.0"
               - name: RESULT_TRANSPORT_MODE
                 value: "submit_ack"
               - name: RESULT_SUBMIT_PATH
@@ -1079,11 +1079,11 @@ spec:
             - name: PULL_INTERVAL_S
               value: "0.05"
             - name: ROUTER_PULL_TIMEOUT_S
-              value: "1000.0"
+              value: "10000.0"
             - name: VLLM_TIMEOUT_S
               value: "7200.0"
             - name: ROUTER_RESULT_TIMEOUT_S
-              value: "1000.0"
+              value: "10000.0"
             - name: RESULT_TRANSPORT_MODE
               value: "submit_ack"
             - name: RESULT_SUBMIT_PATH

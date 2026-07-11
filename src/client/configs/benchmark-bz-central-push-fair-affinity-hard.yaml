@@ -128,14 +128,14 @@ transport:
 claude:
   bare: true            # skip hooks / CLAUDE.md for reproducibility
   enable_tools: false   # text-only; no file/shell tools, no permission prompts
-  timeout_s: 900.0      # raised from 300s: under backpressure per-turn e2e tails
-                        # exceed 300s (light-load p99 was already ~254s). Stays
-                        # under the router RESULT_TIMEOUT_S=1000s hard ceiling.
+  timeout_s: 10000.0    # matches boom upstream + router RESULT_TIMEOUT_S=10000s so
+                        # real per-turn e2e tails are measured, not clipped (~900s
+                        # before); raised together with the router/sidecar ceilings.
 
 # N users, each running K conversations sequentially with an interval between them.
 users:
   num_users: 64             # = 64-seq pod capacity (batchSize 32 x 2): near-zero timeouts
-  convs_per_user: 15        # CALIBRATION length; finalize for ~1.5h after a measured run
+  convs_per_user: 10        # ~1h/cell at 64 users (15 was ~1.5h); users model controls count
   interval_between_convs_s: 2.0        # min think time between a user's conversations
   interval_between_convs_max_s: 10.0   # random think time ~ U[2,10]s (per-user seeded)
   ramp_s: 0.1               # PER-USER stagger (sleep = user_idx * ramp_s): 96 users
