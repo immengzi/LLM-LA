@@ -103,6 +103,10 @@ _METRICS_CATALOG = [
     ("preemptions_per_sec",      "rate(vllm:num_preemptions_total[{w}])",  "instance+engine"),
     ("gen_tokens_per_sec",       "rate(vllm:generation_tokens_total[{w}])",       "instance+engine"),
     ("prefill_tokens_per_sec",   "rate(vllm:prompt_tokens_total[{w}])",           "instance+engine"),
+    # Cumulative (all-time) token counters, so incoming/outgoing token
+    # throughput can be re-windowed retrospectively (not just the rate above).
+    ("generation_tokens_total",  "vllm:generation_tokens_total",  "instance+engine"),
+    ("prompt_tokens_total",      "vllm:prompt_tokens_total",      "instance+engine"),
     ("prefix_cache_hits_per_sec",   "rate(vllm:prefix_cache_hits_total[{w}])",    "instance+engine"),
     ("prefix_cache_queries_per_sec","rate(vllm:prefix_cache_queries_total[{w}])", "instance+engine"),
     ("ext_prefix_cache_hits_per_sec",   "rate(vllm:external_prefix_cache_hits_total[{w}])",    "instance+engine"),
@@ -130,6 +134,23 @@ _METRICS_CATALOG = [
     ("router_tpot_avg_p95", "histogram_quantile(0.95, rate(router_request_tpot_avg_seconds_bucket[{w}]))", "model"),
     ("router_e2e_p50",      "histogram_quantile(0.50, rate(router_request_e2e_seconds_bucket[{w}]))",      "model"),
     ("router_e2e_p95",      "histogram_quantile(0.95, rate(router_request_e2e_seconds_bucket[{w}]))",      "model"),
+]
+
+
+# Per-second fields that get a per-minute companion (per_min = per_sec * 60).
+# Kept identical to prod_external_metrics_scraper.py so both tools emit the same
+# keys; fields absent on a given row are simply skipped. Covers both request
+# rates (rps -> rpm) and token throughput (incoming prefill / outgoing gen).
+_RPM_FIELDS = [
+    ("request_success_per_sec", "request_success_per_min"),
+    ("router_admission_rps",    "router_admission_rpm"),
+    ("router_outgoing_rps",     "router_outgoing_rpm"),
+    ("sidecar_received_rps",    "sidecar_received_rpm"),
+    ("sidecar_completed_rps",   "sidecar_completed_rpm"),
+    ("derived_rps",             "derived_rpm"),
+    # token throughput: incoming = prompt/prefill, outgoing = generated/decode
+    ("prefill_tokens_per_sec",  "prefill_tokens_per_min"),
+    ("gen_tokens_per_sec",      "gen_tokens_per_min"),
 ]
 
 
@@ -333,6 +354,17 @@ def _augment_derived_rps(
             prev_nq[inst] = (n_now, now_ts)
 
 
+def _augment_rpm(snapshot: Dict[str, Any]) -> None:
+    """Add a per-minute companion (rpm = rps * 60) for every request-rate field
+    present on each sample, in-place. Same 30s window as the rps value; this is
+    purely a unit conversion for convenience/reporting."""
+    for rec in snapshot.get("samples", []):
+        for rps_field, rpm_field in _RPM_FIELDS:
+            if rps_field in rec:
+                v = rec.get(rps_field)
+                rec[rpm_field] = (v * 60.0) if v is not None else None
+
+
 # ============================================================
 # Per-endpoint token rollup (mirrors trace_utils.summarize_endpoint_tokens)
 # ============================================================
@@ -496,6 +528,7 @@ def main():
             snapshot = _scrape_prometheus(args.prometheus_url, namespace=args.namespace)
             if snapshot:
                 _augment_derived_rps(snapshot, prev_nq, now)
+                _augment_rpm(snapshot)
                 metrics_fh.write(json.dumps(snapshot, default=str) + "\n")
                 metrics_fh.flush()
             last_prom_scrape = now
