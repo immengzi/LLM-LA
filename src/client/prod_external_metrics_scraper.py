@@ -115,6 +115,23 @@ HISTOGRAMS = [
 
 DEFAULT_QUANTILES = [0.50, 0.90, 0.95, 0.99]
 
+# Per-second fields that get a per-minute companion (per_min = per_sec * 60).
+# Kept identical to the collector's list so both tools emit the same keys;
+# fields not present on a given row (e.g. router/sidecar on bare vLLM) are
+# simply skipped. Covers both request rates (rps -> rpm) and token throughput
+# (incoming prefill / outgoing gen).
+_RPM_FIELDS = [
+    ("request_success_per_sec", "request_success_per_min"),
+    ("router_admission_rps",    "router_admission_rpm"),
+    ("router_outgoing_rps",     "router_outgoing_rpm"),
+    ("sidecar_received_rps",    "sidecar_received_rpm"),
+    ("sidecar_completed_rps",   "sidecar_completed_rpm"),
+    ("derived_rps",             "derived_rpm"),
+    # token throughput: incoming = prompt/prefill, outgoing = generated/decode
+    ("prefill_tokens_per_sec",  "prefill_tokens_per_min"),
+    ("gen_tokens_per_sec",      "gen_tokens_per_min"),
+]
+
 _INF = float("inf")
 
 
@@ -397,6 +414,10 @@ def build_tick(
 
         rec["gen_tokens_per_sec"] = crate("vllm:generation_tokens_total")
         rec["prefill_tokens_per_sec"] = crate("vllm:prompt_tokens_total")
+        # Cumulative (all-time) token counters, so incoming/outgoing token
+        # throughput can be re-windowed retrospectively (not just the rate above).
+        rec["generation_tokens_total"] = counters["vllm:generation_tokens_total"].get(key)
+        rec["prompt_tokens_total"] = counters["vllm:prompt_tokens_total"].get(key)
         rec["request_success_per_sec"] = crate("vllm:request_success_total")
         # Cumulative (all-time) finished-request counter, summed across the
         # finished_reason label by _group_counter. Matches the internal
@@ -436,6 +457,13 @@ def build_tick(
                 derived_rps = succ + net_queue_growth
                 rec["net_queue_growth_per_sec"] = net_queue_growth
         rec["derived_rps"] = derived_rps
+
+        # Per-minute companions for every request-rate field (rpm = rps * 60,
+        # same 30s window, just a unit conversion for convenience/reporting).
+        for _rps_field, _rpm_field in _RPM_FIELDS:
+            _v = rec.get(_rps_field)
+            if _rps_field in rec:
+                rec[_rpm_field] = (_v * 60.0) if _v is not None else None
 
         # histograms (avg + percentiles), TTFT first
         for base, prefix, avg_field in HISTOGRAMS:
