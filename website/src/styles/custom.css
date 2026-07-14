@@ -1,0 +1,47 @@
+/* LA-Boom brand accents for Starlight (energetic orange -> magenta "boom"). */
+:root {
+  --sl-color-accent-low: #3a1508;
+  --sl-color-accent: #ff5a2c;
+  --sl-color-accent-high: #ffc9ab;
+
+  --laboom-grad: linear-gradient(120deg, #ff7a18 0%, #ff3d54 55%, #d6006e 100%);
+}
+
+:root[data-theme="light"] {
+  --sl-color-accent-low: #ffe1d2;
+  --sl-color-accent: #e6431d;
+  --sl-color-accent-high: #7a1e05;
+}
+
+/* Splash hero: give the tagline the brand gradient. */
+.hero h1 {
+  background: var(--laboom-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.hero .tagline {
+  max-width: 46ch;
+}
+
+/* Landing feature cards: subtle lift + accent top border. */
+.laboom-grid .card {
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+.laboom-grid .card:hover {
+  transform: translateY(-2px);
+  border-color: var(--sl-color-accent);
+}
+
+/* Tables in dense reference docs read better a touch smaller. */
+.sl-markdown-content table {
+  font-size: var(--sl-text-sm);
+}
+
+/* Mermaid diagrams: center and add breathing room. */
+.mermaid {
+  display: flex;
+  justify-content: center;
+  margin: 1.5rem 0;
+}

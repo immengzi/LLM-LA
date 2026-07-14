@@ -1,0 +1,23 @@
+{
+  "name": "la-boom-website",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Project website (landing + docs) for LA-Boom, built with Astro + Starlight.",
+  "scripts": {
+    "sync": "node scripts/sync-docs.mjs",
+    "predev": "node scripts/sync-docs.mjs",
+    "dev": "astro dev",
+    "prebuild": "node scripts/sync-docs.mjs",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.34.8",
+    "astro": "^5.18.2",
+    "astro-mermaid": "^1.4.0",
+    "mermaid": "^11.16.0",
+    "sharp": "^0.33.5"
+  }
+}

@@ -1,0 +1,157 @@
+---
+title: LA-Boom
+description: KV-aware load balancing and benchmarking for vLLM on Kubernetes. Route for cache reuse, not round-robin — then prove it with reproducible sweeps.
+template: splash
+hero:
+  tagline: "KV-aware load balancing and benchmarking for vLLM — at cluster scale. Route for cache reuse, not round-robin. Then prove it with reproducible sweeps."
+  image:
+    file: ../../assets/logo.svg
+  # NOTE: Starlight does not prepend the configured `base` to hero action links,
+  # so the base (/llm-la) is included explicitly here. Keep in sync with
+  # site.config.mjs BASE if it ever changes.
+  actions:
+    - text: Quickstart
+      link: /llm-la/getting-started/quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: Architecture
+      link: /llm-la/architecture/overview/
+      icon: open-book
+      variant: secondary
+    - text: View on GitHub
+      link: https://github.com/LA-Boom/llm-la
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from "@astrojs/starlight/components";
+
+**LA-Boom is a distributed serving platform for vLLM on Kubernetes** — a KV-,
+length-, and SLO-aware router with per-pod sidecars wrapped around unmodified
+vLLM, deployed by a single Helm chart. Route for cache reuse, autoscale per
+model, and front it with a gateway for auth and spend. It ships with a
+reproducible benchmark harness so you can prove which routing strategy wins,
+apples-to-apples.
+
+> **The one-liner:** vLLM's prefix cache makes _where_ a request lands matter
+> enormously. Round-robin throws that away. LA-Boom doesn't.
+
+## Key capabilities
+
+<div class="laboom-grid">
+<CardGrid stagger>
+  <Card title="KV-aware routing" icon="random">
+    Scores every queued request against each replica's *live* KV-block ownership
+    and places it for maximum prefix reuse — higher hit rates, lower TTFT.
+  </Card>
+  <Card title="Length & SLO aware" icon="seti:clock">
+    Short-first / long-first batching and slack-based deadline scheduling are
+    first-class levers, not an afterthought.
+  </Card>
+  <Card title="Kubernetes-native, one chart" icon="rocket">
+    Router, sidecars, Redis, vLLM, gateways, and per-model KEDA autoscaling all
+    deploy from the `vllm-kv-stack` Helm chart — no engine fork.
+  </Card>
+  <Card title="Reproducible benchmarks" icon="approve-check">
+    An open-loop load generator plus automated Helm sweeps that archive
+    per-request logs, Prometheus metrics, and rendered manifests.
+  </Card>
+  <Card title="Serve at scale" icon="setting">
+    Many models per cluster; multi-node data + expert parallel via
+    LeaderWorkerSet; cross-node KV transfer via Mooncake / LMCache.
+  </Card>
+  <Card title="Gateways & observability" icon="open-book">
+    BooM (Rust) and LiteLLM gateways for auth, virtual keys, and spend;
+    Prometheus metrics and per-request tracing.
+  </Card>
+</CardGrid>
+</div>
+
+## Architecture
+
+The router holds a central queue and either **pulls** work to sidecars on demand
+(capacity-gated, the default) or **pushes** it proactively. Sidecars subscribe to
+vLLM's ZMQ KV events and record block ownership in Redis; the router watches
+Redis to build a live `block hash → replica` map for prefix-aware placement.
+
+```mermaid
+flowchart TB
+  subgraph clients [Clients]
+    Bench["Benchmark harness"]
+    App["Apps / Claude Code"]
+  end
+  subgraph gw [Gateways optional]
+    BooM["BooM (Rust)"]
+    LiteLLM["LiteLLM (Python)"]
+  end
+  Router["Router :8080<br/>KV + length + SLO scheduling<br/>inline KV-block hashing"]
+  Redis[("Redis<br/>KV block ownership")]
+  subgraph serving [vLLM fleet]
+    direction LR
+    SA["Sidecar :9000"] --> VA["vLLM :8200"]
+    SB["Sidecar :9000"] --> VB["vLLM :8200"]
+  end
+  App --> BooM --> Router
+  App --> LiteLLM --> Router
+  Bench --> Router
+  Router -->|"pull / push"| SA
+  Router -->|"pull / push"| SB
+  Router -->|"lookup owners"| Redis
+  SA -->|"ZMQ kv@ events"| Redis
+  SB -->|"ZMQ kv@ events"| Redis
+```
+
+## Quickstart
+
+```bash
+# 1. One-time: create the model PV/PVC
+helm upgrade --install vllm ./src/core/vllm-kv-stack -n vllm --create-namespace \
+  --set modelVolume.create=true --set modelVolume.modelSubPath=placeholder
+
+# 2. Deploy the platform (vLLM + sidecar) for a model
+python src/client/deploy_vllm.py --config configs/router-tp8-glm.yaml
+
+# 3. Send some load (via the benchmark harness)
+python src/client/main.py --config router --n 500
+```
+
+## Compatibility
+
+LA-Boom is a routing/benchmark layer around **unmodified vLLM**, so it inherits
+vLLM's model support and adds Kubernetes-native wiring on top.
+
+| Area | Works with | Notes |
+|------|-----------|-------|
+| Inference engine | **vLLM** (OpenAI-compatible) | Router + sidecar wrap stock vLLM; no engine fork |
+| KV transfer | **Mooncake** (default), **LMCache** P2P | Switch via `lmcache.mode: mooncake \| p2p` |
+| Parallelism | **TP**, **DP** + **EP** for MoE | DP/EP via LeaderWorkerSet (e.g. GLM-5 TP8+DP) |
+| Orchestration | **Kubernetes 1.28+**, **Helm 3.12+** | Deploy/sweep via the `vllm-kv-stack` chart |
+| Autoscaling | **KEDA** | Per-model, opt-in, on queue or KV-cache signals |
+| Gateways / auth | **BooM** (Rust), **LiteLLM** (Python) | Virtual keys, rate limiting, spend tracking |
+| Clients | **OpenAI API**, **Claude Code** | Anthropic-style access via BooM / LiteLLM |
+| Models (validated) | GLM-5, MiniMax-M2, Qwen3 | Any vLLM-supported model works |
+
+## Jump in by role
+
+<CardGrid>
+  <LinkCard
+    title="New here?"
+    description="Deploy the stack and run your first experiment end-to-end."
+    href={import.meta.env.BASE_URL + "getting-started/quickstart/"}
+  />
+  <LinkCard
+    title="Understand the design"
+    description="Architecture overview, router strategies, and the KV cache flow."
+    href={import.meta.env.BASE_URL + "architecture/overview/"}
+  />
+  <LinkCard
+    title="Benchmark & analyze"
+    description="The load generator, automated Helm sweeps, and captured artifacts."
+    href={import.meta.env.BASE_URL + "benchmarking/harness/"}
+  />
+  <LinkCard
+    title="Operate a cluster"
+    description="Cluster setup, registry, autoscaling, and disaster recovery."
+    href={import.meta.env.BASE_URL + "operations/cluster-setup/"}
+  />
+</CardGrid>

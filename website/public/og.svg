@@ -1,0 +1,20 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="630" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#1a1030"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="80" y1="200" x2="260" y2="380" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff7a18"/>
+      <stop offset="0.55" stop-color="#ff3d54"/>
+      <stop offset="1" stop-color="#d6006e"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <g transform="translate(90,215) scale(5)">
+    <path fill="url(#mark)" d="M20 1.5l3.6 7.4 8-2.4-2.4 8 7.4 3.6-7.4 3.6 2.4 8-8-2.4L20 38.5l-3.6-7.4-8 2.4 2.4-8L3.4 21.7l7.4-3.6-2.4-8 8 2.4L20 1.5z"/>
+  </g>
+  <text x="330" y="300" font-family="system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif" font-size="96" font-weight="800" fill="#ffffff">LA-Boom</text>
+  <text x="332" y="372" font-family="system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif" font-size="34" font-weight="500" fill="#c9d1d9">KV-aware load balancing &amp; benchmarking</text>
+  <text x="332" y="418" font-family="system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif" font-size="34" font-weight="500" fill="#c9d1d9">for vLLM on Kubernetes</text>
+</svg>
