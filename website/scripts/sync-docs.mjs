@@ -26,6 +26,10 @@ const REPO_ROOT = path.resolve(WEBSITE_DIR, "..");
 const DOCS_SRC = path.join(REPO_ROOT, "docs");
 const OUT_DIR = path.join(WEBSITE_DIR, "src", "content", "docs");
 
+// "" when BASE is root ("/"), else the base without a trailing slash (e.g.
+// "/llm-la"). Used to build base-absolute in-tree links without double slashes.
+const BASE_HREF = BASE === "/" ? "" : BASE.replace(/\/+$/, "");
+
 // Section directories (mirrors docs/) that this script fully owns/regenerates.
 // Hand-authored files at the docs root (e.g. index.mdx) are never touched.
 const SECTION_DIRS = [
@@ -198,10 +202,10 @@ function rewriteLink(url, currentDocsRel) {
 
   if (targetRepo.startsWith("docs/")) {
     const docsRel = targetRepo.slice("docs/".length);
-    if (docsRel.toLowerCase() === "readme.md") return `${BASE}/${frag}`;
+    if (docsRel.toLowerCase() === "readme.md") return `${BASE_HREF}/${frag}`;
     if (targetRepo.toLowerCase().endsWith(".md")) {
       const slug = slugFor(docsRel.toLowerCase());
-      return `${BASE}/${slug}/${frag}`.replace(/([^:])\/\/+/g, "$1/");
+      return `${BASE_HREF}/${slug}/${frag}`;
     }
     // In-tree directory or non-page file -> GitHub source.
     return endsWithSlash || !looksLikeFile

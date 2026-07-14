@@ -6,16 +6,17 @@ hero:
   tagline: "KV-aware load balancing and benchmarking for vLLM — at cluster scale. Route for cache reuse, not round-robin. Then prove it with reproducible sweeps."
   image:
     file: ../../assets/logo.svg
-  # NOTE: Starlight does not prepend the configured `base` to hero action links,
-  # so the base (/llm-la) is included explicitly here. Keep in sync with
-  # site.config.mjs BASE if it ever changes.
+  # NOTE: Starlight does not prepend the configured `base` to hero action links.
+  # BASE is currently "/" (private Pages served at the subdomain root), so links
+  # are root-absolute. If you switch to public project Pages, prefix these with
+  # the base (e.g. /llm-la/...) to match site.config.mjs BASE.
   actions:
     - text: Quickstart
-      link: /llm-la/getting-started/quickstart/
+      link: /getting-started/quickstart/
       icon: right-arrow
       variant: primary
     - text: Architecture
-      link: /llm-la/architecture/overview/
+      link: /architecture/overview/
       icon: open-book
       variant: secondary
     - text: View on GitHub
