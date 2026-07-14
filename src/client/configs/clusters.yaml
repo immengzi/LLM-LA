@@ -35,7 +35,7 @@ clusters:
         images.mooncakeMaster: "quay.io/ascend/vllm-ascend:glm5-openeuler"
         boom.image: "boom-gateway:v4"
         router.imagePullPolicy: "Always"
-        sidecar.imagePullPolicy: "IfNotPresent"
+        sidecar.imagePullPolicy: "Always"
         boom.imagePullPolicy: "Always"
         cpuHash.ascendDriverMounts: false
         pin.enabled: true
@@ -84,7 +84,7 @@ clusters:
         images.mooncakeMaster: "quay.io/ascend/vllm-ascend:glm5-openeuler"
         boom.image: "boom-gateway:v5"
         router.imagePullPolicy: "Always"
-        sidecar.imagePullPolicy: "IfNotPresent"
+        sidecar.imagePullPolicy: "Always"
         boom.imagePullPolicy: "Always"
         cpuHash.ascendDriverMounts: true
         pin.enabled: true

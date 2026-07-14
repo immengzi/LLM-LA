@@ -56,6 +56,10 @@ images:
 sidecar:
   enabled: true     # set false in boom direct mode (no router/sidecar needed)
   logLevel: info    # debug | info | warning | error
+  # Always re-pull the sidecar image. Needed because the image ships as a
+  # mutable :latest tag — IfNotPresent would keep a stale cached copy on the
+  # node after a rebuild. Mirrors the router's default.
+  imagePullPolicy: Always
   # Extra items to buffer beyond BATCH_SIZE (pull_cap = BATCH_SIZE + PREFETCH).
   # Workers = BATCH_SIZE + PREFETCH, extras queue inside vLLM's internal scheduler.
   # Control via sweep method --set sidecar.prefetch=N.
