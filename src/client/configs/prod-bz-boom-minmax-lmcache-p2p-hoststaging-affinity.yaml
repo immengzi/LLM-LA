@@ -98,6 +98,39 @@ generation:
 output_log_mode: "summary"
 print_trace: false
 
+# Poll the router /latency_log ring -> router_logs.json, and run the end-of-run
+# authoritative join so logs.json carries the serving endpoint + prefix/KV-hit
+# fields. Required for logs_full.json below.
+collect_router_log: true
+# Also emit logs_full.json: a SUPERSET of logs.json that additionally carries the
+# full request body + the prefix block-hash list (pulled from router_logs.json).
+# logs.json stays lean (no body, no bulky block-hash list); logs_full.json is the
+# heavy twin for deep prefix/content analysis. Needs router_log_request_body +
+# router_log_block_hashes on the router (set in helm: below).
+emit_logs_full: true
+
+# Live Redis KV-block ownership snapshot -> separate file redis_kv_watch.jsonl.
+# Each tick SCANs <model>:kvblock:* and dumps the FULL block-hash -> owner-pods
+# map plus aggregate ownership/sharing counts. Caps raised past the live key
+# count so nothing is truncated. snapshot_mode: delta keeps the file small at a
+# 2s cadence -- each tick records only blocks added/changed/removed vs the prior
+# scan (the mostly-static map is NOT rewritten every tick), with a full baseline
+# on tick 1 and every snapshot_full_every_n_ticks (150 @ 2s = ~5 min).
+# Reconstruct full state at any tick = last baseline + replayed deltas. interval
+# 2s tracks KV ownership churn closely (near the Prometheus scrape cadence);
+# only blocks created AND evicted within the same 2s window slip through. Each
+# tick logs scan_s -- headroom toward the 0.5s floor if it stays well under 2s.
+# node_ip empty -> derived from router_url host; port = Redis NodePort.
+redis_watch:
+  enabled: true
+  interval_s: 2.0
+  snapshot_mode: "delta"
+  snapshot_full_every_n_ticks: 150
+  snapshot_max_blocks: 1000000
+  max_keys: 1000000
+  scan_count: 1000
+  port: 30079
+
 metrics:
   enabled: true
   scrape_interval_s: 1.0
@@ -145,11 +178,12 @@ helm:
   router_strip_cch: "1"
   router_log_block_hashes: true
   router_measure_prefix: true
-  # Optionally store each request's full body (messages + sampling params) under
-  # "request_body" in the /latency_log ring, so prod_latency_collector.py logs
-  # the requests themselves. Bounded ring (auto-evicts); max_bytes caps each
-  # body (0 = unlimited). Disabled for now — flip to true to capture bodies again.
-  router_log_request_body: false
+  # Store each request's full body (messages + sampling params) under
+  # "request_body" in the /latency_log ring -> router_logs.json. ON: this deploy
+  # runs in "full request" capture mode. The body is NOT copied into the lean
+  # logs.json; it is written only to logs_full.json (client emit_logs_full=true
+  # above). Bounded ring (auto-evicts); max_bytes caps each body (0 = unlimited).
+  router_log_request_body: true
   router_log_request_body_max_bytes: 16384
   router_affinity_mode: "hard"
   # Redis-backed persistent affinity map: the conversation→pod map is persisted

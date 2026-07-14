@@ -23,9 +23,15 @@ Usage:
 Output (in <experiments_root>/<N>/):
     config.json           - collector settings + start time
     logs.json             - NDJSON, one line per request (same schema as load_runner);
-                            streamed LIVE during the run (standard primary artifact)
+                            streamed LIVE during the run (standard primary artifact).
+                            Made LEAN at shutdown when --emit-logs-full (no request
+                            body, no block-hash list) to match client sweeps.
+    logs_full.json        - superset of logs.json + full request body + block hashes
+                            (written on shutdown; --emit-logs-full, on by default)
     router_logs.json      - router /latency_log truth; mirrored from logs.json at
                             shutdown for backward-compat (client runs ship both)
+    redis_kv_watch.jsonl  - Redis KV-block ownership snapshots (--redis-watch, on by
+                            default; delta mode). Best-effort: skipped if unreachable.
     run_summary.json      - written on shutdown with total counts and wall time
     metrics.jsonl         - optional: periodic Prometheus histogram snapshots
     endpoint_tokens.json  - per-endpoint token rollup (written on shutdown)
@@ -54,11 +60,20 @@ _DEFAULT_EXPERIMENTS_ROOT = os.environ.get("EXPERIMENTS_ROOT") or str(
     Path(__file__).resolve().parent / "experiments"
 )
 
+from urllib.parse import urlparse
+
 from router_log_collector import (
     RouterLogCollector,
     join_logs_with_router,
     summarize_routing,
 )
+
+# Optional Redis KV-block ownership watcher (writes redis_kv_watch.jsonl), same
+# module the client (main.py) uses so external observation ships the same artifact.
+try:
+    from redis_watch import RedisKVWatcher
+except Exception:  # pragma: no cover - best-effort
+    RedisKVWatcher = None  # type: ignore
 
 
 # ============================================================
@@ -504,6 +519,42 @@ def main():
                         help="Disable container log capture")
     parser.add_argument("--pod-log-namespace", default=None,
                         help="Namespace to capture container logs from (default: --namespace or 'vllm')")
+
+    # logs_full.json: lean logs.json + full request body + block hashes (matches
+    # the client's emit_logs_full). On by default; logs.json is made lean.
+    parser.add_argument("--emit-logs-full", dest="emit_logs_full",
+                        action="store_true", default=True,
+                        help="Also write logs_full.json (full request body + block hashes); "
+                             "logs.json is kept lean. Default: on")
+    parser.add_argument("--no-logs-full", dest="emit_logs_full", action="store_false",
+                        help="Do not split logs; keep the full router truth in logs.json only")
+
+    # Redis KV-block ownership watcher -> redis_kv_watch.jsonl (same as the client).
+    parser.add_argument("--redis-watch", dest="redis_watch",
+                        action="store_true", default=True,
+                        help="Watch Redis KV-block ownership -> redis_kv_watch.jsonl. Default: on "
+                             "(best-effort: skipped if redis unreachable)")
+    parser.add_argument("--no-redis-watch", dest="redis_watch", action="store_false",
+                        help="Disable the Redis KV-block ownership watcher")
+    parser.add_argument("--redis-host", default=None,
+                        help="Redis host (default: derived from --router-url host)")
+    parser.add_argument("--redis-port", type=int, default=30079,
+                        help="Redis port / NodePort (default: 30079)")
+    parser.add_argument("--redis-db", type=int, default=0, help="Redis DB (default: 0)")
+    parser.add_argument("--redis-password", default=None, help="Redis password (default: none)")
+    parser.add_argument("--redis-model", default="served-model-minmax",
+                        help="Model key prefix for <model>:kvblock:* (default: served-model-minmax)")
+    parser.add_argument("--redis-interval", type=float, default=2.0,
+                        help="Seconds between Redis scans (default: 2.0)")
+    parser.add_argument("--redis-snapshot-mode", default="delta", choices=["full", "delta"],
+                        help="Block-map write mode: delta (small, replay from baselines) or full "
+                             "(rewrite whole map each tick). Default: delta")
+    parser.add_argument("--redis-snapshot-full-every-n", type=int, default=150,
+                        help="Delta mode: re-emit a full baseline every N ticks (default: 150)")
+    parser.add_argument("--redis-snapshot-max-blocks", type=int, default=1000000,
+                        help="Cap on block-hash entries per baseline/full dump (default: 1000000)")
+    parser.add_argument("--redis-max-keys", type=int, default=1000000,
+                        help="Cap on Redis keys scanned per tick (default: 1000000)")
     args = parser.parse_args()
 
     router_url = args.router_url.rstrip("/")
@@ -536,14 +587,30 @@ def main():
     # observation mode logs.json IS the router truth (endpoint + prefix/KV fields),
     # so it exists LIVE during the run, just like client sweeps. router_logs.json
     # is mirrored at shutdown for backward-compat (client runs ship both).
+    #
+    # With --emit-logs-full we run the collector as a DUAL live stream (matches
+    # client sweeps): the FULL record (request body + block hashes) streams into
+    # logs_full.json and a LEAN copy streams into logs.json -- both live, so a
+    # hard kill still leaves logs.json lean and logs_full.json complete (no
+    # shutdown rewrite needed). Without it, logs.json is the single full stream.
     logs_path = exp_dir / "logs.json"
     router_logs_path = exp_dir / "router_logs.json"
-    collector = RouterLogCollector(
-        router_url=router_url,
-        out_path=logs_path,
-        poll_interval_s=args.poll_interval,
-        batch_size=args.batch_size,
-    )
+    logs_full_path = exp_dir / "logs_full.json"
+    if args.emit_logs_full:
+        collector = RouterLogCollector(
+            router_url=router_url,
+            out_path=logs_full_path,   # full (request body + block hashes), live
+            lean_out_path=logs_path,   # lean logs.json, live
+            poll_interval_s=args.poll_interval,
+            batch_size=args.batch_size,
+        )
+    else:
+        collector = RouterLogCollector(
+            router_url=router_url,
+            out_path=logs_path,
+            poll_interval_s=args.poll_interval,
+            batch_size=args.batch_size,
+        )
 
     # Optional metrics.jsonl
     metrics_fh = None
@@ -564,6 +631,40 @@ def main():
     collector.start()
     print(f"[collector] polling {latency_url} every {args.poll_interval}s")
     print(f"[collector] press Ctrl+C to stop and write summary")
+
+    # Redis KV-block ownership watcher -> <exp_dir>/redis_kv_watch.jsonl (same
+    # module + artifact as the client). Best-effort: warns and continues if the
+    # redis package is missing or the host is unreachable.
+    redis_watcher = None
+    if args.redis_watch:
+        if RedisKVWatcher is None:
+            print("[collector] redis-watch requested but redis_watch.py unavailable; skipping.")
+        else:
+            redis_host = args.redis_host
+            if not redis_host:
+                try:
+                    redis_host = urlparse(router_url).hostname or "127.0.0.1"
+                except Exception:
+                    redis_host = "127.0.0.1"
+            try:
+                redis_watcher = RedisKVWatcher(
+                    out_path=exp_dir / "redis_kv_watch.jsonl",
+                    host=redis_host,
+                    port=args.redis_port,
+                    model=args.redis_model,
+                    db=args.redis_db,
+                    password=args.redis_password,
+                    interval_s=args.redis_interval,
+                    max_keys=args.redis_max_keys,
+                    snapshot_max_blocks=args.redis_snapshot_max_blocks,
+                    snapshot_mode=args.redis_snapshot_mode,
+                    snapshot_full_every_n_ticks=args.redis_snapshot_full_every_n,
+                )
+                if not redis_watcher.start():
+                    redis_watcher = None
+            except Exception as e:
+                print(f"[collector] WARN: failed to start redis watcher: {e}")
+                redis_watcher = None
 
     # Container log capture (vLLM/router/sidecar) -> <exp_dir>/vllm-logs/
     pod_log_streamer = None
@@ -602,6 +703,12 @@ def main():
 
     # ---- Shutdown: write summary files ----
     collector.stop()
+    if redis_watcher is not None:
+        try:
+            redis_watcher.stop()
+            print("[collector] redis watcher stopped")
+        except Exception as e:
+            print(f"[collector] WARN: failed to stop redis watcher: {e}")
     if pod_log_streamer is not None:
         try:
             pod_log_streamer.stop()
@@ -612,33 +719,67 @@ def main():
 
     dt_wall = time.time() - t_start
 
-    # logs.json is the live router truth (pure-observation mode). Mirror it to
-    # router_logs.json for backward-compat (client runs ship both), then run the
-    # authoritative join (idempotent: it just re-attaches the router fields), so
-    # external runs match client runs.
     all_records: List[Dict[str, Any]] = []
-    try:
-        with logs_path.open("r", encoding="utf-8") as fin, \
-                router_logs_path.open("w", encoding="utf-8") as fout:
-            for line in fin:
-                line = line.rstrip("\n")
-                if not line.strip():
-                    continue
-                fout.write(line + "\n")
-                try:
-                    all_records.append(json.loads(line))
-                except Exception:
-                    continue
-    except FileNotFoundError:
-        logs_path.write_text("", encoding="utf-8")
-        router_logs_path.write_text("", encoding="utf-8")
-
     routing_summary = None
-    try:
-        join_logs_with_router(logs_path, router_logs_path)
-        routing_summary = summarize_routing(logs_path)
-    except Exception as e:
-        print(f"[collector] WARN: routing join/summary failed: {e}")
+
+    if args.emit_logs_full:
+        # Dual-stream mode: logs.json (lean) and logs_full.json (full) were both
+        # written LIVE by the collector. Mirror the full stream to router_logs.json
+        # for backward-compat (client runs ship it), and read the lean logs.json
+        # for the token rollup + routing summary. No join needed: each record was
+        # built straight from the router truth, so logs.json is already enriched.
+        try:
+            if logs_full_path.is_file():
+                with logs_full_path.open("r", encoding="utf-8") as fin, \
+                        router_logs_path.open("w", encoding="utf-8") as fout:
+                    for line in fin:
+                        line = line.rstrip("\n")
+                        if line.strip():
+                            fout.write(line + "\n")
+            else:
+                router_logs_path.write_text("", encoding="utf-8")
+        except Exception as e:
+            print(f"[collector] WARN: could not mirror router_logs.json: {e}")
+        try:
+            if logs_path.is_file():
+                with logs_path.open("r", encoding="utf-8") as fin:
+                    for line in fin:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            all_records.append(json.loads(line))
+                        except Exception:
+                            continue
+            else:
+                logs_path.write_text("", encoding="utf-8")
+            routing_summary = summarize_routing(logs_path)
+        except Exception as e:
+            print(f"[collector] WARN: routing summary failed: {e}")
+    else:
+        # Single-stream mode: logs.json is the live full router truth. Mirror it to
+        # router_logs.json for backward-compat, then run the authoritative join
+        # (idempotent: re-attaches the router fields) so it matches client runs.
+        try:
+            with logs_path.open("r", encoding="utf-8") as fin, \
+                    router_logs_path.open("w", encoding="utf-8") as fout:
+                for line in fin:
+                    line = line.rstrip("\n")
+                    if not line.strip():
+                        continue
+                    fout.write(line + "\n")
+                    try:
+                        all_records.append(json.loads(line))
+                    except Exception:
+                        continue
+        except FileNotFoundError:
+            logs_path.write_text("", encoding="utf-8")
+            router_logs_path.write_text("", encoding="utf-8")
+        try:
+            join_logs_with_router(logs_path, router_logs_path)
+            routing_summary = summarize_routing(logs_path)
+        except Exception as e:
+            print(f"[collector] WARN: routing join/summary failed: {e}")
 
     # endpoint_tokens.json
     try:

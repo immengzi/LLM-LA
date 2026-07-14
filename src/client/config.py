@@ -175,6 +175,18 @@ class RedisWatchConfig:
     # Per-tick KV-cache snapshot: dump up to this many block-hash -> owner-pods
     # entries alongside the summary counts (0 disables the block-level detail).
     snapshot_max_blocks: int = 200
+    # Block-level snapshot write mode:
+    #   "full"  -> rewrite the whole (bounded) map every tick (bulky: file grows
+    #              as map_size x ticks; a short interval_s blows this up).
+    #   "delta" -> write only blocks added/changed/removed vs the previous tick;
+    #              the first tick + every snapshot_full_every_n_ticks tick are
+    #              full baselines. Same fidelity as "full" at a fraction of the
+    #              size (grows with churn, not total size). Reconstruct full state
+    #              by replaying deltas from the last baseline.
+    snapshot_mode: str = "full"
+    # In "delta" mode, re-emit a full baseline every N ticks (0 = only the first
+    # tick is a baseline). Periodic baselines bound replay cost and self-heal.
+    snapshot_full_every_n_ticks: int = 0
 
 
 # =========================
@@ -909,6 +921,14 @@ class ClientConfig:
     collect_router_log: bool = False
     router_log_url: str = ""
 
+    # When true (requires collect_router_log): in addition to the lean logs.json,
+    # also write logs_full.json — a SUPERSET that carries every logs.json field
+    # PLUS the full request body and the prefix block-hash list, pulled from the
+    # router truth (router_logs.json). logs.json itself stays body-free. Requires
+    # router_log_request_body (bodies) / router_log_block_hashes (hashes) on the
+    # router so those fields exist to copy in. Off by default (backward compatible).
+    emit_logs_full: bool = False
+
     # Metrics
     metrics: PrometheusMetricsConfig = field(default_factory=PrometheusMetricsConfig)
 
@@ -1131,6 +1151,7 @@ def load_config(path: str) -> ClientConfig:
     collect_vllm_logs = bool(raw.get("collect_vllm_logs", ClientConfig.collect_vllm_logs))
     collect_router_log = bool(raw.get("collect_router_log", ClientConfig.collect_router_log))
     router_log_url = str(raw.get("router_log_url", ClientConfig.router_log_url) or "")
+    emit_logs_full = bool(raw.get("emit_logs_full", ClientConfig.emit_logs_full))
 
     # -----------------------------
     # Normalize router transport
@@ -1332,6 +1353,17 @@ def load_config(path: str) -> ClientConfig:
             redis_watch.snapshot_max_blocks = max(0, int(redis_watch.snapshot_max_blocks))
         except Exception:
             redis_watch.snapshot_max_blocks = 200
+        redis_watch.snapshot_mode = (
+            str(getattr(redis_watch, "snapshot_mode", "full") or "full").strip().lower()
+        )
+        if redis_watch.snapshot_mode not in ("full", "delta"):
+            redis_watch.snapshot_mode = "full"
+        try:
+            redis_watch.snapshot_full_every_n_ticks = max(
+                0, int(redis_watch.snapshot_full_every_n_ticks)
+            )
+        except Exception:
+            redis_watch.snapshot_full_every_n_ticks = 0
 
     # Shadow deployment overrides (top-level keys)
     vllm_node_selector = raw.get("vllm_node_selector", None)
@@ -1361,6 +1393,7 @@ def load_config(path: str) -> ClientConfig:
         collect_vllm_logs=collect_vllm_logs,
         collect_router_log=collect_router_log,
         router_log_url=router_log_url,
+        emit_logs_full=emit_logs_full,
         metrics=metrics,
         redis_watch=redis_watch,
         transport=transport,
