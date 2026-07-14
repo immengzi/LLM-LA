@@ -193,6 +193,13 @@ spec:
                 {{- if $.Values.lmcache.enabled }}
                 sed -e "s/__LOCAL_HOSTNAME__/${NODE_IP}/" -e "s/__P2P_HOST__/${NODE_IP}/" -e "s/__LMCACHE_INSTANCE_ID__/${POD_NAME}/" /etc/lmcache/lmcache_config.yaml > /tmp/lmcache_config.yaml
                 export LMCACHE_CONFIG_FILE="/tmp/lmcache_config.yaml"
+                # LMCache runs in worker processes separate from the vLLM API server.
+                # In vLLM v1 their prometheus series only fold into /metrics when BOTH
+                # share the same PROMETHEUS_MULTIPROC_DIR (LMCache issue #621). Pin it
+                # (and wipe stale shards on restart) so lmcache: metrics show up on
+                # :8200/metrics and get scraped by the vllm ServiceMonitor.
+                export PROMETHEUS_MULTIPROC_DIR=/tmp/lmcache_prometheus
+                rm -rf "${PROMETHEUS_MULTIPROC_DIR}" && mkdir -p "${PROMETHEUS_MULTIPROC_DIR}"
                 {{- if $.Values.lmcache.nds.enabled }}
                 mkdir -p {{ $.Values.lmcache.nds.path }}
                 export PYTHONPATH="{{ $xds }}:${PYTHONPATH:-}"
@@ -612,6 +619,13 @@ spec:
                 {{- if $.Values.lmcache.enabled }}
                 sed -e "s/__LOCAL_HOSTNAME__/${NODE_IP}/" -e "s/__P2P_HOST__/${NODE_IP}/" -e "s/__LMCACHE_INSTANCE_ID__/${POD_NAME}/" /etc/lmcache/lmcache_config.yaml > /tmp/lmcache_config.yaml
                 export LMCACHE_CONFIG_FILE="/tmp/lmcache_config.yaml"
+                # LMCache runs in worker processes separate from the vLLM API server.
+                # In vLLM v1 their prometheus series only fold into /metrics when BOTH
+                # share the same PROMETHEUS_MULTIPROC_DIR (LMCache issue #621). Pin it
+                # (and wipe stale shards on restart) so lmcache: metrics show up on
+                # :8200/metrics and get scraped by the vllm ServiceMonitor.
+                export PROMETHEUS_MULTIPROC_DIR=/tmp/lmcache_prometheus
+                rm -rf "${PROMETHEUS_MULTIPROC_DIR}" && mkdir -p "${PROMETHEUS_MULTIPROC_DIR}"
                 {{- if $.Values.lmcache.nds.enabled }}
                 mkdir -p {{ $.Values.lmcache.nds.path }}
                 export PYTHONPATH="{{ $xds }}:${PYTHONPATH:-}"
@@ -892,6 +906,13 @@ spec:
               {{- if $.Values.lmcache.enabled }}
               sed -e "s/__LOCAL_HOSTNAME__/${NODE_IP}/" -e "s/__P2P_HOST__/${NODE_IP}/" -e "s/__LMCACHE_INSTANCE_ID__/${POD_NAME}/" /etc/lmcache/lmcache_config.yaml > /tmp/lmcache_config.yaml
               export LMCACHE_CONFIG_FILE="/tmp/lmcache_config.yaml"
+              # LMCache runs in worker processes separate from the vLLM API server.
+              # In vLLM v1 their prometheus series only fold into /metrics when BOTH
+              # share the same PROMETHEUS_MULTIPROC_DIR (LMCache issue #621). Pin it
+              # (and wipe stale shards on restart) so lmcache: metrics show up on
+              # :8200/metrics and get scraped by the vllm ServiceMonitor.
+              export PROMETHEUS_MULTIPROC_DIR=/tmp/lmcache_prometheus
+              rm -rf "${PROMETHEUS_MULTIPROC_DIR}" && mkdir -p "${PROMETHEUS_MULTIPROC_DIR}"
               {{- if $.Values.lmcache.nds.enabled }}
               mkdir -p {{ $.Values.lmcache.nds.path }}
               export PYTHONPATH="{{ $xds }}:${PYTHONPATH:-}"

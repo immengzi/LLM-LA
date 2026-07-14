@@ -116,6 +116,54 @@ _METRICS_CATALOG = [
     ("ttft_seconds_avg",       "rate(vllm:time_to_first_token_seconds_sum[{w}]) / rate(vllm:time_to_first_token_seconds_count[{w}])",   "instance+engine"),
     ("tpot_seconds_avg",       "rate(vllm:time_per_output_token_seconds_sum[{w}]) / rate(vllm:time_per_output_token_seconds_count[{w}])", "instance+engine"),
     ("e2e_latency_seconds_avg","rate(vllm:e2e_request_latency_seconds_sum[{w}]) / rate(vllm:e2e_request_latency_seconds_count[{w}])",     "instance+engine"),
+    # --- LMCache (P2P host-staging); exposed on the same vLLM /metrics with the
+    #     lmcache: prefix. Answers whether the CPU host-staging + P2P tier serves
+    #     back prefixes the GPU (L0) cache evicted, or also collapses. Absent
+    #     (no series) on plain vLLM / when LMCache metric logging is disabled. ---
+    ("lmc_lookup_hit_rate_gauge",   "lmcache:lookup_hit_rate",   "instance+engine"),
+    ("lmc_retrieve_hit_rate_gauge", "lmcache:retrieve_hit_rate", "instance+engine"),
+    ("lmc_local_cache_usage_bytes",  "lmcache:local_cache_usage",  "instance+engine"),
+    ("lmc_remote_cache_usage_bytes", "lmcache:remote_cache_usage", "instance+engine"),
+    ("lmc_local_storage_usage_bytes","lmcache:local_storage_usage","instance+engine"),
+    ("lmc_active_memory_objs",       "lmcache:active_memory_objs_count",  "instance+engine"),
+    ("lmc_pinned_memory_objs",       "lmcache:pinned_memory_objs_count",  "instance+engine"),
+    ("lmc_local_cpu_hot_cache_count","lmcache:local_cpu_hot_cache_count", "instance+engine"),
+    ("lmc_is_healthy",               "lmcache:lmcache_is_healthy",        "instance+engine"),
+    ("lmc_kv_msg_queue_size",        "lmcache:kv_msg_queue_size",         "instance+engine"),
+    ("lmc_remote_put_task_num",      "lmcache:remote_put_task_num",       "instance+engine"),
+    ("lmc_storage_events_ongoing",   "lmcache:storage_events_ongoing_count",       "instance+engine"),
+    ("lmc_scheduler_unfinished_requests","lmcache:scheduler_unfinished_requests_count","instance+engine"),
+    # LMCache counter rates
+    ("lmc_retrieve_requests_per_sec","rate(lmcache:num_retrieve_requests[{w}])","instance+engine"),
+    ("lmc_store_requests_per_sec",   "rate(lmcache:num_store_requests[{w}])",   "instance+engine"),
+    ("lmc_lookup_requests_per_sec",  "rate(lmcache:num_lookup_requests[{w}])",  "instance+engine"),
+    ("lmc_requested_tokens_per_sec", "rate(lmcache:num_requested_tokens[{w}])", "instance+engine"),
+    ("lmc_hit_tokens_per_sec",       "rate(lmcache:num_hit_tokens[{w}])",       "instance+engine"),
+    ("lmc_stored_tokens_per_sec",    "rate(lmcache:num_stored_tokens[{w}])",    "instance+engine"),
+    ("lmc_lookup_tokens_per_sec",    "rate(lmcache:num_lookup_tokens[{w}])",    "instance+engine"),
+    ("lmc_lookup_hit_tokens_per_sec","rate(lmcache:num_lookup_hits[{w}])",      "instance+engine"),
+    ("lmc_vllm_hit_tokens_per_sec",  "rate(lmcache:num_vllm_hit_tokens[{w}])",  "instance+engine"),
+    ("lmc_cpu_evict_per_sec",        "rate(lmcache:local_cpu_evict_count[{w}])","instance+engine"),
+    ("lmc_cpu_evict_keys_per_sec",   "rate(lmcache:local_cpu_evict_keys_count[{w}])","instance+engine"),
+    ("lmc_cpu_evict_failed_per_sec", "rate(lmcache:local_cpu_evict_failed_count[{w}])","instance+engine"),
+    ("lmc_forced_unpin_per_sec",     "rate(lmcache:forced_unpin_count[{w}])",   "instance+engine"),
+    ("lmc_slow_retrieval_by_time_per_sec", "rate(lmcache:num_slow_retrieval_by_time[{w}])", "instance+engine"),
+    ("lmc_slow_retrieval_by_speed_per_sec","rate(lmcache:num_slow_retrieval_by_speed[{w}])","instance+engine"),
+    ("lmc_p2p_requests_per_sec",     "rate(lmcache:num_p2p_requests[{w}])",     "instance+engine"),
+    ("lmc_p2p_transferred_tokens_per_sec","rate(lmcache:num_p2p_transferred_tokens[{w}])","instance+engine"),
+    # LMCache cumulative counters, so hit rate / P2P volume can be re-windowed
+    ("lmc_num_lookup_hits_total",    "lmcache:num_lookup_hits",    "instance+engine"),
+    ("lmc_num_lookup_tokens_total",  "lmcache:num_lookup_tokens",  "instance+engine"),
+    ("lmc_num_hit_tokens_total",     "lmcache:num_hit_tokens",     "instance+engine"),
+    ("lmc_num_requested_tokens_total","lmcache:num_requested_tokens","instance+engine"),
+    ("lmc_num_p2p_transferred_tokens_total","lmcache:num_p2p_transferred_tokens","instance+engine"),
+    # LMCache histogram avgs
+    ("lmc_time_to_retrieve_avg","rate(lmcache:time_to_retrieve_sum[{w}]) / rate(lmcache:time_to_retrieve_count[{w}])","instance+engine"),
+    ("lmc_time_to_store_avg",   "rate(lmcache:time_to_store_sum[{w}]) / rate(lmcache:time_to_store_count[{w}])",      "instance+engine"),
+    ("lmc_retrieve_speed_avg",  "rate(lmcache:retrieve_speed_sum[{w}]) / rate(lmcache:retrieve_speed_count[{w}])",    "instance+engine"),
+    ("lmc_store_speed_avg",     "rate(lmcache:store_speed_sum[{w}]) / rate(lmcache:store_speed_count[{w}])",          "instance+engine"),
+    ("lmc_p2p_time_to_transfer_avg","rate(lmcache:p2p_time_to_transfer_sum[{w}]) / rate(lmcache:p2p_time_to_transfer_count[{w}])","instance+engine"),
+    ("lmc_p2p_transfer_speed_avg","rate(lmcache:p2p_transfer_speed_sum[{w}]) / rate(lmcache:p2p_transfer_speed_count[{w}])","instance+engine"),
     # --- Sidecar ---
     ("sidecar_queue_length",   "sidecar_queue_length",              "endpoint"),
     ("sidecar_received_rps",   "rate(sidecar_received_requests_total[{w}])", "endpoint"),
@@ -305,6 +353,22 @@ def _scrape_prometheus(prom_url: str, namespace: Optional[str] = None) -> Option
             rec["ext_prefix_cache_hit_rate"] = ext_hits / ext_queries
         else:
             rec["ext_prefix_cache_hit_rate"] = None
+
+        # LMCache token-level hit rates (windowed): did the CPU/P2P tier catch
+        # what the GPU (L0) prefix cache evicted?
+        lmc_lookup_tok = rec.get("lmc_lookup_tokens_per_sec")
+        lmc_lookup_hit = rec.get("lmc_lookup_hit_tokens_per_sec")
+        if lmc_lookup_tok and lmc_lookup_tok > 0 and lmc_lookup_hit is not None:
+            rec["lmc_lookup_hit_rate"] = lmc_lookup_hit / lmc_lookup_tok
+        else:
+            rec["lmc_lookup_hit_rate"] = None
+
+        lmc_req_tok = rec.get("lmc_requested_tokens_per_sec")
+        lmc_hit_tok = rec.get("lmc_hit_tokens_per_sec")
+        if lmc_req_tok and lmc_req_tok > 0 and lmc_hit_tok is not None:
+            rec["lmc_retrieve_hit_rate"] = lmc_hit_tok / lmc_req_tok
+        else:
+            rec["lmc_retrieve_hit_rate"] = None
 
     return {
         "ts": datetime.now(timezone.utc).isoformat(),

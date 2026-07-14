@@ -14,8 +14,8 @@
 
 # ── ACTIVE p2p host-staging deployments (uncomment the one you want to run) ──
 # BZ (this machine) — affinity, and its fair-pull variant:
-# prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
-#   - pull
+prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
+  - pull
 # prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity-fair:
 #   - pull
 #
@@ -40,49 +40,49 @@
 # out any block/line you want to skip.
 
 # ---- pull (vanilla) ----
-benchmark-bz-pull-none:
-  - pull
-benchmark-bz-pull-prefix:
-  - pull
-benchmark-bz-pull-affinity-hard:
-  - pull
-benchmark-bz-pull-affinity-soft:
-  - pull
-benchmark-bz-pull-both:
-  - pull
+# benchmark-bz-pull-none:
+#   - pull
+# benchmark-bz-pull-prefix:
+#   - pull
+# benchmark-bz-pull-affinity-hard:
+#   - pull
+# benchmark-bz-pull-affinity-soft:
+#   - pull
+# benchmark-bz-pull-both:
+#   - pull
 
 # ---- pull (rebalancing / fairness ON) ----
-benchmark-bz-pull-fair-none:
-  - pull
-benchmark-bz-pull-fair-prefix:
-  - pull
-benchmark-bz-pull-fair-affinity-hard:
-  - pull
-benchmark-bz-pull-fair-affinity-soft:
-  - pull
-benchmark-bz-pull-fair-both:
-  - pull
+# benchmark-bz-pull-fair-none:
+#   - pull
+# benchmark-bz-pull-fair-prefix:
+#   - pull
+# benchmark-bz-pull-fair-affinity-hard:
+#   - pull
+# benchmark-bz-pull-fair-affinity-soft:
+#   - pull
+# benchmark-bz-pull-fair-both:
+#   - pull
 
 # ---- central-push (vanilla) ----
-benchmark-bz-central-push-none:
-  - central-push
-benchmark-bz-central-push-prefix:
-  - central-push
-benchmark-bz-central-push-affinity-hard:
-  - central-push
-benchmark-bz-central-push-affinity-soft:
-  - central-push
-benchmark-bz-central-push-both:
-  - central-push
+# benchmark-bz-central-push-none:
+#   - central-push
+# benchmark-bz-central-push-prefix:
+#   - central-push
+# benchmark-bz-central-push-affinity-hard:
+#   - central-push
+# benchmark-bz-central-push-affinity-soft:
+#   - central-push
+# benchmark-bz-central-push-both:
+#   - central-push
 
 # ---- central-push (rebalancing / fairness ON) ----
-benchmark-bz-central-push-fair-none:
-  - central-push
-benchmark-bz-central-push-fair-prefix:
-  - central-push
-benchmark-bz-central-push-fair-affinity-hard:
-  - central-push
-benchmark-bz-central-push-fair-affinity-soft:
-  - central-push
-benchmark-bz-central-push-fair-both:
-  - central-push
+# benchmark-bz-central-push-fair-none:
+#   - central-push
+# benchmark-bz-central-push-fair-prefix:
+#   - central-push
+# benchmark-bz-central-push-fair-affinity-hard:
+#   - central-push
+# benchmark-bz-central-push-fair-affinity-soft:
+#   - central-push
+# benchmark-bz-central-push-fair-both:
+#   - central-push

@@ -113,6 +113,64 @@ HISTOGRAMS = [
     ("vllm:request_decode_time_seconds", "decode_time", "decode_time_seconds_avg"),
 ]
 
+# ------------------------------------------------------------
+# LMCache (P2P host-staging) metrics. Exposed on the SAME vLLM /metrics
+# endpoint with the ``lmcache:`` prefix when LMCache metric logging is
+# enabled; simply absent (no series) on plain vLLM or when disabled, in
+# which case every derived field below is None. Answers the question the
+# vLLM (L0/GPU) prefix-cache metrics can't: when the GPU cache evicts a
+# prefix, does LMCache's CPU host-staging + P2P tier serve it back, or
+# also collapse (forcing a full recompute -> TTFT spike)?
+# ------------------------------------------------------------
+LMCACHE_GAUGES = [
+    "lmcache:lookup_hit_rate",
+    "lmcache:retrieve_hit_rate",
+    "lmcache:local_cache_usage",
+    "lmcache:remote_cache_usage",
+    "lmcache:local_storage_usage",
+    "lmcache:active_memory_objs_count",
+    "lmcache:pinned_memory_objs_count",
+    "lmcache:local_cpu_hot_cache_count",
+    "lmcache:lmcache_is_healthy",
+    "lmcache:kv_msg_queue_size",
+    "lmcache:remote_put_task_num",
+    "lmcache:storage_events_ongoing_count",
+    "lmcache:scheduler_unfinished_requests_count",
+]
+
+LMCACHE_COUNTERS = [
+    "lmcache:num_retrieve_requests",
+    "lmcache:num_store_requests",
+    "lmcache:num_lookup_requests",
+    "lmcache:num_requested_tokens",
+    "lmcache:num_hit_tokens",
+    "lmcache:num_stored_tokens",
+    "lmcache:num_lookup_tokens",
+    "lmcache:num_lookup_hits",
+    "lmcache:num_vllm_hit_tokens",
+    "lmcache:local_cpu_evict_count",
+    "lmcache:local_cpu_evict_keys_count",
+    "lmcache:local_cpu_evict_failed_count",
+    "lmcache:forced_unpin_count",
+    "lmcache:num_slow_retrieval_by_time",
+    "lmcache:num_slow_retrieval_by_speed",
+    "lmcache:num_p2p_requests",
+    "lmcache:num_p2p_transferred_tokens",
+]
+
+LMCACHE_HISTOGRAMS = [
+    ("lmcache:time_to_retrieve", "lmc_time_to_retrieve", "lmc_time_to_retrieve_avg"),
+    ("lmcache:time_to_store", "lmc_time_to_store", "lmc_time_to_store_avg"),
+    ("lmcache:retrieve_speed", "lmc_retrieve_speed", "lmc_retrieve_speed_avg"),
+    ("lmcache:store_speed", "lmc_store_speed", "lmc_store_speed_avg"),
+    ("lmcache:p2p_time_to_transfer", "lmc_p2p_time_to_transfer", "lmc_p2p_time_to_transfer_avg"),
+    ("lmcache:p2p_transfer_speed", "lmc_p2p_transfer_speed", "lmc_p2p_transfer_speed_avg"),
+]
+
+GAUGES = GAUGES + LMCACHE_GAUGES
+COUNTERS = COUNTERS + LMCACHE_COUNTERS
+HISTOGRAMS = HISTOGRAMS + LMCACHE_HISTOGRAMS
+
 DEFAULT_QUANTILES = [0.50, 0.90, 0.95, 0.99]
 
 # Per-second fields that get a per-minute companion (per_min = per_sec * 60).
@@ -441,6 +499,59 @@ def build_tick(
         rec["ext_prefix_cache_hit_rate"] = (
             ext_hits / ext_q if (ext_hits is not None and ext_q and ext_q > 0) else None
         )
+
+        # --- LMCache (P2P host-staging); absent (all None) on plain vLLM ---
+        # point-in-time gauges
+        rec["lmc_lookup_hit_rate_gauge"] = gauges["lmcache:lookup_hit_rate"].get(key)
+        rec["lmc_retrieve_hit_rate_gauge"] = gauges["lmcache:retrieve_hit_rate"].get(key)
+        rec["lmc_local_cache_usage_bytes"] = gauges["lmcache:local_cache_usage"].get(key)
+        rec["lmc_remote_cache_usage_bytes"] = gauges["lmcache:remote_cache_usage"].get(key)
+        rec["lmc_local_storage_usage_bytes"] = gauges["lmcache:local_storage_usage"].get(key)
+        rec["lmc_active_memory_objs"] = gauges["lmcache:active_memory_objs_count"].get(key)
+        rec["lmc_pinned_memory_objs"] = gauges["lmcache:pinned_memory_objs_count"].get(key)
+        rec["lmc_local_cpu_hot_cache_count"] = gauges["lmcache:local_cpu_hot_cache_count"].get(key)
+        rec["lmc_is_healthy"] = gauges["lmcache:lmcache_is_healthy"].get(key)
+        rec["lmc_kv_msg_queue_size"] = gauges["lmcache:kv_msg_queue_size"].get(key)
+        rec["lmc_remote_put_task_num"] = gauges["lmcache:remote_put_task_num"].get(key)
+        rec["lmc_storage_events_ongoing"] = gauges["lmcache:storage_events_ongoing_count"].get(key)
+        rec["lmc_scheduler_unfinished_requests"] = gauges["lmcache:scheduler_unfinished_requests_count"].get(key)
+        # counter rates
+        rec["lmc_retrieve_requests_per_sec"] = crate("lmcache:num_retrieve_requests")
+        rec["lmc_store_requests_per_sec"] = crate("lmcache:num_store_requests")
+        rec["lmc_lookup_requests_per_sec"] = crate("lmcache:num_lookup_requests")
+        lmc_req_tok = crate("lmcache:num_requested_tokens")
+        lmc_hit_tok = crate("lmcache:num_hit_tokens")
+        lmc_lookup_tok = crate("lmcache:num_lookup_tokens")
+        lmc_lookup_hit = crate("lmcache:num_lookup_hits")
+        rec["lmc_requested_tokens_per_sec"] = lmc_req_tok
+        rec["lmc_hit_tokens_per_sec"] = lmc_hit_tok
+        rec["lmc_stored_tokens_per_sec"] = crate("lmcache:num_stored_tokens")
+        rec["lmc_lookup_tokens_per_sec"] = lmc_lookup_tok
+        rec["lmc_lookup_hit_tokens_per_sec"] = lmc_lookup_hit
+        rec["lmc_vllm_hit_tokens_per_sec"] = crate("lmcache:num_vllm_hit_tokens")
+        rec["lmc_cpu_evict_per_sec"] = crate("lmcache:local_cpu_evict_count")
+        rec["lmc_cpu_evict_keys_per_sec"] = crate("lmcache:local_cpu_evict_keys_count")
+        rec["lmc_cpu_evict_failed_per_sec"] = crate("lmcache:local_cpu_evict_failed_count")
+        rec["lmc_forced_unpin_per_sec"] = crate("lmcache:forced_unpin_count")
+        rec["lmc_slow_retrieval_by_time_per_sec"] = crate("lmcache:num_slow_retrieval_by_time")
+        rec["lmc_slow_retrieval_by_speed_per_sec"] = crate("lmcache:num_slow_retrieval_by_speed")
+        rec["lmc_p2p_requests_per_sec"] = crate("lmcache:num_p2p_requests")
+        rec["lmc_p2p_transferred_tokens_per_sec"] = crate("lmcache:num_p2p_transferred_tokens")
+        # windowed token-level hit rates (the real "LMCache tier caught it" signal)
+        rec["lmc_lookup_hit_rate"] = (
+            lmc_lookup_hit / lmc_lookup_tok
+            if (lmc_lookup_hit is not None and lmc_lookup_tok and lmc_lookup_tok > 0) else None
+        )
+        rec["lmc_retrieve_hit_rate"] = (
+            lmc_hit_tok / lmc_req_tok
+            if (lmc_hit_tok is not None and lmc_req_tok and lmc_req_tok > 0) else None
+        )
+        # cumulative counters, so LMCache hit rate / P2P volume can be re-windowed
+        rec["lmc_num_lookup_hits_total"] = counters["lmcache:num_lookup_hits"].get(key)
+        rec["lmc_num_lookup_tokens_total"] = counters["lmcache:num_lookup_tokens"].get(key)
+        rec["lmc_num_hit_tokens_total"] = counters["lmcache:num_hit_tokens"].get(key)
+        rec["lmc_num_requested_tokens_total"] = counters["lmcache:num_requested_tokens"].get(key)
+        rec["lmc_num_p2p_transferred_tokens_total"] = counters["lmcache:num_p2p_transferred_tokens"].get(key)
 
         # Flow-balance incoming estimate. A bare vLLM has no router-admission
         # counter, so we infer arrivals from conservation of requests in the
