@@ -30,7 +30,10 @@ export default defineConfig({
       head: [
         {
           tag: "meta",
-          attrs: { property: "og:image", content: `${SITE_URL}${BASE}/og.svg` },
+          attrs: {
+            property: "og:image",
+            content: `${SITE_URL}${BASE.replace(/\/$/, "")}/og.svg`,
+          },
         },
         {
           tag: "meta",
