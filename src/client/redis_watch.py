@@ -54,6 +54,8 @@ class RedisKVWatcher:
         scan_count: int = 500,
         top_n: int = 10,
         snapshot_max_blocks: int = 200,
+        snapshot_mode: str = "full",
+        snapshot_full_every_n_ticks: int = 0,
     ):
         self._out_path = Path(out_path)
         self._host = host
@@ -66,6 +68,12 @@ class RedisKVWatcher:
         self._scan_count = max(1, int(scan_count))
         self._top_n = max(1, int(top_n))
         self._snapshot_max_blocks = max(0, int(snapshot_max_blocks))
+        self._snapshot_mode = str(snapshot_mode or "full").strip().lower()
+        if self._snapshot_mode not in ("full", "delta"):
+            self._snapshot_mode = "full"
+        self._snapshot_full_every_n_ticks = max(0, int(snapshot_full_every_n_ticks))
+        # Previous scan (block-hash -> sorted owner tuple) for delta snapshots.
+        self._prev: Dict[str, Tuple[str, ...]] = {}
         self._pattern = f"{model}:kvblock:*"
         self._key_prefix = f"{model}:kvblock:"
 
@@ -198,16 +206,52 @@ class RedisKVWatcher:
             "top_owners": [[o, int(c)] for o, c in owner_counts.most_common(self._top_n)],
         }
 
-        # KV-cache snapshot: bounded block-hash -> owner-pods map so the log
-        # carries the actual cache contents (the "kv_block" detail), not just
-        # aggregate counts. Sorted for determinism; capped at snapshot_max_blocks.
-        if self._snapshot_max_blocks > 0 and cur:
-            blocks: Dict[str, list] = {}
-            for k in sorted(cur.keys())[: self._snapshot_max_blocks]:
+        # KV-cache snapshot: the block-hash -> owner-pods map so the log carries
+        # the actual cache contents (the "kv_block" detail), not just aggregate
+        # counts. snapshot_max_blocks == 0 disables the block-level detail.
+        #   "full"  -> dump the whole (bounded) map every tick. Simple but bulky:
+        #              the mostly-static map is rewritten every interval, so the
+        #              file grows as map_size x ticks.
+        #   "delta" -> dump only blocks added/changed/removed vs the previous
+        #              tick. The first tick (and every snapshot_full_every_n_ticks
+        #              tick) is a full "baseline"; reconstruct the full state at
+        #              any tick by taking the last baseline and replaying the
+        #              deltas after it. File grows with churn, not total size.
+        if self._snapshot_max_blocks != 0 and cur:
+            cur_bh: Dict[str, Tuple[str, ...]] = {}
+            for k, owners in cur.items():
                 bh = k[len(self._key_prefix):] if k.startswith(self._key_prefix) else k
-                blocks[bh] = list(cur[k])
-            summary["blocks"] = blocks
-            summary["blocks_truncated"] = len(cur) > self._snapshot_max_blocks
+                cur_bh[bh] = owners
+
+            if self._snapshot_mode == "delta":
+                is_baseline = self._tick == 1 or (
+                    self._snapshot_full_every_n_ticks > 0
+                    and self._tick % self._snapshot_full_every_n_ticks == 0
+                )
+                if is_baseline:
+                    keys = sorted(cur_bh.keys())[: self._snapshot_max_blocks]
+                    summary["snapshot_kind"] = "baseline"
+                    summary["blocks"] = {bh: list(cur_bh[bh]) for bh in keys}
+                    summary["blocks_truncated"] = len(cur_bh) > self._snapshot_max_blocks
+                else:
+                    added: Dict[str, list] = {}
+                    changed: Dict[str, list] = {}
+                    for bh, owners in cur_bh.items():
+                        prev_owners = self._prev.get(bh)
+                        if prev_owners is None:
+                            added[bh] = list(owners)
+                        elif prev_owners != owners:
+                            changed[bh] = list(owners)
+                    removed = [bh for bh in self._prev if bh not in cur_bh]
+                    summary["snapshot_kind"] = "delta"
+                    summary["blocks_added"] = added
+                    summary["blocks_changed"] = changed
+                    summary["blocks_removed"] = removed
+                self._prev = cur_bh
+            else:
+                keys = sorted(cur_bh.keys())[: self._snapshot_max_blocks]
+                summary["blocks"] = {bh: list(cur_bh[bh]) for bh in keys}
+                summary["blocks_truncated"] = len(cur_bh) > self._snapshot_max_blocks
         try:
             self._fh.write(json.dumps(summary, ensure_ascii=False) + "\n")
             self._fh.flush()

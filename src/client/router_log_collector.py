@@ -146,9 +146,17 @@ class RouterLogCollector:
         batch_size: int = 2000,
         dedup_max: int = 50_000,
         request_timeout_s: float = 10.0,
+        lean_out_path: Optional[str | Path] = None,
+        lean_drop_fields: tuple = ("request_body", "block_hashes"),
     ):
         self._latency_url = f"{make_router_log_url(router_url)}?last={int(batch_size)}"
         self._out_path = Path(out_path)
+        # Optional second, LIVE lean stream: same records written to out_path but
+        # with the bulky fields (request body + block hashes) stripped. Lets an
+        # observer keep a lean logs.json alongside a full logs_full.json without a
+        # shutdown rewrite (robust to hard kills). None -> single-stream (default).
+        self._lean_out_path = Path(lean_out_path) if lean_out_path else None
+        self._lean_drop_fields = tuple(lean_drop_fields)
         self._poll_interval_s = float(poll_interval_s)
         self._request_timeout_s = float(request_timeout_s)
         self._dedup_max = int(dedup_max)
@@ -161,6 +169,7 @@ class RouterLogCollector:
         self._seen: "OrderedDict[str, None]" = OrderedDict()
         self._count = 0
         self._fh = None  # type: Optional[Any]
+        self._lean_fh = None  # type: Optional[Any]
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -170,6 +179,9 @@ class RouterLogCollector:
             return
         self._out_path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = open(self._out_path, "a", encoding="utf-8")
+        if self._lean_out_path is not None:
+            self._lean_out_path.parent.mkdir(parents=True, exist_ok=True)
+            self._lean_fh = open(self._lean_out_path, "a", encoding="utf-8")
         self._thread = threading.Thread(
             target=self._run, name="router-log-collector", daemon=True
         )
@@ -193,6 +205,12 @@ class RouterLogCollector:
             except Exception:
                 pass
             self._fh = None
+        if self._lean_fh is not None:
+            try:
+                self._lean_fh.close()
+            except Exception:
+                pass
+            self._lean_fh = None
 
     # ------------------------------------------------------------------
     # Live lookup
@@ -252,20 +270,32 @@ class RouterLogCollector:
         return new_count
 
     def _write(self, record: Dict[str, Any]) -> None:
-        if self._fh is None:
+        if self._fh is None and self._lean_fh is None:
             return
         try:
             line = json.dumps(record, ensure_ascii=False, default=str)
         except Exception:
-            return
-        with self._lock:
-            if self._fh is None:
-                return
+            line = None
+        lean_line = None
+        if self._lean_fh is not None:
+            lean_rec = {k: v for k, v in record.items() if k not in self._lean_drop_fields}
             try:
-                self._fh.write(line + "\n")
-                self._fh.flush()
+                lean_line = json.dumps(lean_rec, ensure_ascii=False, default=str)
             except Exception:
-                pass
+                lean_line = None
+        with self._lock:
+            if self._fh is not None and line is not None:
+                try:
+                    self._fh.write(line + "\n")
+                    self._fh.flush()
+                except Exception:
+                    pass
+            if self._lean_fh is not None and lean_line is not None:
+                try:
+                    self._lean_fh.write(lean_line + "\n")
+                    self._lean_fh.flush()
+                except Exception:
+                    pass
 
 
 class EnrichingLogger:
@@ -331,19 +361,115 @@ def join_logs_with_router(
     router_logs_path: str | Path,
     *,
     overwrite_endpoint: bool = True,
+    drop_fields: Optional[set] = None,
 ) -> Dict[str, int]:
     """Rewrite ``logs.json`` in place, attaching router endpoint + kv fields.
 
     Authoritative: covers any record the live path missed (poller lag, ring cap).
-    Returns simple stats: ``{matched, total, missing}``.
+    ``drop_fields`` names router fields to *omit* from ``logs.json`` (e.g.
+    ``{"block_hashes"}`` to keep it lean while the full list still rides
+    ``logs_full.json``). Returns simple stats: ``{matched, total, missing}``.
     """
     logs_path = Path(logs_path)
     router_logs_path = Path(router_logs_path)
+    drop_fields = drop_fields or set()
     by_rid = _read_router_logs(router_logs_path)
     if not logs_path.is_file():
         return {"matched": 0, "total": 0, "missing": 0}
 
     tmp_path = logs_path.with_suffix(logs_path.suffix + ".tmp")
+    matched = total = missing = 0
+    with logs_path.open("r", encoding="utf-8") as fin, \
+            tmp_path.open("w", encoding="utf-8") as fout:
+        for line in fin:
+            line = line.rstrip("\n")
+            if not line.strip():
+                continue
+            total += 1
+            try:
+                rec = json.loads(line)
+            except Exception:
+                fout.write(line + "\n")
+                continue
+            rid = normalize_rid(rec.get("req_id"))
+            fields = by_rid.get(rid)
+            if fields:
+                matched += 1
+                for k, v in fields.items():
+                    if k in drop_fields:
+                        continue
+                    if k == "endpoint_id" and not overwrite_endpoint and rec.get("endpoint_id"):
+                        continue
+                    rec[k] = v
+            else:
+                missing += 1
+            # Drop any explicitly-excluded fields so a lean logs.json can omit
+            # bulky data (e.g. block_hashes / request_body) that instead rides
+            # logs_full.json. Callers that want the full record pass no drop_fields.
+            for k in drop_fields:
+                rec.pop(k, None)
+            fout.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+
+    tmp_path.replace(logs_path)
+    return {"matched": matched, "total": total, "missing": missing}
+
+
+def _read_router_logs_full(router_logs_path: Path) -> Dict[str, Dict[str, Any]]:
+    """Like ``_read_router_logs`` but also carries ``request_body`` + block hashes.
+
+    Used to build ``logs_full.json`` -- the superset that keeps the full request
+    body and prefix block-hash list the lean ``logs.json`` withholds.
+    """
+    by_rid: Dict[str, Dict[str, Any]] = {}
+    if not router_logs_path.is_file():
+        return by_rid
+    with router_logs_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except Exception:
+                continue
+            rid = normalize_rid(entry.get("req_id") or entry.get("rid"))
+            if not rid:
+                continue
+            fields: Dict[str, Any] = {}
+            if entry.get("endpoint_id") is not None:
+                fields["endpoint_id"] = entry["endpoint_id"]
+            for k in _KV_FIELDS:
+                if k in entry:
+                    fields[k] = entry[k]
+            if "request_body" in entry:
+                fields["request_body"] = entry["request_body"]
+            by_rid[rid] = fields
+    return by_rid
+
+
+def write_logs_full(
+    logs_path: str | Path,
+    router_logs_path: str | Path,
+    full_path: str | Path,
+    *,
+    overwrite_endpoint: bool = True,
+) -> Dict[str, int]:
+    """Write ``logs_full.json`` = every ``logs.json`` record PLUS the full request
+    body and prefix block-hash list, pulled from the router truth.
+
+    ``logs.json`` is left untouched (lean / body-free); this is its superset
+    twin. Requires the router to have emitted bodies (ROUTER_LOG_REQUEST_BODY)
+    and hashes (ROUTER_LOG_BLOCK_HASHES) into ``router_logs.json``.
+    Returns ``{matched, total, missing}``.
+    """
+    logs_path = Path(logs_path)
+    router_logs_path = Path(router_logs_path)
+    full_path = Path(full_path)
+    if not logs_path.is_file():
+        return {"matched": 0, "total": 0, "missing": 0}
+    by_rid = _read_router_logs_full(router_logs_path)
+
+    tmp_path = full_path.with_suffix(full_path.suffix + ".tmp")
     matched = total = missing = 0
     with logs_path.open("r", encoding="utf-8") as fin, \
             tmp_path.open("w", encoding="utf-8") as fout:
@@ -369,7 +495,7 @@ def join_logs_with_router(
                 missing += 1
             fout.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
-    tmp_path.replace(logs_path)
+    tmp_path.replace(full_path)
     return {"matched": matched, "total": total, "missing": missing}
 
 

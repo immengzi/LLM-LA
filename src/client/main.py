@@ -42,6 +42,7 @@ try:
         EnrichingLogger,
         join_logs_with_router,
         build_claude_logs_from_router,
+        write_logs_full,
         summarize_routing,
     )
 except Exception:
@@ -49,6 +50,7 @@ except Exception:
     EnrichingLogger = None     # type: ignore
     join_logs_with_router = None  # type: ignore
     build_claude_logs_from_router = None  # type: ignore
+    write_logs_full = None     # type: ignore
     summarize_routing = None      # type: ignore
 
 # event-driven pod->node mapping snapshots (autoscaler / churn)
@@ -397,6 +399,8 @@ def main():
                     max_keys=rw.max_keys,
                     scan_count=rw.scan_count,
                     snapshot_max_blocks=getattr(rw, "snapshot_max_blocks", 200),
+                    snapshot_mode=getattr(rw, "snapshot_mode", "full"),
+                    snapshot_full_every_n_ticks=getattr(rw, "snapshot_full_every_n_ticks", 0),
                 )
                 if not redis_watcher.start():
                     redis_watcher = None
@@ -563,7 +567,13 @@ def main():
                     pass
         else:
             try:
-                stats = join_logs_with_router(logs_path, router_logs_path)
+                # When we also emit logs_full.json, keep logs.json lean: the
+                # bulky block-hash list + request body ride only the full variant.
+                emit_full = getattr(cfg, "emit_logs_full", False)
+                drop_fields = {"block_hashes", "request_body"} if emit_full else None
+                stats = join_logs_with_router(
+                    logs_path, router_logs_path, drop_fields=drop_fields
+                )
                 print(
                     f"[router-log] joined logs.json: matched={stats['matched']}/"
                     f"{stats['total']} (missing={stats['missing']})"
@@ -571,6 +581,26 @@ def main():
                 routing_summary = summarize_routing(logs_path)
             except Exception as e:
                 print(f"[router-log] WARN: end-of-run join failed: {e}")
+
+    # Optional superset log: logs_full.json = every logs.json record PLUS the full
+    # request body and prefix block-hash list, from the router truth. logs.json
+    # itself stays lean/body-free. Opt-in via emit_logs_full (needs the router to
+    # emit bodies via router_log_request_body + hashes via router_log_block_hashes).
+    if (
+        getattr(cfg, "emit_logs_full", False)
+        and router_collector is not None
+        and write_logs_full is not None
+    ):
+        try:
+            full_logs_path = str(Path(exp_dir) / "logs_full.json")
+            fstats = write_logs_full(logs_path, router_logs_path, full_logs_path)
+            print(
+                f"[router-log] wrote logs_full.json (block hashes + full request): "
+                f"matched={fstats['matched']}/{fstats['total']} "
+                f"(missing={fstats['missing']})"
+            )
+        except Exception as e:
+            print(f"[router-log] WARN: logs_full.json write failed: {e}")
 
     # Confirm Redis stores the block hashes the router computed (writes
     # redis_verify.json). Runs against the router's own truth (router_logs.json).
