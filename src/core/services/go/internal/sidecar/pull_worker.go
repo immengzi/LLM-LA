@@ -25,9 +25,9 @@ type RouterPullWorker struct {
 	stopCh       chan struct{}
 
 	// vLLM health gate
-	healthMu           sync.Mutex
-	vllmHealthy        atomic.Bool
-	vllmLastProbe      time.Time
+	healthMu            sync.Mutex
+	vllmHealthy         atomic.Bool
+	vllmLastProbe       time.Time
 	vllmUnhealthyLogged bool
 }
 

@@ -24,10 +24,10 @@ type KVWatcher struct {
 
 	rdb *redis.Client
 
-	mu          sync.Mutex
-	lastScanTS  map[string]float64
-	pods        map[string]string // pod_name -> pod_ip
-	lastDiscov  float64
+	mu         sync.Mutex
+	lastScanTS map[string]float64
+	pods       map[string]string // pod_name -> pod_ip
+	lastDiscov float64
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup

@@ -12,7 +12,7 @@ from .router_client import RouterPullWorker
 from .vllm_client import VLLMWorker
 from .result_poster import ResultPoster
 from .zmq_subscriber import KVSubscriber
-from .api import app, bind_local_queue, bind_pull_worker
+from .api import bind_local_queue, bind_pull_worker
 from .metrics import (
     set_sidecar_python_threads,
     set_sidecar_workers_total,

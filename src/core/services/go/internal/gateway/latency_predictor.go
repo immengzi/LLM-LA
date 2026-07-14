@@ -101,9 +101,9 @@ func latencyProfileFromJSON(path string) (latencyProfile, error) {
 // ---------------- LinearLatencyPredictor ----------------
 
 type linearLatencyPredictor struct {
-	p           latencyProfile
-	chunked     bool
-	maxBatched  int
+	p          latencyProfile
+	chunked    bool
+	maxBatched int
 }
 
 func newLinearLatencyPredictor(p latencyProfile, chunkedPrefill bool, maxNumBatchedTokens int) *linearLatencyPredictor {

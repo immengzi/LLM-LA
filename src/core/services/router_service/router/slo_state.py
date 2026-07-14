@@ -13,7 +13,7 @@ Cleanup: entries are removed when results are ingested or when TTL expires.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from threading import RLock
 from typing import Dict, Optional
 

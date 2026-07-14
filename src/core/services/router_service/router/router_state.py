@@ -11,7 +11,7 @@ import uuid
 import asyncio
 import time
 
-from .config import get_config, get_model_registry
+from .config import get_config
 from .kv_aware import prefix_len, get_request_blocks, record_routing
 from .predictors import get_length_predictor
 from .len_select import select_len_aware
@@ -899,7 +899,6 @@ class RouterState:
             return current_want
 
         # Find the tightest TPOT budget among queued requests
-        tpot_budget = None
         avg_accum = 2048  # reasonable default for accumulated length
 
         # Use entries from the SLO registry to find budget

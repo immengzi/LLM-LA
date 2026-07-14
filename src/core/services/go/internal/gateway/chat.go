@@ -197,8 +197,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	lat := map[string]interface{}{
 		"ts": nowS(), "t_start": tStart, "rid": rid, "model": model, "stream": false,
-		"finish_reason": finishReason,
-		"prompt_tokens": toInt(usage["prompt_tokens"]),
+		"finish_reason":     finishReason,
+		"prompt_tokens":     toInt(usage["prompt_tokens"]),
 		"completion_tokens": completionTokens,
 	}
 	for k, v := range xlat {
@@ -378,8 +378,8 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, prompt, mode
 		}
 		lat := map[string]interface{}{
 			"ts": tEnd, "t_start": tStart, "rid": rid, "model": model, "stream": true,
-			"finish_reason": finReason,
-			"prompt_tokens": toInt(u["prompt_tokens"]),
+			"finish_reason":     finReason,
+			"prompt_tokens":     toInt(u["prompt_tokens"]),
 			"completion_tokens": toInt(u["completion_tokens"]),
 		}
 		for k, v := range xlat {

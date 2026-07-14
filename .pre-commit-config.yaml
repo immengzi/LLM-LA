@@ -1,0 +1,65 @@
+# Pre-commit hooks for the LA-Boom repo.
+#
+# Install once:
+#   pip install pre-commit
+#   pre-commit install            # installs both pre-commit and pre-push hooks
+#   (or: make -C src/core hooks)
+#
+# Run manually on everything:
+#   pre-commit run --all-files
+#
+# Design notes:
+#  * Hooks run ONLY on files you stage (except the pre-push test hook), so they
+#    do not retroactively block commits to files you are not touching.
+#  * Python linting is scoped to CORRECTNESS rules (pyflakes `F` + syntax `E9`),
+#    not style/line-length, so it flags real bugs (undefined names, unused
+#    imports/vars) without churning the existing code's formatting.
+#  * Go formatting uses the system `gofmt`. Full `go vet` + `go test` need Go
+#    1.26 and run in CI (.github/workflows/ci.yml), not locally.
+#  * The full Python unit suite runs on `pre-push` (fast, ~7s), keeping commits
+#    quick while gating pushes.
+
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.ipynb$'
+      - id: end-of-file-fixer
+        exclude: '\.ipynb$'
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+        # Helm templates are Go-templated, not valid standalone YAML.
+        exclude: '^src/core/vllm-kv-stack/templates/'
+      - id: check-json
+        exclude: '\.ipynb$'
+      - id: check-added-large-files
+        args: [--maxkb=10240]
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.21
+    hooks:
+      - id: ruff
+        name: ruff (correctness lint)
+        args: ["--select=E9,F", "--fix"]
+        exclude: '^(analysis-notebooks/|lmcache-csi/|.*/\.venv/)'
+
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt (go formatting)
+        entry: gofmt -l -w
+        language: system
+        types: [go]
+
+      - id: core-python-tests
+        name: core python unit tests (pre-push)
+        entry: make -C src/core test-py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
