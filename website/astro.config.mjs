@@ -49,6 +49,7 @@ export default defineConfig({
         { label: "Gateways", autogenerate: { directory: "gateways" } },
         { label: "Benchmarking", autogenerate: { directory: "benchmarking" } },
         { label: "Comparisons", autogenerate: { directory: "comparisons" } },
+        { label: "Contributing", autogenerate: { directory: "contributing" } },
         {
           label: "Design & Planning (internal)",
           collapsed: true,
