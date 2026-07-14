@@ -1,0 +1,161 @@
+name: core-ci
+
+# CI for the LA-Boom core services (src/core): Python unit/component tests,
+# Go unit tests (Go 1.26 container), docker image builds, Helm lint, and a
+# docker-compose end-to-end test (mock vLLM + real Redis + router + sidecar).
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "src/core/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "src/core/**"
+      - ".github/workflows/ci.yml"
+
+concurrency:
+  group: core-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Runs the same pre-commit hooks as the local git hook, but only on the files
+  # changed in the PR — so it enforces lint correctness on new/edited code
+  # without failing on pre-existing style debt in untouched files.
+  lint:
+    name: lint (pre-commit, changed files)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install pre-commit
+      - name: Run pre-commit on changed files
+        run: |
+          pre-commit run \
+            --from-ref "${{ github.event.pull_request.base.sha }}" \
+            --to-ref "${{ github.sha }}" \
+            --show-diff-on-failure
+
+  python-tests:
+    name: python (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [router, sidecar, services]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        working-directory: src/core
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.suite }}" = "router" ] || [ "${{ matrix.suite }}" = "services" ]; then
+            pip install -r services/router_service/requirements-dev.txt
+          fi
+          if [ "${{ matrix.suite }}" = "sidecar" ]; then
+            pip install -r services/sidecar/requirements-dev.txt
+          fi
+
+      - name: Run tests
+        working-directory: src/core
+        env:
+          PYTHONHASHSEED: "0"
+        run: |
+          set -euo pipefail
+          case "${{ matrix.suite }}" in
+            router)   (cd services/router_service && pytest --cov=router   --cov-report=term-missing) ;;
+            sidecar)  (cd services/sidecar        && pytest --cov=sidecar  --cov-report=term-missing) ;;
+            services) (cd services                && pytest tests) ;;
+          esac
+
+  go-tests:
+    name: go (1.26)
+    runs-on: ubuntu-latest
+    container: golang:1.26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: go vet
+        working-directory: src/core/services/go
+        run: go vet ./...
+
+      - name: go test
+        working-directory: src/core/services/go
+        run: go test -race ./...
+
+  # NOTE: production images for the Go services and prefix_hash need prebuilt
+  # artifacts (build.sh) or a private base image (vllm-arm64), so they are not
+  # built here. The `sidecar` image is self-contained; the e2e job additionally
+  # builds lightweight router/sidecar/mock images and runs them.
+  docker-build:
+    name: docker build (sidecar)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build sidecar image
+        uses: docker/build-push-action@v6
+        with:
+          context: src/core/services/sidecar
+          file: src/core/services/sidecar/Dockerfile
+          push: false
+          tags: laboom-sidecar:ci
+
+  helm-lint:
+    name: helm lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Lint chart
+        run: helm lint src/core/vllm-kv-stack
+
+  e2e:
+    name: e2e (compose)
+    runs-on: ubuntu-latest
+    needs: [python-tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Start stack
+        working-directory: src/core/tests/e2e
+        run: docker compose up -d --build
+
+      - name: Install test deps
+        working-directory: src/core/tests/e2e
+        run: pip install -r requirements.txt
+
+      - name: Run e2e tests
+        working-directory: src/core/tests/e2e
+        run: pytest
+
+      - name: Dump logs on failure
+        if: failure()
+        working-directory: src/core/tests/e2e
+        run: docker compose logs --no-color
+
+      - name: Tear down
+        if: always()
+        working-directory: src/core/tests/e2e
+        run: docker compose down -v

@@ -15,9 +15,7 @@ Dependencies: slo_state, latency_predictor, kv_aware.
 
 from __future__ import annotations
 
-import math
 import time
-from collections import deque
 from threading import RLock
 from typing import Dict, Optional, Tuple
 

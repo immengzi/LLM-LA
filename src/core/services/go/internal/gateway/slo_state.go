@@ -11,12 +11,12 @@ import (
 type sloEntry struct {
 	ReqID string `json:"req_id"`
 
-	SLOType        *string `json:"slo_type"`
-	DeadlineTTFT   *float64 `json:"deadline_ttft"`
-	DeadlineTPOTs  *float64 `json:"deadline_tpot_s"`
-	DeadlineE2E    *float64 `json:"deadline_e2e"`
-	TaskType       *string  `json:"task_type"`
-	OutputLenHint  *int     `json:"output_len_hint"`
+	SLOType       *string  `json:"slo_type"`
+	DeadlineTTFT  *float64 `json:"deadline_ttft"`
+	DeadlineTPOTs *float64 `json:"deadline_tpot_s"`
+	DeadlineE2E   *float64 `json:"deadline_e2e"`
+	TaskType      *string  `json:"task_type"`
+	OutputLenHint *int     `json:"output_len_hint"`
 
 	ArrivalTS          float64 `json:"arrival_ts"`
 	InputTokens        int     `json:"input_tokens"`

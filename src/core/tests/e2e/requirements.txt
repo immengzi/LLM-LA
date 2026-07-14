@@ -1,0 +1,3 @@
+# Dependencies for the host-side e2e test runner (talks to the compose stack).
+pytest>=8,<10
+requests>=2.31

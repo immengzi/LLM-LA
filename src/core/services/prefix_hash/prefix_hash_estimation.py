@@ -14,7 +14,7 @@ import time
 import logging
 from typing import List, Tuple, Dict, Any
 
-from transformers import AutoTokenizer, PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast
 
 # vLLM imports
 from vllm.sampling_params import SamplingParams
@@ -254,5 +254,5 @@ if __name__ == "__main__":
     print(f"Total tokens: {len(token_ids)}")
     print(f"Block size: {block_size}")
     print(f"Number of block hashes: {len(hashes)}")
-    print(f"Computed hashes (ints):")
+    print("Computed hashes (ints):")
     print(hashes)

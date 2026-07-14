@@ -51,6 +51,14 @@ HQ-production/
 *.tar
 *.log
 venv
+.venv
+.venv/
+**/.venv/
+.pytest_cache/
+**/.pytest_cache/
+.coverage
+htmlcov/
+.cursor/
 data
 local_plots
 

@@ -13,7 +13,6 @@ Redis schema (per MODEL_NAME_REDIS):
   - {MODEL}:kvblocks                    (HASH)  index of all block_hashes
 """
 
-import os
 import socket
 import time
 import threading

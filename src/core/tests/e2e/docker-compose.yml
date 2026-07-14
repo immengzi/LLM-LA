@@ -1,0 +1,86 @@
+# End-to-end test stack for the LA-Boom core services.
+#
+# Topology (pull mode):
+#
+#   e2e test ──HTTP──> router ──/pull──> sidecar ──HTTP──> mock-vllm
+#        ^                │  <─/result──   │
+#        └────────────────┘               └── ZMQ/Redis KV sync ──> redis
+#
+# Redis is real; vLLM is mocked by a deterministic OpenAI-compatible server.
+# Routing runs with ROUTER_STRATEGY=none / KV_AWARE=false so no Kubernetes API
+# or tokenizer is required.
+
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  mock-vllm:
+    build:
+      context: ./mock_vllm
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  router:
+    build:
+      context: ../../services/router_service
+      dockerfile: ../../tests/e2e/router.e2e.Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MODEL_NAME: served-model
+      ROUTER_MODE: pull
+      ROUTER_STRATEGY: none
+      KV_AWARE: "false"
+      LEN_AWARE: "false"
+      RESULT_TIMEOUT_S: "30"
+      ACCESS_LOG: "false"
+    ports:
+      - "18080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health/router')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  sidecar:
+    build:
+      context: ../../services/sidecar
+      dockerfile: ../../tests/e2e/sidecar.e2e.Dockerfile
+    depends_on:
+      router:
+        condition: service_healthy
+      mock-vllm:
+        condition: service_healthy
+    environment:
+      ROUTER_URL: http://router:8080
+      VLLM_URL: http://mock-vllm:8000
+      VLLM_HOST: mock-vllm
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MODEL_NAME: served-model
+      CONTAINER_NAME: sidecar-e2e-0
+      SIDECAR_MODE: pull
+      SIDECAR_PORT: "9000"
+      BATCH_SIZE: "4"
+      PULL_INTERVAL_S: "0.05"
+      LOG_LEVEL: info
+    ports:
+      - "19000:9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/health')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

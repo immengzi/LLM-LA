@@ -22,7 +22,6 @@ Design notes:
     skipped for the rest of the pass to avoid hammering a full/unready pod.
 """
 import asyncio
-import time
 from typing import Any, Optional, Set
 
 from .config import get_config

@@ -17,7 +17,6 @@ import re
 import time
 import sys
 import asyncio
-import uuid
 from threading import RLock
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -47,7 +46,7 @@ from .metrics import (
     observe_request_tpot_avg,
     observe_request_e2e,
 )
-from .slo_state import SLORegistry, SLOEntry
+from .slo_state import SLORegistry
 
 # Push-dispatch metrics (present in router/metrics.py per prior changes)
 try:
@@ -718,7 +717,7 @@ def _register_slo(rid: str, req: EnqueueRequest, arrival_ts: float) -> None:
         if not _cfg.SLO_AWARE:
             return
     input_tokens = max(1, len(req.prompt) // 4)
-    entry = _slo_registry.register(
+    _slo_registry.register(
         rid,
         slo_type=req.slo_type,
         slo_ttft_ms=req.slo_ttft_ms,
@@ -2162,7 +2161,6 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
             if the full result arrives before any chunks.
             """
             first_chunk_timeout = _cfg.RESULT_TIMEOUT_S
-            got_any_chunk = False
             t_first_chunk: Optional[float] = None
 
             def _emit_latency_metrics(u: Dict[str, Any], finish_reason: str = "stop") -> Dict[str, Any]:
@@ -2226,7 +2224,6 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
                         )
                     return
 
-                got_any_chunk = True
                 t_first_chunk = time.time()
                 stream_endpoint_id = first.get("endpoint_id")
                 if stream_endpoint_id:
