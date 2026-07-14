@@ -41,6 +41,7 @@ const SECTION_DIRS = [
   "gateways",
   "benchmarking",
   "comparisons",
+  "contributing",
   "internal",
 ];
 
@@ -107,6 +108,9 @@ const ORDER = {
 
   "comparisons/pull-vs-aibrix-lr.md": { order: 1 },
   "comparisons/pull-vs-aibrix-kv.md": { order: 2 },
+
+  "contributing/development.md": { order: 1, label: "Contributing" },
+  "contributing/testing.md": { order: 2, label: "Testing" },
 
   "internal/vision.md": { order: 1 },
   "internal/open-sourcing-plan.md": { order: 2 },
