@@ -24,6 +24,11 @@ type RouterPullWorker struct {
 	firstSuccess atomic.Bool
 	stopCh       chan struct{}
 
+	// Optional dynamic pull-cap source (SLO backpressure). When nil, the worker
+	// uses the static BatchSize + Prefetch cap — identical to the original
+	// behavior (zero-change path when the feature is disabled).
+	capProvider func() int
+
 	// vLLM health gate
 	healthMu            sync.Mutex
 	vllmHealthy         atomic.Bool
@@ -48,10 +53,25 @@ func NewRouterPullWorker(cfg *Config, queue *LocalQueue, endpointID string) *Rou
 	}
 }
 
+// SetCapProvider installs a dynamic pull-cap source (SLO backpressure). Must be
+// called before Start. When unset, the static BatchSize + Prefetch cap is used.
+func (w *RouterPullWorker) SetCapProvider(fn func() int) {
+	w.capProvider = fn
+}
+
+// currentPullCap is the effective pull cap for this tick: the dynamic value when
+// a provider is set, else the static cap (byte-for-byte the original behavior).
+func (w *RouterPullWorker) currentPullCap() int {
+	if w.capProvider == nil {
+		return w.cfg.PullCap()
+	}
+	return w.capProvider()
+}
+
 // Start launches the background poll loop that keeps the local queue warm,
 // mirroring RouterPullWorker._poll_loop.
 func (w *RouterPullWorker) Start() {
-	pullCap := w.cfg.PullCap()
+	pullCap := w.currentPullCap()
 	log.Printf("[sidecar] RouterPullWorker ready (endpoint_id=%s, BATCH_SIZE=%d, PREFETCH=%d, pull_cap=%d)",
 		w.endpointID, w.cfg.BatchSize, w.cfg.Prefetch, pullCap)
 	go w.pollLoop()
@@ -169,7 +189,7 @@ func (w *RouterPullWorker) PullIfCapacity() {
 func (w *RouterPullWorker) doPull() {
 	st := w.queue.State()
 	totalReserved := st.Pending + st.Inflight
-	pullCap := w.cfg.PullCap()
+	pullCap := w.currentPullCap()
 	if totalReserved >= pullCap {
 		return
 	}

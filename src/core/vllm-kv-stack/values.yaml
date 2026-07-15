@@ -70,6 +70,27 @@ sidecar:
   # When true, sidecar streams from vLLM internally (captures TTFT).
   streamingMode: false
 
+  # ------------------------------------------------------------------
+  # SLO-driven dynamic pull backpressure (AIMD).
+  #
+  # When enabled the sidecar watches vLLM TPOT (vllm:time_per_output_token_seconds)
+  # and shrinks the per-pod pull cap while the TPOT SLO is violated, then slowly
+  # restores it once TPOT is back inside SLO. Default OFF: the sidecar behaves
+  # exactly as before (static pull_cap = BATCH_SIZE + PREFETCH, no monitor thread).
+  sloDynamicPull:
+    enabled: false          # master switch; false = zero behavior change
+    tpotSloSeconds: 0.05    # TPOT SLO target (seconds)
+    evalIntervalSeconds: 5  # how often to scrape vLLM /metrics and re-evaluate
+    windowSamples: 6        # sliding-window size (eval samples) to smooth TPOT
+    windowAgg: mean         # mean | p90
+    minPull: 1              # never starve a pod completely
+    maxPull: 0              # 0 => use BATCH_SIZE + PREFETCH (original pull cap)
+    decreaseMode: additive  # additive (cap - step) | multiplicative (cap * factor)
+    decreaseStep: 1         # additive step down on violation
+    decreaseFactor: 0.5     # multiplicative factor on violation (if mode=multiplicative)
+    recoverStep: 1          # additive step up when inside SLO
+    cooldownSeconds: 10     # min seconds between adjustments (hysteresis)
+
 router:
   # pull | push-rr | push-random | push-leastq | central-push
   mode: pull

@@ -13,9 +13,11 @@ from .vllm_client import VLLMWorker
 from .result_poster import ResultPoster
 from .zmq_subscriber import KVSubscriber
 from .api import bind_local_queue, bind_pull_worker
+from .slo_backpressure import SloBackpressureMonitor
 from .metrics import (
     set_sidecar_python_threads,
     set_sidecar_workers_total,
+    set_slo_backpressure_state,
 )
 
 _cfg = get_config()
@@ -61,11 +63,33 @@ def main():
 
     mode = (_cfg.SIDECAR_MODE or "pull").lower()
 
+    # ------------------------------------------------------------
+    # SLO-driven dynamic pull backpressure (default OFF).
+    #
+    # When disabled we never construct the monitor and never pass a cap_provider,
+    # so RouterPullWorker uses the static BATCH_SIZE + PREFETCH cap and the
+    # behavior is identical to before (zero-change / zero-cost path).
+    # ------------------------------------------------------------
+    slo_monitor = None
+    cap_provider = None
+    if _cfg.SLO_DYNAMIC_PULL_ENABLED and mode == "pull":
+        default_cap = _cfg.BATCH_SIZE + _cfg.PREFETCH
+        slo_monitor = SloBackpressureMonitor(
+            _cfg,
+            default_cap=default_cap,
+            endpoint_id=endpoint_id,
+            metrics_hook=set_slo_backpressure_state,
+        )
+        cap_provider = slo_monitor.get_cap
+
     pull_worker = None
     if mode == "pull":
-        pull_worker = RouterPullWorker(local_q, endpoint_id)
+        pull_worker = RouterPullWorker(local_q, endpoint_id, cap_provider=cap_provider)
         pull_worker.start()
     bind_pull_worker(pull_worker)
+
+    if slo_monitor is not None:
+        slo_monitor.start()
 
     # ------------------------------------------------------------
     # Result poster (async router result delivery)
@@ -140,6 +164,9 @@ def main():
             time.sleep(0.5)
     finally:
         print("[sidecar] shutting down")
+
+        if slo_monitor is not None:
+            slo_monitor.stop()
 
         if pull_worker:
             pull_worker.stop()

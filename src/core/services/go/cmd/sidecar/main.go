@@ -38,10 +38,24 @@ func main() {
 
 	queue := sidecar.NewLocalQueue(endpointID)
 
+	// SLO-driven dynamic pull backpressure (default OFF). When disabled we never
+	// construct the monitor and never set a cap provider, so RouterPullWorker
+	// uses the static BatchSize + Prefetch cap (zero-change / zero-cost path).
+	var sloMonitor *sidecar.SloBackpressureMonitor
+	if cfg.SLODynamicPullEnabled && cfg.SidecarMode == "pull" {
+		sloMonitor = sidecar.NewSloBackpressureMonitor(cfg, cfg.PullCap(), endpointID)
+	}
+
 	var puller *sidecar.RouterPullWorker
 	if cfg.SidecarMode == "pull" {
 		puller = sidecar.NewRouterPullWorker(cfg, queue, endpointID)
+		if sloMonitor != nil {
+			puller.SetCapProvider(sloMonitor.GetCap)
+		}
 		puller.Start()
+	}
+	if sloMonitor != nil {
+		sloMonitor.Start()
 	}
 
 	poster := sidecar.NewResultPoster(cfg)
@@ -212,6 +226,9 @@ func main() {
 	defer shutCancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
 		log.Printf("[main] server shutdown error: %v", err)
+	}
+	if sloMonitor != nil {
+		sloMonitor.Stop()
 	}
 	if puller != nil {
 		puller.Stop()
