@@ -68,6 +68,19 @@ type Config struct {
 	AffinityTTLS         float64
 	AffinityHardTimeoutS float64
 
+	// Persistent (Redis-backed) affinity map. Off by default. When enabled,
+	// every affinity claim is write-through to Redis and the in-memory map is
+	// warmed from Redis at startup, so conversation->pod mappings survive
+	// router restarts / redeploys. Mirrors AFFINITY_PERSIST_* / CLUSTER in
+	// src/core/services/router_service/router/config.py.
+	AffinityPersistEnabled  bool
+	AffinityRedisTTLSeconds int
+	AffinityRedisKeyPrefix  string
+	AffinityCacheMax        int
+	AffinityCacheRefreshS   float64
+	AffinityEndpointStaleS  float64
+	Cluster                 string
+
 	PoolFactor       float64
 	DefaultMaxTokens int
 
@@ -158,6 +171,18 @@ type Config struct {
 	StuckPullSeconds       int
 	AffinityReleaseOnStuck bool
 
+	// Soft KV divert (GPU-KV-pressure-aware grant trimming). Off by default.
+	// When a pod's GPU KV cache is saturated AND a healthier peer exists, cold
+	// (no-prefix, non-pinned) work is withheld from that pod's /pull grant.
+	// Mirrors ROUTER_KV_* in src/core/services/router_service/router/config.py.
+	KVSoftDivert          bool
+	KVPressureHigh        float64
+	KVPressureLow         float64
+	KVPressurePeerOK      float64
+	KVSoftMinHits         int
+	KVUsageStaleS         float64
+	KVHealthPollIntervalS float64
+
 	OutputLenPredictor string
 	BatchSizeEstimate  string
 	FixedBatchEstimate int
@@ -219,6 +244,14 @@ func LoadConfig() *Config {
 		AffinityMode:         common.EnvStr("AFFINITY_MODE", "soft"),
 		AffinityTTLS:         common.EnvFloat("AFFINITY_TTL_S", 300.0),
 		AffinityHardTimeoutS: common.EnvFloat("AFFINITY_HARD_TIMEOUT_S", 5.0),
+
+		AffinityPersistEnabled:  common.EnvBool("AFFINITY_PERSIST_ENABLED", false),
+		AffinityRedisTTLSeconds: common.EnvInt("AFFINITY_REDIS_TTL_SECONDS", 0),
+		AffinityRedisKeyPrefix:  common.EnvStr("AFFINITY_REDIS_KEY_PREFIX", "affinity"),
+		AffinityCacheMax:        common.EnvInt("AFFINITY_CACHE_MAX", 100000),
+		AffinityCacheRefreshS:   common.EnvFloat("AFFINITY_CACHE_REFRESH_S", 0.0),
+		AffinityEndpointStaleS:  common.EnvFloat("AFFINITY_ENDPOINT_STALE_S", 1800.0),
+		Cluster:                 common.EnvStr("CLUSTER", ""),
 
 		PoolFactor:       common.EnvFloat("POOL_FACTOR", 4.0),
 		DefaultMaxTokens: common.EnvInt("DEFAULT_MAX_TOKENS", 1024),
@@ -286,6 +319,14 @@ func LoadConfig() *Config {
 		FairFloor:              common.EnvInt("ROUTER_FAIR_FLOOR", 1),
 		StuckPullSeconds:       common.EnvInt("ROUTER_STUCK_PULL_SECONDS", 0),
 		AffinityReleaseOnStuck: common.EnvBool("ROUTER_AFFINITY_RELEASE_ON_STUCK", false),
+
+		KVSoftDivert:          common.EnvBool("ROUTER_KV_SOFT_DIVERT", false),
+		KVPressureHigh:        common.EnvFloat("ROUTER_KV_PRESSURE_HIGH", 0.85),
+		KVPressureLow:         common.EnvFloat("ROUTER_KV_PRESSURE_LOW", 0.75),
+		KVPressurePeerOK:      common.EnvFloat("ROUTER_KV_PRESSURE_PEER_OK", 0.70),
+		KVSoftMinHits:         common.EnvInt("ROUTER_KV_SOFT_MIN_HITS", 1),
+		KVUsageStaleS:         common.EnvFloat("ROUTER_KV_USAGE_STALE_S", 30.0),
+		KVHealthPollIntervalS: common.EnvFloat("ROUTER_KV_HEALTH_POLL_INTERVAL_S", 5.0),
 
 		OutputLenPredictor: common.EnvStr("OUTPUT_LEN_PREDICTOR", "simple"),
 		BatchSizeEstimate:  common.EnvStr("BATCH_SIZE_ESTIMATE", "fixed"),
@@ -495,6 +536,32 @@ func (c *Config) normalize() {
 	if c.StuckPullSeconds < 0 {
 		c.StuckPullSeconds = 0
 	}
+	if c.KVSoftMinHits < 0 {
+		c.KVSoftMinHits = 0
+	}
+	if c.KVUsageStaleS < 0 {
+		c.KVUsageStaleS = 0
+	}
+	if c.KVHealthPollIntervalS < 0 {
+		c.KVHealthPollIntervalS = 0
+	}
+	if c.AffinityRedisTTLSeconds < 0 {
+		c.AffinityRedisTTLSeconds = 0
+	}
+	c.AffinityRedisKeyPrefix = strings.TrimSpace(c.AffinityRedisKeyPrefix)
+	if c.AffinityRedisKeyPrefix == "" {
+		c.AffinityRedisKeyPrefix = "affinity"
+	}
+	if c.AffinityCacheMax < 0 {
+		c.AffinityCacheMax = 0
+	}
+	if c.AffinityCacheRefreshS < 0 {
+		c.AffinityCacheRefreshS = 0
+	}
+	if c.AffinityEndpointStaleS < 0 {
+		c.AffinityEndpointStaleS = 0
+	}
+	c.Cluster = strings.TrimSpace(c.Cluster)
 	if c.FixedBatchEstimate < 1 {
 		c.FixedBatchEstimate = 1
 	}
@@ -618,6 +685,13 @@ func (c *Config) PrintBanner() {
 		"AFFINITY_MODE":                     c.AffinityMode,
 		"AFFINITY_TTL_S":                    c.AffinityTTLS,
 		"AFFINITY_HARD_TIMEOUT_S":           c.AffinityHardTimeoutS,
+		"AFFINITY_PERSIST_ENABLED":          c.AffinityPersistEnabled,
+		"AFFINITY_REDIS_TTL_SECONDS":        c.AffinityRedisTTLSeconds,
+		"AFFINITY_REDIS_KEY_PREFIX":         c.AffinityRedisKeyPrefix,
+		"AFFINITY_CACHE_MAX":                c.AffinityCacheMax,
+		"AFFINITY_CACHE_REFRESH_S":          c.AffinityCacheRefreshS,
+		"AFFINITY_ENDPOINT_STALE_S":         c.AffinityEndpointStaleS,
+		"CLUSTER":                           c.Cluster,
 		"POOL_FACTOR":                       c.PoolFactor,
 		"DEFAULT_MAX_TOKENS":                c.DefaultMaxTokens,
 		"ROUTER_MODE":                       c.RouterMode,
@@ -659,6 +733,13 @@ func (c *Config) PrintBanner() {
 		"ROUTER_FAIR_FLOOR":                 c.FairFloor,
 		"ROUTER_STUCK_PULL_SECONDS":         c.StuckPullSeconds,
 		"ROUTER_AFFINITY_RELEASE_ON_STUCK":  c.AffinityReleaseOnStuck,
+		"ROUTER_KV_SOFT_DIVERT":             c.KVSoftDivert,
+		"ROUTER_KV_PRESSURE_HIGH":           c.KVPressureHigh,
+		"ROUTER_KV_PRESSURE_LOW":            c.KVPressureLow,
+		"ROUTER_KV_PRESSURE_PEER_OK":        c.KVPressurePeerOK,
+		"ROUTER_KV_SOFT_MIN_HITS":           c.KVSoftMinHits,
+		"ROUTER_KV_USAGE_STALE_S":           c.KVUsageStaleS,
+		"ROUTER_KV_HEALTH_POLL_INTERVAL_S":  c.KVHealthPollIntervalS,
 		"OUTPUT_LEN_PREDICTOR":              c.OutputLenPredictor,
 		"BATCH_SIZE_ESTIMATE":               c.BatchSizeEstimate,
 		"FIXED_BATCH_ESTIMATE":              c.FixedBatchEstimate,

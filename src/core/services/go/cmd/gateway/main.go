@@ -38,6 +38,10 @@ func main() {
 	}
 
 	queue := gateway.NewCentralQueue(cfg, kv)
+	// Persistent affinity: reload the durable conversation->pod map from Redis
+	// so the router does not start empty after a restart/redeploy. No-op unless
+	// AFFINITY_PERSIST_ENABLED. Mirrors router_state.warm_affinity_from_store.
+	queue.WarmAffinityFromStore()
 	results := gateway.NewResultStore()
 	results.StartCleanupLoop(
 		time.Duration(cfg.PollResultTTLS*float64(time.Second)),
@@ -189,5 +193,6 @@ func main() {
 	if ownerLookup != nil {
 		ownerLookup.Close()
 	}
+	queue.CloseAffinityStore()
 	log.Println("[router] Shutdown complete.")
 }
