@@ -14,8 +14,9 @@
 
 # ── ACTIVE p2p host-staging deployments (uncomment the one you want to run) ──
 # BZ (this machine) — affinity, and its fair-pull variant:
-prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
-  - pull
+# (commented out during TONIGHT plan below — re-enable after benches)
+# prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
+#   - pull
 # prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity-fair:
 #   - pull
 #
@@ -25,12 +26,57 @@ prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
 # prod-yz-shadow-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
 
-# ── BZ: KV soak — us+BooM (33/218 path) vs BooM-only (142 path) ──
-# Reproduces yz-style LMCache host-staging pin deadlock. Activate ONE at a time.
-# benchmark-bz-us-boom-lmsys-kv-soak:      # us+boom (33/218 path)
+# =============================================================================
+# TONIGHT (BZ only) — activate ONE block at a time; do not leave prod-bz active.
+# Full cold redeploy (no --skip-vllm) on first launch of each block.
+# Order suggested: (A) crash-soak → compare, then (B) fair high-load A/B.
+# Soft-divert A/B is optional (needs feat/kv-soft-divert images).
+# =============================================================================
+
+# ---- A) Crash / pin-deadlock soak + path compare (metrics) ----
+# Leave running until pin timeouts OR GPU KV ~100% + decode decay.
+# Success signals: Pin timeout in vllm.log, prefix_cache_hit_rate collapse,
+# decode tok/s down while running≈batchSize. Compare Grafana / notebook panels
+# (running, rps, prefill/decode, TTFT/TPOT/e2e, prefix hit) between Series 1/2.
+# A1 first (us+BooM = 33/218 path). A2 optional same-night or next (142 path).
+# benchmark-bz-us-boom-lmsys-kv-soak:      # A1 us+boom
 #   - pull
-# benchmark-bz-boom-only-lmsys-kv-soak:    # boom-only (142 path)
+# benchmark-bz-boom-only-lmsys-kv-soak:    # A2 boom-only (key_affinity)
 #   - key_affinity
+
+# ---- B) Rebalancing under high load (fair pull A/B, 96 users) ----
+# Prefix strategy. B1 = fair OFF, B2 = fair ON. Same 96-user overload.
+# Watch: router_fair_* / in-flight balance, waiting, TTFT/TPOT, timeouts.
+# benchmark-bz-pull-prefix-highload:       # B1 fair OFF
+#   - pull
+# benchmark-bz-pull-fair-prefix-highload:  # B2 fair ON
+#   - pull
+
+# ---- C) Optional: soft KV divert A/B (needs soft-divert router/sidecar image) ----
+# benchmark-bz-pull-kvdivert-off-prefix:
+#   - pull
+# benchmark-bz-pull-kvdivert-on-prefix:
+#   - pull
+
+# ── BZ: KV soak — us+BooM (33/218 path) vs BooM-only (142 path) ──
+# (see TONIGHT block A above)
+# benchmark-bz-us-boom-lmsys-kv-soak:
+#   - pull
+# benchmark-bz-boom-only-lmsys-kv-soak:
+#   - key_affinity
+
+# ── YZ metrics redeploy check (run ON YZ machine, not BZ) ──
+# After helm upgrade of prod-yz…affinity with main (≥32a8c49):
+#   kubectl -n <ns> get servicemonitor vllm -o yaml | grep -E 'interval|scrapeTimeout'
+#     expect: interval 15s, scrapeTimeout 10s (was 1s)
+#   kubectl -n <ns> get podmonitor kv-router kv-sidecar -o yaml | grep -E 'interval|scrapeTimeout'
+#     expect: interval 5s, scrapeTimeout 4s
+#   Confirm models[].batchSize: 32 in values / pod env BATCH_SIZE
+#   Prometheus: scrape no continuous timeout errors on vLLM :8200/metrics
+#   Grafana: continuous GPU KV / decode / prefix panels (no multi-minute gaps
+#   under load). Client metrics.prometheus_base_url stays the YZ URL.
+# prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity:
+#   - pull
 
 # ── ACTIVE: claude-CLI HIGH-LOAD routing comparison (96 users x 180 convs, ~1h) ──
 # Drives the real `claude` CLI (transport.mode=claude) across every routing

@@ -1,0 +1,213 @@
+# benchmark: BZ KV soak — BooM only (142-style path)
+# ---------------------------------------------------------------------------
+# Path: client → boom-proxy (NodePort 30401) → vLLM engines (LWS DNS)
+#   NO LLM-LA router, NO redis, NO kv-sidecar.
+# Matches the 142 reference: LMCache-native P2P host-staging behind BooM only.
+#
+# How: helm.boom_route_via: direct  →  sweep sets boom.routeVia=direct and
+# disables deploy.router / redis / sidecars. Master method IS BooM's strategy
+# (use key_affinity). See values.yaml boom.routeVia + 75-boom.yaml.
+#
+# key_affinity needs per-conversation API keys or everything pins to one pod:
+# boom.key_affinity_keys + helm.boom_key_affinity_bench deploy ephemeral Postgres
+# with sk-bench-{0..N-1}; the client rotates sk-bench-{conv_id % N}.
+#
+# WORKLOAD (matches the yz soak that filled KV to ~100% then pin-deadlocked):
+#   - hf-lmsys ShareGPT/lmsys conversations, uncapped input (p95 tens of k tokens)
+#   - long continuous det arrivals at ~1 rps until engines sit at batch cap
+#   - single deploy, leave pods up for many hours (do NOT redeploy mid-soak)
+#
+# Success criteria (you've reproduced it):
+#   GPU KV usage → ~97–100% and stays there
+#   vllm.log: "Pin timeout … Forcing unpin to 0"
+#   decode tok/s decays while num_requests_running stays ~batchSize
+#   prefix_cache_hit_rate collapses
+#
+# If KV stays ~10% for hours, raise rate_rps until waiting>0 / running~32.
+#
+# Pre-requisites (same as prod-bz p2p):
+#   sysctl -w vm.swappiness=0 && sysctl -w kernel.numa_balancing=0  (each engine node)
+#   lmcache-ascend:hccl-p2p image in reg.local:32000
+#   controller IP/node below matches a real BZ node
+#
+# Run (full redeploy — do not --skip-vllm the first time):
+#   # in 1-master_config.yaml activate ONLY:
+#   #   benchmark-bz-boom-only-lmsys-kv-soak:
+#   #     - key_affinity
+#   cd src/client && python sweep_methods.py
+#
+# Mid-soak client-only restarts OK with --skip-vllm ONLY if live mode is already direct.
+#
+# Sibling: benchmark-bz-us-boom-lmsys-kv-soak.yaml (33/218 / us+BooM path).
+# First draft of this soak archived at
+#   old/p2p-baselines/benchmark-bz-boom-direct-lmsys-kv-soak.yaml
+
+switch_cluster: bz
+backend: "boom"
+
+# Open-loop soak: many long prompts. Wall time is ~ total_requests / rate_rps
+# (plus queueing). 50k @ 1 rps ≈ 14 h; stop early once pin timeouts appear.
+total_requests: 50000
+prompt_source: "hf-lmsys"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_name: "/data/gateway/gateway/data/lmsys_conversations_hf"
+  split: "train"
+  tokenizer_name: "/data/models/MiniMax-M2.7-w8a8-QuaRot"
+  streaming: true
+  min_input_tokens: 1
+  max_input_tokens: 10000000
+  repeat_each: 1
+
+load_pattern:
+  pattern: "det"
+  # Start at 1 rps; raise if engines never pin at batchSize / waiting stays 0.
+  rate_rps: 1.0
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  max_tokens: 8192
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+  use_dataset_output_len: false
+
+output_log_mode: "summary"
+print_trace: false
+
+# No LLM-LA router in this path — leave router/redis collectors off.
+collect_router_log: false
+emit_logs_full: false
+collect_vllm_logs: true
+
+metrics:
+  enabled: true
+  scrape_interval_s: 1.0
+  window_s: 3.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+transport:
+  mode: "async_pubsub"
+  submit_path: "/submit"
+  topic: "results"
+  run_id: null
+  idle_timeout_s: 1000.0
+  # Long gap tolerance so a temporary quiet period doesn't abort the soak.
+  idle_zero_running_s: 600.0
+
+boom:
+  # Cluster profile supplies base_url (http://192.168.0.79:30401 on bz).
+  chat_path: "/v1/chat/completions"
+  model: "served-model-minmax"
+  api_key: "sk-boom-master"
+  timeout_s: 10000.0
+  stream: true
+  # Rotate virtual keys so BooM key_affinity sticks each conversation to a pod
+  # (sk-bench-{conv_id % 64}). Requires boom_key_affinity_bench below.
+  key_affinity_keys: 64
+
+helm:
+  boom_claude_aliases: true
+  boom_max_inflight: 1000
+  # PURE BOOM: gateway → vLLM only (no LLM-LA router). Master method must be
+  # key_affinity → boom.directRoutingStrategy=key_affinity.
+  boom_route_via: direct
+  boom_key_affinity_bench: true
+
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 1
+
+  # Router knobs are inert in direct mode (router not deployed); left absent
+  # on purpose so nothing quietly re-enables the LLM-LA path.
+
+  expose_per_pod: true
+
+  nfs_path: "/data/models/MiniMax-M2.7-w8a8-QuaRot"
+  model_host_path: "/data/models"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+  # Sidecar is forced OFF by boom_route_via=direct in sweep_methods; value unused.
+  sidecar_prefetch: 2
+
+  mooncake_enabled: false
+  deploy_mooncake_master: false
+
+  # --- LMCache P2P / host-staging (the failure surface under soak) ---
+  lmcache_enabled: true
+  lmcache_mode: "p2p"
+  lmcache_chunk_size: 512
+  lmcache_max_local_cpu_size: 100
+
+  lmcache_use_host_staging: true
+  lmcache_os_staging_bytes: 8589934592   # 8 GiB
+
+  lmcache_p2p_controller_pull_url: "192.168.0.42:9800"
+  lmcache_p2p_controller_reply_url: "192.168.0.42:9900"
+  deploy_lmcache_controller: true
+  lmcache_controller_image: "reg.local:32000/lmcache-ascend:hccl-p2p-metrics-fix"
+  lmcache_nds_enabled: false
+
+  dtype: "bfloat16"
+  ascend_enable_flashcomm1: true
+  model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":16}'
+
+  vllm_image: "reg.local:32000/lmcache-ascend:hccl-p2p-metrics-fix"
+
+  models:
+    - name: minimax-m2
+      servedModelName: served-model-minmax
+      replicas: 2
+      streamingMode: true
+      modelSubPath: MiniMax-M2.7-w8a8-QuaRot
+      tensorParallelSize: 8
+      batchSize: 32
+      sidecarPrefetch: 2
+      dataParallel:
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 8888
+        pairTopologyKey: roce-pair
+        hcclBuffSize: 1024
+        ompNumThreads: 16
+      vllm:
+        gpuMemoryUtilization: 0.92
+        dtype: bfloat16
+        enableExpertParallel: true
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 32768
+        enablePrefixCaching: true
+        enablePromptTokensDetails: true
+        toolCallParser: minimax_m2
+        reasoningParser: minimax_m2_append_think
+        modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
+        ascendEnableFlashcomm1: true
+
+  values:
+    lmcacheController.nodeName: "k8s-worker1"
+    boom.image: "boom-gateway:v5"

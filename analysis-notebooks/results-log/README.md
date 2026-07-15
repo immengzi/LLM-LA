@@ -72,3 +72,15 @@ Add new entries with `new_entry.py` (see `template.md`).
 | 13-16 | [`006-reproduing-old-series-35.md`](02-boom-reproduce/006-reproduing-old-series-35.md) | 13, 14, 15, 16 | Good Results *** |
 | 17-20 | [`007-check-streaming.md`](02-boom-reproduce/007-check-streaming.md) | 17, 18, 19, 20 | Seems not stremaing |
 | 21-24 | [`008-check-streaming.md`](02-boom-reproduce/008-check-streaming.md) | 21, 22, 23, 24 | Seems not to be streaming |
+
+## 03-bz-kv-soak
+
+| Series | Entry | Exp IDs | Summary |
+|---|---|---|---|
+| 1-2 | [`000-us-boom-vs-boom-only-kv-soak-tonight-placeholders.md`](03-bz-kv-soak/000-us-boom-vs-boom-only-kv-soak-tonight-placeholders.md) | TBD | Tonight placeholders: us+boom vs boom-only KV soak on BZ. Analyse in `prefix-kv-drop-root-cause.ipynb`. |
+
+## 04-bz-fair-highload
+
+| Series | Entry | Exp IDs | Summary |
+|---|---|---|---|
+| 1-2 | [`000-fair-pull-a-b-at-96-users-prefix-tonight-placeholders.md`](04-bz-fair-highload/000-fair-pull-a-b-at-96-users-prefix-tonight-placeholders.md) | TBD | Tonight placeholders: fair OFF vs ON at 96 users (prefix). Analyse in `claude-strategy-comparison.ipynb`. |

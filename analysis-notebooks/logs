@@ -1,6 +1,6 @@
 Legend:
-↓ lower is better  ↑ higher is better  
-Values are real metrics.  
+↓ lower is better  ↑ higher is better
+Values are real metrics.
 Percentages in parentheses show **Pull’s improvement (+) or regression (−)** relative to the method.
 
 Series 0:
@@ -1497,7 +1497,7 @@ Setup:
   159) Push-Random
   160) Push-Least-Queue
 
-Purpose: 25000 requests experiment on rps 3, repeating the 
+Purpose: 25000 requests experiment on rps 3, repeating the
 Findings: 3 seems to be a magic number that shows the best performance
 
 Metric (mean / p99)            | Pull (exp157) | Push-RR (exp158)        | Push-Random (exp159)     | Push-LQ (exp160)         | Winner
@@ -1538,7 +1538,7 @@ Setup:
   163) Push-Random
   164) Push-Least-Queue
 
-Purpose: 40000 requests experiment on rps 3, repeating the 
+Purpose: 40000 requests experiment on rps 3, repeating the
 Findings: 3 seems to be a magic number that shows the best performance
 
 Metric (mean / p99)            | Pull (exp161) | Push-RR (exp162)        | Push-Random (exp163)     | Push-LQ (exp164)         | Winner
@@ -1579,7 +1579,7 @@ Setup:
   167) Push-Random
   168) Push-Least-Queue
 
-Purpose: 40000 requests experiment on rps 4, repeating the 
+Purpose: 40000 requests experiment on rps 4, repeating the
 Findings: Since the servers became over saturated then the queuing latency is now so high that the difference between methdos become marginal
 
 
@@ -1621,7 +1621,7 @@ Setup:
   171) Push-Random
   172) Push-Least-Queue
 
-Purpose: 40000 requests experiment on rps 5, repeating the 
+Purpose: 40000 requests experiment on rps 5, repeating the
 Findings: Since the servers became over saturated then the queuing latency is now so high that the difference between methdos become marginal
 
 
@@ -1662,7 +1662,7 @@ Setup:
   175) Push-Random
   176) Push-Least-Queue
 
-Purpose: 40000 requests experiment on rps 6, repeating the 
+Purpose: 40000 requests experiment on rps 6, repeating the
 Findings: Since the servers became over saturated then the queuing latency is now so high that the difference between methdos become marginal
 
 
@@ -1998,7 +1998,7 @@ rps: 2
 10000
 
 269:
-The batch variable is being 
+The batch variable is being
 controled through the helm var rather than ours not sure which one was taking effect here
 boom+llm-la
 GLM-5
@@ -2008,7 +2008,7 @@ rps: 2
 10000
 
 270:
-The batch variable is being 
+The batch variable is being
 controled through the helm var rather than ours not sure which one was taking effect here
 boom+llm-la
 GLM-5
@@ -2026,7 +2026,7 @@ rps: 2.5
 10000
 
 272:
-The batch variable is being 
+The batch variable is being
 controled through the helm var rather than ours not sure which one was taking effect here
 boom+llm-la
 GLM-5
@@ -2036,7 +2036,7 @@ rps: 2.5
 10000
 
 273:
-The batch variable is being 
+The batch variable is being
 controled through the helm var rather than ours not sure which one was taking effect here
 boom+llm-la
 GLM-5
@@ -2046,7 +2046,7 @@ rps: 2.5
 10000
 
 274:
-The batch variable is being 
+The batch variable is being
 controled through the helm var rather than ours not sure which one was taking effect here
 boom
 GLM-5
@@ -2056,7 +2056,7 @@ rps: 2
 10000
 
 275:
-The batch variable is being 
+The batch variable is being
 controled through the helm var rather than ours not sure which one was taking effect here
 boom
 GLM-5
@@ -2066,7 +2066,7 @@ rps: 2
 10000
 
 276:
-The batch variable is being 
+The batch variable is being
 controled through the helm var rather than ours not sure which one was taking effect here
 boom
 GLM-5
@@ -2076,7 +2076,7 @@ rps: 2
 10000
 
 277:
-The batch variable is being 
+The batch variable is being
 controled through the helm var rather than ours not sure which one was taking effect here
 boom
 GLM-5
@@ -2086,7 +2086,7 @@ rps: 2.5
 10000
 
 278:
-The batch variable is being 
+The batch variable is being
 controled through the helm var rather than ours not sure which one was taking effect here
 boom
 GLM-5
@@ -2096,7 +2096,7 @@ rps: 2.5
 10000
 
 279:
-The batch variable is being 
+The batch variable is being
 controled through the helm var rather than ours not sure which one was taking effect here
 boom
 GLM-5
@@ -2122,7 +2122,7 @@ TODO should check
 301-302
 
 300 requests
-good results 
+good results
 
 303-304
 
@@ -2559,3 +2559,58 @@ Router outgoing RPS mean |       0.55 |      0.46 |      0.44 |      0.46
 Sidecar queue length mean|      53.91 |    122.89 |    129.78 |     93.97
 Sidecar received RPS mean|       3.73 |      3.66 |      3.52 |      3.69
 Sidecar completed RPS mean|      3.73 |      3.66 |      3.51 |      3.69
+
+BZ results:
+
+Series 1 — us+boom (33/218 path) KV soak
+Notebook: analysis-notebooks/prefix-kv-drop-root-cause.ipynb (BZ tonight KV soak)
+Results-log: analysis-notebooks/results-log/03-bz-kv-soak/000-us-boom-vs-boom-only-kv-soak-tonight-placeholders.md
+Setup:
+- Cluster: bz
+- Config: benchmark-bz-us-boom-lmsys-kv-soak
+- Path: client → BooM → LLM-LA router/sidecar → vLLM (LMCache P2P host-staging)
+- Method: pull; router_strategy=both; hard affinity
+- Workload: hf-lmsys uncapped, max_tokens 8192, ~50k @ 1 rps
+Purpose: Reproduce YZ-style GPU-KV fill / prefix collapse / pin timeouts on the us+boom path
+Findings: (pending run)
+Observations: (pending)
+
+Series 2 — boom-only (142 path) KV soak
+Notebook: analysis-notebooks/prefix-kv-drop-root-cause.ipynb (BZ tonight KV soak)
+Results-log: analysis-notebooks/results-log/03-bz-kv-soak/000-us-boom-vs-boom-only-kv-soak-tonight-placeholders.md
+Setup:
+- Cluster: bz
+- Config: benchmark-bz-boom-only-lmsys-kv-soak
+- Path: client → BooM → vLLM direct (no LLM-LA router)
+- Method: key_affinity; sk-bench-0..63
+- Workload: same as Series 1
+Purpose: Same soak on the 142-style boom-only path
+Findings: (pending run)
+Observations: (pending)
+
+
+Series 3 — fair OFF prefix high-load (96 users)
+Setup:
+- Cluster: bz
+- Config: benchmark-bz-pull-prefix-highload
+- Path: client → BooM → LLM-LA router/sidecar → vLLM (LMCache P2P host-staging)
+- Method: pull; router_strategy=prefix; router_fair_pull=false
+- Workload: Claude CLI, 96 users × 10 convs (≈1.5× capacity)
+Purpose: High-load control for fair-pull rebalancing A/B
+Findings: (pending run)
+Observations: (pending)
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb (BZ tonight fair high-load)
+Results-log: analysis-notebooks/results-log/04-bz-fair-highload/000-fair-pull-a-b-at-96-users-prefix-tonight-placeholders.md
+
+Series 4 — fair ON prefix high-load (96 users)
+Setup:
+- Cluster: bz
+- Config: benchmark-bz-pull-fair-prefix-highload
+- Path: same as Series 3
+- Method: pull; router_strategy=prefix; router_fair_pull=true (margin 1.15)
+- Workload: same as Series 3
+Purpose: Treatment cell — load-aware grant throttle under overload
+Findings: (pending run)
+Observations: (pending)
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb (BZ tonight fair high-load)
+Results-log: analysis-notebooks/results-log/04-bz-fair-highload/000-fair-pull-a-b-at-96-users-prefix-tonight-placeholders.md

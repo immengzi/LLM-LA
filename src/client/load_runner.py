@@ -42,7 +42,7 @@ from config import (
     MultiModelConfig,
     generation_effective_ignore_eos,
 )
-from prompts import Conversation, ConversationTurn
+from prompts import Conversation
 from trace_utils import print_trace_block, compute_trace_metrics
 from experiment_io import ExperimentLogger
 
@@ -702,6 +702,7 @@ def _request_thread_litellm_http(
     print_trace: bool = True,
     label: str = "LiteLLM",
     model_override: Optional[str] = None,
+    api_key_override: Optional[str] = None,
 ):
     """
     OpenAI-compatible proxy worker: one open HTTP request per thread.
@@ -729,6 +730,7 @@ def _request_thread_litellm_http(
             rid, result = send_one_litellm(
                 session, litellm_cfg, task.prompt, effective_gen, label=label,
                 model_override=model_override,
+                api_key_override=api_key_override,
             )
             t1 = time.time()
             end_to_end_s = t1 - t0
@@ -785,6 +787,8 @@ def _request_thread_litellm_http(
 
                 if model_override is not None:
                     record["target_model"] = model_override
+                if api_key_override is not None:
+                    record["affinity_key"] = api_key_override
                 if endpoint_id is not None:
                     record["endpoint_id"] = endpoint_id
                 if usage_prompt_tokens is not None:
@@ -821,6 +825,8 @@ def _request_thread_litellm_http(
                     "planned_ts_mono": task.ts_mono,
                     "send_failed": True,
                 }
+                if api_key_override is not None:
+                    err_record["affinity_key"] = api_key_override
                 logger.log_request(err_record)
     finally:
         session.close()
@@ -836,6 +842,7 @@ def _request_thread_litellm_http_stream(
     print_trace: bool = True,
     label: str = "LiteLLM",
     model_override: Optional[str] = None,
+    api_key_override: Optional[str] = None,
 ):
     """
     Streaming variant of _request_thread_litellm_http.
@@ -862,6 +869,7 @@ def _request_thread_litellm_http_stream(
             rid, result = send_one_litellm_stream(
                 session, litellm_cfg, task.prompt, effective_gen, label=label,
                 model_override=model_override,
+                api_key_override=api_key_override,
             )
             t1 = time.time()
             end_to_end_s = t1 - t0
@@ -921,6 +929,8 @@ def _request_thread_litellm_http_stream(
 
                 if model_override is not None:
                     record["target_model"] = model_override
+                if api_key_override is not None:
+                    record["affinity_key"] = api_key_override
                 if ttft_s is not None:
                     record["ttft_s"] = ttft_s
                 if tpot_avg_s is not None:
@@ -963,6 +973,8 @@ def _request_thread_litellm_http_stream(
                     "planned_ts_mono": task.ts_mono,
                     "send_failed": True,
                 }
+                if api_key_override is not None:
+                    err_record["affinity_key"] = api_key_override
                 logger.log_request(err_record)
     finally:
         session.close()
@@ -1199,7 +1211,7 @@ def _request_thread_anthropic_http(
 
         t0 = time.time()
         try:
-            rid, result = send_one_anthropic(session, boom_cfg, task.prompt, gen_cfg)
+            rid, result = send_one_anthropic(session, boom_cfg, task.prompt, gen_cfg)  # noqa: F821
             t1 = time.time()
             end_to_end_s = t1 - t0
 
@@ -2163,9 +2175,11 @@ def run_open_loop_load(
 
         boom_stream = bool(getattr(boom, "stream", False))
         stream_tag = " (stream=true)" if boom_stream else ""
+        n_affinity_keys = getattr(boom, "key_affinity_keys", 0) or 0
+        affinity_tag = f", key_affinity_keys={n_affinity_keys}" if n_affinity_keys > 0 else ""
         print(
             f"[load_runner] BooM Gateway: {boom.base_url}{boom.chat_path} "
-            f"model={boom.model}{stream_tag}"
+            f"model={boom.model}{stream_tag}{affinity_tag}"
         )
         print(
             "[load_runner] NOTE: backend=boom routes through BooM Gateway "
@@ -2184,9 +2198,15 @@ def run_open_loop_load(
 
             ot = output_tokens_per_request[idx] if output_tokens_per_request else None
             task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono, output_tokens=ot)
+            req_api_key = (
+                f"sk-bench-{idx % n_affinity_keys}" if n_affinity_keys > 0 else None
+            )
             t = threading.Thread(
                 target=thread_fn,
-                args=(task, boom, gen_cfg, t0_mono, logger, output_log_mode, print_trace, "BooM"),
+                args=(
+                    task, boom, gen_cfg, t0_mono, logger, output_log_mode, print_trace,
+                    "BooM", None, req_api_key,
+                ),
                 daemon=True,
                 name=f"boom-T{idx}",
             )
