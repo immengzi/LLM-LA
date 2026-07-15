@@ -2,7 +2,7 @@
 
 The router service is the **central coordinator** between:
 
-- external clients (HTTP `/enqueue`), and  
+- external clients (HTTP `/enqueue`), and
 - model workers running behind sidecars.
 
 It provides **synchronous request/response** to clients while internally
@@ -25,7 +25,7 @@ At a high level, the router:
      default; the legacy external service is opt-in),
    - records which blocks the request will use.
 4. Either:
-   - **pull-mode**: puts the request in a central queue, or  
+   - **pull-mode**: puts the request in a central queue, or
    - **push-mode**: immediately pushes it to a chosen sidecar.
 5. Waits for the sidecar to send back the result.
 6. Returns the result to the client as the `/enqueue` response.
@@ -37,25 +37,25 @@ inside the router.
 
 ## 2. Main Endpoints (Conceptual)
 
-- `GET /health`  
+- `GET /health`
   Liveness check. The aggregated response nests queue length under `router.queue_len`; the per-component `GET /health/router` returns a top-level `queue_len`.
 
-- `POST /enqueue` (client → router)  
+- `POST /enqueue` (client → router)
   Synchronous call:
   - input: `prompt` + optional `meta`, timestamps, etc.
   - output: `req_id` and the model `result` (text, finish reason, latency, …).
 
-- `POST /pull` (sidecar → router; pull-mode)  
+- `POST /pull` (sidecar → router; pull-mode)
   Sidecar asks for up to `want` jobs:
   - input: `endpoint` identity + capacity `want`
   - output: list of jobs (each with `req_id`, `prompt`, `meta`).
 
-- `POST /result` (sidecar → router)  
+- `POST /result` (sidecar → router)
   Sidecar delivers model output:
   - router unblocks the waiting `/enqueue` call and returns the result
     to the client.
 
-- `GET /latency_log?last=N` (observer → router)  
+- `GET /latency_log?last=N` (observer → router)
   Returns the most recent completed requests from an in-memory ring buffer
   (server-side, so it survives a BooM/proxy hop). Each entry carries
   `rid`, `endpoint`, token counts, and latencies, plus the routing decision
@@ -165,7 +165,7 @@ KV-awareness is about **reusing model KV cache blocks** when possible.
 
 The router keeps two maps:
 
-- request → list of block hashes  
+- request → list of block hashes
 - block hash → set of endpoints that own that block
 
 Information comes from:
@@ -255,6 +255,34 @@ unavailable-target path.
 
 ---
 
+## 5d. Soft KV Divert (Conceptual)
+
+Soft KV divert is an **off-by-default grant filter** for pull / central-push. When a
+pod’s GPU KV usage is high **and another pod still has headroom**, the saturated
+pod keeps only:
+
+- affinity self-pins, and
+- requests with local `prefix_len >= ROUTER_KV_SOFT_MIN_HITS`,
+
+and leaves cold / low-hit work for healthier pullers. It does **not** dump
+prefix-local conversations onto peers (that would be hard divert).
+
+**Signal:** each sidecar optionally scrapes **local** vLLM `/metrics`
+(`vllm:kv_cache_usage_perc`, fallback `vllm:gpu_cache_usage_perc`; `max` across
+engines) and reports `kv_usage` on `/pull` and `/health`. Direct pod-local HTTP —
+not cluster Prometheus. Sidecar switch: `KV_USAGE_REPORT` (default off).
+
+**Activation:** `ROUTER_KV_SOFT_DIVERT=true`, self `kv_usage ≥ ROUTER_KV_PRESSURE_HIGH`
+(with LOW hysteresis), and some peer with fresh `kv_usage < ROUTER_KV_PRESSURE_PEER_OK`.
+If every peer is also high / samples are missing or stale → **no-op** (rebalance
+cannot create capacity). Central-push refreshes samples by polling sidecar `/health`
+(`ROUTER_KV_HEALTH_POLL_INTERVAL_S`).
+
+Composes after fair-pull in `pull_for_endpoint`. Orthogonal to SLO dynamic pull
+(sidecar AIMD on `want`).
+
+---
+
 ## 6. Configuration (High-Level)
 
 Most behavior is controlled via environment variables loaded into
@@ -283,6 +311,10 @@ Most behavior is controlled via environment variables loaded into
   items an overloaded pod still gets. `ROUTER_STUCK_PULL_SECONDS` (0 = off) and
   `ROUTER_AFFINITY_RELEASE_ON_STUCK` are the optional stuck-pod controls. All
   default off; never override KV/affinity.
+- `ROUTER_KV_SOFT_DIVERT` – soft GPU-KV pressure divert (see 5d). Defaults off.
+  Thresholds: `ROUTER_KV_PRESSURE_HIGH` / `LOW` / `PEER_OK`,
+  `ROUTER_KV_SOFT_MIN_HITS`, `ROUTER_KV_USAGE_STALE_S`,
+  `ROUTER_KV_HEALTH_POLL_INTERVAL_S`. Sidecar must set `KV_USAGE_REPORT=true`.
 - `ROUTER_LOG_REQUEST_BODY` – also store each request's full body (messages +
   sampling params) under `request_body` in the `/latency_log` ring. Opt-in, off
   by default; the body rides the bounded ring so it evicts automatically.
@@ -295,7 +327,8 @@ The Go gateway and the Python router are kept at parity: both honor
 `ROUTER_STRATEGY`, `ROUTER_MEASURE_PREFIX`, `ROUTER_LOG_BLOCK_HASHES`,
 `ROUTER_LOG_REQUEST_BODY`, `KV_BLOCK_SIZE`, the pull-mode fairness knobs
 (`ROUTER_FAIR_PULL`, `ROUTER_FAIR_MARGIN`, `ROUTER_FAIR_FLOOR`,
-`ROUTER_STUCK_PULL_SECONDS`, `ROUTER_AFFINITY_RELEASE_ON_STUCK`), and the
+`ROUTER_STUCK_PULL_SECONDS`, `ROUTER_AFFINITY_RELEASE_ON_STUCK`), soft KV divert
+(`ROUTER_KV_SOFT_DIVERT` and related thresholds), and the
 central-push knobs (`ROUTER_MODE=central-push`, `ROUTER_CENTRAL_PUSH_CAP`,
 `ROUTER_CENTRAL_PUSH_INTERVAL_S`), and both enrich `/latency_log` with the same
 prefix/KV fields.
@@ -306,7 +339,7 @@ prefix/KV fields.
 
 At startup, the router prints the effective config and starts:
 
-- the KV watcher thread, and  
+- the KV watcher thread, and
 - the push router (if in push mode).
 
 ---

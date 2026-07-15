@@ -246,9 +246,22 @@ class RouterPullWorker:
                 # ---------------------
                 # ROUTER /pull request
                 # ---------------------
+                pull_body = {
+                    "endpoint": self.endpoint_id,
+                    "want": want,
+                    "model": _cfg.MODEL_NAME,
+                }
+                try:
+                    from .kv_usage import get_cached_kv_usage
+                    kv = get_cached_kv_usage()
+                    if kv is not None:
+                        pull_body["kv_usage"] = kv
+                except Exception:
+                    pass
+
                 resp = session.post(
                     f"{_cfg.ROUTER_URL}/pull",
-                    json={"endpoint": self.endpoint_id, "want": want, "model": _cfg.MODEL_NAME},
+                    json=pull_body,
                     timeout=_cfg.ROUTER_PULL_TIMEOUT_S,
                 )
 

@@ -33,6 +33,12 @@ def cfg(monkeypatch):
     monkeypatch.setattr(c, "FAIR_PULL", False)
     monkeypatch.setattr(c, "TRACE_ENABLED", False)
     monkeypatch.setattr(c, "ROUTER_LOG_BLOCK_HASHES", False)
+    monkeypatch.setattr(c, "KV_SOFT_DIVERT", False)
+    monkeypatch.setattr(c, "KV_PRESSURE_HIGH", 0.85)
+    monkeypatch.setattr(c, "KV_PRESSURE_LOW", 0.75)
+    monkeypatch.setattr(c, "KV_PRESSURE_PEER_OK", 0.70)
+    monkeypatch.setattr(c, "KV_SOFT_MIN_HITS", 1)
+    monkeypatch.setattr(c, "KV_USAGE_STALE_S", 30.0)
     return c
 
 
@@ -185,3 +191,110 @@ def test_size_per_model(cfg):
     assert rs.size("m1") == 1
     assert rs.size("m2") == 2
     assert rs.size() == 3
+
+
+def _seed_kv(rs, ep, kv, peer=None, peer_kv=0.2):
+    rs.record_kv_usage(ep, kv)
+    if peer is not None:
+        rs.record_kv_usage(peer, peer_kv)
+        rs._last_pull_ts[peer] = 1.0
+    rs._last_pull_ts[ep] = 1.0
+
+
+def test_kv_soft_divert_keeps_prefix_and_affinity(cfg, clean_kv_state):
+    monkeypatch_kv = clean_kv_state
+    rs_mod._cfg.KV_SOFT_DIVERT = True
+    rs_mod._cfg.KV_AWARE = True
+    rs = RouterState()
+    rs._affinity = AffinityMap(300.0)
+    rs._affinity.claim("conv-hot", "epHot")
+    _seed_kv(rs, "epHot", 0.95, peer="epCool", peer_kv=0.20)
+
+    monkeypatch_kv.register_request_blocks("hit", [1, 2])
+    monkeypatch_kv.set_request_owners("hit", {1: {"epHot"}, 2: {"epHot"}})
+    monkeypatch_kv.register_request_blocks("cold", [9])
+    monkeypatch_kv.set_request_owners("cold", {})
+
+    _inject(rs, [
+        ("cold", "c", {}),
+        ("hit", "h", {}),
+        ("pin", "p", {"__affinity_key__": "conv-hot"}),
+    ])
+    items = rs.pull_for_endpoint("epHot", 3)
+    ids = [i.req_id for i in items]
+    assert "cold" not in ids
+    assert set(ids) == {"hit", "pin"}
+    assert rs.size() == 1  # cold requeued
+
+
+def test_kv_soft_divert_no_op_when_all_peers_high(cfg):
+    rs_mod._cfg.KV_SOFT_DIVERT = True
+    rs = RouterState()
+    _seed_kv(rs, "epA", 0.95, peer="epB", peer_kv=0.90)
+    _inject(rs, [(f"r{i}", "p", {}) for i in range(4)])
+    items = rs.pull_for_endpoint("epA", 4)
+    assert len(items) == 4
+
+
+def test_kv_soft_divert_no_op_when_disabled(cfg):
+    rs_mod._cfg.KV_SOFT_DIVERT = False
+    rs = RouterState()
+    _seed_kv(rs, "epA", 0.99, peer="epB", peer_kv=0.1)
+    _inject(rs, [(f"r{i}", "p", {}) for i in range(3)])
+    items = rs.pull_for_endpoint("epA", 3)
+    assert len(items) == 3
+
+
+def test_kv_soft_divert_no_op_when_self_kv_missing(cfg):
+    rs_mod._cfg.KV_SOFT_DIVERT = True
+    rs = RouterState()
+    rs.record_kv_usage("epB", 0.1)
+    rs._last_pull_ts = {"epA": 1.0, "epB": 1.0}
+    _inject(rs, [(f"r{i}", "p", {}) for i in range(3)])
+    items = rs.pull_for_endpoint("epA", 3)
+    assert len(items) == 3
+
+
+def test_kv_soft_divert_stale_peer_no_divert(cfg):
+    import time
+    rs_mod._cfg.KV_SOFT_DIVERT = True
+    rs_mod._cfg.KV_USAGE_STALE_S = 1.0
+    rs = RouterState()
+    rs.record_kv_usage("epA", 0.95)
+    rs._kv_usage_by_endpoint["epB"] = (0.1, time.time() - 60.0)  # stale
+    rs._last_pull_ts = {"epA": 1.0, "epB": 1.0}
+    _inject(rs, [(f"r{i}", "p", {}) for i in range(3)])
+    items = rs.pull_for_endpoint("epA", 3)
+    assert len(items) == 3
+
+
+def test_kv_soft_divert_hysteresis_low(cfg):
+    rs_mod._cfg.KV_SOFT_DIVERT = True
+    rs = RouterState()
+    _seed_kv(rs, "epA", 0.95, peer="epB", peer_kv=0.1)
+    # Enter pressure
+    assert rs._kv_pressure_active.get("epA") is True
+    # Still above LOW -> stays pressured and trims
+    rs.record_kv_usage("epA", 0.80)
+    _inject(rs, [(f"r{i}", "p", {}) for i in range(3)])
+    items = rs.pull_for_endpoint("epA", 3)
+    assert len(items) == 0  # no pins / hits
+    # Drop below LOW -> clears
+    rs.record_kv_usage("epA", 0.50)
+    _inject(rs, [(f"r{i}", "p", {}) for i in range(3)])
+    items = rs.pull_for_endpoint("epA", 3)
+    assert len(items) == 3
+
+
+def test_kv_soft_divert_composes_with_fair_pull(cfg):
+    rs_mod._cfg.KV_SOFT_DIVERT = True
+    rs_mod._cfg.FAIR_PULL = True
+    rs_mod._cfg.FAIR_MARGIN = 1.0
+    rs_mod._cfg.FAIR_FLOOR = 1
+    rs = RouterState()
+    rs._inflight_by_endpoint = {"epA": 8, "epB": 0}
+    _seed_kv(rs, "epA", 0.95, peer="epB", peer_kv=0.1)
+    _inject(rs, [(f"r{i}", "p", {}) for i in range(5)])
+    # Fair throttle alone would grant floor=1; soft divert then trims to 0.
+    items = rs.pull_for_endpoint("epA", 5)
+    assert len(items) == 0

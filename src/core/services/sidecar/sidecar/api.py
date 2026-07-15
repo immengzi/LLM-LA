@@ -89,6 +89,11 @@ async def health() -> dict:
         "logical": pending + inflight,
     }
 
+    from .kv_usage import get_cached_kv_usage
+    kv = get_cached_kv_usage()
+    if kv is not None:
+        resp["kv_usage"] = kv
+
     from starlette.responses import JSONResponse
     if not vllm_ok:
         return JSONResponse(content=resp, status_code=503)

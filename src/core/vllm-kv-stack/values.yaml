@@ -91,6 +91,13 @@ sidecar:
     recoverStep: 1          # additive step up when inside SLO
     cooldownSeconds: 10     # min seconds between adjustments (hysteresis)
 
+  # Report GPU KV usage from local vLLM /metrics on /pull and /health (default
+  # OFF). Required for router.kvSoftDivert to receive samples.
+  kvUsageReport:
+    enabled: false
+    scrapeIntervalSeconds: 5
+    scrapeTimeoutSeconds: 2
+
 router:
   # pull | push-rr | push-random | push-leastq | central-push
   mode: pull
@@ -221,6 +228,16 @@ router:
   fairFloor: 1
   stuckPullSeconds: 0
   affinityReleaseOnStuck: false
+  # Soft KV divert (default off). When on, a high-KV pod keeps only strong
+  # local prefix hits + affinity pins; cold work goes to healthier peers.
+  # Sidecar must also enable sidecar.kvUsageReport so samples arrive.
+  kvSoftDivert: false
+  kvPressureHigh: 0.85
+  kvPressureLow: 0.75
+  kvPressurePeerOk: 0.70
+  kvSoftMinHits: 1
+  kvUsageStaleSeconds: 30
+  kvHealthPollIntervalSeconds: 5
   # Central-push mode (only used when mode: central-push). The router dispatches
   # centralPushCap - in-flight items per pod via POST /push every
   # centralPushIntervalS (and on each enqueue). centralPushCap should track the

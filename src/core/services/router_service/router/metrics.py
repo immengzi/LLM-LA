@@ -57,6 +57,24 @@ ROUTER_ENDPOINT_STUCK = Gauge(
     ["endpoint"],
 )
 
+ROUTER_ENDPOINT_KV_USAGE = Gauge(
+    "router_endpoint_kv_usage",
+    "Latest GPU KV usage fraction [0,1] reported by the sidecar for soft divert",
+    ["endpoint"],
+)
+
+ROUTER_KV_SOFT_DIVERT_ACTIVE = Gauge(
+    "router_kv_soft_divert_active",
+    "1 when soft KV divert is currently trimming grants for this endpoint",
+    ["endpoint"],
+)
+
+ROUTER_KV_SOFT_DIVERT_TRIMMED_TOTAL = Counter(
+    "router_kv_soft_divert_trimmed_total",
+    "Items withheld from a high-KV endpoint grant by soft divert",
+    ["endpoint"],
+)
+
 # -------------------------------------------------
 # Key-affinity routing metrics
 # -------------------------------------------------
@@ -275,6 +293,28 @@ def set_endpoint_last_pull_seconds(endpoint: str, seconds: float) -> None:
 def set_endpoint_stuck(endpoint: str, v: int) -> None:
     try:
         ROUTER_ENDPOINT_STUCK.labels(endpoint=str(endpoint)).set(int(v))
+    except Exception:
+        pass
+
+
+def set_endpoint_kv_usage(endpoint: str, v: float) -> None:
+    try:
+        ROUTER_ENDPOINT_KV_USAGE.labels(endpoint=str(endpoint)).set(float(v))
+    except Exception:
+        pass
+
+
+def set_kv_soft_divert_active(endpoint: str, v: int) -> None:
+    try:
+        ROUTER_KV_SOFT_DIVERT_ACTIVE.labels(endpoint=str(endpoint)).set(int(v))
+    except Exception:
+        pass
+
+
+def inc_kv_soft_divert_trimmed(endpoint: str, n: int = 1) -> None:
+    try:
+        if n > 0:
+            ROUTER_KV_SOFT_DIVERT_TRIMMED_TOTAL.labels(endpoint=str(endpoint)).inc(int(n))
     except Exception:
         pass
 

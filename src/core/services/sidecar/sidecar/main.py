@@ -14,6 +14,7 @@ from .result_poster import ResultPoster
 from .zmq_subscriber import KVSubscriber
 from .api import bind_local_queue, bind_pull_worker
 from .slo_backpressure import SloBackpressureMonitor
+from .kv_usage import KvUsageMonitor, bind_kv_usage_monitor
 from .metrics import (
     set_sidecar_python_threads,
     set_sidecar_workers_total,
@@ -92,6 +93,21 @@ def main():
         slo_monitor.start()
 
     # ------------------------------------------------------------
+    # GPU KV usage reporting for router soft divert (default OFF).
+    # ------------------------------------------------------------
+    kv_monitor = None
+    if _cfg.KV_USAGE_REPORT:
+        kv_monitor = KvUsageMonitor(
+            _cfg.VLLM_URL,
+            interval_s=_cfg.KV_USAGE_SCRAPE_INTERVAL_S,
+            timeout_s=_cfg.KV_USAGE_SCRAPE_TIMEOUT_S,
+        )
+        bind_kv_usage_monitor(kv_monitor)
+        kv_monitor.start()
+    else:
+        bind_kv_usage_monitor(None)
+
+    # ------------------------------------------------------------
     # Result poster (async router result delivery)
     #   - sync: POST /result (legacy)
     #   - submit_ack: POST RESULT_SUBMIT_PATH (default /result_submit), router ACKs 202 immediately
@@ -167,6 +183,10 @@ def main():
 
         if slo_monitor is not None:
             slo_monitor.stop()
+
+        if kv_monitor is not None:
+            kv_monitor.stop()
+            bind_kv_usage_monitor(None)
 
         if pull_worker:
             pull_worker.stop()

@@ -17,20 +17,25 @@ src/core/
 │   ├── sidecar/                   # Python sidecar (FastAPI + workers)
 │   │   ├── Makefile               # make test
 │   │   ├── requirements-dev.txt
-│   │   └── tests/
+│   │   └── tests/                 # includes kv_usage scrape/parse accessibility
 │   ├── go/                        # Go router + sidecar
 │   │   ├── Makefile               # make test  (needs Go 1.26)
-│   │   └── internal/**/*_test.go
+│   │   └── internal/**/*_test.go  # includes kv_usage parse + pull wire tests
 │   ├── tests/                     # standalone service tests (fingerprint mw)
 │   └── prefix_hash/tests/         # skipped unless vllm+transformers present
 └── tests/e2e/                     # docker-compose e2e stack + pytest suite
     ├── Makefile                   # make e2e
     ├── docker-compose.yml
-    ├── mock_vllm/                 # fake OpenAI server (deterministic echo)
+    ├── mock_vllm/                 # fake OpenAI server (+ /metrics for KV scrape)
     ├── router.e2e.Dockerfile
     ├── sidecar.e2e.Dockerfile
     └── tests/test_e2e_pull.py
 ```
+
+Soft KV divert units live under `router_service/tests/test_router_state_pull.py`
+(+ models/config/api), `sidecar/tests/test_kv_usage.py`, and
+`go/internal/sidecar/kv_usage_test.go`. E2E checks that mock vLLM `/metrics` is
+reachable and sidecar `/health` can expose `kv_usage` when reporting is enabled.
 
 ## Prerequisites
 
