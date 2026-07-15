@@ -9,6 +9,10 @@ the platform over HTTP (directly to the router or through a gateway such as BooM
 The deployed system it exercises (router, sidecars, vLLM, Helm chart) lives under
 [`src/core/`](../../src/core); see the [architecture overview](../architecture/overview.md).
 
+Platform deploy is normally done with Helm ([quickstart](../getting-started/quickstart.md)).
+The helpers below (`deploy_vllm.py`, `sweep_methods.py`) wrap the same chart for
+experiment workflows; they are not required to bring up a serving stack.
+
 ## Layout
 
 ```
@@ -32,23 +36,24 @@ src/client/
 | Piece | What it does |
 |-------|--------------|
 | Load generator ([`main.py`](../../src/client/main.py)) | Runs one experiment from a client config: builds prompts/conversations, drives an open-loop schedule, records per-request timings, and writes the run directory. |
-| Sweep runner ([`sweep_methods.py`](../../src/client/sweep_methods.py)) | Orchestrates a matrix of routing methods: renders/applies the Helm chart, waits for readiness, launches `main.py`, then snapshots `vllm-k8s.yaml`, `helm-effective-values.yaml`, and `deployment-info.txt` into the experiment dir. |
-| Deploy helper ([`deploy_vllm.py`](../../src/client/deploy_vllm.py)) | Deploys **only** the vLLM pods (and co-located sidecar) from a client config — no router/Redis/prefix-hash — for iterating on the engine independently. |
+| Deploy helper ([`deploy_vllm.py`](../../src/client/deploy_vllm.py)) | Harness helper: deploys **only** the vLLM pods from a client config (chart `deploy.router`/`redis` off). Prefer direct Helm for day-to-day serving deploys. |
+| Sweep runner ([`sweep_methods.py`](../../src/client/sweep_methods.py)) | Orchestrates a matrix of routing methods: applies the Helm chart, waits for readiness, launches `main.py`, then snapshots deployment metadata into the experiment dir. |
 | External observer ([`prod_latency_collector.py`](../../src/client/prod_latency_collector.py)) | Polls a live router's `/latency_log` and Prometheus endpoints and streams them to `logs.json` (mirrored to `router_logs.json`), so production deployments can be observed without a client-driven sweep. |
 | Config ([`config.py`](../../src/client/config.py)) | Defines the client + `helm:` schema and merges per-cluster profiles from `configs/clusters.yaml` via [`switch_cluster`](../operations/switch_cluster.md). |
 
 ## Running it
 
-All commands run from the repository root:
+Deploy the platform with Helm first ([quickstart](../getting-started/quickstart.md)),
+then drive load from the repository root:
 
 ```bash
-# single experiment
+# single experiment (against an already-deployed stack)
 python src/client/main.py --config router --n 500
 
-# deploy vLLM only
+# optional: vLLM-only chart helper (no router/redis) from a client config
 python src/client/deploy_vllm.py --config configs/router-tp8-glm.yaml
 
-# sweep a set of routing methods
+# optional: sweep routing methods (applies the chart between runs)
 python src/client/sweep_methods.py --config 1-master_config --skip-vllm
 ```
 

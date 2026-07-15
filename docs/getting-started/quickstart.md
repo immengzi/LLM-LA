@@ -1,21 +1,20 @@
 # Quickstart
 
-Deploy the LA-Boom stack on Kubernetes and run your first load experiment. This guide assumes the cluster prerequisites are already met; if not, start with [prerequisites.md](prerequisites.md).
+Deploy the LA-Boom stack on Kubernetes with the Helm chart. This guide assumes the cluster prerequisites are already met; if not, start with [prerequisites.md](prerequisites.md).
 
-> Conventions: replace `<node-ip>` with any cluster node IP and `<repo-root>` with your checkout path. Commands are run from `<repo-root>/src` unless noted. Cluster-specific values (registry host, NFS server, node labels) are documented under [operations/](../operations/).
+> Conventions: replace `<node-ip>` with any cluster node IP and `<repo-root>` with your checkout path. Commands are run from `<repo-root>` unless noted. Cluster-specific values (registry host, NFS server, node labels) are documented under [operations/](../operations/).
 
 ## Prerequisites (short)
 
 - A Kubernetes cluster with `kubectl` access and Helm 3.12+
 - Model weights reachable from worker nodes (NFS or local path)
 - A private image registry holding the LA-Boom images (router, sidecar, prefix-hash, vLLM, gateways)
-- Python 3.10+ with `pyyaml`, `requests`, `click` (`pip install -r requirements.txt`)
 
 Full details: [prerequisites.md](prerequisites.md).
 
 ## 1. One-time PV/PVC setup
 
-Run once per cluster (not per experiment) to create the model `PersistentVolume`/`PersistentVolumeClaim` over your model storage. After this, `modelVolume.create` stays `false` in all later deploys.
+Run once per cluster (not per deploy) to create the model `PersistentVolume`/`PersistentVolumeClaim` over your model storage. After this, leave `modelVolume.create` unset or `false` in later upgrades.
 
 ```bash
 helm upgrade --install vllm ./src/core/vllm-kv-stack -n vllm --create-namespace \
@@ -23,119 +22,85 @@ helm upgrade --install vllm ./src/core/vllm-kv-stack -n vllm --create-namespace 
   --set modelVolume.modelSubPath=placeholder
 ```
 
-## 2. Deploy vLLM
+## 2. Deploy the stack
 
-Deploy only the vLLM pods (router, Redis, and prefix-hash are not deployed here) from a client config YAML:
+Create a values overlay that defines at least one model, then install the full chart (router + Redis + vLLM + sidecar by default):
 
-```bash
-python src/client/deploy_vllm.py --config configs/router-tp8-glm.yaml
+```yaml
+# my-values.yaml
+models:
+  - name: qwen3-8b
+    servedModelName: qwen3-8b
+    replicas: 1
+    modelSubPath: Qwen3-8B
+    tensorParallelSize: 1
+    batchSize: 64
+    vllm:
+      gpuMemoryUtilization: 0.90
 ```
 
-Flags:
+```bash
+helm upgrade --install vllm ./src/core/vllm-kv-stack -n vllm --create-namespace \
+  -f my-values.yaml
+```
 
-- `--reinstall` — uninstall the existing release first (force a fresh pod)
-- `--timeout 36000` — seconds to wait for pods Ready (default 10h)
+Override cluster-specific knobs (`global.imageRegistry`, NFS, node selectors) in the same file or via `--set`. Full key reference: [Helm values](../configuration/helm-values.md). For multiple models or data-parallel layouts, see [multi-model](../deployment/multi-model.md) and [data parallel with LWS](../deployment/data-parallel-lws.md).
 
-`deploy_vllm.py` derives `modelVolume.modelSubPath` from `helm.nfs_path` in the config (e.g. `/home/models/GLM-5-w4a8-mtp-QuaRot` -> `GLM-5-w4a8-mtp-QuaRot`).
-
-Wait for the pod to become Ready:
+## 3. Verify
 
 ```bash
 kubectl get pods -n vllm -w
-kubectl logs -f <vllm-pod> -n vllm   # watch model load progress
+kubectl logs -f <vllm-pod> -n vllm -c vllm   # watch model load progress
+
+# Router health (NodePort 30080)
+curl http://<node-ip>:30080/health
+
+# Optional smoke request
+curl http://<node-ip>:30080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-8b",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_tokens": 32
+  }'
 ```
 
-## 3. Run a single experiment
-
-With vLLM Ready, run one open-loop load experiment against the router:
+## 4. Monitor
 
 ```bash
-python src/client/main.py --config router --n 500
-```
-
-- `--config <name>` resolves to `configs/<name>.yaml` (a path with a directory or `.yaml` suffix is used as-is).
-- `--n N` overrides `total_requests` from the config.
-
-Results are written to the experiments directory (see [artifacts & analysis](../benchmarking/artifacts-and-analysis.md)).
-
-## 4. Run an automated sweep
-
-To deploy and measure several routing methods in sequence, use the sweep runner. Use `--skip-vllm` to preserve already-running vLLM pods and only redeploy the routing stack (router + Redis + prefix-hash) between experiments:
-
-```bash
-python src/client/sweep_methods.py --config 1-master_config --skip-vllm
-```
-
-Without `--skip-vllm`, the full stack (including vLLM) is uninstalled and reinstalled before each experiment — slower, but guaranteed-clean state.
-
-The sweep runner reads `configs/1-master_config.yaml`, which maps client configs to routing methods. See [experiment configs](../configuration/experiment-configs.md) for the master-config format, method vocabulary, and the full sweep lifecycle.
-
-## 5. Client config essentials
-
-Each client config (e.g. `configs/router-tp8-glm.yaml`) sets the workload plus a `helm:` section that controls vLLM and the routing stack:
-
-```yaml
-helm:
-  nfs_path: "/home/models/GLM-5-w4a8-mtp-QuaRot"  # REQUIRED
-  tensor_parallel_size: 8
-  vllm_quantization: "ascend"          # null for dense models (e.g. Qwen3)
-  vllm_enable_expert_parallel: true    # false for dense models
-  router_kv_aware: true
-  router_len_policy: "short_first"     # short_first | long_first
-```
-
-Model-specific cheatsheet:
-
-| Model | `vllm_quantization` | `vllm_enable_expert_parallel` | `vllm_max_model_len` |
-|---|---|---|---|
-| Qwen3-8B (dense) | `null` | `false` | `null` |
-| GLM-5-w4a8 (MoE W4A8) | `"ascend"` | `true` | `80000` |
-
-The `helm:` section is documented in [experiment configs](../configuration/experiment-configs.md); the full client schema is in [client config](../configuration/client-config.md) and chart values in [Helm values](../configuration/helm-values.md).
-
-## 6. Monitor during a run
-
-```bash
-# Pod status
 kubectl get pods -n vllm -w
 
 # Router queue depth
 curl http://<node-ip>:30080/metrics | grep router_central_queue_length
 
-# Router/backends health
-curl http://<node-ip>:30080/health
-
 # Prometheus UI (NodePort)
 open http://<node-ip>:31190
 ```
 
-## 7. Results
+## 5. Production gateways (optional)
 
-Each run is saved to its own numbered experiment directory containing per-request logs (`logs.json`), aggregate summaries (`run_summary.json`), the frozen config, and—when enabled—Prometheus samples. Sweeps add deployment snapshots.
-
-See [artifacts & analysis](../benchmarking/artifacts-and-analysis.md) for the full directory layout, the sweep-only files, and the `logs.json` record schema.
-
-## 8. Production gateways (optional)
-
-For auth, virtual keys, rate limiting, and spend tracking in front of the router, deploy a gateway. Use `backend: router` for clean benchmarking; use a gateway to validate the production path.
+For auth, virtual keys, rate limiting, and spend tracking in front of the router, enable a gateway in Helm values (`boom.enabled=true` or `litellm.enabled=true`).
 
 - [BooM Gateway](../gateways/boom/overview.md) (Rust, NodePort 30401) — recommended
 - LiteLLM (Python, NodePort 30400) — alternative
+
+## Benchmarking (optional)
+
+To drive open-loop load and collect experiment artifacts against a deployed stack, use the [benchmark harness](../benchmarking/harness.md). Chart configuration from the client side is documented in [client config](../configuration/client-config.md) and [experiment configs](../configuration/experiment-configs.md).
 
 ## Common issues
 
 | Symptom | Fix |
 |---|---|
-| `modelSubPath must be set` | Add `nfs_path` to the `helm:` section of the client config |
-| `NPU out of memory` | Model loaded unquantized — set `vllm_quantization: "ascend"` |
-| `KV cache too small for max seq len` | Add `vllm_max_model_len: 80000` (or lower) |
-| RBAC ownership conflict | All operations use release name `vllm` — never use a different release name |
-| vLLM pods deleted by sweep | Run with `--skip-vllm` to preserve running pods across Helm upgrades |
+| `modelSubPath must be set` | Set `models[].modelSubPath` (or legacy `modelVolume.modelSubPath`) in your values overlay |
+| `NPU out of memory` | Model loaded unquantized — set `models[].vllm.quantization: ascend` for W4A8 MoE |
+| `KV cache too small for max seq len` | Lower `models[].vllm.maxModelLen` (e.g. `80000`) |
+| RBAC ownership conflict | Keep the release name `vllm` for this chart |
 | Router image stale | Router uses `imagePullPolicy: Always`; delete the cached image on the node with `crictl rmi` |
 | ClusterIP `Connection error` from pods | kube-proxy iptables broken on a node — install `iptables-libs` and restart kube-proxy (see [k8s DNS runbook](../operations/k8s-dns-troubleshooting.md)) |
 
 ## See also
 
-- [First experiment walkthrough](first-experiment.md)
+- [First deploy walkthrough](first-experiment.md)
 - [Architecture overview](../architecture/overview.md)
-- [Experiment configs and sweeps](../configuration/experiment-configs.md)
+- [Helm values reference](../configuration/helm-values.md)
