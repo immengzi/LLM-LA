@@ -16,15 +16,15 @@ What you need before deploying LA-Boom and running experiments. For full cluster
 |------|---------|
 | `kubectl` | Kubernetes CLI |
 | `helm` (>= 3.12) | Chart install / upgrade |
-| `python` (>= 3.10) | Load client (`main.py`), sweep runner (`sweep_methods.py`), deploy script |
-| Python deps | `pip install -r <repo-root>/src/client/requirements.txt` (includes `pyyaml`, `requests`, `click`) |
+| `python` (>= 3.10) | Optional: benchmark harness only (see [harness](../benchmarking/harness.md)) |
+| Python deps | Optional: `pip install -r <repo-root>/src/client/requirements.txt` when using the harness |
 
 ## Model storage
 
 Model weights must be reachable from worker nodes via one of:
 
-- **NFS** (default): an NFS export mounted by the chart's PV/PVC. Set `helm.nfs_path` per model; run the [one-time PV/PVC setup](quickstart.md#1-one-time-pvpvc-setup) once per cluster.
-- **Local hostPath**: set `helm.model_host_path` to bypass the PVC and mount a local directory on each node.
+- **NFS** (default): an NFS export mounted by the chart's PV/PVC. Set `models[].modelSubPath` (or `modelVolume.modelSubPath`) per model; run the [one-time PV/PVC setup](quickstart.md#1-one-time-pvpvc-setup) once per cluster.
+- **Local hostPath**: set `modelVolume.hostPath` (see Helm values) to bypass the PVC and mount a local directory on each node.
 
 Details: [Helm values reference](../configuration/helm-values.md) (`modelVolume.*`) and [cluster setup](../operations/cluster-setup.md).
 

@@ -109,12 +109,17 @@ flowchart TB
 helm upgrade --install vllm ./src/core/vllm-kv-stack -n vllm --create-namespace \
   --set modelVolume.create=true --set modelVolume.modelSubPath=placeholder
 
-# 2. Deploy the platform (vLLM + sidecar) for a model
-python src/client/deploy_vllm.py --config configs/router-tp8-glm.yaml
+# 2. Deploy the platform (router + Redis + vLLM + sidecar)
+helm upgrade --install vllm ./src/core/vllm-kv-stack -n vllm --create-namespace \
+  -f my-values.yaml
 
-# 3. Send some load (via the benchmark harness)
-python src/client/main.py --config router --n 500
+# 3. Smoke-check the router (NodePort 30080)
+curl http://NODE_IP:30080/health
 ```
+
+Write `models[]` (and cluster overrides) in `my-values.yaml` — see the
+[quickstart](getting-started/quickstart). To drive load and collect artifacts,
+use the [benchmark harness](benchmarking/harness).
 
 ## Compatibility
 
@@ -137,7 +142,7 @@ vLLM's model support and adds Kubernetes-native wiring on top.
 <CardGrid>
   <LinkCard
     title="New here?"
-    description="Deploy the stack and run your first experiment end-to-end."
+    description="Deploy the stack with Helm and verify end-to-end."
     href={import.meta.env.BASE_URL + "getting-started/quickstart/"}
   />
   <LinkCard

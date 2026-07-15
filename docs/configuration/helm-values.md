@@ -4,11 +4,8 @@ Reference for the `vllm-kv-stack` Helm chart (`src/core/vllm-kv-stack/values.yam
 
 ## How values are set
 
-There are three ways values reach the chart:
-
-1. **Sweep runner** — `sweep_methods.py` translates the `helm:` section of a client config into `--set` flags plus a temporary `models[]` overlay. This is the primary path. See [experiment configs](experiment-configs.md).
-2. **`deploy_vllm.py`** — deploys only vLLM (`deploy.vllm=true`, router/redis/cpuHash off) from the same client config.
-3. **Direct `helm upgrade --install ... --set ...`** — for manual/one-off deploys.
+1. **Direct Helm** (primary) — `helm upgrade --install ... -f values.yaml` and/or `--set` / `--set-json`. This is the normal deploy path. See the [quickstart](../getting-started/quickstart.md).
+2. **Benchmark harness** (optional) — the client can also apply the same chart from client YAML (`helm:` / `models[]`) during sweeps or vLLM-only helper deploys. See the [benchmark harness](../benchmarking/harness.md) and [experiment configs](experiment-configs.md).
 
 ## Top-level
 
@@ -266,8 +263,8 @@ all pods. In `p2p` mode the sweep forces `deploy.mooncakeMaster=false`. See
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `deploy.vllm` | `true` | Set `false` for stack-only deploys (sweep `--skip-vllm`) |
-| `deploy.router` / `deploy.redis` | `true` | Set `false` for vLLM-only deploys (`deploy_vllm.py`) |
+| `deploy.vllm` | `true` | Set `false` for stack-only upgrades (router/redis without touching vLLM) |
+| `deploy.router` / `deploy.redis` | `true` | Set `false` for vLLM-only deploys |
 | `deploy.cpuHash` | `false` | No longer read by the chart; the legacy external hasher is auto-deployed when `router.hashSource=external` |
 | `deploy.mooncakeMaster` | `true` | Skip mooncake-master if `false` |
 
