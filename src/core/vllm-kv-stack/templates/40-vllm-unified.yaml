@@ -398,6 +398,31 @@ spec:
                 value: {{ $.Values.sidecar.forceIgnoreEos | default false | quote }}
               - name: STREAMING_MODE
                 value: {{ $.Values.sidecar.streamingMode | default false | quote }}
+              {{- $slo := $.Values.sidecar.sloDynamicPull | default dict }}
+              - name: SLO_DYNAMIC_PULL_ENABLED
+                value: {{ $slo.enabled | default false | quote }}
+              - name: SLO_TPOT_SLO_S
+                value: {{ $slo.tpotSloSeconds | default 0.05 | quote }}
+              - name: SLO_EVAL_INTERVAL_S
+                value: {{ $slo.evalIntervalSeconds | default 5 | quote }}
+              - name: SLO_WINDOW_SAMPLES
+                value: {{ $slo.windowSamples | default 6 | quote }}
+              - name: SLO_WINDOW_AGG
+                value: {{ $slo.windowAgg | default "mean" | quote }}
+              - name: SLO_MIN_PULL
+                value: {{ $slo.minPull | default 1 | quote }}
+              - name: SLO_MAX_PULL
+                value: {{ $slo.maxPull | default 0 | quote }}
+              - name: SLO_DECREASE_MODE
+                value: {{ $slo.decreaseMode | default "additive" | quote }}
+              - name: SLO_DECREASE_STEP
+                value: {{ $slo.decreaseStep | default 1 | quote }}
+              - name: SLO_DECREASE_FACTOR
+                value: {{ $slo.decreaseFactor | default 0.5 | quote }}
+              - name: SLO_RECOVER_STEP
+                value: {{ $slo.recoverStep | default 1 | quote }}
+              - name: SLO_COOLDOWN_S
+                value: {{ $slo.cooldownSeconds | default 10 | quote }}
             ports:
               - containerPort: 9000
                 name: sidecar-http
@@ -1135,6 +1160,31 @@ spec:
               value: {{ $.Values.sidecar.forceIgnoreEos | default false | quote }}
             - name: STREAMING_MODE
               value: {{ $.Values.sidecar.streamingMode | default false | quote }}
+            {{- $slo := $.Values.sidecar.sloDynamicPull | default dict }}
+            - name: SLO_DYNAMIC_PULL_ENABLED
+              value: {{ $slo.enabled | default false | quote }}
+            - name: SLO_TPOT_SLO_S
+              value: {{ $slo.tpotSloSeconds | default 0.05 | quote }}
+            - name: SLO_EVAL_INTERVAL_S
+              value: {{ $slo.evalIntervalSeconds | default 5 | quote }}
+            - name: SLO_WINDOW_SAMPLES
+              value: {{ $slo.windowSamples | default 6 | quote }}
+            - name: SLO_WINDOW_AGG
+              value: {{ $slo.windowAgg | default "mean" | quote }}
+            - name: SLO_MIN_PULL
+              value: {{ $slo.minPull | default 1 | quote }}
+            - name: SLO_MAX_PULL
+              value: {{ $slo.maxPull | default 0 | quote }}
+            - name: SLO_DECREASE_MODE
+              value: {{ $slo.decreaseMode | default "additive" | quote }}
+            - name: SLO_DECREASE_STEP
+              value: {{ $slo.decreaseStep | default 1 | quote }}
+            - name: SLO_DECREASE_FACTOR
+              value: {{ $slo.decreaseFactor | default 0.5 | quote }}
+            - name: SLO_RECOVER_STEP
+              value: {{ $slo.recoverStep | default 1 | quote }}
+            - name: SLO_COOLDOWN_S
+              value: {{ $slo.cooldownSeconds | default 10 | quote }}
           ports:
             - containerPort: 9000
               name: sidecar-http

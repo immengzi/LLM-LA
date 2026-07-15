@@ -48,6 +48,46 @@ SIDECAR_WORKERS_BUSY = Gauge(
 )
 
 # --------------------------------
+# SLO-driven dynamic pull backpressure metrics (lazily registered)
+# --------------------------------
+# These are created only when the feature is enabled (init_slo_metrics() is
+# called from the SLO monitor's constructor). Keeping them out of the module
+# import path means that when SLO_DYNAMIC_PULL_ENABLED=false the /metrics output
+# is byte-for-byte identical to before — not even HELP/TYPE headers appear.
+
+SIDECAR_SLO_DYNAMIC_PULL_CAP: "Gauge | None" = None
+SIDECAR_SLO_OBSERVED_TPOT_SECONDS: "Gauge | None" = None
+SIDECAR_SLO_VIOLATION: "Gauge | None" = None
+
+_SLO_METRICS_INITED = False
+
+
+def init_slo_metrics() -> None:
+    """Register the SLO backpressure gauges. Idempotent; call when enabled."""
+    global _SLO_METRICS_INITED
+    global SIDECAR_SLO_DYNAMIC_PULL_CAP
+    global SIDECAR_SLO_OBSERVED_TPOT_SECONDS
+    global SIDECAR_SLO_VIOLATION
+    if _SLO_METRICS_INITED:
+        return
+    SIDECAR_SLO_DYNAMIC_PULL_CAP = Gauge(
+        "sidecar_slo_dynamic_pull_cap",
+        "Current dynamic pull cap chosen by the SLO backpressure controller",
+        ["endpoint"],
+    )
+    SIDECAR_SLO_OBSERVED_TPOT_SECONDS = Gauge(
+        "sidecar_slo_observed_tpot_seconds",
+        "Windowed TPOT observed from vLLM by the SLO backpressure monitor",
+        ["endpoint"],
+    )
+    SIDECAR_SLO_VIOLATION = Gauge(
+        "sidecar_slo_violation",
+        "1 if the windowed TPOT currently violates the SLO target, else 0",
+        ["endpoint"],
+    )
+    _SLO_METRICS_INITED = True
+
+# --------------------------------
 # Existing helpers
 # --------------------------------
 
@@ -95,5 +135,31 @@ def set_sidecar_workers_total(endpoint: str, n: int) -> None:
 def set_sidecar_workers_busy(endpoint: str, n: int) -> None:
     try:
         SIDECAR_WORKERS_BUSY.labels(endpoint=str(endpoint)).set(int(n))
+    except Exception:
+        pass
+
+
+def set_slo_backpressure_state(
+    endpoint: str,
+    cap: int,
+    observed_tpot=None,
+    slo_target=None,
+) -> None:
+    """Publish SLO backpressure observability (cap, observed TPOT, violation).
+
+    No-ops if the gauges have not been registered yet (init_slo_metrics()),
+    which only happens when the feature is enabled.
+    """
+    if not _SLO_METRICS_INITED:
+        return
+    try:
+        SIDECAR_SLO_DYNAMIC_PULL_CAP.labels(endpoint=str(endpoint)).set(int(cap))
+        if observed_tpot is not None:
+            SIDECAR_SLO_OBSERVED_TPOT_SECONDS.labels(endpoint=str(endpoint)).set(
+                float(observed_tpot)
+            )
+            if slo_target is not None:
+                violated = 1 if float(observed_tpot) > float(slo_target) else 0
+                SIDECAR_SLO_VIOLATION.labels(endpoint=str(endpoint)).set(violated)
     except Exception:
         pass

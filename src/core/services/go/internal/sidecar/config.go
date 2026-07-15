@@ -49,6 +49,25 @@ type Config struct {
 	ForceIgnoreEos bool
 	StreamingMode  bool
 
+	// SLO-driven dynamic pull backpressure (default OFF). When disabled the
+	// sidecar behaves exactly as before: no monitor goroutine is started and
+	// PullCap() stays BatchSize + Prefetch. Mirrors the Python SLO_* knobs in
+	// src/core/services/sidecar/sidecar/config.py.
+	SLODynamicPullEnabled bool
+	SLOTpotSLOS           float64
+	SLOEvalIntervalS      float64
+	SLOWindowSamples      int
+	SLOWindowAgg          string
+	SLOMinPull            int
+	SLOMaxPull            int
+	SLODecreaseMode       string
+	SLODecreaseStep       int
+	SLODecreaseFactor     float64
+	SLORecoverStep        int
+	SLOCooldownS          float64
+	SLOTpotMetric         string
+	SLOScrapeTimeoutS     float64
+
 	LogLevel string
 }
 
@@ -93,6 +112,21 @@ func LoadConfig() *Config {
 		ForceIgnoreEos: common.EnvBool("FORCE_IGNORE_EOS", false),
 		StreamingMode:  common.EnvBool("STREAMING_MODE", false),
 
+		SLODynamicPullEnabled: common.EnvBool("SLO_DYNAMIC_PULL_ENABLED", false),
+		SLOTpotSLOS:           common.EnvFloat("SLO_TPOT_SLO_S", 0.05),
+		SLOEvalIntervalS:      common.EnvFloat("SLO_EVAL_INTERVAL_S", 5.0),
+		SLOWindowSamples:      common.EnvInt("SLO_WINDOW_SAMPLES", 6),
+		SLOWindowAgg:          common.EnvStr("SLO_WINDOW_AGG", "mean"),
+		SLOMinPull:            common.EnvInt("SLO_MIN_PULL", 1),
+		SLOMaxPull:            common.EnvInt("SLO_MAX_PULL", 0),
+		SLODecreaseMode:       common.EnvStr("SLO_DECREASE_MODE", "additive"),
+		SLODecreaseStep:       common.EnvInt("SLO_DECREASE_STEP", 1),
+		SLODecreaseFactor:     common.EnvFloat("SLO_DECREASE_FACTOR", 0.5),
+		SLORecoverStep:        common.EnvInt("SLO_RECOVER_STEP", 1),
+		SLOCooldownS:          common.EnvFloat("SLO_COOLDOWN_S", 10.0),
+		SLOTpotMetric:         common.EnvStr("SLO_TPOT_METRIC", "vllm:time_per_output_token_seconds"),
+		SLOScrapeTimeoutS:     common.EnvFloat("SLO_SCRAPE_TIMEOUT_S", 2.0),
+
 		LogLevel: common.EnvStr("LOG_LEVEL", "info"),
 	}
 	cfg.normalize()
@@ -117,6 +151,14 @@ func (c *Config) normalize() {
 	}
 	if c.Prefetch < 0 {
 		c.Prefetch = 0
+	}
+	c.SLOWindowAgg = strings.TrimSpace(strings.ToLower(c.SLOWindowAgg))
+	if c.SLOWindowAgg != "mean" && c.SLOWindowAgg != "p90" {
+		c.SLOWindowAgg = "mean"
+	}
+	c.SLODecreaseMode = strings.TrimSpace(strings.ToLower(c.SLODecreaseMode))
+	if c.SLODecreaseMode != "additive" && c.SLODecreaseMode != "multiplicative" {
+		c.SLODecreaseMode = "additive"
 	}
 }
 

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 import threading
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Callable, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -51,9 +51,18 @@ class RouterPullWorker:
     NOTE: endpoint_id must match what the router sees as the endpoint identity.
     """
 
-    def __init__(self, local_q: LocalQueue, endpoint_id: str):
+    def __init__(
+        self,
+        local_q: LocalQueue,
+        endpoint_id: str,
+        cap_provider: Optional[Callable[[], int]] = None,
+    ):
         self.local_q = local_q
         self.endpoint_id = endpoint_id  # sidecar identity used by router
+        # Optional dynamic pull-cap source (SLO backpressure). When None, the
+        # worker uses the static BATCH_SIZE + PREFETCH cap — identical to the
+        # original behavior (zero-change path when the feature is disabled).
+        self._cap_provider = cap_provider
         self._stop_evt = threading.Event()
         self._lock = threading.RLock()
         self._session: requests.Session | None = None
@@ -67,6 +76,22 @@ class RouterPullWorker:
         self._vllm_healthy: bool = False
         self._vllm_last_probe: float = 0.0
         self._vllm_unhealthy_logged: bool = False
+
+    # ---------------- pull-cap resolution ----------------
+
+    def _current_pull_cap(self) -> int:
+        """Effective pull cap for this tick.
+
+        Static path (no cap_provider): BATCH_SIZE + PREFETCH, byte-for-byte the
+        original behavior. Dynamic path: the SLO controller's current cap.
+        """
+        if self._cap_provider is None:
+            return _cfg.BATCH_SIZE + _cfg.PREFETCH
+        try:
+            return int(self._cap_provider())
+        except Exception:
+            # Fail safe to the static cap if the provider misbehaves.
+            return _cfg.BATCH_SIZE + _cfg.PREFETCH
 
     # ---------------- lifecycle ----------------
 
@@ -198,7 +223,7 @@ class RouterPullWorker:
 
         with self._lock:
             pending, inflight = self.local_q.state()
-            pull_cap = _cfg.BATCH_SIZE + _cfg.PREFETCH
+            pull_cap = self._current_pull_cap()
             total_reserved = pending + inflight
 
             if total_reserved >= pull_cap:

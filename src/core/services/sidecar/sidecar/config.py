@@ -111,6 +111,51 @@ class SidecarConfig:
     DP_SIZE_LOCAL: int = 1
 
     # ------------------------------------------------
+    # SLO-driven dynamic pull backpressure (default OFF)
+    # ------------------------------------------------
+    # When disabled the sidecar behaves *exactly* as before: no monitor thread
+    # is started and pull_cap stays BATCH_SIZE + PREFETCH. See slo_backpressure.py.
+
+    # Master switch. false -> zero behavior change / zero extra cost.
+    SLO_DYNAMIC_PULL_ENABLED: bool = False
+
+    # Target TPOT SLO in seconds. TPOT above this (windowed) counts as a violation.
+    SLO_TPOT_SLO_S: float = 0.05
+
+    # How often the monitor scrapes vLLM /metrics and re-evaluates the cap.
+    SLO_EVAL_INTERVAL_S: float = 5.0
+
+    # Sliding window size (number of eval samples) used to smooth TPOT.
+    SLO_WINDOW_SAMPLES: int = 6
+
+    # Aggregation over the window: "mean" or "p90".
+    SLO_WINDOW_AGG: str = "mean"
+
+    # Hard floor / ceiling for the dynamic pull cap.
+    #   min_pull: never starve completely (>= 1).
+    #   max_pull: <= 0 means "use BATCH_SIZE + PREFETCH" (the original pull cap).
+    SLO_MIN_PULL: int = 1
+    SLO_MAX_PULL: int = 0
+
+    # Decrease policy on violation: "additive" (cap - step) or
+    # "multiplicative" (floor(cap * factor)). AIMD default = additive.
+    SLO_DECREASE_MODE: str = "additive"
+    SLO_DECREASE_STEP: int = 1
+    SLO_DECREASE_FACTOR: float = 0.5
+
+    # Recovery policy when inside SLO: additive step up.
+    SLO_RECOVER_STEP: int = 1
+
+    # Cooldown / hysteresis: minimum seconds between two cap adjustments.
+    SLO_COOLDOWN_S: float = 10.0
+
+    # Prometheus metric name exposed by vLLM for TPOT (histogram).
+    SLO_TPOT_METRIC: str = "vllm:time_per_output_token_seconds"
+
+    # HTTP timeout for scraping vLLM /metrics.
+    SLO_SCRAPE_TIMEOUT_S: float = 2.0
+
+    # ------------------------------------------------
     # Logging
     # ------------------------------------------------
 
@@ -205,6 +250,26 @@ def get_config() -> SidecarConfig:
     # ------------------------------------------------
     cfg.DP_SIZE = int(os.getenv("DP_SIZE", cfg.DP_SIZE))
     cfg.DP_SIZE_LOCAL = int(os.getenv("DP_SIZE_LOCAL", cfg.DP_SIZE_LOCAL))
+
+    # ------------------------------------------------
+    # SLO-driven dynamic pull backpressure
+    # ------------------------------------------------
+    cfg.SLO_DYNAMIC_PULL_ENABLED = (
+        os.getenv("SLO_DYNAMIC_PULL_ENABLED", str(cfg.SLO_DYNAMIC_PULL_ENABLED)).lower() == "true"
+    )
+    cfg.SLO_TPOT_SLO_S = float(os.getenv("SLO_TPOT_SLO_S", cfg.SLO_TPOT_SLO_S))
+    cfg.SLO_EVAL_INTERVAL_S = float(os.getenv("SLO_EVAL_INTERVAL_S", cfg.SLO_EVAL_INTERVAL_S))
+    cfg.SLO_WINDOW_SAMPLES = int(os.getenv("SLO_WINDOW_SAMPLES", cfg.SLO_WINDOW_SAMPLES))
+    cfg.SLO_WINDOW_AGG = os.getenv("SLO_WINDOW_AGG", cfg.SLO_WINDOW_AGG).lower()
+    cfg.SLO_MIN_PULL = int(os.getenv("SLO_MIN_PULL", cfg.SLO_MIN_PULL))
+    cfg.SLO_MAX_PULL = int(os.getenv("SLO_MAX_PULL", cfg.SLO_MAX_PULL))
+    cfg.SLO_DECREASE_MODE = os.getenv("SLO_DECREASE_MODE", cfg.SLO_DECREASE_MODE).lower()
+    cfg.SLO_DECREASE_STEP = int(os.getenv("SLO_DECREASE_STEP", cfg.SLO_DECREASE_STEP))
+    cfg.SLO_DECREASE_FACTOR = float(os.getenv("SLO_DECREASE_FACTOR", cfg.SLO_DECREASE_FACTOR))
+    cfg.SLO_RECOVER_STEP = int(os.getenv("SLO_RECOVER_STEP", cfg.SLO_RECOVER_STEP))
+    cfg.SLO_COOLDOWN_S = float(os.getenv("SLO_COOLDOWN_S", cfg.SLO_COOLDOWN_S))
+    cfg.SLO_TPOT_METRIC = os.getenv("SLO_TPOT_METRIC", cfg.SLO_TPOT_METRIC)
+    cfg.SLO_SCRAPE_TIMEOUT_S = float(os.getenv("SLO_SCRAPE_TIMEOUT_S", cfg.SLO_SCRAPE_TIMEOUT_S))
 
     # ------------------------------------------------
     # Logging
