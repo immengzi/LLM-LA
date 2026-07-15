@@ -208,6 +208,84 @@ func TestExternalPushClamps(t *testing.T) {
 	}
 }
 
+// TestSoftDivertConfigDefaults verifies the soft-divert knobs default to the
+// same values as the Python router config.
+func TestSoftDivertConfigDefaults(t *testing.T) {
+	cfg := LoadConfig()
+	if cfg.KVSoftDivert {
+		t.Error("KVSoftDivert should default off")
+	}
+	if cfg.KVPressureHigh != 0.85 || cfg.KVPressureLow != 0.75 || cfg.KVPressurePeerOK != 0.70 {
+		t.Errorf("pressure defaults = %v/%v/%v, want 0.85/0.75/0.70", cfg.KVPressureHigh, cfg.KVPressureLow, cfg.KVPressurePeerOK)
+	}
+	if cfg.KVSoftMinHits != 1 {
+		t.Errorf("KVSoftMinHits = %d, want 1", cfg.KVSoftMinHits)
+	}
+	if cfg.KVUsageStaleS != 30.0 {
+		t.Errorf("KVUsageStaleS = %v, want 30.0", cfg.KVUsageStaleS)
+	}
+	if cfg.KVHealthPollIntervalS != 5.0 {
+		t.Errorf("KVHealthPollIntervalS = %v, want 5.0", cfg.KVHealthPollIntervalS)
+	}
+}
+
+func TestSoftDivertConfigOverride(t *testing.T) {
+	t.Setenv("ROUTER_KV_SOFT_DIVERT", "true")
+	t.Setenv("ROUTER_KV_PRESSURE_HIGH", "0.9")
+	t.Setenv("ROUTER_KV_SOFT_MIN_HITS", "-3") // clamps to 0
+	cfg := LoadConfig()
+	if !cfg.KVSoftDivert {
+		t.Error("KVSoftDivert should be true")
+	}
+	if cfg.KVPressureHigh != 0.9 {
+		t.Errorf("KVPressureHigh = %v, want 0.9", cfg.KVPressureHigh)
+	}
+	if cfg.KVSoftMinHits != 0 {
+		t.Errorf("KVSoftMinHits = %d, want clamp to 0", cfg.KVSoftMinHits)
+	}
+}
+
+// TestAffinityPersistConfigDefaults verifies persistent-affinity defaults match
+// the Python router config.
+func TestAffinityPersistConfigDefaults(t *testing.T) {
+	cfg := LoadConfig()
+	if cfg.AffinityPersistEnabled {
+		t.Error("AffinityPersistEnabled should default off")
+	}
+	if cfg.AffinityRedisTTLSeconds != 0 {
+		t.Errorf("AffinityRedisTTLSeconds = %d, want 0", cfg.AffinityRedisTTLSeconds)
+	}
+	if cfg.AffinityRedisKeyPrefix != "affinity" {
+		t.Errorf("AffinityRedisKeyPrefix = %q, want affinity", cfg.AffinityRedisKeyPrefix)
+	}
+	if cfg.AffinityCacheMax != 100000 {
+		t.Errorf("AffinityCacheMax = %d, want 100000", cfg.AffinityCacheMax)
+	}
+	if cfg.AffinityEndpointStaleS != 1800.0 {
+		t.Errorf("AffinityEndpointStaleS = %v, want 1800.0", cfg.AffinityEndpointStaleS)
+	}
+}
+
+func TestAffinityPersistConfigOverride(t *testing.T) {
+	t.Setenv("AFFINITY_PERSIST_ENABLED", "true")
+	t.Setenv("AFFINITY_REDIS_KEY_PREFIX", "  ")  // blank -> falls back to "affinity"
+	t.Setenv("AFFINITY_REDIS_TTL_SECONDS", "-5") // clamps to 0
+	t.Setenv("CLUSTER", " bz ")
+	cfg := LoadConfig()
+	if !cfg.AffinityPersistEnabled {
+		t.Error("AffinityPersistEnabled should be true")
+	}
+	if cfg.AffinityRedisKeyPrefix != "affinity" {
+		t.Errorf("blank prefix should fall back to affinity, got %q", cfg.AffinityRedisKeyPrefix)
+	}
+	if cfg.AffinityRedisTTLSeconds != 0 {
+		t.Errorf("negative TTL should clamp to 0, got %d", cfg.AffinityRedisTTLSeconds)
+	}
+	if cfg.Cluster != "bz" {
+		t.Errorf("CLUSTER should be trimmed to bz, got %q", cfg.Cluster)
+	}
+}
+
 func TestNumericClamps(t *testing.T) {
 	t.Setenv("POOL_FACTOR", "0.1")
 	t.Setenv("KV_BLOCK_SIZE", "0")
