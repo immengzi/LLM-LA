@@ -68,6 +68,11 @@ type Config struct {
 	SLOTpotMetric         string
 	SLOScrapeTimeoutS     float64
 
+	// GPU KV usage reporting for router soft divert (default OFF).
+	KVUsageReport          bool
+	KVUsageScrapeIntervalS float64
+	KVUsageScrapeTimeoutS  float64
+
 	LogLevel string
 }
 
@@ -126,6 +131,10 @@ func LoadConfig() *Config {
 		SLOCooldownS:          common.EnvFloat("SLO_COOLDOWN_S", 10.0),
 		SLOTpotMetric:         common.EnvStr("SLO_TPOT_METRIC", "vllm:time_per_output_token_seconds"),
 		SLOScrapeTimeoutS:     common.EnvFloat("SLO_SCRAPE_TIMEOUT_S", 2.0),
+
+		KVUsageReport:          common.EnvBool("KV_USAGE_REPORT", false),
+		KVUsageScrapeIntervalS: common.EnvFloat("KV_USAGE_SCRAPE_INTERVAL_S", 5.0),
+		KVUsageScrapeTimeoutS:  common.EnvFloat("KV_USAGE_SCRAPE_TIMEOUT_S", 2.0),
 
 		LogLevel: common.EnvStr("LOG_LEVEL", "info"),
 	}

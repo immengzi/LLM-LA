@@ -25,6 +25,13 @@ prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
 # prod-yz-shadow-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
 
+# ── BZ: KV soak — us+BooM (33/218 path) vs BooM-only (142 path) ──
+# Reproduces yz-style LMCache host-staging pin deadlock. Activate ONE at a time.
+# benchmark-bz-us-boom-lmsys-kv-soak:      # us+boom (33/218 path)
+#   - pull
+# benchmark-bz-boom-only-lmsys-kv-soak:    # boom-only (142 path)
+#   - key_affinity
+
 # ── ACTIVE: claude-CLI HIGH-LOAD routing comparison (96 users x 180 convs, ~1h) ──
 # Drives the real `claude` CLI (transport.mode=claude) across every routing
 # strategy on an identical replay. Offered concurrency (~96) exceeds pod capacity
@@ -61,6 +68,14 @@ prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
 # benchmark-bz-pull-fair-affinity-soft:
 #   - pull
 # benchmark-bz-pull-fair-both:
+#   - pull
+
+# ---- pull (soft KV divert A/B; prefix strategy) ----
+# Same workload as pull-prefix; only router_kv_soft_divert differs (sidecar
+# kv_usage report on for both). Activate one at a time or both sequentially.
+# benchmark-bz-pull-kvdivert-off-prefix:
+#   - pull
+# benchmark-bz-pull-kvdivert-on-prefix:
 #   - pull
 
 # ---- central-push (vanilla) ----

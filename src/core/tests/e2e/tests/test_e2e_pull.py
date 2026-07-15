@@ -24,6 +24,23 @@ def test_sidecar_health(sidecar_url):
     assert r.status_code == 200
 
 
+def test_sidecar_reports_kv_usage_from_mock_metrics(sidecar_url):
+    """Accessibility: mock vLLM /metrics is reachable; sidecar caches max engine KV."""
+    import time
+
+    kv = None
+    for _ in range(20):
+        r = requests.get(f"{sidecar_url}/health", timeout=5)
+        assert r.status_code == 200
+        kv = r.json().get("kv_usage")
+        if kv is not None:
+            break
+        time.sleep(0.5)
+    assert kv is not None, "sidecar never reported kv_usage (scrape failed?)"
+    # mock exposes 0.42 and 0.58 -> max = 0.58
+    assert 0.50 <= float(kv) <= 0.65
+
+
 def test_chat_completion_non_streaming(router_url):
     payload = {
         "model": "served-model",

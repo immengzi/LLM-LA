@@ -22,6 +22,7 @@ Design notes:
     skipped for the rest of the pass to avoid hammering a full/unready pod.
 """
 import asyncio
+import time
 from typing import Any, Optional, Set
 
 from .config import get_config
@@ -62,6 +63,7 @@ class CentralPushDispatcher:
         self._lock = asyncio.Lock()
         self._task: Optional[asyncio.Task] = None
         self._stop = False
+        self._last_kv_poll = 0.0
 
     def start(self) -> None:
         if self._task is not None:
@@ -104,6 +106,17 @@ class CentralPushDispatcher:
 
     async def _dispatch_pass(self) -> None:
         async with self._lock:
+            # Soft KV divert needs fresh samples; sidecars never /pull in this mode.
+            poll_s = float(getattr(_cfg, "KV_HEALTH_POLL_INTERVAL_S", 5.0) or 0.0)
+            if bool(getattr(_cfg, "KV_SOFT_DIVERT", False)) and poll_s > 0:
+                now = time.time()
+                if (now - self._last_kv_poll) >= poll_s:
+                    try:
+                        await self._pr.refresh_kv_usage_from_health(self._rs)
+                    except Exception as e:
+                        _log(f"kv health poll error: {e!r}", level="full")
+                    self._last_kv_poll = now
+
             endpoints = self._pr.endpoints_snapshot()
             if not endpoints:
                 return

@@ -3,6 +3,8 @@
 """Unit tests for RouterConfig env parsing, normalization and the model registry."""
 import textwrap
 
+import pytest
+
 from router.config import RouterConfig, load_model_registry
 
 
@@ -69,6 +71,16 @@ def test_fair_margin_floor_and_boolean(reset_config, monkeypatch):
     cfg = reset_config()
     assert cfg.FAIR_PULL is True
     assert cfg.FAIR_MARGIN == 1.0
+
+
+def test_kv_soft_divert_env(reset_config, monkeypatch):
+    monkeypatch.setenv("ROUTER_KV_SOFT_DIVERT", "true")
+    monkeypatch.setenv("ROUTER_KV_PRESSURE_HIGH", "0.9")
+    monkeypatch.setenv("ROUTER_KV_SOFT_MIN_HITS", "2")
+    cfg = reset_config()
+    assert cfg.KV_SOFT_DIVERT is True
+    assert cfg.KV_PRESSURE_HIGH == pytest.approx(0.9)
+    assert cfg.KV_SOFT_MIN_HITS == 2
 
 
 def test_result_submit_path_gets_leading_slash(reset_config, monkeypatch):

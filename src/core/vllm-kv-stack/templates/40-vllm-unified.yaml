@@ -423,6 +423,13 @@ spec:
                 value: {{ $slo.recoverStep | default 1 | quote }}
               - name: SLO_COOLDOWN_S
                 value: {{ $slo.cooldownSeconds | default 10 | quote }}
+              {{- $kvReport := $.Values.sidecar.kvUsageReport | default dict }}
+              - name: KV_USAGE_REPORT
+                value: {{ ternary "true" "false" ($kvReport.enabled | default false) | quote }}
+              - name: KV_USAGE_SCRAPE_INTERVAL_S
+                value: {{ $kvReport.scrapeIntervalSeconds | default 5 | quote }}
+              - name: KV_USAGE_SCRAPE_TIMEOUT_S
+                value: {{ $kvReport.scrapeTimeoutSeconds | default 2 | quote }}
             ports:
               - containerPort: 9000
                 name: sidecar-http
@@ -1185,6 +1192,13 @@ spec:
               value: {{ $slo.recoverStep | default 1 | quote }}
             - name: SLO_COOLDOWN_S
               value: {{ $slo.cooldownSeconds | default 10 | quote }}
+            {{- $kvReport := $.Values.sidecar.kvUsageReport | default dict }}
+            - name: KV_USAGE_REPORT
+              value: {{ ternary "true" "false" ($kvReport.enabled | default false) | quote }}
+            - name: KV_USAGE_SCRAPE_INTERVAL_S
+              value: {{ $kvReport.scrapeIntervalSeconds | default 5 | quote }}
+            - name: KV_USAGE_SCRAPE_TIMEOUT_S
+              value: {{ $kvReport.scrapeTimeoutSeconds | default 2 | quote }}
           ports:
             - containerPort: 9000
               name: sidecar-http
