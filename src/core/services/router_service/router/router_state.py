@@ -29,6 +29,9 @@ from .metrics import (
     inc_affinity_hold,
     inc_affinity_release,
     set_affinity_map_size,
+    set_endpoint_kv_usage,
+    set_kv_soft_divert_active,
+    inc_kv_soft_divert_trimmed,
 )
 
 _cfg = get_config()
@@ -194,6 +197,12 @@ class RouterState:
         # in-flight work but not draining results while the queue is backed up is
         # "stuck". In pull mode this is informational only.
         self._last_result_ts: Dict[str, float] = {}
+
+        # Soft KV divert: endpoint -> (kv_usage fraction, wall ts). Updated from
+        # /pull kv_usage and central-push /health polls. Stale samples ignored.
+        self._kv_usage_by_endpoint: Dict[str, Tuple[float, float]] = {}
+        # Hysteresis: endpoints currently considered under KV pressure.
+        self._kv_pressure_active: Dict[str, bool] = {}
 
         # initialize gauge
         set_central_queue_length(0)
@@ -450,6 +459,12 @@ class RouterState:
             # are always kept), so KV/affinity ordering is never overridden.
             ordered, effective_want = self._apply_fair_throttle(
                 endpoint, want, effective_want, ordered,
+            )
+
+            # Step 7c: Soft KV divert — keep prefix hits + affinity pins on a
+            # saturated pod; leave cold work for healthier peers.
+            ordered, effective_want = self._apply_kv_soft_divert(
+                endpoint, effective_want, ordered,
             )
 
             # 5) Choose
@@ -888,6 +903,141 @@ class RouterState:
                 level="summary",
             )
         return new_ordered, new_effective
+
+    # -------------------------------------------------------
+    # Soft KV divert helpers
+    # -------------------------------------------------------
+
+    def record_kv_usage(self, endpoint: str, kv_usage: float | None) -> None:
+        """Store a sidecar-reported GPU KV usage sample (call outside or under lock)."""
+        if not endpoint or kv_usage is None:
+            return
+        try:
+            v = float(kv_usage)
+        except (TypeError, ValueError):
+            return
+        if v != v or v < 0.0:  # NaN
+            return
+        if v > 1.0:
+            v = 1.0 if v > 100.0 else v / 100.0
+        now = time.time()
+        with self._lock:
+            self._kv_usage_by_endpoint[endpoint] = (v, now)
+            # Hysteresis bookkeeping
+            high = float(getattr(_cfg, "KV_PRESSURE_HIGH", 0.85))
+            low = float(getattr(_cfg, "KV_PRESSURE_LOW", 0.75))
+            was = bool(self._kv_pressure_active.get(endpoint, False))
+            if was:
+                if v < low:
+                    self._kv_pressure_active[endpoint] = False
+            else:
+                if v >= high:
+                    self._kv_pressure_active[endpoint] = True
+        try:
+            set_endpoint_kv_usage(endpoint, v)
+        except Exception:
+            pass
+
+    def _fresh_kv(self, endpoint: str, now: float) -> float | None:
+        """Return fresh kv_usage for endpoint, or None if missing/stale (under lock)."""
+        rec = self._kv_usage_by_endpoint.get(endpoint)
+        if not rec:
+            return None
+        v, ts = rec
+        stale_s = float(getattr(_cfg, "KV_USAGE_STALE_S", 30.0))
+        if stale_s > 0 and (now - ts) > stale_s:
+            return None
+        return float(v)
+
+    def _kv_pressure_for(self, endpoint: str, kv: float) -> bool:
+        """Apply HIGH/LOW hysteresis (under lock)."""
+        high = float(getattr(_cfg, "KV_PRESSURE_HIGH", 0.85))
+        low = float(getattr(_cfg, "KV_PRESSURE_LOW", 0.75))
+        was = bool(self._kv_pressure_active.get(endpoint, False))
+        if was:
+            active = kv >= low
+        else:
+            active = kv >= high
+        self._kv_pressure_active[endpoint] = active
+        return active
+
+    def _has_healthy_peer(self, endpoint: str, now: float) -> bool:
+        """True if some other endpoint has a fresh kv_usage < PEER_OK (under lock)."""
+        peer_ok = float(getattr(_cfg, "KV_PRESSURE_PEER_OK", 0.70))
+        peers = set(self._kv_usage_by_endpoint.keys())
+        peers.update(self._last_pull_ts.keys())
+        peers.update(self._inflight_by_endpoint.keys())
+        for ep in peers:
+            if ep == endpoint:
+                continue
+            kv = self._fresh_kv(ep, now)
+            if kv is not None and kv < peer_ok:
+                return True
+        return False
+
+    def _apply_kv_soft_divert(
+        self,
+        endpoint: str,
+        effective_want: int,
+        ordered: List[Tuple[str, str, float, dict]],
+    ) -> Tuple[List[Tuple[str, str, float, dict]], int]:
+        """Trim cold work from a high-KV pod when a healthier peer exists.
+
+        Keeps affinity self-pins and items with prefix_len >= KV_SOFT_MIN_HITS.
+        Default-off / missing KV / fleet-full => no-op.
+        """
+        if not bool(getattr(_cfg, "KV_SOFT_DIVERT", False)) or not endpoint:
+            return ordered, effective_want
+        if effective_want <= 0 or not ordered:
+            set_kv_soft_divert_active(endpoint, 0)
+            return ordered, effective_want
+
+        now = time.time()
+        kv = self._fresh_kv(endpoint, now)
+        if kv is None:
+            set_kv_soft_divert_active(endpoint, 0)
+            return ordered, effective_want
+
+        if not self._kv_pressure_for(endpoint, kv):
+            set_kv_soft_divert_active(endpoint, 0)
+            return ordered, effective_want
+
+        if not self._has_healthy_peer(endpoint, now):
+            set_kv_soft_divert_active(endpoint, 0)
+            return ordered, effective_want
+
+        min_hits = int(getattr(_cfg, "KV_SOFT_MIN_HITS", 1))
+        keep: List[Tuple[str, str, float, dict]] = []
+        for it in ordered:
+            rid, _p, _t, meta = it
+            if self._affinity_match(endpoint, meta):
+                keep.append(it)
+                continue
+            try:
+                hits = int(prefix_len(endpoint, rid))
+            except Exception:
+                hits = 0
+            if hits >= min_hits:
+                keep.append(it)
+
+        trimmed = max(0, min(effective_want, len(ordered)) - min(effective_want, len(keep)))
+        new_effective = min(effective_want, len(keep))
+        set_kv_soft_divert_active(endpoint, 1)
+        if trimmed > 0:
+            inc_kv_soft_divert_trimmed(endpoint, trimmed)
+            _log_req(
+                f"kv soft divert endpoint={endpoint} kv={kv:.3f} "
+                f"kept={len(keep)} trimmed={trimmed} "
+                f"eff {effective_want}->{new_effective}",
+                level="summary",
+            )
+        # Reorder: kept items first (preserve relative order), then the rest
+        # (not granted but stay contiguously after for clarity — leftovers
+        # requeue from ordered[effective_want:] in the caller, so we only
+        # need the grant head to be the kept set).
+        keep_ids = {id(x) for x in keep}
+        rest = [it for it in ordered if id(it) not in keep_ids]
+        return keep + rest, new_effective
 
     def _apply_admission_throttle(self, current_want: int, endpoint: str) -> int:
         """Dynamic admission throttling via binary search on predicted TPOT."""

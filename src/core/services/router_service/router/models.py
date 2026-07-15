@@ -46,6 +46,9 @@ class PullRequest(BaseModel):
     endpoint: str
     want: int                 # sidecar-computed capacity
     model: str = ""           # target model queue (empty = default MODEL_NAME)
+    # Optional GPU KV fill fraction [0,1] reported by the sidecar (soft divert).
+    # Omitted / null => router treats as unknown (no divert for missing samples).
+    kv_usage: Optional[float] = None
 
 
 class JobItem(BaseModel):

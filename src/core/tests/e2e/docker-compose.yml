@@ -76,6 +76,8 @@ services:
       SIDECAR_PORT: "9000"
       BATCH_SIZE: "4"
       PULL_INTERVAL_S: "0.05"
+      KV_USAGE_REPORT: "true"
+      KV_USAGE_SCRAPE_INTERVAL_S: "1"
       LOG_LEVEL: info
     ports:
       - "19000:9000"

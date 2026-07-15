@@ -3,6 +3,7 @@
 Implements just enough of the vLLM HTTP surface that the sidecar exercises:
 
   * GET  /health              -> 200 (used by the sidecar health gate)
+  * GET  /metrics             -> Prometheus text (GPU KV usage for soft divert)
   * POST /v1/chat/completions -> OpenAI ChatCompletion (streaming + non-stream)
 
 The response content is deterministic ("echo: <last user message>") so the
@@ -16,7 +17,7 @@ import time
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse
 
 app = FastAPI(title="mock-vllm")
 
@@ -60,6 +61,18 @@ def _make_completion(model: str, text: str) -> Dict[str, Any]:
 @app.get("/health")
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def metrics() -> PlainTextResponse:
+    # Static dual-engine KV gauges so sidecar KV_USAGE_REPORT can scrape.
+    body = (
+        "# HELP vllm:kv_cache_usage_perc Fraction of GPU KV cache used\n"
+        "# TYPE vllm:kv_cache_usage_perc gauge\n"
+        'vllm:kv_cache_usage_perc{engine="0",model_name="served-model"} 0.42\n'
+        'vllm:kv_cache_usage_perc{engine="1",model_name="served-model"} 0.58\n'
+    )
+    return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
 
 
 @app.post("/v1/chat/completions")

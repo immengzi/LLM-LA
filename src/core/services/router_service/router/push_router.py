@@ -385,6 +385,30 @@ class PushRouter:
         with self._lock:
             return list(self._eps)
 
+    async def refresh_kv_usage_from_health(self, router_state) -> None:
+        """GET each sidecar /health and store optional kv_usage on router_state.
+
+        Used by central-push (sidecars do not /pull). Best-effort: failures skip.
+        """
+        self._ensure_endpoints()
+        with self._lock:
+            items = list(self._urls.items())
+        if not items:
+            return
+
+        async def one(ep: str, url: str):
+            try:
+                r = await self._health_client.get(f"{url}/health")
+                # 503 still can carry kv_usage when vLLM is unhealthy; parse body.
+                data = r.json() if r.content else {}
+                kv = data.get("kv_usage", None)
+                if kv is not None:
+                    router_state.record_kv_usage(ep, kv)
+            except Exception:
+                return
+
+        await asyncio.gather(*(one(ep, url) for ep, url in items), return_exceptions=True)
+
     async def push_to_endpoint(self, endpoint: str, req_id: str, prompt: str, meta: dict) -> None:
         """Deliver a single pre-selected request to a specific sidecar via
         POST {url}/push. Unlike route_and_push(), the target endpoint is chosen

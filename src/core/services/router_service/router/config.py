@@ -309,6 +309,21 @@ class RouterConfig:
     STUCK_PULL_SECONDS: int = 0
     AFFINITY_RELEASE_ON_STUCK: bool = False
 
+    # --------------------------------------------------------------------
+    # SOFT KV DIVERT (GPU-pressure grant filter; default OFF)
+    # --------------------------------------------------------------------
+    # When on, a high-KV pod only keeps affinity self-pins and strong local
+    # prefix hits; cold/movable work is left for healthier peers. No-op when
+    # all peers are also high (or KV samples missing/stale).
+    KV_SOFT_DIVERT: bool = False
+    KV_PRESSURE_HIGH: float = 0.85
+    KV_PRESSURE_LOW: float = 0.75
+    KV_PRESSURE_PEER_OK: float = 0.70
+    KV_SOFT_MIN_HITS: int = 1
+    KV_USAGE_STALE_S: float = 30.0
+    # Central-push: how often to refresh sidecar /health kv_usage (0 = off).
+    KV_HEALTH_POLL_INTERVAL_S: float = 5.0
+
     # Output length predictor
     OUTPUT_LEN_PREDICTOR: str = "simple"    # simple | distribution | regression | hint_only
     # Batch size estimation
@@ -595,6 +610,24 @@ def get_config() -> RouterConfig:
     cfg.STUCK_PULL_SECONDS = max(0, int(os.getenv("ROUTER_STUCK_PULL_SECONDS", cfg.STUCK_PULL_SECONDS)))
     cfg.AFFINITY_RELEASE_ON_STUCK = (
         os.getenv("ROUTER_AFFINITY_RELEASE_ON_STUCK", str(cfg.AFFINITY_RELEASE_ON_STUCK)).lower() == "true"
+    )
+
+    # Soft KV divert
+    cfg.KV_SOFT_DIVERT = (
+        os.getenv("ROUTER_KV_SOFT_DIVERT", str(cfg.KV_SOFT_DIVERT)).lower() == "true"
+    )
+    cfg.KV_PRESSURE_HIGH = float(os.getenv("ROUTER_KV_PRESSURE_HIGH", cfg.KV_PRESSURE_HIGH))
+    cfg.KV_PRESSURE_LOW = float(os.getenv("ROUTER_KV_PRESSURE_LOW", cfg.KV_PRESSURE_LOW))
+    cfg.KV_PRESSURE_PEER_OK = float(
+        os.getenv("ROUTER_KV_PRESSURE_PEER_OK", cfg.KV_PRESSURE_PEER_OK)
+    )
+    cfg.KV_SOFT_MIN_HITS = max(0, int(os.getenv("ROUTER_KV_SOFT_MIN_HITS", cfg.KV_SOFT_MIN_HITS)))
+    cfg.KV_USAGE_STALE_S = max(
+        0.0, float(os.getenv("ROUTER_KV_USAGE_STALE_S", cfg.KV_USAGE_STALE_S))
+    )
+    cfg.KV_HEALTH_POLL_INTERVAL_S = max(
+        0.0,
+        float(os.getenv("ROUTER_KV_HEALTH_POLL_INTERVAL_S", cfg.KV_HEALTH_POLL_INTERVAL_S)),
     )
 
     cfg.OUTPUT_LEN_PREDICTOR = os.getenv("OUTPUT_LEN_PREDICTOR", cfg.OUTPUT_LEN_PREDICTOR)

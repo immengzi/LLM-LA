@@ -155,9 +155,10 @@ func (w *RouterPullWorker) pollLoop() {
 }
 
 type pullRequest struct {
-	Endpoint string `json:"endpoint"`
-	Want     int    `json:"want"`
-	Model    string `json:"model"`
+	Endpoint string   `json:"endpoint"`
+	Want     int      `json:"want"`
+	Model    string   `json:"model"`
+	KvUsage  *float64 `json:"kv_usage,omitempty"`
 }
 
 type pullResponseItem struct {
@@ -198,7 +199,11 @@ func (w *RouterPullWorker) doPull() {
 		return
 	}
 
-	body, err := json.Marshal(pullRequest{Endpoint: w.endpointID, Want: want, Model: w.cfg.ModelName})
+	req := pullRequest{Endpoint: w.endpointID, Want: want, Model: w.cfg.ModelName}
+	if kv, ok := GetCachedKvUsage(); ok {
+		req.KvUsage = &kv
+	}
+	body, err := json.Marshal(req)
 	if err != nil {
 		log.Printf("[pull] marshal error: %v", err)
 		return

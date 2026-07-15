@@ -30,9 +30,13 @@ def clean_router_state():
         rs._result_futs.clear()
         rs._inflight_by_endpoint.clear()
         rs._req_endpoint.clear()
+        rs._kv_usage_by_endpoint.clear()
+        rs._kv_pressure_active.clear()
     yield
     with rs._lock:
         rs._queues.clear()
+        rs._kv_usage_by_endpoint.clear()
+        rs._kv_pressure_active.clear()
 
 
 def test_health_router_ok(client):
@@ -68,6 +72,20 @@ def test_pull_returns_enqueued_items(client):
     assert r.status_code == 200
     items = r.json()["items"]
     assert any(it["req_id"] == rid for it in items)
+
+
+def test_pull_accepts_kv_usage(client):
+    r = client.post("/pull", json={"endpoint": "pod-a", "want": 1, "kv_usage": 0.77})
+    assert r.status_code == 200
+    rec = api_mod.router_state._kv_usage_by_endpoint.get("pod-a")
+    assert rec is not None
+    assert rec[0] == pytest.approx(0.77)
+
+
+def test_pull_omitted_kv_usage_ok(client):
+    r = client.post("/pull", json={"endpoint": "pod-b", "want": 1})
+    assert r.status_code == 200
+    assert "pod-b" not in api_mod.router_state._kv_usage_by_endpoint
 
 
 def test_pull_empty_queue_returns_no_items(client):
