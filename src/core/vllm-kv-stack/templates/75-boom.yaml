@@ -47,9 +47,15 @@ data:
     {{- $isDP := $dp.enabled | default false }}
     {{- $replicas := .replicas | default 1 | int }}
     {{- if $isDP }}
-    {{/* DP: one entry per leader pod via LWS headless DNS */}}
+    {{/* DP: one entry per leader pod via LWS headless DNS.
+         model_info.id is REQUIRED for key_affinity (and flow_control): BooM
+         sticks {key_hash}:{model} → deployment_id. Without id, load looks like
+         0 for every candidate and affinity never sticks — all traffic collapses
+         onto candidates[0]. */}}
     {{- range $i := until $replicas }}
       - model_name: {{ $served | quote }}
+        model_info:
+          id: {{ printf "%s-%d" $mName $i | quote }}
         litellm_params:
           model: {{ printf "openai/%s" $served | quote }}
           api_base: {{ printf "http://vllm-%s-%d.vllm-%s:8200/v1" $mName $i $mName | quote }}
@@ -63,6 +69,8 @@ data:
     {{- else }}
     {{/* Non-DP: one entry per replica via K8s Service (pods have no stable DNS) */}}
       - model_name: {{ $served | quote }}
+        model_info:
+          id: {{ printf "%s-0" $mName | quote }}
         litellm_params:
           model: {{ printf "openai/%s" $served | quote }}
           api_base: {{ printf "http://vllm-%s:8200/v1" .name | quote }}
@@ -76,6 +84,8 @@ data:
     {{- end }}
     {{- else }}
       - model_name: served-model
+        model_info:
+          id: "vllm-qwen-0"
         litellm_params:
           model: openai/served-model
           api_base: http://vllm-qwen:8200/v1
@@ -91,6 +101,8 @@ data:
     {{- if .Values.models }}
     {{- range .Values.models }}
       - model_name: {{ .servedModelName | default .name | quote }}
+        model_info:
+          id: {{ printf "router-%s" (.name) | quote }}
         litellm_params:
           model: {{ printf "openai/%s" (.servedModelName | default .name) | quote }}
           api_base: "http://router-service:8080/v1"
@@ -103,6 +115,8 @@ data:
     {{- end }}
     {{- else }}
       - model_name: served-model
+        model_info:
+          id: "router-served-model"
         litellm_params:
           model: openai/served-model
           api_base: http://router-service:8080/v1
