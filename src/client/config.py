@@ -7,7 +7,7 @@ import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, List, Optional
+from typing import List, Optional
 import yaml
 from urllib.parse import urlparse
 
@@ -584,6 +584,22 @@ class HelmConfig:
     router_fair_floor: int = 1
     router_stuck_pull_seconds: int = 0
     router_affinity_release_on_stuck: bool = False
+
+    # ---- soft KV divert (maps to values.router.kvSoft* / sidecar.kvUsageReport) ----
+    # When router_kv_soft_divert is on, a high-KV pod keeps strong local prefix
+    # hits + affinity pins; cold/low-hit work is steered to healthier peers.
+    # Requires sidecar_kv_usage_report so /pull and /health carry kv_usage.
+    # All default OFF (chart defaults).
+    router_kv_soft_divert: bool = False
+    router_kv_pressure_high: float = 0.85
+    router_kv_pressure_low: float = 0.75
+    router_kv_pressure_peer_ok: float = 0.70
+    router_kv_soft_min_hits: int = 1
+    router_kv_usage_stale_s: int = 30
+    router_kv_health_poll_interval_s: float = 5.0
+    sidecar_kv_usage_report: bool = False
+    sidecar_kv_usage_scrape_interval_s: float = 5.0
+    sidecar_kv_usage_scrape_timeout_s: float = 2.0
 
     # ---- central-push mode (maps to values.router.centralPush*) ----
     # Central-push admits into the central queue like pull (so KV-affinity,

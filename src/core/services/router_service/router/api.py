@@ -1647,6 +1647,12 @@ async def pull(req: PullRequest):
         level="full",
     )
 
+    if req.kv_usage is not None:
+        try:
+            router_state.record_kv_usage(req.endpoint, req.kv_usage)
+        except Exception:
+            pass
+
     items = router_state.pull_for_endpoint(
         endpoint=req.endpoint,
         want=req.want,

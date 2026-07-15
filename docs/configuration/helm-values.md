@@ -42,6 +42,9 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 | `prefetch` | `0` | Extra items buffered beyond `BATCH_SIZE` (pull cap = `BATCH_SIZE + PREFETCH`) |
 | `forceIgnoreEos` | `false` | Force `ignore_eos=true` (replay mode: generate exactly `max_tokens`) |
 | `streamingMode` | `false` | Stream from vLLM internally to capture TTFT |
+| `kvUsageReport.enabled` | `false` | Scrape local vLLM `/metrics` for GPU KV usage; attach `kv_usage` on `/pull` + `/health` (needed for `router.kvSoftDivert`) |
+| `kvUsageReport.scrapeIntervalSeconds` | `5` | How often to scrape |
+| `kvUsageReport.scrapeTimeoutSeconds` | `2` | HTTP timeout for `/metrics` |
 
 ## Router (`router.*`)
 
@@ -69,6 +72,13 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 | `fairFloor` | `1` | Min movable items an overloaded pod still gets (prevents a dead pod stalling the queue) |
 | `stuckPullSeconds` | `0` | Liveness: flag a pod that hasn't pulled this long while the queue is backed up (0 = off; exposes `router_endpoint_stuck`) |
 | `affinityReleaseOnStuck` | `false` | Let a stuck pod's affinity pins release to LB via the existing unavailable-target path |
+| `kvSoftDivert` | `false` | Soft divert: high-KV pods keep prefix hits + affinity pins; cold work goes to healthier peers ([§5d](../architecture/router.md#5d-soft-kv-divert-conceptual)). Requires `sidecar.kvUsageReport.enabled` |
+| `kvPressureHigh` | `0.85` | Enter divert pressure when pod GPU KV usage ≥ this |
+| `kvPressureLow` | `0.75` | Exit pressure (hysteresis) when usage falls below this |
+| `kvPressurePeerOk` | `0.70` | Divert only if some peer has fresh usage below this |
+| `kvSoftMinHits` | `1` | Min local `prefix_len` kept on a pressured pod (non-pins) |
+| `kvUsageStaleSeconds` | `30` | Ignore KV samples older than this |
+| `kvHealthPollIntervalSeconds` | `5` | Central-push: poll sidecar `/health` for `kv_usage` this often |
 | `centralPushCap` | `8` | Central-push only: per-pod concurrency ceiling; router dispatches `cap − in-flight` items per pod. Track sidecar `batchSize + prefetch` |
 | `centralPushIntervalS` | `0.05` | Central-push only: periodic dispatch tick (also dispatched on every enqueue) |
 | `outputLenPredictor` | `simple` | Output-length predictor |

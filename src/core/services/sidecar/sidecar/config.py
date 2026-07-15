@@ -156,6 +156,18 @@ class SidecarConfig:
     SLO_SCRAPE_TIMEOUT_S: float = 2.0
 
     # ------------------------------------------------
+    # GPU KV usage reporting for router soft divert (default OFF)
+    # ------------------------------------------------
+    # When false: no scrape thread, /pull and /health omit kv_usage (unchanged).
+    # Independent of SLO_DYNAMIC_PULL_ENABLED; soft divert on the router also
+    # needs this on to receive fresh samples.
+
+    KV_USAGE_REPORT: bool = False
+    # How often to scrape vLLM /metrics for kv_cache_usage_perc.
+    KV_USAGE_SCRAPE_INTERVAL_S: float = 5.0
+    KV_USAGE_SCRAPE_TIMEOUT_S: float = 2.0
+
+    # ------------------------------------------------
     # Logging
     # ------------------------------------------------
 
@@ -270,6 +282,19 @@ def get_config() -> SidecarConfig:
     cfg.SLO_COOLDOWN_S = float(os.getenv("SLO_COOLDOWN_S", cfg.SLO_COOLDOWN_S))
     cfg.SLO_TPOT_METRIC = os.getenv("SLO_TPOT_METRIC", cfg.SLO_TPOT_METRIC)
     cfg.SLO_SCRAPE_TIMEOUT_S = float(os.getenv("SLO_SCRAPE_TIMEOUT_S", cfg.SLO_SCRAPE_TIMEOUT_S))
+
+    # ------------------------------------------------
+    # GPU KV usage reporting
+    # ------------------------------------------------
+    cfg.KV_USAGE_REPORT = (
+        os.getenv("KV_USAGE_REPORT", str(cfg.KV_USAGE_REPORT)).lower() == "true"
+    )
+    cfg.KV_USAGE_SCRAPE_INTERVAL_S = float(
+        os.getenv("KV_USAGE_SCRAPE_INTERVAL_S", cfg.KV_USAGE_SCRAPE_INTERVAL_S)
+    )
+    cfg.KV_USAGE_SCRAPE_TIMEOUT_S = float(
+        os.getenv("KV_USAGE_SCRAPE_TIMEOUT_S", cfg.KV_USAGE_SCRAPE_TIMEOUT_S)
+    )
 
     # ------------------------------------------------
     # Logging

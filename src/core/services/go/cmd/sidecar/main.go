@@ -58,6 +58,15 @@ func main() {
 		sloMonitor.Start()
 	}
 
+	var kvMon *sidecar.KvUsageMonitor
+	if cfg.KVUsageReport {
+		kvMon = sidecar.NewKvUsageMonitor(cfg)
+		sidecar.BindKvUsageMonitor(kvMon)
+		kvMon.Start()
+	} else {
+		sidecar.BindKvUsageMonitor(nil)
+	}
+
 	poster := sidecar.NewResultPoster(cfg)
 	poster.Start()
 
@@ -99,13 +108,17 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(httpCode)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		payload := map[string]interface{}{
 			"status":       status,
 			"vllm_healthy": vllmOK,
 			"queue_len":    st.Pending,
 			"inflight":     st.Inflight,
 			"logical":      st.Pending + st.Inflight,
-		})
+		}
+		if kv, ok := sidecar.GetCachedKvUsage(); ok {
+			payload["kv_usage"] = kv
+		}
+		json.NewEncoder(w).Encode(payload)
 	})
 	r.Handle("/metrics", promhttp.Handler())
 
@@ -229,6 +242,10 @@ func main() {
 	}
 	if sloMonitor != nil {
 		sloMonitor.Stop()
+	}
+	if kvMon != nil {
+		kvMon.Stop()
+		sidecar.BindKvUsageMonitor(nil)
 	}
 	if puller != nil {
 		puller.Stop()

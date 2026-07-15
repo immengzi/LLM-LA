@@ -868,7 +868,7 @@ def _print_boom_config(
         for m in models_list:
             name = m.get("servedModelName") or m.get("name", "unknown")
             _emit(f"  - model_name: {name}")
-            _emit(f"    litellm_params:")
+            _emit("    litellm_params:")
             _emit(f"      model: openai/{name}")
             _emit(f"      api_base: http://{node_ip}:{router_port}/v1")
             _emit(f'      api_key: "{router_api_key}"')
@@ -877,7 +877,7 @@ def _print_boom_config(
         _emit("")
         _emit("model_list:")
         _emit(f"  - model_name: {model_name}")
-        _emit(f"    litellm_params:")
+        _emit("    litellm_params:")
         _emit(f"      model: openai/{model_name}")
         _emit(f"      api_base: http://{node_ip}:{router_port}/v1")
         _emit(f'      api_key: "{router_api_key}"')
@@ -937,16 +937,16 @@ def _print_boom_config(
     _emit("-" * 70)
     _emit("  Prod Latency Collector (run in a separate terminal)")
     _emit("-" * 70)
-    _emit(f"  python src/client/prod_latency_collector.py \\")
+    _emit("  python src/client/prod_latency_collector.py \\")
     _emit(f"      --router-url http://{node_ip}:{router_port} \\")
     _emit(f"      --prometheus-url http://{node_ip}:{prom_port} \\")
-    _emit(f"      --poll-interval 5")
+    _emit("      --poll-interval 5")
 
     _emit("")
     _emit("-" * 70)
     _emit('  Claude CLI  (~/.claude/settings.json  "env" block)')
     _emit("-" * 70)
-    _emit(f'  "env": {{')
+    _emit('  "env": {')
     _emit(f'      "ANTHROPIC_AUTH_TOKEN": "{boom_api_key}",')
     _emit(f'      "ANTHROPIC_BASE_URL": "http://{node_ip}:{boom_port}",')
     _emit(f'      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "{served_model}",')
@@ -954,7 +954,7 @@ def _print_boom_config(
     _emit(f'      "ANTHROPIC_DEFAULT_SONNET_MODEL": "{served_model}",')
     _emit(f'      "ANTHROPIC_MODEL": "{served_model}",')
     _emit(f'      "ANTHROPIC_REASONING_MODEL": "{served_model}"')
-    _emit(f'  }}')
+    _emit('  }')
 
     _emit("=" * 70)
     _emit("")
@@ -1102,6 +1102,26 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             "router.fairFloor": int(getattr(h, "router_fair_floor", 1)),
             "router.stuckPullSeconds": int(getattr(h, "router_stuck_pull_seconds", 0)),
             "router.affinityReleaseOnStuck": bool(getattr(h, "router_affinity_release_on_stuck", False)),
+
+            # Soft KV divert (trim cold grants on high-KV pods)
+            "router.kvSoftDivert": bool(getattr(h, "router_kv_soft_divert", False)),
+            "router.kvPressureHigh": float(getattr(h, "router_kv_pressure_high", 0.85)),
+            "router.kvPressureLow": float(getattr(h, "router_kv_pressure_low", 0.75)),
+            "router.kvPressurePeerOk": float(getattr(h, "router_kv_pressure_peer_ok", 0.70)),
+            "router.kvSoftMinHits": int(getattr(h, "router_kv_soft_min_hits", 1)),
+            "router.kvUsageStaleSeconds": int(getattr(h, "router_kv_usage_stale_s", 30)),
+            "router.kvHealthPollIntervalSeconds": float(
+                getattr(h, "router_kv_health_poll_interval_s", 5.0)
+            ),
+            "sidecar.kvUsageReport.enabled": bool(
+                getattr(h, "sidecar_kv_usage_report", False)
+            ),
+            "sidecar.kvUsageReport.scrapeIntervalSeconds": float(
+                getattr(h, "sidecar_kv_usage_scrape_interval_s", 5.0)
+            ),
+            "sidecar.kvUsageReport.scrapeTimeoutSeconds": float(
+                getattr(h, "sidecar_kv_usage_scrape_timeout_s", 2.0)
+            ),
 
             # Central-push mode (router-driven capacity dispatch from the queue)
             "router.centralPushCap": int(getattr(h, "router_central_push_cap", 8)),

@@ -42,6 +42,13 @@ def test_pull_request_want_coerces_int():
     assert req.want == 5
 
 
+def test_pull_request_optional_kv_usage():
+    req = PullRequest(endpoint="pod-a", want=1)
+    assert req.kv_usage is None
+    req2 = PullRequest(endpoint="pod-a", want=1, kv_usage=0.42)
+    assert req2.kv_usage == pytest.approx(0.42)
+
+
 def test_now_s_is_time():
     a = now_s()
     assert isinstance(a, float)
