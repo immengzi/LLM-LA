@@ -178,7 +178,7 @@ helm:
       streamingMode: true
       modelSubPath: MiniMax-M2.7-w8a8-QuaRot
       tensorParallelSize: 8
-      batchSize: 16
+      batchSize: 32
       sidecarPrefetch: 2
       dataParallel:
         enabled: true

@@ -3,6 +3,7 @@ ascend-device-plugin
 /ascend-device-plugin/test_pod/lmc.yaml
 bin
 experiments
+experiments_yz
 figures
 images
 /infra-scripts/get_helm.sh
