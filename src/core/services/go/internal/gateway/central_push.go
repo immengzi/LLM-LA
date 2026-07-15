@@ -25,6 +25,11 @@ type CentralPushDispatcher struct {
 
 	mu      sync.Mutex // single-flight: passes never overlap
 	started bool
+
+	// Wall-clock of the last sidecar /health kv_usage poll (soft divert needs
+	// fresh samples; sidecars never /pull in central-push). Touched only by the
+	// single dispatch goroutine. Mirrors CentralPushDispatcher._last_kv_poll.
+	lastKVPoll float64
 }
 
 // NewCentralPushDispatcher builds a dispatcher. cap is the per-pod concurrency
@@ -98,6 +103,17 @@ func (d *CentralPushDispatcher) run() {
 }
 
 func (d *CentralPushDispatcher) dispatchPass() {
+	// Soft KV divert needs fresh samples; sidecars never /pull in this mode, so
+	// poll each sidecar /health for kv_usage on the configured interval.
+	cfg := d.queue.cfg
+	if cfg.KVSoftDivert && cfg.KVHealthPollIntervalS > 0 {
+		now := nowS()
+		if now-d.lastKVPoll >= cfg.KVHealthPollIntervalS {
+			d.pushRouter.RefreshKVUsageFromHealth(d.queue)
+			d.lastKVPoll = now
+		}
+	}
+
 	endpoints := d.pushRouter.EndpointsSnapshot()
 	if len(endpoints) == 0 {
 		return

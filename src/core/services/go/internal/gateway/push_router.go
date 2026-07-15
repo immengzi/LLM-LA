@@ -919,6 +919,46 @@ func (pd *PushDispatcher) EndpointsSnapshot() []string {
 	return out
 }
 
+// RefreshKVUsageFromHealth GETs each sidecar /health in parallel and stores any
+// reported kv_usage onto the queue for soft divert. Used by central-push, where
+// sidecars never /pull so kv_usage cannot piggyback on a pull. Best-effort:
+// failures skip. Mirrors PushRouter.refresh_kv_usage_from_health.
+func (pd *PushDispatcher) RefreshKVUsageFromHealth(q *CentralQueue) {
+	pd.mu.Lock()
+	pd.refreshLocked(false)
+	urls := make(map[string]string, len(pd.urls))
+	for k, v := range pd.urls {
+		urls[k] = v
+	}
+	pd.mu.Unlock()
+	if len(urls) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	for ep, url := range urls {
+		wg.Add(1)
+		go func(ep, url string) {
+			defer wg.Done()
+			resp, err := pd.client.Get(url + "/health")
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			// A 503 can still carry kv_usage when vLLM is unhealthy; parse body
+			// regardless of status.
+			var data map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+				return
+			}
+			if v, ok := data["kv_usage"]; ok && v != nil {
+				q.RecordKVUsage(ep, toFloat(v))
+			}
+		}(ep, url)
+	}
+	wg.Wait()
+}
+
 // PushToEndpoint delivers a single pre-selected request to a specific sidecar
 // via POST {url}/push. Unlike RouteAndPush, the target endpoint is chosen by
 // the central scheduler (Pull), so there is no pickEndpoint. Returns an error
