@@ -13,11 +13,16 @@ spec:
     matchNames:
       - {{ .Release.Namespace }}
   endpoints:
+    # Was 1s with implicit timeout <= interval. Under LMCache P2P host-staging
+    # saturation the vLLM process stalls on pin/transfer work and /metrics often
+    # exceeds 1s -> scrape timeouts -> gappy Grafana. Keep batchSize/engine knobs
+    # alone; give scrapes headroom so panel continuity survives overload.
     - path: /metrics
       port: http
       scheme: http
       honorLabels: true
-      interval: 1s
+      interval: 15s
+      scrapeTimeout: 10s
 
 ---
 {{- if or (eq (lower .Values.backend) "router") (eq (lower .Values.backend) "litellm") (eq (lower .Values.backend) "boom") }}
@@ -37,7 +42,8 @@ spec:
       port: http
       scheme: http
       honorLabels: true
-      interval: 1s
+      interval: 5s
+      scrapeTimeout: 4s
 
 ---
 apiVersion: monitoring.coreos.com/v1
@@ -56,7 +62,8 @@ spec:
       port: sidecar-http
       scheme: http
       honorLabels: true
-      interval: 1s
+      interval: 5s
+      scrapeTimeout: 4s
 {{- end }}
 
 ---

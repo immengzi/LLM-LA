@@ -191,12 +191,10 @@ helm:
   # longer for the pinned pod preserves prefix locality at the cost of tail latency
   # (this is what the flat-hit-rate "142" router effectively does). Bump
   # incrementally while watching releases_total, the 命中率 panel, and p99 latency.
-  # 800 (rate-limit pairing): with batchSize 16 halving per-pod concurrency, the
-  # longer hold makes queued turns wait for their warm pod instead of spilling, so
-  # the throttle preserves prefix locality rather than scattering it. Hard ceiling is
-  # RESULT_TIMEOUT_S=1000s (router waits that long end-to-end INCLUDING this hold, then
-  # 504s), so 800 leaves ~200s for pull+inference. Higher also slows failover: requests
-  # pinned to a dead/restarting pod wait this long before spilling to a healthy one.
+  # Hard ceiling is RESULT_TIMEOUT_S=1000s (router waits that long end-to-end
+  # INCLUDING this hold, then 504s), so 800 leaves ~200s for pull+inference. Higher
+  # also slows failover: requests pinned to a dead/restarting pod wait this long
+  # before spilling to a healthy one.
   router_affinity_hard_timeout_s: 800
 
   expose_per_pod: true
@@ -277,11 +275,8 @@ helm:
       streamingMode: true
       modelSubPath: MiniMax-M2.7-w8a8-QuaRot
       tensorParallelSize: 8
-      # 16 (rate-limit-to-affined-node): halve per-pod concurrency vs the 142
-      # reference's 32 to cap KV pressure/eviction so queued turns wait for their
-      # warm pod (hard affinity) instead of spilling. Blunt/static cap -- revisit
-      # from the high-load KV-usage data (batch-32 vs batch-16 sweep).
-      batchSize: 16
+      # Match the 142 reference --max-num-seqs (32).
+      batchSize: 32
       sidecarPrefetch: 2
       dataParallel:
         enabled: true
