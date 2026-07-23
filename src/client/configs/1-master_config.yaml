@@ -14,7 +14,6 @@
 
 # ── ACTIVE p2p host-staging deployments (uncomment the one you want to run) ──
 # BZ (this machine) — affinity, and its fair-pull variant:
-# (commented out during TONIGHT plan below — re-enable after benches)
 # prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
 # prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity-fair:
@@ -26,57 +25,118 @@
 # prod-yz-shadow-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
 
-# =============================================================================
-# TONIGHT (BZ only) — activate ONE block at a time; do not leave prod-bz active.
-# Full cold redeploy (no --skip-vllm) on first launch of each block.
-# Order suggested: (A) crash-soak → compare, then (B) fair high-load A/B.
-# Soft-divert A/B is optional (needs feat/kv-soft-divert images).
-# =============================================================================
-
-# ---- A) Crash / pin-deadlock soak + path compare (metrics) ----
-# Leave running until pin timeouts OR GPU KV ~100% + decode decay.
-# Success signals: Pin timeout in vllm.log, prefix_cache_hit_rate collapse,
-# decode tok/s down while running≈batchSize. Compare Grafana / notebook panels
-# (running, rps, prefill/decode, TTFT/TPOT/e2e, prefix hit) between Series 1/2.
-# A1 first (us+BooM = 33/218 path). A2 optional same-night or next (142 path).
-# benchmark-bz-us-boom-lmsys-kv-soak:      # A1 us+boom
+# ── SMOKE — 1 user × 1 conv (wiring only) ──
+# benchmark-bz-us-boom-claude-smoke:
 #   - pull
-# benchmark-bz-boom-only-lmsys-kv-soak:    # A2 boom-only (key_affinity)
+# benchmark-bz-boom-only-claude-smoke:
 #   - key_affinity
 
-# ---- B) Rebalancing under high load (fair pull A/B, 96 users) ----
-# Prefix strategy. B1 = fair OFF, B2 = fair ON. Same 96-user overload.
-# Watch: router_fair_* / in-flight balance, waiting, TTFT/TPOT, timeouts.
-# benchmark-bz-pull-prefix-highload:       # B1 fair OFF
-#   - pull
-# benchmark-bz-pull-fair-prefix-highload:  # B2 fair ON
-#   - pull
+# ── ACTIVE: full 1h sweep first (all mine, then all boom-only), then the
+#    full long sweep (all mine, then all boom-only). All cells run under the
+#    SAME harness code, so mine-vs-boom is apples-to-apples within each phase.
+#    The 1h phase also regenerates a same-code baseline for mine (replacing the
+#    old-code 115-118) and validates the kvc_aware path before the long soak. ──
+# Full cold redeploy between cells; do NOT pass --skip-vllm (router vs direct
+# mode changes between mine=router and boom-only=direct cells).
+# Methods: mine -> pull (LLM-LA router applies the real strategy); boom-only ->
+# round_robin / key_affinity / kvc_aware (BooM's three scheduler policies).
 
-# ---- C) Optional: soft KV divert A/B (needs soft-divert router/sidecar image) ----
-# benchmark-bz-pull-kvdivert-off-prefix:
+# ===================== 1-HOUR SWEEP (DONE — the LOW load point) =====================
+# mine = 122-125 (valid, reused as LOW); boom-direct re-run as 129-131 with the
+# strip fix. All commented out — the LOAD SWEEP below is the active suite and
+# reuses these 16-user runs as its low-load level.
+# benchmark-bz-us-boom-claude-1h:                   # both + hard affinity
 #   - pull
-# benchmark-bz-pull-kvdivert-on-prefix:
+# benchmark-bz-us-boom-claude-1h-affinity-hard:     # affinity hard only
 #   - pull
-
-# ── BZ: KV soak — us+BooM (33/218 path) vs BooM-only (142 path) ──
-# (see TONIGHT block A above)
-# benchmark-bz-us-boom-lmsys-kv-soak:
+# benchmark-bz-us-boom-claude-1h-affinity-soft:     # affinity soft only
 #   - pull
-# benchmark-bz-boom-only-lmsys-kv-soak:
+# benchmark-bz-us-boom-claude-1h-prefix:            # prefix only
+#   - pull
+# benchmark-bz-boom-rr-claude-1h:                   # round_robin
+#   - round_robin
+# benchmark-bz-boom-only-claude-1h:                 # key_affinity
 #   - key_affinity
+# benchmark-bz-boom-kvc-claude-1h:                  # kvc_aware
+#   - kvc_aware
 
-# ── YZ metrics redeploy check (run ON YZ machine, not BZ) ──
-# After helm upgrade of prod-yz…affinity with main (≥32a8c49):
-#   kubectl -n <ns> get servicemonitor vllm -o yaml | grep -E 'interval|scrapeTimeout'
-#     expect: interval 15s, scrapeTimeout 10s (was 1s)
-#   kubectl -n <ns> get podmonitor kv-router kv-sidecar -o yaml | grep -E 'interval|scrapeTimeout'
-#     expect: interval 5s, scrapeTimeout 4s
-#   Confirm models[].batchSize: 32 in values / pod env BATCH_SIZE
-#   Prometheus: scrape no continuous timeout errors on vLLM :8200/metrics
-#   Grafana: continuous GPU KV / decode / prefix panels (no multi-minute gaps
-#   under load). Client metrics.prometheus_base_url stays the YZ URL.
-# prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity:
+# ===================== LOAD SWEEP (ACTIVE, ~36-42h) =====================
+# 7 methods x 3 NEW load levels. LOW (16 users) is already covered by 122-125 +
+# 129-131, so it is NOT re-run here. total_requests=128 at all new levels;
+# LOW-MID=32 users (convs_per_user=4), MEDIUM=64 users (convs_per_user=2),
+# HIGH=128 users (convs_per_user=1) — a clean 16->32->64->128 concurrency ramp.
+# Claude per-turn timeout=10000s (no practical cap, matches 122-131). Full cold
+# redeploy per cell (router vs direct changes), so do NOT pass --skip-vllm.
+# Ordered low->high so an interrupted run
+# still leaves complete lower-load comparisons. New experiments numbered from the
+# current max onward (after the in-flight 129-131 finish).
+
+# --- LOW-MID: 32 users --- (DONE: 132-138, all commented out)
+# benchmark-bz-us-boom-claude-u32:                 # mine: both (kv+len+affinity) -> 132
 #   - pull
+# benchmark-bz-us-boom-claude-affinity-hard-u32:   # mine: affinity hard -> 133
+#   - pull
+# benchmark-bz-us-boom-claude-affinity-soft-u32:   # mine: affinity soft -> 134
+#   - pull
+# benchmark-bz-us-boom-claude-prefix-u32:          # mine: prefix -> 135
+#   - pull
+# benchmark-bz-boom-rr-claude-u32:                 # boom: round_robin -> 136
+#   - round_robin
+# benchmark-bz-boom-only-claude-u32:               # boom: key_affinity -> 137
+#   - key_affinity
+# benchmark-bz-boom-kvc-claude-u32:                # boom: kvc_aware -> 138
+#   - kvc_aware
+
+# --- MEDIUM: 64 users ---
+# DONE (139-140), commented out so the restart resumes at affinity-soft (new 141):
+# benchmark-bz-us-boom-claude-u64:                 # mine: both (kv+len+affinity) -> 139
+#   - pull
+# benchmark-bz-us-boom-claude-affinity-hard-u64:   # mine: affinity hard -> 140
+#   - pull
+benchmark-bz-us-boom-claude-affinity-soft-u64:   # mine: affinity soft -> 141 (restart)
+  - pull
+benchmark-bz-us-boom-claude-prefix-u64:          # mine: prefix
+  - pull
+benchmark-bz-boom-rr-claude-u64:                 # boom: round_robin
+  - round_robin
+benchmark-bz-boom-only-claude-u64:               # boom: key_affinity
+  - key_affinity
+benchmark-bz-boom-kvc-claude-u64:                # boom: kvc_aware
+  - kvc_aware
+
+# --- HIGH: 128 users ---
+benchmark-bz-us-boom-claude-u128:                # mine: both (kv+len+affinity)
+  - pull
+benchmark-bz-us-boom-claude-affinity-hard-u128:  # mine: affinity hard
+  - pull
+benchmark-bz-us-boom-claude-affinity-soft-u128:  # mine: affinity soft
+  - pull
+benchmark-bz-us-boom-claude-prefix-u128:         # mine: prefix
+  - pull
+benchmark-bz-boom-rr-claude-u128:                # boom: round_robin
+  - round_robin
+benchmark-bz-boom-only-claude-u128:              # boom: key_affinity
+  - key_affinity
+benchmark-bz-boom-kvc-claude-u128:               # boom: kvc_aware
+  - kvc_aware
+
+# ===================== LONG SWEEP =====================
+# --- mine (us + LLM-LA router), ~5h each ---
+# benchmark-bz-us-boom-claude-long:                 # both + hard affinity
+#   - pull
+# benchmark-bz-us-boom-claude-long-affinity-hard:   # affinity hard only
+#   - pull
+# benchmark-bz-us-boom-claude-long-affinity-soft:   # affinity soft only
+#   - pull
+# benchmark-bz-us-boom-claude-long-prefix:          # prefix only
+#   - pull
+# --- boom-only baselines, longer ---
+# benchmark-bz-boom-rr-claude-long:                 # round_robin
+#   - round_robin
+# benchmark-bz-boom-only-claude-long:               # key_affinity
+#   - key_affinity
+# benchmark-bz-boom-kvc-claude-long:                # kvc_aware
+#   - kvc_aware
 
 # ── ACTIVE: claude-CLI HIGH-LOAD routing comparison (96 users x 180 convs, ~1h) ──
 # Drives the real `claude` CLI (transport.mode=claude) across every routing
@@ -114,14 +174,6 @@
 # benchmark-bz-pull-fair-affinity-soft:
 #   - pull
 # benchmark-bz-pull-fair-both:
-#   - pull
-
-# ---- pull (soft KV divert A/B; prefix strategy) ----
-# Same workload as pull-prefix; only router_kv_soft_divert differs (sidecar
-# kv_usage report on for both). Activate one at a time or both sequentially.
-# benchmark-bz-pull-kvdivert-off-prefix:
-#   - pull
-# benchmark-bz-pull-kvdivert-on-prefix:
 #   - pull
 
 # ---- central-push (vanilla) ----

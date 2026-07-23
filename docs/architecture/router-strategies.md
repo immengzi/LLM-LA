@@ -174,8 +174,6 @@ helm:
 
 - The selector overrides the low-level `KV_AWARE` / `AFFINITY_ENABLED` flags when
   set; leaving it empty falls back to those flags (backward compatible).
-- Soft KV divert ([router.md §5d](router.md#5d-soft-kv-divert-conceptual)) is an
-  orthogonal grant filter under GPU pressure — most useful with `prefix`/`both`.
 - Full knob reference: [helm-values.md](../configuration/helm-values.md) and the
   affinity-specific TTL/timeout knobs in [key-affinity.md](key-affinity.md#7-configuration).
 

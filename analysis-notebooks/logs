@@ -2560,7 +2560,395 @@ Sidecar queue length mean|      53.91 |    122.89 |    129.78 |     93.97
 Sidecar received RPS mean|       3.73 |      3.66 |      3.52 |      3.69
 Sidecar completed RPS mean|      3.73 |      3.66 |      3.51 |      3.69
 
+YZ results (copied — prod shadow captures, not load-gen sweeps):
+Cluster: yz. Model: MiniMax-M2 (NPU, TP8, DP2). Path: BooM/router -> vLLM (LMCache P2P host-staging).
+Data: src/client/experiments/yz/{95,96,102,103}. Observation-only (external-scrape / prod-collector).
+Notebooks: prefix-kv-drop-root-cause.ipynb (root cause), bz-vs-yz-tpot.ipynb (TPOT), doomsday-saeid.ipynb (dashboard overlay).
+Endpoint map (confirmed from pod logs):
+  vllm-minimax-m2-0 = 7.150.6.33  (ours)
+  vllm-minimax-m2-1 = 7.150.1.218 (ours)
+  them-142          = 7.150.2.142 (external bare-vLLM baseline)
+
+Purpose: prod shadow of the yz MiniMax-M2 stack; root-cause the prefix-cache / throughput collapse.
+Findings (one story across all four): the throughput/prefix collapse is GPU-KV-cache saturation, not the
+observability update. Large lmsys prompts (p95 ~68k input tokens) x concurrency overrun the 1.18M-token GPU
+KV cache -> it fills to ~100% and stays there -> prefix-cache hit rate collapses and the engine leans hard on
+LMCache P2P host-staging, whose transfer pins deadlock (held >300s -> force-unpin), with preemptions and
+out-of-order steps. Same signature appears pre- and post-update (96 and 103); absent on the 142 baseline
+(95/102) and on every local bz run (KV ~6-11%, 0 pin timeouts).
+
+run    | stack            | when                    | KV max | pin timeouts | outcome
+-------|------------------|-------------------------|--------|--------------|---------------------------
+yz/95  | them (142 bare)  | 2026-07-11 (ext scrape) | ~6%    |      0       | healthy (KV drains)
+yz/96  | ours (pre-update)| 2026-07-11 -> 14 (~54h) | ~99.8% |     880      | degrades (KV-sat soak)
+yz/102 | them (142 bare)  | 2026-07-14 (~10.4h)     | n/a    |      0       | healthy throughout
+yz/103 | ours (post-upd.) | 2026-07-14/15 (~10.4h)  | ~100%  |    2,792     | degrades (KV-sat soak)
+
+yz/95  - external scrape of 7.150.2.142:8077 (bare vLLM). metrics.jsonl only, has latency percentiles. "them" ref.
+yz/96  - prod_latency_collector on yz router 10.50.156.65. ~54h soak on the deployment that predates the
+         observability update -> exonerates the logging change as the cause.
+yz/102 - external scrape 7.150.2.142:8077, 30s interval, 1229 ticks, wall 37403s. Second healthy "them" ref.
+yz/103 - prod-collector (router 10.50.156.65, prom :31190), 5s poll, 7395 polls, wall 37395s, 969 requests.
+         Routing: frac_kv_hit 0.452, sticky_frac 0.9981, avg_distinct_endpoints 1.0019 (527 conv groups).
+         Per-endpoint: m2-0 kv_hit 0.382 (571 req), m2-1 kv_hit 0.553 (398 req).
+Fix direction: keep GPU KV off saturation (cap prompt/context or add KV headroom; smaller max_num_seqs did
+not help), harden/lower the LMCache pin timeout, and test P2P host-staging under a controlled KV-sat soak.
+
+
 BZ results:
+
+exp 69 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: pull; router_fair_pull: false; router_strategy: none
+Purpose: no-affinity pull baseline
+Findings: kv_hit 0.744, sticky 0.423, jain 0.9999, req_cov 0.009, infl_cov 0.232, e2e p50 98.6s / p95 1495.8s, gen 292.9 tok/s, 0 timeouts. Balance excellent, KV reuse low without affinity.
+
+------------------------------------------------
+
+exp 70 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: pull; router_fair_pull: false; router_strategy: prefix
+Purpose: prefix-cache routing, no conversation affinity
+Findings: kv_hit 0.998, sticky 0.483, jain 0.9939, req_cov 0.078, infl_cov 0.276, e2e p50 100.3s / p95 1459.6s, gen 310.7 tok/s, 0 timeouts. Prefix lifts KV but stickiness stays low.
+
+------------------------------------------------
+
+exp 71 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: pull; router_fair_pull: false; router_strategy: affinity (hard)
+Purpose: hard conversation affinity, pull baseline
+Findings: kv_hit 0.999, sticky 1.000, jain 0.9971, req_cov 0.054, infl_cov 0.184, e2e p50 102.3s / p95 1620.1s, gen 300.2 tok/s, 0 timeouts. Full stickiness, well balanced.
+
+------------------------------------------------
+
+exp 72 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: pull; router_fair_pull: false; router_strategy: affinity (soft)
+Purpose: soft conversation affinity, pull baseline
+Findings: kv_hit 0.998, sticky 0.428, jain 0.9975, req_cov 0.050, infl_cov 0.192, e2e p50 97.2s / p95 1499.8s, gen 294.3 tok/s, 0 timeouts. KV high but soft lets convs drift (low sticky).
+
+------------------------------------------------
+
+exp 73 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: pull; router_fair_pull: false; router_strategy: both (hard)
+Purpose: prefix + hard affinity, pull baseline
+Findings: kv_hit 0.999, sticky 1.000, jain 0.9994, req_cov 0.025, infl_cov 0.256, e2e p50 102.0s / p95 1610.9s, gen 260.2 tok/s, 0 timeouts. Best jain among vanilla cells.
+
+------------------------------------------------
+
+exp 74 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: pull; router_fair_pull: true (margin 1.15); router_strategy: none
+Purpose: fair-pull with no affinity anchor
+Findings: kv_hit 0.920, sticky 0.353, jain 0.9876, req_cov 0.112, infl_cov 0.608, e2e p50 26.0s / p95 452.6s, gen 212.0 tok/s, 0 timeouts. Huge latency drop but imbalance — aggressive-throttle artifact with no affinity.
+
+------------------------------------------------
+
+exp 75 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: pull; router_fair_pull: true (margin 1.15); router_strategy: prefix
+Purpose: fair-pull + prefix routing
+Findings: kv_hit 0.958, sticky 0.428, jain 0.9997, req_cov 0.016, infl_cov 0.150, e2e p50 104.9s / p95 1384.1s, gen 336.0 tok/s, 0 timeouts. Excellent balance.
+
+------------------------------------------------
+
+exp 76 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: pull; router_fair_pull: true (margin 1.15); router_strategy: affinity (hard)
+Purpose: fair-pull + hard affinity (the headline treatment)
+Findings: kv_hit 0.994, sticky 1.000, jain 1.0000, req_cov 0.007, infl_cov 0.324, e2e p50 99.8s / p95 1483.4s, gen 285.1 tok/s, 0 timeouts. BEST all-rounder — top balance with KV intact.
+
+------------------------------------------------
+
+exp 77 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: pull; router_fair_pull: true (margin 1.15); router_strategy: affinity (soft)
+Purpose: fair-pull + soft affinity
+Findings: kv_hit 0.994, sticky 0.393, jain 0.9989, req_cov 0.033, infl_cov 0.214, e2e p50 103.4s / p95 1449.9s, gen 305.5 tok/s, 0 timeouts. KV high, soft keeps stickiness low.
+
+------------------------------------------------
+
+exp 78 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: pull; router_fair_pull: true (margin 1.15); router_strategy: both (hard)
+Purpose: fair-pull + prefix + hard affinity
+Findings: kv_hit 0.995, sticky 1.000, jain 0.9957, req_cov 0.066, infl_cov 0.212, e2e p50 107.9s / p95 1682.5s, gen 319.1 tok/s, 0 timeouts.
+
+------------------------------------------------
+
+exp 79 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 300 s
+- router_mode: central-push; router_fair_pull: false; router_strategy: none (aff soft)
+Purpose: central-push no-affinity baseline
+Findings: kv_hit 0.764, sticky 0.774, jain 0.9193, req_cov 0.296, infl_cov 0.551, e2e p50 103.0s / p95 1513.4s, gen 261.5 tok/s, 0 timeouts. Imbalanced vs pull.
+
+------------------------------------------------
+
+exp 80 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: central-push; router_fair_pull: false; router_strategy: prefix
+Purpose: central-push + prefix routing
+Findings: kv_hit 0.869, sticky 0.842, jain 0.8912, req_cov 0.349, infl_cov 0.599, e2e p50 104.8s / p95 1481.1s, gen 205.6 tok/s, 0 timeouts. Imbalanced.
+
+------------------------------------------------
+
+exp 97 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: central-push; router_fair_pull: false; router_strategy: affinity (hard)
+Purpose: central-push + hard affinity
+Findings: kv_hit 0.994, sticky 1.000, jain 0.7818, req_cov 0.528, infl_cov 0.622, e2e p50 131.2s / p95 1705.2s, gen 257.3 tok/s, 0 timeouts. Worst balance in the grid, high tail — affinity fights central-push placement.
+
+------------------------------------------------
+
+exp 98 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: central-push; router_fair_pull: false; router_strategy: affinity (soft)
+Purpose: central-push + soft affinity
+Findings: kv_hit 0.918, sticky 0.793, jain 0.8790, req_cov 0.371, infl_cov 0.600, e2e p50 101.1s / p95 1598.1s, gen 264.9 tok/s, 0 timeouts. Imbalanced.
+
+------------------------------------------------
+
+exp 99 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: central-push; router_fair_pull: false; router_strategy: both (hard)
+Purpose: central-push + prefix + hard affinity
+Findings: kv_hit 0.993, sticky 1.000, jain 0.8023, req_cov 0.496, infl_cov 0.597, e2e p50 130.5s / p95 1533.5s, gen 261.9 tok/s, 0 timeouts. Imbalanced, high tail.
+
+------------------------------------------------
+
+exp 100 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 300 s
+- router_mode: central-push; router_fair_pull: true (margin 1.15); router_strategy: none (aff soft)
+Purpose: central-push fair, no affinity
+Findings: kv_hit 0.992, sticky 0.833, jain 0.8817, req_cov 0.366, infl_cov 0.447, e2e p50 108.7s / p95 1351.2s, gen 261.4 tok/s, 0 timeouts. Fair lifts kv_hit 0.764 -> 0.992 and improves balance.
+
+------------------------------------------------
+
+exp 101 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: central-push; router_fair_pull: true (margin 1.15); router_strategy: prefix
+Purpose: central-push fair + prefix
+Findings: kv_hit 0.962, sticky 0.802, jain 0.8915, req_cov 0.349, infl_cov 0.487, e2e p50 105.7s / p95 1422.1s, gen 284.9 tok/s, 0 timeouts.
+
+------------------------------------------------
+
+exp 102 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: central-push; router_fair_pull: true (margin 1.15); router_strategy: affinity (hard)
+Purpose: central-push fair + hard affinity
+Findings: kv_hit 0.985, sticky 1.000, jain 0.8570, req_cov 0.409, infl_cov 0.648, e2e p50 144.6s / p95 1656.4s, gen 252.3 tok/s, 0 timeouts. Highest tail in the grid.
+
+------------------------------------------------
+
+exp 103 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: central-push; router_fair_pull: true (margin 1.15); router_strategy: affinity (soft)
+Purpose: central-push fair + soft affinity — completes the grid
+Findings: DONE on disk, pending fold-in to the notebook grid (not yet in the summary table below).
+
+------------------------------------------------
+
+exp 104 (grid):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb
+Setup:
+- Cluster: bz (192.168.0.79); Model: MiniMax-M2 (2 endpoints)
+- Backend: boom; prompt_source: CodeFlowBench
+- Workload: 64 users × 10 convs (~960 req); batch 32; ~3-4 h
+- KV transport: LMCache P2P host-staging; hard-affinity hold 600 s
+- router_mode: central-push; router_fair_pull: true (margin 1.15); router_strategy: both (hard)
+Purpose: central-push fair + prefix + hard affinity — completes the grid
+Findings: DONE on disk, pending fold-in to the notebook grid (not yet in the summary table below).
+
+------------------------------------------------
+
+Grid overall findings (exps 69-104):
+- Health: all cells 0 timeouts / 0 failures; never saturated (GPU KV ~5-8%) — the healthy counter-example to
+  the yz KV-sat soak.
+- Load balance: pull >> central-push (pull req_cov ~0.01-0.11 / infl_cov ~0.15-0.61; cpush req_cov ~0.30-0.53
+  / infl_cov ~0.45-0.65). Central-push's own capacity balancing is worse than pull at this load.
+- KV-affinity quality: hard-affinity strategies (aff-hard, both-hard) reach sticky ~1.0 and kv_hit ~0.99 in
+  both modes; turning fairness on barely dents it (kv_hit delta -0.004..-0.009, sticky unchanged at 1.0).
+- Fairness: eye-catcher is 74:pull/none/fair (e2e p50 26s vs ~98s) but it pays with imbalance — an aggressive
+  throttle artifact when there is no affinity to anchor placement. For affinity strategies fair keeps KV intact.
+- Best all-rounder: exp 76 (pull/fair/aff-hard) — kv_hit 0.994, sticky 1.0, jain 1.0, req_cov 0.007, e2e p50
+  99.8s. Pull dominates central-push on both balance and tail. Fairness helps cpush kv_hit for none/prefix
+  (delta +0.09..+0.23) but never catches pull.
+
+Observations (grid head-to-head; higher kv_hit/sticky/jain better, lower cov/latency better; e2e in s):
+label                   | kv_hit | sticky |  jain  | req_cov | infl_cov | e2e_p50 | e2e_p95 | gen_tok/s
+------------------------|--------|--------|--------|---------|----------|---------|---------|----------
+69:pull/none/van        | 0.744  | 0.423  | 0.9999 |  0.009  |  0.232   |   98.6  | 1495.8  |  292.9
+70:pull/prefix/van      | 0.998  | 0.483  | 0.9939 |  0.078  |  0.276   |  100.3  | 1459.6  |  310.7
+71:pull/aff-hard/van    | 0.999  | 1.000  | 0.9971 |  0.054  |  0.184   |  102.3  | 1620.1  |  300.2
+72:pull/aff-soft/van    | 0.998  | 0.428  | 0.9975 |  0.050  |  0.192   |   97.2  | 1499.8  |  294.3
+73:pull/both-hard/van   | 0.999  | 1.000  | 0.9994 |  0.025  |  0.256   |  102.0  | 1610.9  |  260.2
+74:pull/none/fair       | 0.920  | 0.353  | 0.9876 |  0.112  |  0.608   |   26.0  |  452.6  |  212.0
+75:pull/prefix/fair     | 0.958  | 0.428  | 0.9997 |  0.016  |  0.150   |  104.9  | 1384.1  |  336.0
+76:pull/aff-hard/fair   | 0.994  | 1.000  | 1.0000 |  0.007  |  0.324   |   99.8  | 1483.4  |  285.1
+77:pull/aff-soft/fair   | 0.994  | 0.393  | 0.9989 |  0.033  |  0.214   |  103.4  | 1449.9  |  305.6
+78:pull/both-hard/fair  | 0.995  | 1.000  | 0.9957 |  0.066  |  0.212   |  107.9  | 1682.5  |  319.1
+79:cpush/none/van       | 0.764  | 0.774  | 0.9193 |  0.296  |  0.551   |  103.0  | 1513.4  |  261.5
+80:cpush/prefix/van     | 0.869  | 0.842  | 0.8912 |  0.349  |  0.599   |  104.8  | 1481.1  |  205.6
+97:cpush/aff-hard/van   | 0.994  | 1.000  | 0.7818 |  0.528  |  0.622   |  131.2  | 1705.2  |  257.3
+98:cpush/aff-soft/van   | 0.918  | 0.793  | 0.8790 |  0.371  |  0.600   |  101.1  | 1598.1  |  264.9
+99:cpush/both-hard/van  | 0.993  | 1.000  | 0.8023 |  0.496  |  0.597   |  130.5  | 1533.5  |  261.9
+100:cpush/none/fair     | 0.992  | 0.833  | 0.8817 |  0.366  |  0.447   |  108.7  | 1351.2  |  261.4
+101:cpush/prefix/fair   | 0.962  | 0.802  | 0.8915 |  0.349  |  0.487   |  105.7  | 1422.1  |  284.9
+102:cpush/aff-hard/fair | 0.985  | 1.000  | 0.8570 |  0.409  |  0.648   |  144.6  | 1656.4  |  252.3
+(exps 103/104 done on disk, pending fold-in.)
+
+
+------------------------------------------------
+
+exp 111 (high-load):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb (96-user high-load A/B)
+Setup:
+- Cluster: bz; Model: MiniMax-M2; Backend: boom; prompt_source: CodeFlowBench
+- Workload: 96 users × 50 convs (4800 req) — ~1.5x capacity (overload regime)
+- KV transport: LMCache P2P host-staging
+- router_mode: pull; router_fair_pull: false; router_strategy: both (hard)
+Purpose: high-load control for fair-pull A/B (different workload from the grid)
+Findings: run collected (has logs_full.json); analysis pending.
+
+------------------------------------------------
+
+exp 112 (high-load):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb (96-user high-load A/B)
+Setup:
+- Cluster: bz; Model: MiniMax-M2; Backend: boom; prompt_source: CodeFlowBench
+- Workload: 96 users × 50 convs (4800 req) — ~1.5x capacity (overload regime)
+- KV transport: LMCache P2P host-staging
+- router_mode: pull; router_fair_pull: false; router_strategy: affinity (soft)
+Purpose: high-load control, soft affinity
+Findings: run collected (no claude_client_logs); analysis pending.
+
+------------------------------------------------
+
+exp 113 (high-load; = KV-soak Series 3 below):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb (96-user high-load A/B)
+Setup:
+- Cluster: bz; Model: MiniMax-M2; Backend: boom; prompt_source: CodeFlowBench
+- Workload: 96 users × 10 convs (960 req) — ~1.5x capacity (overload regime)
+- KV transport: LMCache P2P host-staging
+- router_mode: pull; router_fair_pull: false; router_strategy: prefix
+Purpose: fair-pull A/B control cell at 96 users (prefix)
+Findings: run collected; analysis pending.
+
+------------------------------------------------
+
+exp 114 (high-load; = KV-soak Series 4 below):
+Notebook: analysis-notebooks/claude-strategy-comparison.ipynb (96-user high-load A/B)
+Setup:
+- Cluster: bz; Model: MiniMax-M2; Backend: boom; prompt_source: CodeFlowBench
+- Workload: 96 users × 10 convs (960 req) — ~1.5x capacity (overload regime)
+- KV transport: LMCache P2P host-staging
+- router_mode: pull; router_fair_pull: true (margin 1.15); router_strategy: prefix
+Purpose: fair-pull A/B treatment cell at 96 users (prefix)
+Findings: INCOMPLETE — left halfway (has logs.json / metrics.jsonl / router_logs but no run_summary.json; not finalized). Not currently running.
+
+------------------------------------------------
+
+Not logged (not useful): exp 105 (aborted pull/aff-hard, no data — deploy only, no logs/metrics), exps 106 & 110 (10x2 smoke tests),
+exps 107/108/109 (prod-collector observation-only ticks).
+
+
+------------------------------------------------
 
 Series 1 — us+boom (33/218 path) KV soak
 Notebook: analysis-notebooks/prefix-kv-drop-root-cause.ipynb (BZ tonight KV soak)
@@ -2572,7 +2960,9 @@ Setup:
 - Method: pull; router_strategy=both; hard affinity
 - Workload: hf-lmsys uncapped, max_tokens 8192, ~50k @ 1 rps
 Purpose: Reproduce YZ-style GPU-KV fill / prefix collapse / pin timeouts on the us+boom path
-Findings: (pending run)
+Findings: (pending dedicated run) — note: the grid bz runs (exps 102/103/104) already act as the healthy
+  counter-example (GPU KV ~6-11%, 0 pin timeouts); a large-prompt saturated soak is still needed to trigger
+  the yz-style deadlock on bz.
 Observations: (pending)
 
 Series 2 — boom-only (142 path) KV soak
@@ -2596,8 +2986,9 @@ Setup:
 - Path: client → BooM → LLM-LA router/sidecar → vLLM (LMCache P2P host-staging)
 - Method: pull; router_strategy=prefix; router_fair_pull=false
 - Workload: Claude CLI, 96 users × 10 convs (≈1.5× capacity)
+- exp_id: 113 (DONE)
 Purpose: High-load control for fair-pull rebalancing A/B
-Findings: (pending run)
+Findings: run complete; analysis pending
 Observations: (pending)
 Notebook: analysis-notebooks/claude-strategy-comparison.ipynb (BZ tonight fair high-load)
 Results-log: analysis-notebooks/results-log/04-bz-fair-highload/000-fair-pull-a-b-at-96-users-prefix-tonight-placeholders.md
@@ -2609,8 +3000,25 @@ Setup:
 - Path: same as Series 3
 - Method: pull; router_strategy=prefix; router_fair_pull=true (margin 1.15)
 - Workload: same as Series 3
+- exp_id: 114 (INCOMPLETE — left halfway, no run_summary.json; not running)
 Purpose: Treatment cell — load-aware grant throttle under overload
-Findings: (pending run)
+Findings: incomplete/aborted run (partial logs/metrics only); needs a rerun
 Observations: (pending)
 Notebook: analysis-notebooks/claude-strategy-comparison.ipynb (BZ tonight fair high-load)
 Results-log: analysis-notebooks/results-log/04-bz-fair-highload/000-fair-pull-a-b-at-96-users-prefix-tonight-placeholders.md
+
+
+Series 5 — us+boom vs boom-only ~1h sanity
+Setup:
+- Cluster: bz
+- Configs (us+BooM, your router strategies, all pull):
+    - benchmark-bz-us-boom-claude-1h                 (both + hard affinity)
+    - benchmark-bz-us-boom-claude-1h-affinity-hard
+    - benchmark-bz-us-boom-claude-1h-affinity-soft
+    - benchmark-bz-us-boom-claude-1h-prefix
+  Control: benchmark-bz-boom-only-claude-1h (key_affinity)
+- Workload: Claude CLI + codeflow, 64 users × 10 convs (~1h each), max_tokens 64
+- System prompt: real Claude Code CLI (transport.mode=claude)
+Purpose: short compare your affinity/prefix strategies vs boom-gateway-only
+Findings: (pending run)
+Observations: (pending)

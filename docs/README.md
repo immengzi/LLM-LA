@@ -13,9 +13,9 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 
 | Doc | Description |
 |-----|-------------|
-| [quickstart.md](getting-started/quickstart.md) | Deploy the stack with Helm and verify end-to-end |
+| [quickstart.md](getting-started/quickstart.md) | Deploy the stack and run your first experiment end-to-end |
 | [prerequisites.md](getting-started/prerequisites.md) | Cluster, NPU, NFS, registry, and tooling requirements |
-| [first-experiment.md](getting-started/first-experiment.md) | Anatomy of a first Helm deploy: release resources and values |
+| [first-experiment.md](getting-started/first-experiment.md) | Anatomy of a run: `deploy_vllm.py` + `main.py` |
 
 ## Architecture
 

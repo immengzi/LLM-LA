@@ -30,5 +30,5 @@ cd src/client && python sweep_methods.py --config 1-master_config
 | [`claude-strategy/`](claude-strategy/) | Light (10-user) + batch16 claude-CLI routing-strategy comparison baselines. | `benchmark-bz-pull-*` (96-user runs). |
 | [`autoscaling/`](autoscaling/) | KEDA autoscaling validation (dense Qwen3-8B), prod + shadow. | Isolated validation release; re-enable only for autoscaling tests. |
 | [`shadow/`](shadow/) | yz shadow-pool BooM variants (`-hq`, `-hq-go`). | The shadow P2P host-staging config kept active in the root. |
-| [`p2p-baselines/`](p2p-baselines/) | Non-affinity P2P host-staging baselines, plus the first-draft BZ boom-direct KV soak (`benchmark-bz-boom-direct-lmsys-kv-soak.yaml`). | Affinity variants + split soaks `benchmark-bz-us-boom-lmsys-kv-soak` / `benchmark-bz-boom-only-lmsys-kv-soak`. |
+| [`p2p-baselines/`](p2p-baselines/) | Non-affinity P2P host-staging baselines used to compare against the affinity variants. | Affinity variants kept active in the root. |
 | [`non-prod/`](non-prod/) | Former `configs/non-prod/`: flat benchmark/template library + its own master plans (`non-prod/1-master_config.yaml`, `non-prod/boom_master.yaml`). Reference by `old/non-prod/<name>`. | n/a (benchmark/dev scratch, not a deployment). |

@@ -49,11 +49,11 @@ Used when `prompt_source: "file"`.
 
 Fields (see `FilePromptsConfig`):
 
-- `path: str`  
+- `path: str`
   Path to a JSON file with keys: `short`, `medium`, `long`.
 
-- `variant: str`  
-  Which key to use: one of `short`, `medium`, `long`.  
+- `variant: str`
+  Which key to use: one of `short`, `medium`, `long`.
   The chosen string is repeated `total_requests` times.
 
 Example:
@@ -70,24 +70,24 @@ Used when `prompt_source: "hf-lmsys"`.
 
 Fields (see `HFLmsysConfig`):
 
-- `dataset_name: str`  
+- `dataset_name: str`
   HF dataset name or local path (e.g. `"lmsys/lmsys-chat-1m"`).
 
-- `split: str`  
+- `split: str`
   Dataset split, e.g. `"train"`.
 
-- `tokenizer_name: str`  
+- `tokenizer_name: str`
   HF tokenizer name or local tokenizer directory.
 
-- `streaming: bool`  
+- `streaming: bool`
   If `true`, uses streaming mode for datasets.
 
-- `min_input_tokens: int | null`  
-- `max_input_tokens: int | null`  
+- `min_input_tokens: int | null`
+- `max_input_tokens: int | null`
 
   Input prompts outside this token range are skipped.
 
-- `repeat_each: int`  
+- `repeat_each: int`
   Each accepted example is repeated this many times.
 
 ---
@@ -139,16 +139,16 @@ This warms model workers, caches, and router paths.
 
 ### Bursty mode (`pattern: "bursty"`)
 
-- `burst_on_s: float`  
+- `burst_on_s: float`
   Length of ON window.
 
-- `burst_off_s: float`  
+- `burst_off_s: float`
   Length of OFF window.
 
-- `burst_rps_on: float`  
+- `burst_rps_on: float`
   RPS during ON windows.
 
-- `burst_rps_off: float`  
+- `burst_rps_off: float`
   RPS during OFF windows.
 
 The scheduler alternates ON and OFF until `duration_s`
@@ -158,7 +158,7 @@ or `total_requests` is exhausted.
 
 ### Steps mode (`pattern: "steps"`)
 
-- `step_schedule: str`  
+- `step_schedule: str`
 
   Comma-separated `offset:rps` pairs.
 
@@ -168,8 +168,8 @@ or `total_requests` is exhausted.
 
 Meaning:
 
-- from 0s to 30s → 5 RPS  
-- from 30s to 60s → 15 RPS  
+- from 0s to 30s → 5 RPS
+- from 30s to 60s → 15 RPS
 - from 60s onward (up to `duration_s`) → 3 RPS
 
 Within each second, timestamps are evenly spaced.
@@ -178,9 +178,9 @@ Within each second, timestamps are evenly spaced.
 
 ### Random mode (`pattern: "rand"`)
 
-- `rand_rps_min: float`  
-- `rand_rps_max: float`  
-- `rand_epoch_s: float`  
+- `rand_rps_min: float`
+- `rand_rps_max: float`
+- `rand_epoch_s: float`
 - `loadgen_seed: int`
 
 Every `rand_epoch_s` seconds:
@@ -201,39 +201,39 @@ these fields as generation parameters.
 
 Fields (see `GenerationConfig`):
 
-- `max_tokens: int`  
+- `max_tokens: int`
   Upper bound on generated tokens.
 
-- `temperature: float`  
+- `temperature: float`
   Sampling temperature.
 
-- `length_mode: str`  
+- `length_mode: str`
   One of:
     - `legacy`
     - `target-output`
     - `target-total`
 
-- `target_output_tokens: int | null`  
-- `target_total_tokens: int | null`  
+- `target_output_tokens: int | null`
+- `target_total_tokens: int | null`
 
 Only meaningful when a non-legacy length mode is used; otherwise they
 are ignored by the server side (but still sent in `meta`).
 
-- `think: bool`  
+- `think: bool`
   When `true`, the request includes `enable_thinking: true` and the model
   is allowed to produce internal reasoning tokens before the final answer.
   When `false`, thinking mode is disabled.
 
-- `min_tokens: int`  
+- `min_tokens: int`
   Lower bound on generated tokens.
 
-- `ignore_eos: bool`  
+- `ignore_eos: bool`
   When `true`, the backend generates exactly `max_tokens` (ignores EOS) — replay/benchmark mode.
 
-- `use_dataset_output_len: bool`  
+- `use_dataset_output_len: bool`
   Use the per-sample output length from the dataset instead of `max_tokens`.
 
-- `replay_output_lengths_from: str | null`  
+- `replay_output_lengths_from: str | null`
   Path to a prior run's `logs.json`; replays each request's recorded output length.
 
 ---
@@ -285,125 +285,125 @@ environment variables on the router deployment (e.g. in Kubernetes YAML).
 
 ### Core networking
 
-- `HOST: str`  
+- `HOST: str`
   Bind address for the FastAPI/uvicorn server (default `"0.0.0.0"`).
 
-- `PORT: int`  
+- `PORT: int`
   Listen port for the router HTTP API (default `8080`).
 
 ### Redis + model identity
 
-- `REDIS_HOST: str`  
+- `REDIS_HOST: str`
   Hostname of the Redis instance used for KV metadata.
 
-- `REDIS_PORT: int`  
+- `REDIS_PORT: int`
   Port for Redis (default `6379`).
 
-- `MODEL_NAME: str`  
+- `MODEL_NAME: str`
   Logical model name used to prefix KV keys in Redis.
 
 ### Hash / KV services
 
-- `KV_HASH_SOURCE: str`  
+- `KV_HASH_SOURCE: str`
   KV-block hash source: `inline` (default; in-process for the Python router,
   in-container for the Go gateway, using `prefix_hash.py`) or `external` (legacy
   standalone `vllm-cpu-hash` service). Set via client config `router_hash_source`
   / Helm `router.hashSource`.
 
-- `HASH_SERVICE_URL: str`  
+- `HASH_SERVICE_URL: str`
   Endpoint of the `/compute_hashes` hasher. For the Go gateway in `inline` mode
   this is the in-container hasher (`http://127.0.0.1:9095`); in `external` mode
   it is the legacy service (`http://vllm-cpu-hash:9095`). Unused by the Python
   router in `inline` mode.
 
-- `KV_OWNER_SOURCE: str`  
+- `KV_OWNER_SOURCE: str`
   Block-owner source for `prefix`/`both` routing: `lookup` (default; targeted
   per-request Redis `HGETALL` at admit, giving a truthful `kv_hit`) or `watcher`
   (legacy background scan into a shared map). Inert under `affinity`/`none`. Set
   via client config `router_owner_source` / Helm `router.ownerSource`.
 
-- `KV_LOOKUP_MAX_BLOCKS: int`  
+- `KV_LOOKUP_MAX_BLOCKS: int`
   Cap on how many leading block hashes are looked up per request when
   `KV_OWNER_SOURCE=lookup` (default `512`). Set via client config
   `router_lookup_max_blocks` / Helm `router.lookupMaxBlocks`.
 
 ### K8s / sidecar discovery
 
-- `NAMESPACE: str`  
+- `NAMESPACE: str`
   Kubernetes namespace where vLLM pods live.
 
-- `LABEL_SELECTOR: str`  
+- `LABEL_SELECTOR: str`
   Label selector used to discover vLLM pods (e.g. `app=vllm-qwen`).
 
-- `VLLM_PORT: int`  
+- `VLLM_PORT: int`
   vLLM HTTP port (for KV watcher’s pod → endpoint mapping).
 
-- `SIDECAR_PORT: int`  
+- `SIDECAR_PORT: int`
   Sidecar HTTP port (used by push router to call `/push` and `/health`).
 
 ### KV watcher controls
 
-- `KV_WATCH_INTERVAL_S: float`  
+- `KV_WATCH_INTERVAL_S: float`
   Interval between Redis KV scans.
 
-- `KV_WATCH_MAX_KEYS: int`  
+- `KV_WATCH_MAX_KEYS: int`
   Max number of `kvblock` keys to scan per pass.
 
-- `KV_DISCOVERY_INTERVAL_S: float`  
+- `KV_DISCOVERY_INTERVAL_S: float`
   Interval between Kubernetes pod discovery runs.
 
-- `KV_LOG_KEYS: str`  
+- `KV_LOG_KEYS: str`
   Verbosity for KV watcher logs: `off | summary | full`.
 
 ### Routing behaviour
 
 > These env vars are set by the chart from the client `helm:` keys. For the `helm:` ↔ chart ↔ env mapping, see [experiment configs](experiment-configs.md#client-config-and-the-helm-section).
 
-- `ROUTER_MODE: str`  
+- `ROUTER_MODE: str`
   One of:
   - `pull`
   - `push-rr`
   - `push-random`
   - `push-leastq`
 
-- `KV_AWARE: bool`  
+- `KV_AWARE: bool`
   Enable/disable KV-aware scoring when assigning work.
 
-- `LEN_AWARE: bool`  
+- `LEN_AWARE: bool`
   Enable/disable length-aware ordering inside the pool.
 
-- `LEN_POLICY: str`  
+- `LEN_POLICY: str`
   Length policy when `LEN_AWARE` is true:
   - `short_first`
   - `long_first`
 
-- `POOL_FACTOR: int`  
+- `POOL_FACTOR: int`
   Pool size multiplier: router looks at `want * POOL_FACTOR` items
   when building the candidate set for a pull.
 
-- `DEFAULT_MAX_TOKENS: int`  
+- `DEFAULT_MAX_TOKENS: int`
   Fallback predicted output length if the predictor returns no value.
 
 ### Timeouts and synchronous wait
 
-- `RESULT_TIMEOUT_S: float`  
+- `RESULT_TIMEOUT_S: float`
   How long `/enqueue` waits for a `/result` before returning 504.
 
-- `RESULT_POLL_INTERVAL_S: float`  
+- `RESULT_POLL_INTERVAL_S: float`
   Sleep interval between checks inside `wait_for_result`.
 
-- `HASH_TIMEOUT_S: float`  
+- `HASH_TIMEOUT_S: float`
   Timeout for HTTP calls to the hasher (Go gateway; inline or external).
 
-- `PUSH_TIMEOUT_S: float`  
+- `PUSH_TIMEOUT_S: float`
   Timeout for router → sidecar `/push` calls (push modes).
 
-- `LEASTQ_TIMEOUT_S: float`  
+- `LEASTQ_TIMEOUT_S: float`
   Timeout for sidecar `/health` probes in `push-leastq` mode.
 
 ### Logging
 
-- `REQ_LOG_MODE: str`  
+- `REQ_LOG_MODE: str`
   Per-request routing logs:
   - `off`
   - `summary`
@@ -411,7 +411,7 @@ environment variables on the router deployment (e.g. in Kubernetes YAML).
 
 Separately (in the Docker entrypoint):
 
-- `ACCESS_LOG: str`  
+- `ACCESS_LOG: str`
   Controls uvicorn access log: `"true"` or `"false"`.
 
 - `output_log_mode: str`
@@ -420,7 +420,7 @@ Controls how much of the model output is written into the client’s
 per-request log file (`logs.json`).
 
 - `"preview"`
-- `"full"`  
+- `"full"`
 
 - `log_request_body: bool` (default `false`)
 
@@ -443,47 +443,47 @@ These are set on the sidecar container and read by `sidecar/config.py`.
 
 ### Core endpoints
 
-- `ROUTER_URL: str`  
+- `ROUTER_URL: str`
   Base URL of the router (e.g. `http://router-service:8080`).
 
-- `VLLM_URL: str`  
+- `VLLM_URL: str`
   Base URL of the local vLLM server in the same pod
   (e.g. `http://127.0.0.1:8200`).
 
-- `MODEL_NAME: str`  
+- `MODEL_NAME: str`
   Logical model name (should match router / Redis configuration).
 
 ### Sidecar HTTP + capacity
 
-- `SIDECAR_PORT: int`  
+- `SIDECAR_PORT: int`
   Port where the sidecar FastAPI server listens (for `/health`, `/push`).
 
-- `BATCH_SIZE: int`  
+- `BATCH_SIZE: int`
   Maximum number of requests allowed in `pending + inflight` for this pod.
   Also used as a target concurrency for worker threads.
 
-- `SIDECAR_MODE: str`  
+- `SIDECAR_MODE: str`
   Mode of operation, currently:
   - `pull` (default) – sidecar pulls work from router via `/pull`.
 
 ### KV events + Redis
 
-- `VLLM_HOST: str`  
+- `VLLM_HOST: str`
   Host used by the ZMQ subscriber to reach vLLM (typically `127.0.0.1`).
 
-- `VLLM_SUB_PORT: int`  
+- `VLLM_SUB_PORT: int`
   ZMQ subscription port exposed by vLLM (`kv-events-config`).
 
-- `REDIS_HOST: str`  
+- `REDIS_HOST: str`
   Hostname for Redis (same Redis as router).
 
-- `REDIS_PORT: int`  
+- `REDIS_PORT: int`
   Port for Redis (default `6379`).
 
-- `CONTAINER_NAME`  
+- `CONTAINER_NAME`
   Usually injected from pod metadata; used for logging / identification.
 
-- `MODEL_NAME_REDIS: str`  
+- `MODEL_NAME_REDIS: str`
   Model name prefix for Redis keys (should match `MODEL_NAME`).
 
 Additional tuning knobs (if configured in code) may include worker counts and

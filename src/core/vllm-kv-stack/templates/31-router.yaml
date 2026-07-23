@@ -168,20 +168,6 @@ spec:
               value: {{ quote (toString (.Values.router.stuckPullSeconds | default 0)) }}
             - name: ROUTER_AFFINITY_RELEASE_ON_STUCK
               value: {{ ternary "true" "false" (.Values.router.affinityReleaseOnStuck | default false) | quote }}
-            - name: ROUTER_KV_SOFT_DIVERT
-              value: {{ ternary "true" "false" (.Values.router.kvSoftDivert | default false) | quote }}
-            - name: ROUTER_KV_PRESSURE_HIGH
-              value: {{ quote (toString (.Values.router.kvPressureHigh | default 0.85)) }}
-            - name: ROUTER_KV_PRESSURE_LOW
-              value: {{ quote (toString (.Values.router.kvPressureLow | default 0.75)) }}
-            - name: ROUTER_KV_PRESSURE_PEER_OK
-              value: {{ quote (toString (.Values.router.kvPressurePeerOk | default 0.70)) }}
-            - name: ROUTER_KV_SOFT_MIN_HITS
-              value: {{ quote (toString (.Values.router.kvSoftMinHits | default 1)) }}
-            - name: ROUTER_KV_USAGE_STALE_S
-              value: {{ quote (toString (.Values.router.kvUsageStaleSeconds | default 30)) }}
-            - name: ROUTER_KV_HEALTH_POLL_INTERVAL_S
-              value: {{ quote (toString (.Values.router.kvHealthPollIntervalSeconds | default 5)) }}
             # ---- central-push mode (only used when mode: central-push) ----
             - name: ROUTER_CENTRAL_PUSH_CAP
               value: {{ quote (toString (.Values.router.centralPushCap | default 8)) }}

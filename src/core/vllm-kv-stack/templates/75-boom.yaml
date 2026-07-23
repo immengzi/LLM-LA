@@ -37,6 +37,7 @@ data:
   boom_config.yaml: |
     model_list:
     {{- $routeVia := .Values.boom.routeVia | default "router" }}
+    {{- $kvc := and (eq $routeVia "direct") (eq (lower (.Values.boom.directRoutingStrategy | default "round_robin")) "kvc_aware") }}
     {{- if eq $routeVia "direct" }}
     {{/* --- DIRECT MODE: BooM → vLLM pods directly (bypass router) --- */}}
     {{- if .Values.models }}
@@ -55,7 +56,9 @@ data:
     {{- range $i := until $replicas }}
       - model_name: {{ $served | quote }}
         model_info:
-          id: {{ printf "%s-%d" $mName $i | quote }}
+          {{/* kvc_aware: id MUST equal the vLLM ZMQ topic worker_id, which is the
+               full leader pod name (kv@<POD_NAME>@<model>). Otherwise short id. */}}
+          id: {{ if $kvc }}{{ printf "vllm-%s-%d" $mName $i | quote }}{{ else }}{{ printf "%s-%d" $mName $i | quote }}{{ end }}
         litellm_params:
           model: {{ printf "openai/%s" $served | quote }}
           api_base: {{ printf "http://vllm-%s-%d.vllm-%s:8200/v1" $mName $i $mName | quote }}
@@ -137,10 +140,47 @@ data:
       database_url: {{ .Values.boom.databaseUrl | quote }}
       {{- end }}
 
-    {{- if or (eq $routeVia "direct") .Values.boom.claudeCodeAliases }}
+    {{- if or (eq $routeVia "direct") .Values.boom.claudeCodeAliases .Values.boom.stripClaudeCodeAttribution }}
     router_settings:
+      {{- if .Values.boom.stripClaudeCodeAttribution }}
+      {{/* Drop Claude Code's rotating x-anthropic-billing-header attribution
+           block so KV-cache prefix matching is byte-stable across requests
+           (matches vLLM PR #36829 and the router-side STRIP_CCH seam). Only
+           affects /v1/messages; /v1/chat/completions is untouched. */}}
+      strip_claude_code_attribution: true
+      {{- end }}
       {{- if eq $routeVia "direct" }}
+      {{- if $kvc }}
+      {{- $kv := .Values.boom.kvcAware | default dict }}
+      {{- $zport := $kv.zmqPort | default 5557 }}
+      schedule_policy: kvc_aware
+      kvc_aware:
+        block_size: {{ $kv.blockSize | default 128 }}
+        cache_weight: {{ $kv.cacheWeight | default 0.5 }}
+        tier_weight: {{ $kv.tierWeight | default 0.3 }}
+        load_weight: {{ $kv.loadWeight | default 0.2 }}
+        tokenizer_dir: {{ $kv.tokenizerDir | default "/app/tokenizers" | quote }}
+        zmq_topic_prefix: {{ $kv.zmqTopicPrefix | default "kv@" | quote }}
+        zmq_endpoints:
+        {{- if .Values.models }}
+        {{- range .Values.models }}
+        {{- $m := .name }}
+        {{- $dpk := .dataParallel | default dict }}
+        {{- $reps := .replicas | default 1 | int }}
+        {{- if $dpk.enabled | default false }}
+        {{- range $j := until $reps }}
+          - {{ printf "tcp://vllm-%s-%d.vllm-%s:%v" $m $j $m $zport | quote }}
+        {{- end }}
+        {{- else }}
+          - {{ printf "tcp://vllm-%s:%v" $m $zport | quote }}
+        {{- end }}
+        {{- end }}
+        {{- else }}
+          - {{ printf "tcp://vllm-qwen:%v" $zport | quote }}
+        {{- end }}
+      {{- else }}
       routing_strategy: {{ .Values.boom.directRoutingStrategy | default "round_robin" | quote }}
+      {{- end }}
       {{- end }}
       {{- if .Values.boom.claudeCodeAliases }}
       model_group_alias:
@@ -222,6 +262,17 @@ spec:
             - name: boom-config
               mountPath: /app/boom_config.yaml
               subPath: boom_config.yaml
+            {{- if $kvc }}
+            {{/* kvc_aware tokenization needs HF tokenizer files at
+                 {tokenizer_dir}/{model_name}/. Mount each model's dir (same
+                 volume vLLM uses) under /app/tokenizers/<servedModelName>. */}}
+            {{- range .Values.models }}
+            - name: model-tok
+              mountPath: {{ printf "/app/tokenizers/%s" (.servedModelName | default .name) | quote }}
+              subPath: {{ .modelSubPath | default $.Values.modelVolume.modelSubPath }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
 
           livenessProbe:
             httpGet:
@@ -252,6 +303,17 @@ spec:
         - name: boom-config
           configMap:
             name: boom-config
+        {{- if $kvc }}
+        - name: model-tok
+          {{- if .Values.modelVolume.hostPath }}
+          hostPath:
+            path: {{ .Values.modelVolume.hostPath }}
+            type: Directory
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.modelVolume.pvcName | default "models-nfs-pvc" }}
+          {{- end }}
+        {{- end }}
 
 ---
 # -----------------------------------------------------------------------

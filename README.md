@@ -113,15 +113,14 @@ LA-Boom is a routing/benchmark layer around **unmodified vLLM**, so it inherits 
 helm upgrade --install vllm ./src/core/vllm-kv-stack -n vllm --create-namespace \
   --set modelVolume.create=true --set modelVolume.modelSubPath=placeholder
 
-# 2. Deploy the platform (router + Redis + vLLM + sidecar)
-helm upgrade --install vllm ./src/core/vllm-kv-stack -n vllm --create-namespace \
-  -f my-values.yaml
+# 2. Deploy the platform (vLLM + sidecar) for a model
+python src/client/deploy_vllm.py --config configs/router-tp8-glm.yaml
 
-# 3. Smoke-check the router (NodePort 30080)
-curl http://<node-ip>:30080/health
+# 3. Send some load (via the benchmark harness)
+python src/client/main.py --config router --n 500
 ```
 
-Write `models[]` (and cluster overrides) in `my-values.yaml` — see the [quickstart](docs/getting-started/quickstart.md). To drive load and collect artifacts, use the [benchmark harness](docs/benchmarking/harness.md).
+The load test uses the bundled harness — see [docs/benchmarking/harness.md](docs/benchmarking/harness.md) for sweeps and analysis. Then read the results like a pro → [full walkthrough](docs/getting-started/quickstart.md).
 
 ## Documentation
 
@@ -131,7 +130,7 @@ Everything lives in the **[documentation index](docs/README.md)**. Jump by role:
 |------------|-----------|
 | Get running fast | [Getting Started](docs/getting-started/quickstart.md) |
 | Understand the design | [Architecture overview](docs/architecture/overview.md) · [Router strategies](docs/architecture/router-strategies.md) · [KV cache flow](docs/architecture/kv-cache-flow.md) |
-| Configure a deploy | [Helm values](docs/configuration/helm-values.md) · [Client config](docs/configuration/client-config.md) (load tests) |
+| Configure a deploy | [Client config](docs/configuration/client-config.md) · [Helm values](docs/configuration/helm-values.md) |
 | Ship to production | [BooM Gateway](docs/gateways/boom/overview.md) |
 | Deploy at scale | [Multi-model serving](docs/deployment/multi-model.md) · [GLM-5 reference ("HQ") deployment](docs/deployment/docker-reference/glm5-dp-docker.md) |
 | Operate the cluster | [Cluster setup](docs/operations/cluster-setup.md) · [Registry & image builds](docs/operations/registry.md) · [Image patches](docs/operations/image-patches.md) |

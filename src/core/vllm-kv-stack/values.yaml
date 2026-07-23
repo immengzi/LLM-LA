@@ -70,34 +70,6 @@ sidecar:
   # When true, sidecar streams from vLLM internally (captures TTFT).
   streamingMode: false
 
-  # ------------------------------------------------------------------
-  # SLO-driven dynamic pull backpressure (AIMD).
-  #
-  # When enabled the sidecar watches vLLM TPOT (vllm:time_per_output_token_seconds)
-  # and shrinks the per-pod pull cap while the TPOT SLO is violated, then slowly
-  # restores it once TPOT is back inside SLO. Default OFF: the sidecar behaves
-  # exactly as before (static pull_cap = BATCH_SIZE + PREFETCH, no monitor thread).
-  sloDynamicPull:
-    enabled: false          # master switch; false = zero behavior change
-    tpotSloSeconds: 0.05    # TPOT SLO target (seconds)
-    evalIntervalSeconds: 5  # how often to scrape vLLM /metrics and re-evaluate
-    windowSamples: 6        # sliding-window size (eval samples) to smooth TPOT
-    windowAgg: mean         # mean | p90
-    minPull: 1              # never starve a pod completely
-    maxPull: 0              # 0 => use BATCH_SIZE + PREFETCH (original pull cap)
-    decreaseMode: additive  # additive (cap - step) | multiplicative (cap * factor)
-    decreaseStep: 1         # additive step down on violation
-    decreaseFactor: 0.5     # multiplicative factor on violation (if mode=multiplicative)
-    recoverStep: 1          # additive step up when inside SLO
-    cooldownSeconds: 10     # min seconds between adjustments (hysteresis)
-
-  # Report GPU KV usage from local vLLM /metrics on /pull and /health (default
-  # OFF). Required for router.kvSoftDivert to receive samples.
-  kvUsageReport:
-    enabled: false
-    scrapeIntervalSeconds: 5
-    scrapeTimeoutSeconds: 2
-
 router:
   # pull | push-rr | push-random | push-leastq | central-push
   mode: pull
@@ -228,16 +200,6 @@ router:
   fairFloor: 1
   stuckPullSeconds: 0
   affinityReleaseOnStuck: false
-  # Soft KV divert (default off). When on, a high-KV pod keeps only strong
-  # local prefix hits + affinity pins; cold work goes to healthier peers.
-  # Sidecar must also enable sidecar.kvUsageReport so samples arrive.
-  kvSoftDivert: false
-  kvPressureHigh: 0.85
-  kvPressureLow: 0.75
-  kvPressurePeerOk: 0.70
-  kvSoftMinHits: 1
-  kvUsageStaleSeconds: 30
-  kvHealthPollIntervalSeconds: 5
   # Central-push mode (only used when mode: central-push). The router dispatches
   # centralPushCap - in-flight items per pod via POST /push every
   # centralPushIntervalS (and on each enqueue). centralPushCap should track the
@@ -739,7 +701,35 @@ boom:
   # These map to real BooM scheduler policies:
   #   round_robin  — cycles through vLLM leader pods sequentially
   #   key_affinity — sticky routing per API key with load-aware rebalancing
+  #   kvc_aware    — subscribe to vLLM KV-cache ZMQ events, route to the worker
+  #                  holding the longest cached prefix (see boom.kvcAware below)
   directRoutingStrategy: round_robin
+
+  # KV-Cache-Aware routing config. Only consumed when
+  # directRoutingStrategy=kvc_aware (routeVia=direct). Renders
+  # router_settings.schedule_policy=kvc_aware + a kvc_aware block in
+  # boom_config.yaml, and forces vLLM to publish KV-cache events over ZMQ
+  # (port zmqPort) even in direct mode where sidecars are off.
+  #
+  # Identity alignment (BooM README): the ZMQ topic worker_id MUST equal
+  # model_info.id. vLLM publishes topic "kv@<POD_NAME>@<servedModelName>", so in
+  # kvc_aware mode 75-boom.yaml sets model_info.id to the full leader pod name
+  # (vllm-<model>-<i>) instead of the short <model>-<i>.
+  kvcAware:
+    # Must match vLLM --block-size (block_size defaults to 128 with prefix cache).
+    blockSize: 128
+    # combined_score = cacheWeight*hit_ratio + tierWeight*tier + loadWeight*load
+    cacheWeight: 0.5
+    tierWeight: 0.3
+    loadWeight: 0.2
+    # ZMQ port each vLLM pod publishes KV events on (matches --kv-events-config).
+    zmqPort: 5557
+    # Topic prefix; vLLM publishes "kv@<pod>@<model>".
+    zmqTopicPrefix: "kv@"
+    # Tokenizer root inside the boom-proxy pod. Files must live under
+    # {tokenizerDir}/{model_name}/ (tokenizer.json, tokenizer_config.json).
+    # 75-boom.yaml hostPath-mounts each model's dir to {tokenizerDir}/{served}.
+    tokenizerDir: "/app/tokenizers"
 
   # Flow control — caps concurrent upstream connections per model deployment.
   # Without this, BooM opens one upstream connection per inflight request,
@@ -789,6 +779,17 @@ boom:
   # Additional model aliases (only when claudeCodeAliases=true).
   # Example: [{alias: "my-claude", target: "served-model"}]
   extraModelAliases: []
+
+  # Strip Claude Code's `x-anthropic-billing-header` attribution block from
+  # /v1/messages requests before forwarding upstream. Claude Code injects a
+  # standalone system text block whose rotating `cc_version` tail and per-request
+  # `cch=` counter invalidate byte-exact KV-cache prefix matching on EVERY
+  # request (misses ~100% of the time). Enabling this drops the whole block
+  # (matching vLLM PR #36829 and the router-side STRIP_CCH seam), restoring
+  # prefix-cache hits. Needed for a fair KV-cache comparison when routeVia=direct
+  # (the router-side strip only applies on the router path, not BooM-direct).
+  # Default false to match BooM's out-of-box behavior.
+  stripClaudeCodeAttribution: false
 
   # Resource requests/limits for the BooM Gateway container.
   # Lower than LiteLLM — Rust binary has much smaller memory footprint.

@@ -45,12 +45,14 @@ type Server struct {
 	hashClient   *HashClient
 	registry     *ModelRegistry
 	kvWatcher    *KVWatcher
-	ownerLookup  *OwnerLookup           // nil unless KV_OWNER_SOURCE=lookup
-	pushRouter   *PushDispatcher        // nil in pull mode
-	pushDispatch *PushDispatchQueue     // nil unless push + decouple dispatch
-	centralPush  *CentralPushDispatcher // nil unless central-push
-	publisher    resultPublisher        // nil unless async_pubsub
-	slo          sloRegistry            // nil unless SLO
+	ownerLookup  *OwnerLookup            // nil unless KV_OWNER_SOURCE=lookup
+	pushRouter   *PushDispatcher         // nil in pull mode
+	pushDispatch *PushDispatchQueue      // nil unless push + decouple dispatch
+	centralPush  *CentralPushDispatcher  // nil unless central-push
+	externalPush *ExternalPushDispatcher // nil unless external-push
+	externalReg  *ExternalRegistry       // nil unless external-push (health source)
+	publisher    resultPublisher         // nil unless async_pubsub
+	slo          sloRegistry             // nil unless SLO
 
 	ridRunIDMu sync.Mutex
 	ridToRunID map[string]string
@@ -81,6 +83,17 @@ func (s *Server) SetSLORegistry(r sloRegistry)            { s.slo = r }
 func (s *Server) SetPushDispatch(d *PushDispatchQueue)    { s.pushDispatch = d }
 func (s *Server) SetOwnerLookup(o *OwnerLookup)           { s.ownerLookup = o }
 func (s *Server) SetCentralPush(d *CentralPushDispatcher) { s.centralPush = d }
+
+// SetExternalPush / SetExternalRegistry wire the external-push dispatcher and
+// its endpoint registry (used for /health) before serving.
+func (s *Server) SetExternalPush(d *ExternalPushDispatcher) { s.externalPush = d }
+func (s *Server) SetExternalRegistry(r *ExternalRegistry)   { s.externalReg = r }
+
+// IngestResult is the exported ingest hook the external-push dispatcher uses to
+// deliver a shaped result back into the router (main wires it as the dispatcher
+// callback since main lives in a different package). Mirrors the sidecar
+// posting to /result.
+func (s *Server) IngestResult(payload map[string]interface{}) { s.ingestResultPayload(payload) }
 
 // DispatchPushJob performs KV registration then pushes to a sidecar. Used as
 // the worker callback for the decoupled push dispatcher.
@@ -506,6 +519,10 @@ func (s *Server) dispatch(rid, prompt string, meta map[string]interface{}, isPul
 	if s.cfg.IsCentralPush() && s.centralPush != nil {
 		s.centralPush.Kick()
 	}
+	// External-push: nudge the router-driven external dispatcher.
+	if s.cfg.IsExternalPush() && s.externalPush != nil {
+		s.externalPush.Kick()
+	}
 }
 
 // --- POST /pull ---
@@ -675,7 +692,42 @@ func (s *Server) handleHealthRouter(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
+// externalBackendHealth reports readiness of the static external endpoints
+// (external-push mode) instead of k8s pod discovery: endpoint id -> status.
+func (s *Server) externalBackendHealth() (map[string]string, int) {
+	s.externalReg.RefreshHealth(true)
+	healthy := map[string]bool{}
+	for _, id := range s.externalReg.HealthyIDs() {
+		healthy[id] = true
+	}
+	status := map[string]string{}
+	count := 0
+	for _, id := range s.externalReg.AllIDs() {
+		if healthy[id] {
+			status[id] = "healthy"
+			count++
+		} else {
+			status[id] = "unhealthy"
+		}
+	}
+	return status, count
+}
+
 func (s *Server) handleHealthBackends(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.IsExternalPush() && s.externalReg != nil {
+		podStatus, healthy := s.externalBackendHealth()
+		code := http.StatusOK
+		if healthy == 0 {
+			code = http.StatusServiceUnavailable
+		}
+		writeJSON(w, code, map[string]interface{}{
+			"status":  ternaryStatus(healthy > 0),
+			"healthy": healthy,
+			"total":   len(podStatus),
+			"pods":    podStatus,
+		})
+		return
+	}
 	pods := discoverVLLMLeaders(s.cfg)
 	if pods == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"status": "error", "detail": "pod discovery failed"})
@@ -705,11 +757,18 @@ func (s *Server) handleHealthAggregated(w http.ResponseWriter, r *http.Request) 
 		routerInfo["models"] = s.registry.Names()
 	}
 
-	pods := discoverVLLMLeaders(s.cfg)
 	healthy := 0
 	podStatus := map[string]string{}
-	if len(pods) > 0 {
-		podStatus, healthy = probeBackends(s.cfg, pods)
+	total := 0
+	if s.cfg.IsExternalPush() && s.externalReg != nil {
+		podStatus, healthy = s.externalBackendHealth()
+		total = len(podStatus)
+	} else {
+		pods := discoverVLLMLeaders(s.cfg)
+		if len(pods) > 0 {
+			podStatus, healthy = probeBackends(s.cfg, pods)
+		}
+		total = len(pods)
 	}
 
 	code := http.StatusOK
@@ -721,7 +780,7 @@ func (s *Server) handleHealthAggregated(w http.ResponseWriter, r *http.Request) 
 		"router": routerInfo,
 		"backends": map[string]interface{}{
 			"healthy": healthy,
-			"total":   len(pods),
+			"total":   total,
 			"pods":    podStatus,
 		},
 	})

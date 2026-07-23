@@ -92,36 +92,37 @@ set in `values.yaml`, the image reference is automatically prefixed.
 
 ---
 
-## Deploy BooM with Helm
+## Running a BooM Gateway sweep
 
-Enable the gateway on the same release as the stack:
+### 1. Deploy vLLM (if not already running)
+
+```bash
+python src/client/deploy_vllm.py --config configs/boom.yaml
+```
+
+### 2. Run the sweep
+
+```bash
+python src/client/sweep_methods.py --config boom_master --skip-vllm
+```
+
+Where `configs/boom_master.yaml` contains:
 
 ```yaml
-# boom-values.yaml (overlay)
 boom:
-  enabled: true
-  masterKey: sk-boom-master   # change for your environment
+  - pull
 ```
+
+The sweep runner will:
+1. Set `boom.enabled=true` and `boom.masterKey` in the Helm upgrade
+2. Deploy the BooM Gateway pod alongside the router
+3. Run `main.py` with `backend=boom`, routing through BooM
+
+### 3. Single experiment (without sweep)
 
 ```bash
-helm upgrade --install vllm ./src/core/vllm-kv-stack -n vllm --create-namespace \
-  -f my-values.yaml \
-  -f boom-values.yaml
+python src/client/main.py --config boom
 ```
-
-Verify:
-
-```bash
-curl http://<node-ip>:30401/health
-```
-
-Full Helm keys: [Helm values — BooM](../../configuration/helm-values.md#boom-gateway-boom). Model-name routing and multi-model wiring: [models.md](models.md).
-
-## Benchmarking with BooM (optional)
-
-To drive load through BooM (`backend: boom`) or run method sweeps with
-`boom.enabled` toggled by the harness, see the [benchmark harness](../../benchmarking/harness.md)
-and [experiment configs](../../configuration/experiment-configs.md).
 
 ---
 

@@ -236,9 +236,11 @@ helm upgrade --install vllm ./vllm-kv-stack \
   -f models-override.yaml   # or use --set-json for simple cases
 ```
 
-The benchmark harness can also apply multi-model values from client YAML during
-sweeps; see [experiment configs](../configuration/experiment-configs.md) and the
-[benchmark harness](../benchmarking/harness.md).
+Or via the sweep runner:
+
+```bash
+python src/client/sweep_methods.py --master configs/multi-model-master.yaml
+```
 
 ### Verify
 

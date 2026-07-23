@@ -369,6 +369,14 @@ _push_dispatcher: Optional[_PushDispatcher] = None
 # to avoid a hard import cycle at module load.
 _central_push_dispatcher: Optional[Any] = None
 
+# External-push components (only started in external-push mode): static endpoint
+# registry, direct-vLLM delivery client, router-side KV subscriber pool, and the
+# dispatcher. All None outside external-push.
+_external_registry: Optional[Any] = None
+_external_client: Optional[Any] = None
+_external_kv_subs: Optional[Any] = None
+_external_push_dispatcher: Optional[Any] = None
+
 
 def _kick_central_push() -> None:
     """Nudge the central-push dispatcher to run a dispatch pass now (coalesced).
@@ -378,6 +386,21 @@ def _kick_central_push() -> None:
     if _central_push_dispatcher is not None:
         try:
             _central_push_dispatcher.kick()
+        except Exception:
+            pass
+
+
+def _kick_dispatch() -> None:
+    """Nudge whichever router-driven dispatcher is active (central-push or
+    external-push). No-op in pull / push-* modes."""
+    if _central_push_dispatcher is not None:
+        try:
+            _central_push_dispatcher.kick()
+        except Exception:
+            pass
+    if _external_push_dispatcher is not None:
+        try:
+            _external_push_dispatcher.kick()
         except Exception:
             pass
 
@@ -431,15 +454,22 @@ def _is_central_push() -> bool:
     return str(_cfg.ROUTER_MODE) == "central-push"
 
 
+def _is_external_push() -> bool:
+    """Return True if router is running the external-push mode (static external
+    vLLM endpoints, no k8s pods, no sidecar; router delivers directly)."""
+    return str(_cfg.ROUTER_MODE) == "external-push"
+
+
 def _uses_central_queue() -> bool:
     """True when requests are admitted into the central queue (pull scheduling
-    path): pull and central-push. Push-* skip the queue entirely."""
+    path): pull, central-push and external-push. Push-* skip the queue."""
     return (not _is_push_mode())
 
 
 def _uses_push_delivery() -> bool:
     """True when the router delivers to sidecars via POST /push (needs the
-    PushRouter + pod discovery): push-* and central-push."""
+    PushRouter + pod discovery): push-* and central-push. External-push does NOT
+    use the sidecar PushRouter -- it has its own direct-delivery dispatcher."""
     return _is_push_mode() or _is_central_push()
 
 
@@ -989,6 +1019,7 @@ def _ingest_result_payload(payload: dict) -> None:
 @app.on_event("startup")
 async def _startup():
     global _kv_watcher, _push_router, _publisher, _push_dispatcher, _central_push_dispatcher
+    global _external_registry, _external_client, _external_kv_subs, _external_push_dispatcher
 
     print(f"[router] api.py version={_API_VERSION}")
     print_config(_cfg)
@@ -1035,9 +1066,16 @@ async def _startup():
         print(f"[router] WARNING: affinity warm failed: {e!r}")
         sys.stdout.flush()
 
-    _kv_watcher = KVWatcher()
-    _kv_watcher.start()
-    print("[router] KVWatcher started.")
+    # KVWatcher does the legacy k8s-based blind Redis scan. It has no pods to
+    # watch in external-push (no k8s), and prefix ownership there comes from the
+    # router-side KV subscriber + owner_lookup, so skip it to avoid k8s errors.
+    if _is_external_push():
+        _kv_watcher = None
+        print("[router] KVWatcher skipped (external-push: no k8s pods).")
+    else:
+        _kv_watcher = KVWatcher()
+        _kv_watcher.start()
+        print("[router] KVWatcher started.")
     sys.stdout.flush()
 
     # Targeted per-request block-owner lookup (preferred routing source; also
@@ -1099,6 +1137,46 @@ async def _startup():
             _push_dispatcher = None
             print("[router] PushDispatch disabled (synchronous push in handlers).")
 
+    elif _is_external_push():
+        # External-push: static external vLLM endpoints, no k8s pods, no sidecar.
+        # Admission uses the central queue (pull_for_endpoint scheduling), but the
+        # dispatcher delivers directly to each external vLLM and ingests results.
+        from .external_endpoints import (
+            ExternalRegistry,
+            ExternalVLLMClient,
+            RouterKVSubscriberPool,
+        )
+        from .external_push import ExternalPushDispatcher
+
+        _external_registry = ExternalRegistry()
+        _external_client = ExternalVLLMClient(_external_registry)
+        print(
+            f"[router] external-push endpoints: {_external_registry.all_ids()}"
+        )
+
+        # Router-side KV-events subscriber(s) so prefix routing works without a
+        # sidecar (no-op when EXTERNAL_KV_EVENTS off or no kv_events declared).
+        _external_kv_subs = RouterKVSubscriberPool(_external_registry)
+        _external_kv_subs.start()
+
+        cap = int(getattr(_cfg, "EXTERNAL_PUSH_CAP", 8))
+        interval_s = float(getattr(_cfg, "EXTERNAL_PUSH_INTERVAL_S", 0.05))
+        _external_push_dispatcher = ExternalPushDispatcher(
+            router_state,
+            _external_registry,
+            _external_client,
+            _ingest_result_payload,
+            cap=cap,
+            interval_s=interval_s,
+        )
+        _external_push_dispatcher.start()
+        _push_router = None
+        _push_dispatcher = None
+        print(
+            f"[router] ExternalPushDispatch started (cap={cap} "
+            f"interval_s={interval_s})"
+        )
+
     else:
         _push_router = None
         _push_dispatcher = None
@@ -1127,6 +1205,7 @@ async def _startup():
 @app.on_event("shutdown")
 async def _shutdown():
     global _kv_watcher, _push_router, _publisher, _push_dispatcher, _central_push_dispatcher
+    global _external_registry, _external_client, _external_kv_subs, _external_push_dispatcher
 
     if _kv_watcher:
         _kv_watcher.stop()
@@ -1140,6 +1219,35 @@ async def _shutdown():
             pass
         _central_push_dispatcher = None
         print("[router] CentralPushDispatch stopped.")
+
+    if _external_push_dispatcher is not None:
+        try:
+            await _external_push_dispatcher.stop()
+        except Exception:
+            pass
+        _external_push_dispatcher = None
+        print("[router] ExternalPushDispatch stopped.")
+
+    if _external_kv_subs is not None:
+        try:
+            _external_kv_subs.stop()
+        except Exception:
+            pass
+        _external_kv_subs = None
+
+    if _external_client is not None:
+        try:
+            await _external_client.aclose()
+        except Exception:
+            pass
+        _external_client = None
+
+    if _external_registry is not None:
+        try:
+            await _external_registry.aclose()
+        except Exception:
+            pass
+        _external_registry = None
 
     try:
         await owner_lookup.close_owner_lookup()
@@ -1241,6 +1349,30 @@ async def health_backends():
     can treat the entire stack as a single healthy/unhealthy virtual node.
     """
     cfg = get_config()
+
+    # External-push: no k8s pods; report the static external endpoints instead,
+    # probing each vLLM /health directly through the registry.
+    if _is_external_push() and _external_registry is not None:
+        try:
+            await _external_registry.refresh_health(force=True)
+        except Exception:
+            pass
+        healthy = set(_external_registry.healthy_ids())
+        all_ids = _external_registry.all_ids()
+        pod_status = {i: ("healthy" if i in healthy else "unhealthy") for i in all_ids}
+        healthy_count = len(healthy)
+        body = {
+            "status": "healthy" if healthy_count > 0 else "unhealthy",
+            "healthy": healthy_count,
+            "total": len(all_ids),
+            "pods": pod_status,
+        }
+        return Response(
+            content=json.dumps(body),
+            status_code=200 if healthy_count > 0 else 503,
+            media_type="application/json",
+        )
+
     pods = _discover_vllm_leaders(cfg)
     if pods is None:
         return Response(
@@ -1302,6 +1434,33 @@ async def health_aggregated():
 
     # Backend health (leaders only -- workers don't expose :8200)
     cfg = get_config()
+
+    # External-push: probe the static external endpoints via the registry.
+    if _is_external_push() and _external_registry is not None:
+        try:
+            await _external_registry.refresh_health(force=True)
+        except Exception:
+            pass
+        healthy = set(_external_registry.healthy_ids())
+        all_ids = _external_registry.all_ids()
+        pod_status = {i: ("healthy" if i in healthy else "unhealthy") for i in all_ids}
+        healthy_count = len(healthy)
+        overall = "healthy" if healthy_count > 0 else "unhealthy"
+        body = {
+            "status": overall,
+            "router": router_info,
+            "backends": {
+                "healthy": healthy_count,
+                "total": len(all_ids),
+                "pods": pod_status,
+            },
+        }
+        return Response(
+            content=json.dumps(body),
+            status_code=200 if healthy_count > 0 else 503,
+            media_type="application/json",
+        )
+
     pods = _discover_vllm_leaders(cfg) or {}
 
     healthy_count = 0
@@ -1458,8 +1617,7 @@ async def submit(req: EnqueueRequest):
             except Exception as e:
                 raise HTTPException(503, f"push failed: {e}")
 
-    if _is_central_push():
-        _kick_central_push()
+    _kick_dispatch()
 
     return Response(
         content=f'{{"req_id":"{rid}"}}',
@@ -1539,8 +1697,7 @@ async def enqueue(req: EnqueueRequest):
             except Exception as e:
                 raise HTTPException(503, f"push failed: {e}")
 
-    if _is_central_push():
-        _kick_central_push()
+    _kick_dispatch()
 
     result = await router_state.wait_for_result_async(
         rid,
@@ -1832,8 +1989,7 @@ async def _enqueue_and_wait(
             except Exception as e:
                 raise HTTPException(503, f"push failed: {e}")
 
-    if _is_central_push():
-        _kick_central_push()
+    _kick_dispatch()
 
     result = await router_state.wait_for_result_async(rid, _cfg.RESULT_TIMEOUT_S)
 
@@ -2155,8 +2311,7 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
                 except Exception as e:
                     raise HTTPException(503, f"push failed: {e}")
 
-        if _is_central_push():
-            _kick_central_push()
+        _kick_dispatch()
 
         chunk_id = f"chatcmpl-{rid}"
         created = int(t_start)
