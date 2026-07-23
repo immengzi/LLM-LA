@@ -4,8 +4,11 @@ Reference for the `vllm-kv-stack` Helm chart (`src/core/vllm-kv-stack/values.yam
 
 ## How values are set
 
-1. **Direct Helm** (primary) — `helm upgrade --install ... -f values.yaml` and/or `--set` / `--set-json`. This is the normal deploy path. See the [quickstart](../getting-started/quickstart.md).
-2. **Benchmark harness** (optional) — the client can also apply the same chart from client YAML (`helm:` / `models[]`) during sweeps or vLLM-only helper deploys. See the [benchmark harness](../benchmarking/harness.md) and [experiment configs](experiment-configs.md).
+There are three ways values reach the chart:
+
+1. **Sweep runner** — `sweep_methods.py` translates the `helm:` section of a client config into `--set` flags plus a temporary `models[]` overlay. This is the primary path. See [experiment configs](experiment-configs.md).
+2. **`deploy_vllm.py`** — deploys only vLLM (`deploy.vllm=true`, router/redis/cpuHash off) from the same client config.
+3. **Direct `helm upgrade --install ... --set ...`** — for manual/one-off deploys.
 
 ## Top-level
 
@@ -42,9 +45,6 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 | `prefetch` | `0` | Extra items buffered beyond `BATCH_SIZE` (pull cap = `BATCH_SIZE + PREFETCH`) |
 | `forceIgnoreEos` | `false` | Force `ignore_eos=true` (replay mode: generate exactly `max_tokens`) |
 | `streamingMode` | `false` | Stream from vLLM internally to capture TTFT |
-| `kvUsageReport.enabled` | `false` | Scrape local vLLM `/metrics` for GPU KV usage; attach `kv_usage` on `/pull` + `/health` (needed for `router.kvSoftDivert`) |
-| `kvUsageReport.scrapeIntervalSeconds` | `5` | How often to scrape |
-| `kvUsageReport.scrapeTimeoutSeconds` | `2` | HTTP timeout for `/metrics` |
 
 ## Router (`router.*`)
 
@@ -72,13 +72,6 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 | `fairFloor` | `1` | Min movable items an overloaded pod still gets (prevents a dead pod stalling the queue) |
 | `stuckPullSeconds` | `0` | Liveness: flag a pod that hasn't pulled this long while the queue is backed up (0 = off; exposes `router_endpoint_stuck`) |
 | `affinityReleaseOnStuck` | `false` | Let a stuck pod's affinity pins release to LB via the existing unavailable-target path |
-| `kvSoftDivert` | `false` | Soft divert: high-KV pods keep prefix hits + affinity pins; cold work goes to healthier peers ([§5d](../architecture/router.md#5d-soft-kv-divert-conceptual)). Requires `sidecar.kvUsageReport.enabled` |
-| `kvPressureHigh` | `0.85` | Enter divert pressure when pod GPU KV usage ≥ this |
-| `kvPressureLow` | `0.75` | Exit pressure (hysteresis) when usage falls below this |
-| `kvPressurePeerOk` | `0.70` | Divert only if some peer has fresh usage below this |
-| `kvSoftMinHits` | `1` | Min local `prefix_len` kept on a pressured pod (non-pins) |
-| `kvUsageStaleSeconds` | `30` | Ignore KV samples older than this |
-| `kvHealthPollIntervalSeconds` | `5` | Central-push: poll sidecar `/health` for `kv_usage` this often |
 | `centralPushCap` | `8` | Central-push only: per-pod concurrency ceiling; router dispatches `cap − in-flight` items per pod. Track sidecar `batchSize + prefetch` |
 | `centralPushIntervalS` | `0.05` | Central-push only: periodic dispatch tick (also dispatched on every enqueue) |
 | `outputLenPredictor` | `simple` | Output-length predictor |
@@ -273,8 +266,8 @@ all pods. In `p2p` mode the sweep forces `deploy.mooncakeMaster=false`. See
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `deploy.vllm` | `true` | Set `false` for stack-only upgrades (router/redis without touching vLLM) |
-| `deploy.router` / `deploy.redis` | `true` | Set `false` for vLLM-only deploys |
+| `deploy.vllm` | `true` | Set `false` for stack-only deploys (sweep `--skip-vllm`) |
+| `deploy.router` / `deploy.redis` | `true` | Set `false` for vLLM-only deploys (`deploy_vllm.py`) |
 | `deploy.cpuHash` | `false` | No longer read by the chart; the legacy external hasher is auto-deployed when `router.hashSource=external` |
 | `deploy.mooncakeMaster` | `true` | Skip mooncake-master if `false` |
 

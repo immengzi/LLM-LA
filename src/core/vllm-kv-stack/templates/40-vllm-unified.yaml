@@ -43,6 +43,11 @@
 {{/* ---- Common variables ---- */}}
 {{- $backend := lower $.Values.backend }}
 {{- $needsSidecar := and (ne (toString $.Values.sidecar.enabled) "false") (or (eq $backend "router") (eq $backend "litellm") (eq $backend "boom")) }}
+{{/* KV-cache events must also be published (and port 5557 exposed) when BooM
+     runs in kvc_aware direct mode, where sidecars are OFF but BooM subscribes to
+     each leader pod's ZMQ PUB socket remotely. */}}
+{{- $boomKvc := and (eq $backend "boom") (eq (lower ($.Values.boom.directRoutingStrategy | default "round_robin")) "kvc_aware") }}
+{{- $publishKvEvents := or $needsSidecar $boomKvc }}
 {{- $isLegacy := not $.Values.models }}
 
 {{/* ---- Render resources per model ---- */}}
@@ -221,7 +226,7 @@ spec:
                   --middleware _fp_mw.HostnameFingerprint \
 {{ include "vllmkv.vllmRuntimeFlags" $flagCtx | trim | indent 18 }}
                   --host 0.0.0.0
-                  {{- if $needsSidecar }} \
+                  {{- if $publishKvEvents }} \
                   --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@{{ $servedModelName }}"}'
                   {{- end }}
                   {{- if $.Values.lmcache.enabled }} \
@@ -247,7 +252,7 @@ spec:
               - containerPort: 8200
                 name: http
                 protocol: TCP
-              {{- if $needsSidecar }}
+              {{- if $publishKvEvents }}
               - containerPort: 5557
                 name: kvpub
                 protocol: TCP
@@ -676,7 +681,7 @@ spec:
                   --data-parallel-rpc-port {{ $dp.rpcPort | default 13389 }} \
                   --data-parallel-start-rank ${START_RANK} \
 {{ include "vllmkv.vllmRuntimeFlags" $flagCtx | trim | indent 18 }}
-                  {{- if $needsSidecar }}
+                  {{- if $publishKvEvents }}
                   --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@{{ $servedModelName }}"}' \
                   {{- end }}
                   {{- if $.Values.lmcache.enabled }}
@@ -962,7 +967,7 @@ spec:
                 --middleware _fp_mw.HostnameFingerprint \
 {{ include "vllmkv.vllmRuntimeFlags" $flagCtx | trim | indent 16 }}
                 --host 0.0.0.0 \
-                {{- if $needsSidecar }}
+                {{- if $publishKvEvents }}
                 --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv@'"${POD_NAME}"'@{{ $servedModelName }}"}' \
                 {{- end }}
                 {{- if $.Values.lmcache.enabled }}
@@ -997,7 +1002,7 @@ spec:
             - containerPort: 8200
               name: http
               protocol: TCP
-            {{- if $needsSidecar }}
+            {{- if $publishKvEvents }}
             - containerPort: 5557
               name: kvpub
               protocol: TCP

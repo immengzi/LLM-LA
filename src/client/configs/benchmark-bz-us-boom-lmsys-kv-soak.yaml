@@ -1,6 +1,6 @@
 # benchmark: BZ KV soak — us + BooM (33/218-style path)
 # ---------------------------------------------------------------------------
-# Path: client → BooM Gateway → LLM-LA router/sidecar/redis → vLLM
+# Path: client → real `claude` CLI → BooM Gateway → LLM-LA router/sidecar/redis → vLLM
 # Matches the prod YZ stack that sits behind our router (servers like 33/218).
 #
 # Routing mirrors prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity:
@@ -8,9 +8,11 @@
 #   router_affinity_hard_timeout_s: 800
 # Cluster / LMCache / paths from prod-bz (BZ registry, controller IP, host paths).
 #
-# WORKLOAD (YZ-style soak that fills GPU KV then pin-deadlocks):
-#   - hf-lmsys uncapped input, max_tokens 8192, ~50k @ ~1 rps
-#   - single deploy; leave pods up for many hours (do NOT redeploy mid-soak)
+# WORKLOAD (Claude Code system prompt + CodeFlowBench, closed-loop users):
+#   - transport.mode=claude → real CLI brings Claude Code's own ~system prompt
+#   - prompt_source=codeflow / dataset_profile=codeflowbench (multi-turn)
+#   - 96 users (~1.5× capacity) × 50 convs — elevated concurrency to fill GPU KV
+#   - single deploy; leave pods up until pin timeouts / KV saturation
 #
 # Success criteria:
 #   GPU KV usage → ~97–100% and stays there
@@ -22,6 +24,7 @@
 #   sysctl -w vm.swappiness=0 && sysctl -w kernel.numa_balancing=0  (each engine node)
 #   lmcache-ascend:hccl-p2p image in reg.local:32000
 #   controller IP/node below matches a real BZ node
+#   `claude` binary on PATH
 #
 # Run (full redeploy — do not --skip-vllm the first time):
 #   # in 1-master_config.yaml activate ONLY:
@@ -34,28 +37,33 @@
 switch_cluster: bz
 backend: "boom"
 
-# Open-loop soak: many long prompts. Wall time is ~ total_requests / rate_rps
-# (plus queueing). 50k @ 1 rps ≈ 14 h; stop early once pin timeouts appear.
-total_requests: 50000
-prompt_source: "hf-lmsys"
+# Claude-CLI KV soak: 96 users × 50 conversations = 4800 (closed-loop).
+# Real `claude` CLI supplies Claude Code system prompt + growing history.
+# total_requests is informational; users model controls conversation count.
+total_requests: 4800
+prompt_source: "codeflow"
 
 file_prompts:
   path: "prompts.json"
   variant: "short"
 
 hf_lmsys:
-  dataset_name: "/data/gateway/gateway/data/lmsys_conversations_hf"
+  dataset_profile: codeflowbench
   split: "train"
-  tokenizer_name: "/data/models/MiniMax-M2.7-w8a8-QuaRot"
-  streaming: true
+  streaming: false
   min_input_tokens: 1
-  max_input_tokens: 10000000
+  # No input cap: YZ96-like length comes from Claude system+tools+history growth,
+  # not from truncating CodeFlow user text (which is already short).
+  max_input_tokens: null
   repeat_each: 1
+  seed: 314
+  multi_turn: true
+  min_user_turns: 3
+  max_pool_size: 99999
 
 load_pattern:
   pattern: "det"
-  # Start at 1 rps; raise if engines never pin at batchSize / waiting stays 0.
-  rate_rps: 1.0
+  rate_rps: 5.0
   duration_s: 1000000000.0
   warmup_reqs: 0
 
@@ -72,6 +80,7 @@ load_pattern:
   loadgen_seed: 12345
 
 generation:
+  # Match prod-YZ output cap. Short YZ96-like outs should come from tool-call turns.
   max_tokens: 8192
   temperature: 0.0
   length_mode: "legacy"
@@ -79,6 +88,7 @@ generation:
   target_total_tokens: null
   think: false
   use_dataset_output_len: false
+  min_output_tokens_floor: 1024
 
 output_log_mode: "summary"
 print_trace: false
@@ -106,17 +116,25 @@ metrics:
   model_name: null
   max_instances: null
 
+# Real claude CLI → BooM Anthropic gateway (system prompt comes from Claude Code).
 transport:
-  mode: "async_pubsub"
-  submit_path: "/submit"
-  topic: "results"
-  run_id: null
-  idle_timeout_s: 1000.0
-  # Long gap tolerance so a temporary quiet period doesn't abort the soak.
-  idle_zero_running_s: 600.0
+  mode: "claude"
+
+claude:
+  # Match YZ96 reference: full Claude Code system + tools (short tool-call turns,
+  # growing session context). Was bare+tools-off → tiny system + long free-form outs.
+  bare: false
+  enable_tools: true
+  timeout_s: 10000.0
+
+users:
+  num_users: 96             # ~1.5x capacity (batchSize 32 x 2 = 64): elevated for KV fill
+  convs_per_user: 50        # long soak — stop early once pin timeouts / KV ~100%
+  interval_between_convs_s: 2.0
+  interval_between_convs_max_s: 10.0
+  ramp_window_s: 60.0
 
 boom:
-  # Cluster profile supplies base_url (http://192.168.0.79:30401 on bz).
   chat_path: "/v1/chat/completions"
   model: "served-model-minmax"
   api_key: "sk-boom-master"

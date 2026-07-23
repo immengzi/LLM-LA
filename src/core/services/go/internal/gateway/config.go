@@ -79,6 +79,20 @@ type Config struct {
 	CentralPushCap       int
 	CentralPushIntervalS float64
 
+	// External-push mode (static external vLLM endpoints; no k8s pods, no
+	// sidecar). Admits + schedules like central-push, but the router delivers
+	// directly to each external vLLM's /v1/chat/completions and ingests the
+	// response inline. Prefix routing still works via a router-side KV-events
+	// subscriber. StaticEndpointsRaw is the ROUTER_STATIC_ENDPOINTS JSON array;
+	// StaticEndpoints is the parsed form. Mirrors router/config.py.
+	StaticEndpointsRaw      string
+	StaticEndpoints         []ExternalEndpointConfig
+	ExternalKVEvents        bool
+	ExternalVLLMTimeoutS    float64
+	ExternalPushCap         int
+	ExternalPushIntervalS   float64
+	ExternalHealthIntervalS float64
+
 	PushLeastQMode       string
 	PushHTTPTimeoutS     float64
 	PushMaxKeepalive     int
@@ -193,6 +207,13 @@ func LoadConfig() *Config {
 		CentralPushCap:       common.EnvInt("ROUTER_CENTRAL_PUSH_CAP", 8),
 		CentralPushIntervalS: common.EnvFloat("ROUTER_CENTRAL_PUSH_INTERVAL_S", 0.05),
 
+		StaticEndpointsRaw:      common.EnvStr("ROUTER_STATIC_ENDPOINTS", ""),
+		ExternalKVEvents:        common.EnvBool("ROUTER_EXTERNAL_KV_EVENTS", true),
+		ExternalVLLMTimeoutS:    common.EnvFloat("ROUTER_EXTERNAL_VLLM_TIMEOUT_S", 300.0),
+		ExternalPushCap:         common.EnvInt("ROUTER_EXTERNAL_PUSH_CAP", 8),
+		ExternalPushIntervalS:   common.EnvFloat("ROUTER_EXTERNAL_PUSH_INTERVAL_S", 0.05),
+		ExternalHealthIntervalS: common.EnvFloat("ROUTER_EXTERNAL_HEALTH_INTERVAL_S", 5.0),
+
 		PushLeastQMode:       common.EnvStr("PUSH_LEASTQ_MODE", "health"),
 		PushHTTPTimeoutS:     common.EnvFloat("PUSH_HTTP_TIMEOUT_S", 2.0),
 		PushMaxKeepalive:     common.EnvInt("PUSH_MAX_KEEPALIVE", 200),
@@ -270,7 +291,11 @@ func (c *Config) normalize() {
 	case "central_push", "centralpush":
 		rm = "central-push"
 	}
-	allowed := map[string]bool{"pull": true, "push-rr": true, "push-random": true, "push-leastq": true, "central-push": true}
+	switch rm {
+	case "external_push", "externalpush", "external", "direct-external":
+		rm = "external-push"
+	}
+	allowed := map[string]bool{"pull": true, "push-rr": true, "push-random": true, "push-leastq": true, "central-push": true, "external-push": true}
 	if !allowed[rm] {
 		rm = "pull"
 	}
@@ -281,6 +306,17 @@ func (c *Config) normalize() {
 	}
 	if c.CentralPushIntervalS <= 0 {
 		c.CentralPushIntervalS = 0.05
+	}
+
+	c.StaticEndpoints = parseStaticEndpoints(c.StaticEndpointsRaw)
+	if c.ExternalPushCap < 1 {
+		c.ExternalPushCap = 1
+	}
+	if c.ExternalPushIntervalS <= 0 {
+		c.ExternalPushIntervalS = 0.05
+	}
+	if c.ExternalHealthIntervalS < 0 {
+		c.ExternalHealthIntervalS = 0
 	}
 
 	plq := strings.TrimSpace(strings.ToLower(c.PushLeastQMode))
@@ -428,10 +464,17 @@ func (c *Config) IsCentralPush() bool {
 	return c.RouterMode == "central-push"
 }
 
+// IsExternalPush reports whether the router runs the external-push mode (static
+// external vLLM endpoints, no k8s pods, no sidecar; router delivers directly).
+func (c *Config) IsExternalPush() bool {
+	return c.RouterMode == "external-push"
+}
+
 // UsesCentralQueue reports whether requests are admitted into the central
-// queue (pull scheduling path): pull and central-push. Push-* skip the queue.
+// queue (pull scheduling path): pull, central-push and external-push. Push-*
+// skip the queue.
 func (c *Config) UsesCentralQueue() bool {
-	return c.RouterMode == "pull" || c.RouterMode == "central-push"
+	return c.RouterMode == "pull" || c.RouterMode == "central-push" || c.RouterMode == "external-push"
 }
 
 // UsesPushDelivery reports whether the router delivers to sidecars via POST
@@ -489,6 +532,12 @@ func (c *Config) PrintBanner() {
 		"SIDECAR_PORT":                      c.SidecarPort,
 		"ROUTER_CENTRAL_PUSH_CAP":           c.CentralPushCap,
 		"ROUTER_CENTRAL_PUSH_INTERVAL_S":    c.CentralPushIntervalS,
+		"ROUTER_STATIC_ENDPOINTS":           len(c.StaticEndpoints),
+		"ROUTER_EXTERNAL_KV_EVENTS":         c.ExternalKVEvents,
+		"ROUTER_EXTERNAL_VLLM_TIMEOUT_S":    c.ExternalVLLMTimeoutS,
+		"ROUTER_EXTERNAL_PUSH_CAP":          c.ExternalPushCap,
+		"ROUTER_EXTERNAL_PUSH_INTERVAL_S":   c.ExternalPushIntervalS,
+		"ROUTER_EXTERNAL_HEALTH_INTERVAL_S": c.ExternalHealthIntervalS,
 		"PUSH_LEASTQ_MODE":                  c.PushLeastQMode,
 		"PUSH_HTTP_TIMEOUT_S":               c.PushHTTPTimeoutS,
 		"PUSH_DECOUPLE_DISPATCH":            c.PushDecoupleDispatch,

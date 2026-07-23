@@ -1103,26 +1103,6 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             "router.stuckPullSeconds": int(getattr(h, "router_stuck_pull_seconds", 0)),
             "router.affinityReleaseOnStuck": bool(getattr(h, "router_affinity_release_on_stuck", False)),
 
-            # Soft KV divert (trim cold grants on high-KV pods)
-            "router.kvSoftDivert": bool(getattr(h, "router_kv_soft_divert", False)),
-            "router.kvPressureHigh": float(getattr(h, "router_kv_pressure_high", 0.85)),
-            "router.kvPressureLow": float(getattr(h, "router_kv_pressure_low", 0.75)),
-            "router.kvPressurePeerOk": float(getattr(h, "router_kv_pressure_peer_ok", 0.70)),
-            "router.kvSoftMinHits": int(getattr(h, "router_kv_soft_min_hits", 1)),
-            "router.kvUsageStaleSeconds": int(getattr(h, "router_kv_usage_stale_s", 30)),
-            "router.kvHealthPollIntervalSeconds": float(
-                getattr(h, "router_kv_health_poll_interval_s", 5.0)
-            ),
-            "sidecar.kvUsageReport.enabled": bool(
-                getattr(h, "sidecar_kv_usage_report", False)
-            ),
-            "sidecar.kvUsageReport.scrapeIntervalSeconds": float(
-                getattr(h, "sidecar_kv_usage_scrape_interval_s", 5.0)
-            ),
-            "sidecar.kvUsageReport.scrapeTimeoutSeconds": float(
-                getattr(h, "sidecar_kv_usage_scrape_timeout_s", 2.0)
-            ),
-
             # Central-push mode (router-driven capacity dispatch from the queue)
             "router.centralPushCap": int(getattr(h, "router_central_push_cap", 8)),
             "router.centralPushIntervalS": float(getattr(h, "router_central_push_interval_s", 0.05)),

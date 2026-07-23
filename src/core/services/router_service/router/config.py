@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional
+from dataclasses import dataclass, asdict, field
+from typing import Any, Dict, List, Optional
+import json
 import os
 import sys
 
@@ -181,8 +182,39 @@ class RouterConfig:
     # --------------------------------------------------------------------
     # Router mode + sidecar port
     # --------------------------------------------------------------------
-    ROUTER_MODE: str = "pull"        # "pull", "push-rr", "push-random", "push-leastq", "central-push"
+    ROUTER_MODE: str = "pull"        # "pull", "push-rr", "push-random", "push-leastq", "central-push", "external-push"
     SIDECAR_PORT: int = 9000         # sidecar FastAPI port
+
+    # --------------------------------------------------------------------
+    # EXTERNAL-PUSH mode (static endpoints; no k8s pods, no sidecar)
+    # --------------------------------------------------------------------
+    # Register vLLM servers that live OUTSIDE this cluster by IP/URL. There is
+    # no sidecar, so the router (a) admits + schedules exactly like central-push
+    # (central queue + pull_for_endpoint: KV-affinity/fairness/SLO all apply),
+    # (b) delivers each request DIRECTLY to the external vLLM OpenAI endpoint,
+    # and (c) optionally subscribes to the external vLLM's KV-cache-events ZMQ
+    # to keep Redis block-owner data fresh so prefix routing still works.
+    #
+    # STATIC_ENDPOINTS is a JSON array; each entry:
+    #   {
+    #     "id":   "ext-1",                        # stable endpoint identity
+    #     "url":  "http://1.2.3.4:8200",          # vLLM OpenAI base (no /v1)
+    #     "model":"served-model-minmax",          # served model name (payload + Redis prefix)
+    #     "kv_events_endpoints": ["tcp://1.2.3.4:5556"],  # optional (prefix routing)
+    #     "kv_events_topic": "kv@"                 # optional (default "kv@")
+    #   }
+    STATIC_ENDPOINTS: str = ""
+    STATIC_ENDPOINTS_PARSED: List[Dict[str, Any]] = field(default_factory=list)
+    # Run the router-side KV-events subscriber for external endpoints that
+    # declare kv_events_endpoints (needed for prefix/both strategies).
+    EXTERNAL_KV_EVENTS: bool = True
+    # Per-request timeout when the router calls an external vLLM directly.
+    EXTERNAL_VLLM_TIMEOUT_S: float = 300.0
+    # Cap concurrent in-flight requests per external endpoint (CAP - in-flight).
+    EXTERNAL_PUSH_CAP: int = 8
+    EXTERNAL_PUSH_INTERVAL_S: float = 0.05
+    # How often to re-probe external vLLM /health for readiness gating.
+    EXTERNAL_HEALTH_INTERVAL_S: float = 5.0
 
     # --------------------------------------------------------------------
     # CENTRAL-PUSH mode (admit like pull + deliver like push)
@@ -356,6 +388,65 @@ def _norm_log_mode(s: str) -> str:
     return s
 
 
+def _parse_static_endpoints(raw: str) -> List[Dict[str, Any]]:
+    """Parse ROUTER_STATIC_ENDPOINTS JSON into a validated list of endpoints.
+
+    Accepts a JSON array of objects. Each entry needs at least ``url``; ``id``
+    defaults to the url host:port and ``model`` defaults to the router's
+    MODEL_NAME (resolved later by the caller). ``kv_events_endpoints`` may be a
+    string or list of ``tcp://host:port`` strings. Malformed entries are skipped
+    (best-effort) so a bad env can never crash router startup.
+    """
+    raw = str(raw or "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        print(f"[router] WARNING: ROUTER_STATIC_ENDPOINTS is not valid JSON: {e}")
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        print("[router] WARNING: ROUTER_STATIC_ENDPOINTS must be a JSON array")
+        return []
+
+    out: List[Dict[str, Any]] = []
+    seen_ids: set = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url", "")).strip().rstrip("/")
+        if not url:
+            continue
+        ep_id = str(item.get("id", "")).strip()
+        if not ep_id:
+            ep_id = url.split("://", 1)[-1]
+        if ep_id in seen_ids:
+            print(f"[router] WARNING: duplicate static endpoint id {ep_id!r}; skipping")
+            continue
+        seen_ids.add(ep_id)
+
+        kv_raw = item.get("kv_events_endpoints") or item.get("kv_events_endpoint") or []
+        if isinstance(kv_raw, str):
+            kv_eps = [kv_raw.strip()] if kv_raw.strip() else []
+        elif isinstance(kv_raw, list):
+            kv_eps = [str(x).strip() for x in kv_raw if str(x).strip()]
+        else:
+            kv_eps = []
+
+        out.append(
+            {
+                "id": ep_id,
+                "url": url,
+                "model": str(item.get("model", "")).strip(),
+                "kv_events_endpoints": kv_eps,
+                "kv_events_topic": str(item.get("kv_events_topic", "kv@")).strip() or "kv@",
+            }
+        )
+    return out
+
+
 def get_config() -> RouterConfig:
     """
     Return a singleton RouterConfig with env overrides applied.
@@ -455,6 +546,25 @@ def get_config() -> RouterConfig:
     )
     if cfg.CENTRAL_PUSH_INTERVAL_S <= 0:
         cfg.CENTRAL_PUSH_INTERVAL_S = 0.05
+
+    # External-push knobs (static external endpoints; no sidecar)
+    cfg.STATIC_ENDPOINTS = os.getenv("ROUTER_STATIC_ENDPOINTS", cfg.STATIC_ENDPOINTS)
+    cfg.STATIC_ENDPOINTS_PARSED = _parse_static_endpoints(cfg.STATIC_ENDPOINTS)
+    cfg.EXTERNAL_KV_EVENTS = (
+        os.getenv("ROUTER_EXTERNAL_KV_EVENTS", str(cfg.EXTERNAL_KV_EVENTS)).lower() == "true"
+    )
+    cfg.EXTERNAL_VLLM_TIMEOUT_S = max(
+        0.001, float(os.getenv("ROUTER_EXTERNAL_VLLM_TIMEOUT_S", cfg.EXTERNAL_VLLM_TIMEOUT_S))
+    )
+    cfg.EXTERNAL_PUSH_CAP = max(1, int(os.getenv("ROUTER_EXTERNAL_PUSH_CAP", cfg.EXTERNAL_PUSH_CAP)))
+    cfg.EXTERNAL_PUSH_INTERVAL_S = float(
+        os.getenv("ROUTER_EXTERNAL_PUSH_INTERVAL_S", cfg.EXTERNAL_PUSH_INTERVAL_S)
+    )
+    if cfg.EXTERNAL_PUSH_INTERVAL_S <= 0:
+        cfg.EXTERNAL_PUSH_INTERVAL_S = 0.05
+    cfg.EXTERNAL_HEALTH_INTERVAL_S = max(
+        0.0, float(os.getenv("ROUTER_EXTERNAL_HEALTH_INTERVAL_S", cfg.EXTERNAL_HEALTH_INTERVAL_S))
+    )
 
     # Sync flow
     cfg.RESULT_TIMEOUT_S = float(os.getenv("RESULT_TIMEOUT_S", cfg.RESULT_TIMEOUT_S))
@@ -557,7 +667,10 @@ def get_config() -> RouterConfig:
     if rm in ("central_push", "centralpush", "central-push"):
         rm = "central-push"
 
-    if rm not in ("pull", "push-rr", "push-random", "push-leastq", "central-push"):
+    if rm in ("external_push", "externalpush", "external-push", "external", "direct-external"):
+        rm = "external-push"
+
+    if rm not in ("pull", "push-rr", "push-random", "push-leastq", "central-push", "external-push"):
         rm = "pull"
     cfg.ROUTER_MODE = rm
 

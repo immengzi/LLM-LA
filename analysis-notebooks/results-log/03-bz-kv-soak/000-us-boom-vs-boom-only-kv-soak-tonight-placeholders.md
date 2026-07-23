@@ -17,9 +17,10 @@ status: draft
 - servers: bz (this cluster)
 - model: MiniMax-M2.7-w8a8-QuaRot / LMCache P2P host-staging
 - backend: boom
-- dataset: hf-lmsys uncapped input, max_tokens 8192, ~50k @ ~1 rps
-- total_requests: 50000
-- rate_rps: 1.0
+- dataset: CodeFlowBench via real `claude` CLI (Claude Code system prompt + multi-turn)
+- total_requests: 4800 (informational; users model controls count)
+- rate_rps: n/a (closed-loop users)
+- users: 96 × 50 convs
 - methods:
   - Series 1: `benchmark-bz-us-boom-lmsys-kv-soak` → `pull` (BooM → LLM-LA router, `router_strategy=both`, hard affinity 800s)
   - Series 2: `benchmark-bz-boom-only-lmsys-kv-soak` → `key_affinity` (BooM → vLLM direct, sk-bench rotation)

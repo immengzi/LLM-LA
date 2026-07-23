@@ -52,6 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import json
+import math
 import threading
 import time
 
@@ -196,7 +197,13 @@ def _vec_to_map_by_label(
             val = _safe_float(v[1])
         if val is None:
             continue
-        out[k] = float(val)
+        # Several series can share the same label value once we collapse to
+        # per-instance — e.g. vLLM's request_success_total is split by a
+        # `finished_reason` label (stop/length/abort/...). Summing them yields
+        # the true per-instance value; for single-series metrics this is a no-op.
+        # (Previously this overwrote, so request_success_* kept only the last
+        # finished_reason series and usually read 0.)
+        out[k] = out.get(k, 0.0) + float(val)
     return out
 
 
@@ -343,6 +350,127 @@ GPU_DCGM_METRICS_CATALOG: List[Dict[str, str]] = [
 ]
 
 
+# ------------------------------------------------------------------------
+# Full-parity extensions (mirror prod_latency_collector.py /
+# prod_external_metrics_scraper.py so sweeps capture the SAME field set).
+# ------------------------------------------------------------------------
+
+# v0 exposes gpu_cache_usage_perc; v1 exposes kv_cache_usage_perc. Capture the
+# v0 name too and fall back to it downstream when kv_cache_usage_perc is absent.
+VLLM_EXTRA_GAUGE_CATALOG: List[Dict[str, str]] = [
+    {"name": "vllm:gpu_cache_usage_perc", "kind": "gauge", "field": "gpu_cache_usage_perc"},
+]
+
+# Cumulative (all-time) vLLM counters. Queried as instant values (kind "gauge")
+# so throughput / hit-rate can be re-windowed retrospectively. Handled in a
+# dedicated block (NOT the main catalog) to avoid colliding on the same metric
+# name already used by the *_per_sec counter_rate specs.
+VLLM_CUMULATIVE_CATALOG: List[Dict[str, str]] = [
+    {"name": "vllm:generation_tokens_total", "field": "generation_tokens_total"},
+    {"name": "vllm:prompt_tokens_total", "field": "prompt_tokens_total"},
+    {"name": "vllm:request_success_total", "field": "request_success_total"},
+    {"name": "vllm:prefix_cache_hits_total", "field": "prefix_cache_hits_total"},
+    {"name": "vllm:prefix_cache_queries_total", "field": "prefix_cache_queries_total"},
+    {"name": "vllm:prompt_tokens_cached_total", "field": "prompt_tokens_cached_total"},
+    {"name": "vllm:external_prefix_cache_hits_total", "field": "external_prefix_cache_hits_total"},
+    {"name": "vllm:external_prefix_cache_queries_total", "field": "external_prefix_cache_queries_total"},
+]
+
+# LMCache (P2P host-staging) metrics, exposed on the same vLLM /metrics with the
+# lmcache: prefix. Absent (all None) on plain vLLM. Same names/fields as the prod
+# collectors. Filtered to discovered vLLM instances (see _allowed_for_metric).
+LMCACHE_METRICS_CATALOG: List[Dict[str, str]] = [
+    # gauges
+    {"name": "lmcache:lookup_hit_rate", "kind": "gauge", "field": "lmc_lookup_hit_rate_gauge"},
+    {"name": "lmcache:retrieve_hit_rate", "kind": "gauge", "field": "lmc_retrieve_hit_rate_gauge"},
+    {"name": "lmcache:local_cache_usage", "kind": "gauge", "field": "lmc_local_cache_usage_bytes"},
+    {"name": "lmcache:remote_cache_usage", "kind": "gauge", "field": "lmc_remote_cache_usage_bytes"},
+    {"name": "lmcache:local_storage_usage", "kind": "gauge", "field": "lmc_local_storage_usage_bytes"},
+    {"name": "lmcache:active_memory_objs_count", "kind": "gauge", "field": "lmc_active_memory_objs"},
+    {"name": "lmcache:pinned_memory_objs_count", "kind": "gauge", "field": "lmc_pinned_memory_objs"},
+    {"name": "lmcache:local_cpu_hot_cache_count", "kind": "gauge", "field": "lmc_local_cpu_hot_cache_count"},
+    {"name": "lmcache:lmcache_is_healthy", "kind": "gauge", "field": "lmc_is_healthy"},
+    {"name": "lmcache:kv_msg_queue_size", "kind": "gauge", "field": "lmc_kv_msg_queue_size"},
+    {"name": "lmcache:remote_put_task_num", "kind": "gauge", "field": "lmc_remote_put_task_num"},
+    {"name": "lmcache:storage_events_ongoing_count", "kind": "gauge", "field": "lmc_storage_events_ongoing"},
+    {"name": "lmcache:scheduler_unfinished_requests_count", "kind": "gauge", "field": "lmc_scheduler_unfinished_requests"},
+    # counter rates
+    {"name": "lmcache:num_retrieve_requests", "kind": "counter_rate", "field": "lmc_retrieve_requests_per_sec"},
+    {"name": "lmcache:num_store_requests", "kind": "counter_rate", "field": "lmc_store_requests_per_sec"},
+    {"name": "lmcache:num_lookup_requests", "kind": "counter_rate", "field": "lmc_lookup_requests_per_sec"},
+    {"name": "lmcache:num_requested_tokens", "kind": "counter_rate", "field": "lmc_requested_tokens_per_sec"},
+    {"name": "lmcache:num_hit_tokens", "kind": "counter_rate", "field": "lmc_hit_tokens_per_sec"},
+    {"name": "lmcache:num_stored_tokens", "kind": "counter_rate", "field": "lmc_stored_tokens_per_sec"},
+    {"name": "lmcache:num_lookup_tokens", "kind": "counter_rate", "field": "lmc_lookup_tokens_per_sec"},
+    {"name": "lmcache:num_lookup_hits", "kind": "counter_rate", "field": "lmc_lookup_hit_tokens_per_sec"},
+    {"name": "lmcache:num_vllm_hit_tokens", "kind": "counter_rate", "field": "lmc_vllm_hit_tokens_per_sec"},
+    {"name": "lmcache:local_cpu_evict_count", "kind": "counter_rate", "field": "lmc_cpu_evict_per_sec"},
+    {"name": "lmcache:local_cpu_evict_keys_count", "kind": "counter_rate", "field": "lmc_cpu_evict_keys_per_sec"},
+    {"name": "lmcache:local_cpu_evict_failed_count", "kind": "counter_rate", "field": "lmc_cpu_evict_failed_per_sec"},
+    {"name": "lmcache:forced_unpin_count", "kind": "counter_rate", "field": "lmc_forced_unpin_per_sec"},
+    {"name": "lmcache:num_slow_retrieval_by_time", "kind": "counter_rate", "field": "lmc_slow_retrieval_by_time_per_sec"},
+    {"name": "lmcache:num_slow_retrieval_by_speed", "kind": "counter_rate", "field": "lmc_slow_retrieval_by_speed_per_sec"},
+    {"name": "lmcache:num_p2p_requests", "kind": "counter_rate", "field": "lmc_p2p_requests_per_sec"},
+    {"name": "lmcache:num_p2p_transferred_tokens", "kind": "counter_rate", "field": "lmc_p2p_transferred_tokens_per_sec"},
+    # histogram avgs
+    {"name": "lmcache:time_to_retrieve", "kind": "hist_avg", "field": "lmc_time_to_retrieve_avg"},
+    {"name": "lmcache:time_to_store", "kind": "hist_avg", "field": "lmc_time_to_store_avg"},
+    {"name": "lmcache:retrieve_speed", "kind": "hist_avg", "field": "lmc_retrieve_speed_avg"},
+    {"name": "lmcache:store_speed", "kind": "hist_avg", "field": "lmc_store_speed_avg"},
+    {"name": "lmcache:p2p_time_to_transfer", "kind": "hist_avg", "field": "lmc_p2p_time_to_transfer_avg"},
+    {"name": "lmcache:p2p_transfer_speed", "kind": "hist_avg", "field": "lmc_p2p_transfer_speed_avg"},
+]
+
+# LMCache cumulative counters (instant values, for re-windowing). Dedicated block.
+LMCACHE_CUMULATIVE_CATALOG: List[Dict[str, str]] = [
+    {"name": "lmcache:num_lookup_hits", "field": "lmc_num_lookup_hits_total"},
+    {"name": "lmcache:num_lookup_tokens", "field": "lmc_num_lookup_tokens_total"},
+    {"name": "lmcache:num_hit_tokens", "field": "lmc_num_hit_tokens_total"},
+    {"name": "lmcache:num_requested_tokens", "field": "lmc_num_requested_tokens_total"},
+    {"name": "lmcache:num_p2p_transferred_tokens", "field": "lmc_num_p2p_transferred_tokens_total"},
+]
+
+# Router per-model latency histogram percentiles (mine-only; boom-direct has no
+# router). {w} is substituted with the sampler's rate window. Broadcast onto the
+# vLLM rows (like router_queue_length) so they're available per tick.
+ROUTER_LATENCY_HIST_CATALOG: List[Dict[str, str]] = [
+    {"field": "router_ttft_p50", "expr": "histogram_quantile(0.50, rate(router_request_ttft_seconds_bucket[{w}]))"},
+    {"field": "router_ttft_p95", "expr": "histogram_quantile(0.95, rate(router_request_ttft_seconds_bucket[{w}]))"},
+    {"field": "router_tpot_avg_p50", "expr": "histogram_quantile(0.50, rate(router_request_tpot_avg_seconds_bucket[{w}]))"},
+    {"field": "router_tpot_avg_p95", "expr": "histogram_quantile(0.95, rate(router_request_tpot_avg_seconds_bucket[{w}]))"},
+    {"field": "router_e2e_p50", "expr": "histogram_quantile(0.50, rate(router_request_e2e_seconds_bucket[{w}]))"},
+    {"field": "router_e2e_p95", "expr": "histogram_quantile(0.95, rate(router_request_e2e_seconds_bucket[{w}]))"},
+]
+
+# Per-instance vLLM latency histogram percentiles + windowed count. This is the
+# distinguishing output of prod_external_metrics_scraper.py (which parses raw
+# buckets); here we get the same via server-side histogram_quantile, preserving
+# per-instance granularity with `sum by (instance, le)`. Field names match the
+# external scraper (e.g. "ttft_p95", "ttft_count").
+VLLM_LATENCY_PCTL_CATALOG: List[Tuple[str, str]] = [
+    ("vllm:time_to_first_token_seconds", "ttft"),
+    ("vllm:time_per_output_token_seconds", "tpot"),
+    ("vllm:e2e_request_latency_seconds", "e2e"),
+    ("vllm:request_queue_time_seconds", "queue_time"),
+    ("vllm:request_prefill_time_seconds", "prefill_time"),
+    ("vllm:request_decode_time_seconds", "decode_time"),
+]
+VLLM_LATENCY_QUANTILES: List[int] = [50, 90, 95, 99]
+
+# Per-second fields that get a per-minute companion (per_min = per_sec * 60).
+# Mirrors prod_latency_collector._RPM_FIELDS.
+_RPM_FIELDS: List[Tuple[str, str]] = [
+    ("request_success_per_sec", "request_success_per_min"),
+    ("router_admission_rps", "router_admission_rpm"),
+    ("router_outgoing_rps", "router_outgoing_rpm"),
+    ("sidecar_received_rps", "sidecar_received_rpm"),
+    ("sidecar_completed_rps", "sidecar_completed_rpm"),
+    ("derived_rps", "derived_rpm"),
+    ("prefill_tokens_per_sec", "prefill_tokens_per_min"),
+    ("gen_tokens_per_sec", "gen_tokens_per_min"),
+]
+
+
 # ----------------------------
 # Sampler thread
 # ----------------------------
@@ -382,6 +510,9 @@ class _MetricsSampler(threading.Thread):
         self._stop_ev = threading.Event()
         self._eps_lock = threading.Lock()
         self._endpoints: List[str] = []
+
+        # instance -> (running+waiting, ts) for the flow-balance derived_rps
+        self._prev_nq: Dict[str, Tuple[float, float]] = {}
 
         self._catalog = list(metrics_catalog)
 
@@ -457,6 +588,42 @@ class _MetricsSampler(threading.Thread):
         s = self._prom.instant(f"rate({base}_sum[{self.rate_window}])")
         c = self._prom.instant(f"rate({base}_count[{self.rate_window}])")
         return s, c
+
+    def _q_expr(self, expr: str) -> List[Dict[str, Any]]:
+        """Run an arbitrary PromQL expression, substituting {w} with the rate window."""
+        return self._prom.instant(expr.replace("{w}", self.rate_window))
+
+    def _augment_derived_rps(self, tick: Dict[str, Any], now_ts: float) -> None:
+        """Flow-balance incoming-rate estimate per sample (mirrors prod collector):
+        arrivals = departures + d(N)/dt, N = running + waiting. None until a
+        windowed pair exists."""
+        for rec in tick.get("samples", []):
+            inst = rec.get("instance")
+            rr = _safe_float(rec.get("requests_running"))
+            rw = _safe_float(rec.get("requests_waiting"))
+            succ = _safe_float(rec.get("request_success_per_sec"))
+            n_now = (rr + rw) if (rr is not None and rw is not None) else None
+            derived = None
+            prev = self._prev_nq.get(inst) if inst is not None else None
+            if n_now is not None and succ is not None and prev is not None:
+                n_prev, t_prev = prev
+                dt = now_ts - t_prev
+                if dt > 0:
+                    net_growth = (n_now - n_prev) / dt
+                    derived = succ + net_growth
+                    rec["net_queue_growth_per_sec"] = net_growth
+            rec["derived_rps"] = derived
+            if inst is not None and n_now is not None:
+                self._prev_nq[inst] = (n_now, now_ts)
+
+    @staticmethod
+    def _augment_rpm(tick: Dict[str, Any]) -> None:
+        """Add a per-minute companion (rpm = rps * 60) for each request-rate field."""
+        for rec in tick.get("samples", []):
+            for rps_field, rpm_field in _RPM_FIELDS:
+                if rps_field in rec:
+                    v = rec.get(rps_field)
+                    rec[rpm_field] = (v * 60.0) if v is not None else None
 
     def _build_pod2instance(self, raw: Dict[str, Any], instances: List[str]) -> Dict[str, str]:
         """
@@ -545,7 +712,9 @@ class _MetricsSampler(threading.Thread):
         """
         if self.only_filter_to_endpoints:
             return vllm_allowed
-        if metric_name.startswith("vllm:"):
+        # vLLM + LMCache series are both exposed on the vLLM /metrics endpoint and
+        # keyed by the same instance label, so isolate both to discovered pods.
+        if metric_name.startswith("vllm:") or metric_name.startswith("lmcache:"):
             return vllm_allowed
         return None
 
@@ -855,6 +1024,104 @@ class _MetricsSampler(threading.Thread):
             else:
                 rec["ext_prefix_cache_hit_rate"] = None
 
+        # ----------------------------
+        # Cumulative (all-time) counters: instant values so throughput / hit-rate
+        # can be re-windowed retrospectively. Queried here (not via the main
+        # catalog) to avoid colliding with the *_per_sec counter_rate specs that
+        # share the same metric name.
+        # ----------------------------
+        for spec in (VLLM_CUMULATIVE_CATALOG + LMCACHE_CUMULATIVE_CATALOG):
+            try:
+                vec = self._q_gauge(spec["name"])
+            except Exception:
+                continue
+            m_val = _vec_to_map_by_label(vec, "instance", allowed=vllm_allowed, model_name=None)
+            for inst, val in m_val.items():
+                _add_key(inst)
+                per_inst[inst][spec["field"]] = val
+
+        # ----------------------------
+        # Per-instance vLLM latency histogram percentiles + windowed count
+        # (parity with prod_external_metrics_scraper.py). `sum by (instance, le)`
+        # keeps per-instance granularity; NaN (no data in window) is skipped.
+        # ----------------------------
+        def _skip_nan(v: Any) -> bool:
+            return v is None or (isinstance(v, float) and math.isnan(v))
+
+        for base, prefix in VLLM_LATENCY_PCTL_CATALOG:
+            try:
+                cnt_vec = self._q_expr(f"sum by (instance) (increase({base}_count[{{w}}]))")
+            except Exception:
+                cnt_vec = []
+            for inst, val in _vec_to_map_by_label(cnt_vec, "instance", allowed=vllm_allowed, model_name=None).items():
+                if _skip_nan(val):
+                    continue
+                _add_key(inst)
+                per_inst[inst][f"{prefix}_count"] = val
+            for q in VLLM_LATENCY_QUANTILES:
+                try:
+                    vec = self._q_expr(
+                        f"histogram_quantile({q / 100.0}, sum by (instance, le) (rate({base}_bucket[{{w}}])))"
+                    )
+                except Exception:
+                    continue
+                for inst, val in _vec_to_map_by_label(vec, "instance", allowed=vllm_allowed, model_name=None).items():
+                    if _skip_nan(val):
+                        continue
+                    _add_key(inst)
+                    per_inst[inst][f"{prefix}_p{q}"] = val
+
+        # ----------------------------
+        # Derived: gpu/kv fallback + LMCache token-level hit rates (windowed)
+        # ----------------------------
+        for inst in list(keys):
+            rec = per_inst.get(inst)
+            if rec is None:
+                continue
+
+            # v0 exposes gpu_cache_usage_perc, v1 kv_cache_usage_perc: fill either.
+            if rec.get("kv_cache_usage_perc") is None and rec.get("gpu_cache_usage_perc") is not None:
+                rec["kv_cache_usage_perc"] = rec.get("gpu_cache_usage_perc")
+
+            lmc_lookup_tok = _safe_float(rec.get("lmc_lookup_tokens_per_sec"))
+            lmc_lookup_hit = _safe_float(rec.get("lmc_lookup_hit_tokens_per_sec"))
+            if lmc_lookup_tok is not None and lmc_lookup_tok > 0.0 and lmc_lookup_hit is not None:
+                rec["lmc_lookup_hit_rate"] = lmc_lookup_hit / lmc_lookup_tok
+            else:
+                rec["lmc_lookup_hit_rate"] = None
+
+            lmc_req_tok = _safe_float(rec.get("lmc_requested_tokens_per_sec"))
+            lmc_hit_tok = _safe_float(rec.get("lmc_hit_tokens_per_sec"))
+            if lmc_req_tok is not None and lmc_req_tok > 0.0 and lmc_hit_tok is not None:
+                rec["lmc_retrieve_hit_rate"] = lmc_hit_tok / lmc_req_tok
+            else:
+                rec["lmc_retrieve_hit_rate"] = None
+
+        # ----------------------------
+        # Router per-model latency histogram percentiles (mine-only). Aggregate
+        # across model series (max) and broadcast onto vLLM rows, like the router
+        # queue/admission scalars below.
+        # ----------------------------
+        router_hist_scalars: Dict[str, Optional[float]] = {}
+        for spec in ROUTER_LATENCY_HIST_CATALOG:
+            try:
+                vec = self._q_expr(spec["expr"])
+            except Exception:
+                vec = []
+            best: Optional[float] = None
+            for it in vec or []:
+                v = _safe_float((it.get("value") or [None, None])[1])
+                if v is None or math.isnan(v):
+                    continue
+                best = v if best is None else max(best, v)
+            router_hist_scalars[spec["field"]] = best
+        if any(v is not None for v in router_hist_scalars.values()):
+            for inst in vllm_instances:
+                _add_key(inst)
+                rec = _ensure(inst)
+                for fld, val in router_hist_scalars.items():
+                    rec[fld] = val
+
         # Broadcast aggregated router scalars into every vLLM row
         for inst in vllm_instances:
             _add_key(inst)
@@ -1050,6 +1317,11 @@ class _MetricsSampler(threading.Thread):
                 try:
                     tick = self._collect_one_tick()
 
+                    # flow-balance incoming-rate + per-minute companions (parity
+                    # with prod_latency_collector / prod_external_metrics_scraper)
+                    self._augment_derived_rps(tick, time.time())
+                    self._augment_rpm(tick)
+
                     # publish last successful tick for other threads
                     with self._last_lock:
                         self._last_tick = tick
@@ -1082,6 +1354,35 @@ _lock = threading.Lock()
 _sampler: Optional[_MetricsSampler] = None
 
 
+def _detect_prom_scrape_interval(
+    prom: "PrometheusHTTP",
+    probe_metrics: Tuple[str, ...] = ("vllm:num_requests_running", "up"),
+    lookback_s: int = 300,
+) -> Optional[float]:
+    """Estimate Prometheus' real scrape interval for the vLLM targets.
+
+    rate()/histogram queries need >=2 samples inside the lookback window; if the
+    window is smaller than the actual scrape interval every rate query returns an
+    empty vector (the bug that silently dropped TTFT/TPOT/throughput/prefix). We
+    probe count_over_time to size the rate window correctly. Returns seconds, or
+    None if it can't be determined.
+    """
+    for metric in probe_metrics:
+        try:
+            vec = prom.instant(f"count_over_time({metric}[{int(lookback_s)}s])")
+        except Exception:
+            continue
+        counts: List[float] = []
+        for it in vec or []:
+            v = _safe_float((it.get("value") or [None, None])[1])
+            if v is not None and v > 1:
+                counts.append(v)
+        if counts:
+            # finest sampling => largest count; interval ~= lookback / count
+            return float(lookback_s) / max(counts)
+    return None
+
+
 def start_metrics_collection(*, run_dir: str | Path, cfg: Any) -> None:
     """
     Start metrics sampling in the background.
@@ -1102,18 +1403,40 @@ def start_metrics_collection(*, run_dir: str | Path, cfg: Any) -> None:
 
         prom_url = str(cfg.prometheus_base_url)
         interval_s = float(cfg.scrape_interval_s)
+        prom_timeout_s = float(getattr(cfg, "prometheus_timeout_s", 5.0))
 
-        # IMPORTANT:
-        # rate() needs >=2 scrapes in the lookback window, otherwise Prom returns empty vectors.
-        # So ensure window >= ~2 scrapes. The floor matches the ServiceMonitor interval (1s).
-        window_s = float(getattr(cfg, "window_s", 10))
-        safe_window_s = max(window_s, 2.2 * interval_s, 3.0)
+        # IMPORTANT (root cause of empty TTFT/TPOT/throughput/prefix in older runs):
+        # rate()/histogram_quantile need >=2 scrapes inside the lookback window,
+        # else Prometheus returns EMPTY vectors and every counter/histogram field
+        # is silently dropped (instant gauges still work, which masked the bug).
+        # The window must exceed the ACTUAL Prometheus scrape interval, NOT the
+        # client's query cadence (interval_s). Auto-detect it and size the window
+        # to ~3 scrapes with a hard 30s floor. An explicit cfg.rate_window_s wins.
+        window_s = float(getattr(cfg, "window_s", 10) or 0)
+        override = getattr(cfg, "rate_window_s", None)
+        if override:
+            safe_window_s = float(override)
+        else:
+            detected = _detect_prom_scrape_interval(
+                PrometheusHTTP(prom_url, timeout_s=prom_timeout_s)
+            )
+            if detected and detected > 0:
+                safe_window_s = max(window_s, 3.0 * detected, 30.0)
+            else:
+                safe_window_s = max(window_s, 2.2 * interval_s, 30.0)
         rate_window = _format_prom_window_s(safe_window_s, default_s=30)
+        print(f"[metrics] rate window = {rate_window} (Prom scrape auto-detected)")
 
         model_name = getattr(cfg, "model_name", None)
 
-        # Catalog selection:
-        catalog = list(CPU_ONLY_METRICS_CATALOG) + list(ROUTER_SIDECAR_METRICS_CATALOG)
+        # Catalog selection (full parity with prod_latency_collector /
+        # prod_external_metrics_scraper): core vLLM + router/sidecar + the v0 KV
+        # gauge fallback + the LMCache P2P host-staging tier. Cumulative counters
+        # and router latency histograms are collected inside _collect_one_tick.
+        catalog = list(CPU_ONLY_METRICS_CATALOG) + list(VLLM_EXTRA_GAUGE_CATALOG) + list(ROUTER_SIDECAR_METRICS_CATALOG)
+
+        if bool(getattr(cfg, "include_lmcache_metrics", True)):
+            catalog += list(LMCACHE_METRICS_CATALOG)
 
         # keep existing debug option (still optional)
         if bool(getattr(cfg, "include_debug_metrics", False)):

@@ -26,9 +26,16 @@ func main() {
 
 	hashClient := gateway.NewHashClient(cfg)
 
+	// KVWatcher discovers k8s pods; external-push has none, so it is disabled
+	// there (OwnerLookup below still provides prefix owners from the router-side
+	// KV subscriber). Mirrors api.py skipping the watcher for external-push.
 	kvWatcher := gateway.NewKVWatcher(cfg, kv, registry)
-	kvWatcher.Start()
-	log.Println("[router] KVWatcher started.")
+	if !cfg.IsExternalPush() {
+		kvWatcher.Start()
+		log.Println("[router] KVWatcher started.")
+	} else {
+		log.Println("[router] external-push mode: KVWatcher disabled (no k8s pods).")
+	}
 
 	queue := gateway.NewCentralQueue(cfg, kv)
 	results := gateway.NewResultStore()
@@ -77,6 +84,28 @@ func main() {
 		srv.SetCentralPush(centralPush)
 		defer centralPush.Stop()
 		log.Printf("[router] CentralPushDispatch started (cap=%d interval_s=%.3f)", cfg.CentralPushCap, cfg.CentralPushIntervalS)
+	}
+
+	// External-push: static external vLLM endpoints (no k8s pods, no sidecar).
+	// Admits + schedules like central-push, but delivers directly to each
+	// external vLLM and ingests inline. Prefix routing works via a router-side
+	// KV-events subscriber writing owners keyed by the endpoint id.
+	if cfg.IsExternalPush() {
+		externalReg := gateway.NewExternalRegistry(cfg)
+		externalReg.RefreshHealth(true)
+		externalClient := gateway.NewExternalVLLMClient(cfg, externalReg)
+		srv.SetExternalRegistry(externalReg)
+
+		externalSubs := gateway.NewRouterKVSubscriberPool(cfg, externalReg)
+		externalSubs.Start(context.Background())
+		defer externalSubs.Stop()
+
+		extPush := gateway.NewExternalPushDispatcher(queue, externalReg, externalClient, srv.IngestResult, cfg.ExternalPushCap, cfg.ExternalPushIntervalS)
+		extPush.Start()
+		srv.SetExternalPush(extPush)
+		defer extPush.Stop()
+		log.Printf("[router] ExternalPushDispatch started (endpoints=%d cap=%d interval_s=%.3f kv_events=%v)",
+			len(cfg.StaticEndpoints), cfg.ExternalPushCap, cfg.ExternalPushIntervalS, cfg.ExternalKVEvents)
 	}
 
 	// SLO subsystem: the registry always exists (so requests carrying SLO
@@ -135,7 +164,9 @@ func main() {
 		log.Printf("[router] Shutdown error: %v", err)
 	}
 
-	kvWatcher.Stop()
+	if !cfg.IsExternalPush() {
+		kvWatcher.Stop()
+	}
 	if ownerLookup != nil {
 		ownerLookup.Close()
 	}

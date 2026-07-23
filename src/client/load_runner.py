@@ -29,6 +29,7 @@ import subprocess
 import threading
 import time
 import json
+import tempfile
 
 import requests
 
@@ -702,7 +703,6 @@ def _request_thread_litellm_http(
     print_trace: bool = True,
     label: str = "LiteLLM",
     model_override: Optional[str] = None,
-    api_key_override: Optional[str] = None,
 ):
     """
     OpenAI-compatible proxy worker: one open HTTP request per thread.
@@ -730,7 +730,6 @@ def _request_thread_litellm_http(
             rid, result = send_one_litellm(
                 session, litellm_cfg, task.prompt, effective_gen, label=label,
                 model_override=model_override,
-                api_key_override=api_key_override,
             )
             t1 = time.time()
             end_to_end_s = t1 - t0
@@ -787,8 +786,6 @@ def _request_thread_litellm_http(
 
                 if model_override is not None:
                     record["target_model"] = model_override
-                if api_key_override is not None:
-                    record["affinity_key"] = api_key_override
                 if endpoint_id is not None:
                     record["endpoint_id"] = endpoint_id
                 if usage_prompt_tokens is not None:
@@ -825,8 +822,6 @@ def _request_thread_litellm_http(
                     "planned_ts_mono": task.ts_mono,
                     "send_failed": True,
                 }
-                if api_key_override is not None:
-                    err_record["affinity_key"] = api_key_override
                 logger.log_request(err_record)
     finally:
         session.close()
@@ -842,7 +837,6 @@ def _request_thread_litellm_http_stream(
     print_trace: bool = True,
     label: str = "LiteLLM",
     model_override: Optional[str] = None,
-    api_key_override: Optional[str] = None,
 ):
     """
     Streaming variant of _request_thread_litellm_http.
@@ -869,7 +863,6 @@ def _request_thread_litellm_http_stream(
             rid, result = send_one_litellm_stream(
                 session, litellm_cfg, task.prompt, effective_gen, label=label,
                 model_override=model_override,
-                api_key_override=api_key_override,
             )
             t1 = time.time()
             end_to_end_s = t1 - t0
@@ -929,8 +922,6 @@ def _request_thread_litellm_http_stream(
 
                 if model_override is not None:
                     record["target_model"] = model_override
-                if api_key_override is not None:
-                    record["affinity_key"] = api_key_override
                 if ttft_s is not None:
                     record["ttft_s"] = ttft_s
                 if tpot_avg_s is not None:
@@ -973,8 +964,6 @@ def _request_thread_litellm_http_stream(
                     "planned_ts_mono": task.ts_mono,
                     "send_failed": True,
                 }
-                if api_key_override is not None:
-                    err_record["affinity_key"] = api_key_override
                 logger.log_request(err_record)
     finally:
         session.close()
@@ -1211,7 +1200,7 @@ def _request_thread_anthropic_http(
 
         t0 = time.time()
         try:
-            rid, result = send_one_anthropic(session, boom_cfg, task.prompt, gen_cfg)  # noqa: F821
+            rid, result = send_one_anthropic(session, boom_cfg, task.prompt, gen_cfg)  # noqa: F821  # unused legacy anthropic-HTTP stub; live path is the Claude CLI worker
             t1 = time.time()
             end_to_end_s = t1 - t0
 
@@ -2175,11 +2164,9 @@ def run_open_loop_load(
 
         boom_stream = bool(getattr(boom, "stream", False))
         stream_tag = " (stream=true)" if boom_stream else ""
-        n_affinity_keys = getattr(boom, "key_affinity_keys", 0) or 0
-        affinity_tag = f", key_affinity_keys={n_affinity_keys}" if n_affinity_keys > 0 else ""
         print(
             f"[load_runner] BooM Gateway: {boom.base_url}{boom.chat_path} "
-            f"model={boom.model}{stream_tag}{affinity_tag}"
+            f"model={boom.model}{stream_tag}"
         )
         print(
             "[load_runner] NOTE: backend=boom routes through BooM Gateway "
@@ -2198,15 +2185,9 @@ def run_open_loop_load(
 
             ot = output_tokens_per_request[idx] if output_tokens_per_request else None
             task = RequestTask(idx=idx, prompt=prompt, ts_mono=ts_mono, output_tokens=ot)
-            req_api_key = (
-                f"sk-bench-{idx % n_affinity_keys}" if n_affinity_keys > 0 else None
-            )
             t = threading.Thread(
                 target=thread_fn,
-                args=(
-                    task, boom, gen_cfg, t0_mono, logger, output_log_mode, print_trace,
-                    "BooM", None, req_api_key,
-                ),
+                args=(task, boom, gen_cfg, t0_mono, logger, output_log_mode, print_trace, "BooM"),
                 daemon=True,
                 name=f"boom-T{idx}",
             )
@@ -2517,28 +2498,79 @@ def _build_claude_cmd(claude_cfg: Any, prompt: str, session_id: Optional[str]) -
     return cmd
 
 
-def _claude_env(claude_cfg: Any) -> Dict[str, str]:
+def _claude_env(
+    claude_cfg: Any,
+    max_output_tokens: Optional[int] = None,
+    api_key_override: Optional[str] = None,
+) -> Dict[str, str]:
     env = dict(os.environ)
     base_url = str(getattr(claude_cfg, "base_url", "") or "")
     if base_url:
         env["ANTHROPIC_BASE_URL"] = base_url
-    api_key = str(getattr(claude_cfg, "api_key", "") or "")
+    # Per-conversation key rotation (api_key_override) lets BooM key_affinity stick
+    # each conversation to a pod: BooM hashes the API key -> deployment_id, so a
+    # single fixed key collapses ALL traffic onto one pod. Rotating sk-bench-{cid%N}
+    # spreads conversations across pods while keeping each conversation's turns on
+    # the same pod (its warm KV prefix).
+    api_key = str(api_key_override or getattr(claude_cfg, "api_key", "") or "")
     if api_key:
         # Claude Code reads ANTHROPIC_AUTH_TOKEN (bearer); set API_KEY too for
         # gateways that expect x-api-key.
         env["ANTHROPIC_AUTH_TOKEN"] = api_key
         env["ANTHROPIC_API_KEY"] = api_key
+    # generation.max_tokens is ignored by the Claude CLI unless we set this env
+    # (Claude Code defaults to ~32k otherwise — see CLAUDE_CODE_MAX_OUTPUT_TOKENS).
+    if max_output_tokens is not None and int(max_output_tokens) > 0:
+        env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(int(max_output_tokens))
     return env
 
 
+_CLAUDE_SCRATCH_DIR: Optional[str] = None
+
+
+def _claude_scratch_dir() -> str:
+    """Base throwaway scratch root for the Claude CLI (never the repo).
+
+    With tools enabled the CLI runs --dangerously-skip-permissions and will
+    write solution files for the coding prompts. Without an explicit cwd it
+    inherits the harness dir (src/client) and can clobber harness files such as
+    main.py, which then hangs the next sweep step on stdin. All file writes are
+    redirected under this per-process scratch root instead; each conversation
+    gets its own subdir (see _claude_conv_dir) so concurrent users never share
+    or clobber each other's files.
+    """
+    global _CLAUDE_SCRATCH_DIR
+    if _CLAUDE_SCRATCH_DIR is None:
+        d = os.path.join(tempfile.gettempdir(), f"llm-la-claude-scratch-{os.getpid()}")
+        os.makedirs(d, exist_ok=True)
+        _CLAUDE_SCRATCH_DIR = d
+    return _CLAUDE_SCRATCH_DIR
+
+
+def _claude_conv_dir(user_id: int, conv_id: int) -> str:
+    """Per-conversation isolated cwd so parallel users don't cross-contaminate.
+
+    Stable across the turns of one conversation (files persist for --resume),
+    isolated across conversations (reproducible, no races).
+    """
+    d = os.path.join(_claude_scratch_dir(), f"u{user_id}_c{conv_id}")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        return _claude_scratch_dir()
+    return d
+
+
 def _run_claude_turn(claude_cfg: Any, env: Dict[str, str], prompt: str,
-                     session_id: Optional[str]) -> Dict[str, Any]:
+                     session_id: Optional[str],
+                     cwd: Optional[str] = None) -> Dict[str, Any]:
     cmd = _build_claude_cmd(claude_cfg, prompt, session_id)
     timeout_s = float(getattr(claude_cfg, "timeout_s", 300.0) or 300.0)
     t0 = time.time()
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, env=env, timeout=timeout_s,
+            cwd=cwd or _claude_scratch_dir(), stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "wall_s": time.time() - t0,
@@ -2587,6 +2619,8 @@ def _claude_user_thread(
     env: Dict[str, str],
     logger: Optional[ExperimentLogger],
     output_log_mode: str,
+    key_affinity_keys: int = 0,
+    max_output_tokens: Optional[int] = None,
 ) -> None:
     # Startup arrival. Prefer a realistic randomized window (users trickle in at
     # random over [0, ramp_window_s]); fall back to the even linear ramp otherwise.
@@ -2620,6 +2654,22 @@ def _claude_user_thread(
         turns = conversations[cid]
         num_turns = len(turns)
         session_id: Optional[str] = None
+        # Isolated throwaway cwd for this conversation's tool file-writes — never
+        # the repo, never shared with other users.
+        conv_cwd = _claude_conv_dir(user_id, cid)
+
+        # Per-conversation API key so BooM key_affinity sticks this conversation
+        # to one pod (and different conversations spread across pods). Falls back
+        # to the shared env (claude_cfg.api_key) when rotation is disabled.
+        conv_affinity_key: Optional[str] = None
+        conv_env = env
+        if key_affinity_keys and key_affinity_keys > 0:
+            conv_affinity_key = f"sk-bench-{cid % key_affinity_keys}"
+            conv_env = _claude_env(
+                claude_cfg,
+                max_output_tokens=max_output_tokens,
+                api_key_override=conv_affinity_key,
+            )
 
         for turn_idx, turn_text in enumerate(turns):
             now_send = time.time()
@@ -2627,7 +2677,7 @@ def _claude_user_thread(
                 f"[client][SEND][c{cid}t{turn_idx}] user={user_id} conv={cid} "
                 f"turn={turn_idx}/{num_turns}"
             )
-            r = _run_claude_turn(claude_cfg, env, turn_text, session_id)
+            r = _run_claude_turn(claude_cfg, conv_env, turn_text, session_id, cwd=conv_cwd)
             if r.get("session_id"):
                 session_id = r["session_id"]  # chain the rest of this conversation
 
@@ -2654,6 +2704,8 @@ def _claude_user_thread(
                     "end_to_end_s": wall,
                     "session_id": session_id,
                 }
+                if conv_affinity_key is not None:
+                    record["affinity_key"] = conv_affinity_key
                 if ok:
                     for key in (
                         "duration_ms", "api_ms", "prompt_tokens", "completion_tokens",
@@ -2690,6 +2742,8 @@ def run_users_claude_load(
     users_cfg: Any,
     logger: Optional[ExperimentLogger] = None,
     output_log_mode: str = "summary",
+    gen_cfg: Optional[Any] = None,
+    key_affinity_keys: int = 0,
 ) -> None:
     """Closed-loop users load: N users x K conversations via the real claude CLI.
 
@@ -2704,7 +2758,17 @@ def run_users_claude_load(
         print("[load_runner] claude users: no conversations to run.")
         return
 
-    env = _claude_env(claude_cfg)
+    max_out = None
+    if gen_cfg is not None and getattr(gen_cfg, "max_tokens", None) is not None:
+        try:
+            max_out = int(gen_cfg.max_tokens)
+        except Exception:
+            max_out = None
+    env = _claude_env(claude_cfg, max_output_tokens=max_out)
+    try:
+        key_affinity_keys = int(key_affinity_keys or 0)
+    except Exception:
+        key_affinity_keys = 0
     _iv = float(getattr(users_cfg, "interval_between_convs_s", 0) or 0)
     _iv_max = getattr(users_cfg, "interval_between_convs_max_s", None)
     _iv_desc = (
@@ -2724,8 +2788,11 @@ def run_users_claude_load(
         f"interval={_iv_desc} "
         f"ramp={_ramp_desc} "
         f"(tools={'on' if getattr(claude_cfg, 'enable_tools', False) else 'off'}, "
+        f"max_output_tokens={max_out if max_out is not None else 'cli-default'}, "
+        f"bare={bool(getattr(claude_cfg, 'bare', False))}, "
         f"model={getattr(claude_cfg, 'model', '') or 'inherit'}, "
-        f"base_url={getattr(claude_cfg, 'base_url', '') or 'inherit'})"
+        f"base_url={getattr(claude_cfg, 'base_url', '') or 'inherit'}, "
+        f"key_affinity_keys={key_affinity_keys or 'off (single key)'})"
     )
 
     threads: List[threading.Thread] = []
@@ -2741,7 +2808,7 @@ def run_users_claude_load(
         t = threading.Thread(
             target=_claude_user_thread,
             args=(u, conv_indices, conversations, claude_cfg, users_cfg, env,
-                  logger, output_log_mode),
+                  logger, output_log_mode, key_affinity_keys, max_out),
             daemon=True,
             name=f"claude-user-{u}",
         )

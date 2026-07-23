@@ -1,0 +1,222 @@
+# EXTERNAL-PUSH variant of benchmark-bz-central-push-prefix.yaml.
+#
+# Same claude-CLI workload + routing knobs as the central-push/pull prefix runs,
+# but the vLLM server lives OUTSIDE this cluster: there are NO k8s vLLM pods and
+# NO kv-sidecar. The router talks DIRECTLY to a static external endpoint.
+#
+# How external-push differs from every other mode (see router/config.py):
+#   * router.mode: "external-push"  (NEW mode; all existing modes are unchanged)
+#   * router.staticEndpoints: the external vLLM(s) by URL — no k8s pod discovery
+#   * Admission + scheduling are IDENTICAL to central-push (central queue +
+#     pull_for_endpoint: KV prefix / affinity / fairness / SLO all apply), but
+#     the router delivers each request straight to the external vLLM's
+#     /v1/chat/completions and ingests the response inline (non-streaming).
+#   * Prefix routing still works WITHOUT a sidecar: the router subscribes to the
+#     external vLLM's KV-cache-events ZMQ (kv_events_endpoints) and writes the
+#     same Redis block-owner data owner_lookup reads. Omit kv_events_endpoints
+#     (or set router_external_kv_events: false) to run affinity/none instead.
+#
+# ── DEPLOYMENT (external-only) ──────────────────────────────────────────────
+#   This config deploys router + redis (+ boom) only; vLLM is external. Deploy
+#   into a namespace with NO in-cluster vLLM pods and pass --skip-vllm so the
+#   sweep sets deploy.vllm=false (router+redis only). The in-cluster vLLM /
+#   LMCache blocks below are NOT applied in that case — they are kept only so
+#   BooM's served-model mapping and the sweep pipeline stay consistent with the
+#   comparable central-push/pull configs.
+#
+# ── BEFORE DEPLOYING — replace the placeholders ─────────────────────────────
+#   1. router_static_endpoints[].url          -> your external vLLM OpenAI base
+#                                                 (host:port that serves /v1/...,
+#                                                  NO trailing /v1).
+#   2. router_static_endpoints[].model         -> the served model name the
+#                                                 external vLLM exposes (must
+#                                                 match boom.model below so KV
+#                                                 owner prefixes line up).
+#   3. router_static_endpoints[].kv_events_endpoints
+#                                              -> the external vLLM's ZMQ KV
+#                                                 events publisher (e.g. the
+#                                                 --kv-events-config endpoint,
+#                                                 typically tcp://IP:5556).
+#                                                 Remove for affinity-only.
+
+switch_cluster: bz
+backend: "boom"
+
+# Same closed-loop claude "users" workload as the prefix comparison runs.
+total_requests: 960
+prompt_source: "codeflow"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_profile: codeflowbench
+  split: "train"
+  streaming: false
+  min_input_tokens: 1
+  max_input_tokens: 3000
+  repeat_each: 1
+  seed: 314
+  multi_turn: true
+  min_user_turns: 1
+  max_pool_size: 99999
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 5.0
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  max_tokens: 64
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+  use_dataset_output_len: false
+  min_output_tokens_floor: 1024
+
+output_log_mode: "summary"
+print_trace: false
+
+# Capture the router /latency_log (KV/prefix truth) alongside the run.
+collect_router_log: true
+
+metrics:
+  enabled: true
+  scrape_interval_s: 1.0
+  window_s: 3.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+transport:
+  mode: "claude"
+
+claude:
+  bare: true
+  enable_tools: false
+  timeout_s: 10000.0
+
+users:
+  num_users: 64
+  convs_per_user: 10
+  interval_between_convs_s: 2.0
+  interval_between_convs_max_s: 10.0
+  ramp_window_s: 60.0
+
+# Live Redis KV-block ownership timeline. In external-push the OWNERS are written
+# by the router-side KV subscriber (keyed by the external endpoint id), so this
+# still reflects real block ownership for the external vLLM.
+redis_watch:
+  enabled: true
+  port: 30079
+  interval_s: 2.0
+
+boom:
+  chat_path: "/v1/chat/completions"
+  model: "served-model-minmax"
+  api_key: "sk-boom-master"
+  timeout_s: 10000.0
+  stream: true
+
+helm:
+  boom_claude_aliases: true
+  boom_max_inflight: 1000
+  router_api_key: "ZhongRuanChuangXin!"
+
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 1
+
+  # Router routing = PREFIX (KV-aware prefix routing via Redis block owners).
+  # Works in external-push because the router-side KV subscriber populates the
+  # same Redis owner schema owner_lookup reads. Set to "affinity"/"none" if the
+  # external vLLM does not publish KV events.
+  router_strategy: "prefix"
+  router_len_aware: true
+  router_len_policy: "short_first"
+  router_owner_source: "lookup"
+  router_lookup_max_blocks: 512
+  router_strip_cch: "1"
+  router_log_block_hashes: true
+  router_measure_prefix: true
+  router_log_request_body: true
+  router_log_request_body_max_bytes: 16384
+  router_affinity_mode: "hard"
+  router_affinity_persist_enabled: false
+  router_affinity_ttl_s: 86400
+  router_affinity_hard_timeout_s: 600
+
+  # ---- external-push (the routing METHOD under test) ────────────────────────
+  # Register the external vLLM server(s). REPLACE the placeholders below.
+  # id     : stable endpoint identity (used for affinity / in-flight / metrics /
+  #          KV owners — the pod-name equivalent).
+  # url    : external vLLM OpenAI base (no trailing /v1).
+  # model  : served model name (payload model + Redis owner prefix); match boom.model.
+  # kv_events_endpoints: external vLLM KV-events ZMQ publisher(s) for prefix routing.
+  router_static_endpoints:
+    - id: "ext-1"
+      url: "http://REPLACE_EXTERNAL_IP:8200"
+      model: "served-model-minmax"
+      kv_events_endpoints: ["tcp://REPLACE_EXTERNAL_IP:5556"]
+      kv_events_topic: "kv@"
+  # Router-side KV subscriber (needed for prefix/both). Set false for affinity/none.
+  router_external_kv_events: true
+  # Per-request timeout when the router calls the external vLLM directly.
+  router_external_vllm_timeout_s: 10000.0
+  # Concurrency ceiling per external endpoint (CAP - in-flight); mirror the
+  # external vLLM's max batch. 34 = a batchSize-32 server + 2 headroom.
+  router_external_push_cap: 34
+  router_external_push_interval_s: 0.05
+  # How often to re-probe the external vLLM /health for readiness gating.
+  router_external_health_interval_s: 5.0
+
+  expose_per_pod: false
+
+  nfs_path: "/data/models/MiniMax-M2.7-w8a8-QuaRot"
+  model_host_path: "/data/models"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+  sidecar_prefetch: 2
+
+  # LMCache / Mooncake are properties of the (external) vLLM server, not this
+  # in-cluster deploy — left off here.
+  mooncake_enabled: false
+  deploy_mooncake_master: false
+  lmcache_enabled: false
+  lmcache_nds_enabled: false
+
+  # NOTE: the vLLM `models:` StatefulSet spec is NOT applied under external-only
+  # (--skip-vllm, no in-cluster vLLM). It is retained so BooM's served-model
+  # mapping matches the comparable central-push/pull configs. The ACTUAL model
+  # is served by router_static_endpoints[].url above.
+  models:
+    - name: minimax-m2
+      servedModelName: served-model-minmax
+      replicas: 2
+      streamingMode: true
+      modelSubPath: MiniMax-M2.7-w8a8-QuaRot
+      tensorParallelSize: 8
+      batchSize: 32
+      sidecarPrefetch: 2
+
+  values:
+    # Select the NEW external-push router mode (overrides the backend method).
+    router.mode: "external-push"
+    boom.image: "boom-gateway:v5"

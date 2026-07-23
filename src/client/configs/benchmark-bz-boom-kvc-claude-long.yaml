@@ -1,0 +1,211 @@
+# benchmark: BZ LONG soak — BooM only, KVC-AWARE (KV-cache aware routing)
+# ---------------------------------------------------------------------------
+# Longer version of benchmark-bz-boom-kvc-claude-1h.yaml (identical wiring,
+# more conversations). BooM direct with kvc_aware scheduling: BooM subscribes
+# to each vLLM leader pod's ZMQ KV-cache events (kv@<pod>@<model> on :5557),
+# builds a token-prefix Trie, and routes each request to the worker holding the
+# longest cached prefix. The BooM-native KV-reuse comparison point alongside
+# round_robin (no reuse) and key_affinity (sticky). 16 users × 10 convs.
+#
+# Method in master MUST be kvc_aware (-> boom.directRoutingStrategy=kvc_aware).
+# See benchmark-bz-boom-kvc-claude-1h.yaml header for the full deploy-time
+# wiring (schedule_policy + kvc_aware block, vLLM KV events, tokenizer mount).
+#
+# Path: client → real `claude` CLI → boom-proxy → vLLM (NO LLM-LA router).
+# Method: kvc_aware; no key rotation (key_affinity_keys=0).
+#
+# Run (full redeploy first time):
+#   # activate ONLY:
+#   #   benchmark-bz-boom-kvc-claude-long:
+#   #     - kvc_aware
+#   cd src/client && python sweep_methods.py
+#
+# Sibling: benchmark-bz-boom-rr-claude-long.yaml / benchmark-bz-boom-only-claude-long.yaml
+# Quick check: benchmark-bz-boom-kvc-claude-1h.yaml
+
+switch_cluster: bz
+backend: "boom"
+
+# Long closed-loop: 16 users × 10 conversations = 160.
+# Real `claude` CLI supplies Claude Code system prompt + growing history.
+total_requests: 160
+prompt_source: "codeflow"
+
+file_prompts:
+  path: "prompts.json"
+  variant: "short"
+
+hf_lmsys:
+  dataset_profile: codeflowbench
+  split: "train"
+  streaming: false
+  min_input_tokens: 1
+  # No input cap: YZ96-like length comes from Claude system+tools+history growth,
+  # not from truncating CodeFlow user text (which is already short).
+  max_input_tokens: null
+  repeat_each: 1
+  seed: 314
+  multi_turn: true
+  min_user_turns: 3
+  max_pool_size: 99999
+
+load_pattern:
+  pattern: "det"
+  rate_rps: 5.0
+  duration_s: 1000000000.0
+  warmup_reqs: 0
+
+  burst_on_s: 2.0
+  burst_off_s: 2.0
+  burst_rps_on: 40.0
+  burst_rps_off: 0.0
+
+  step_schedule: "0:5,30:15,60:3"
+
+  rand_rps_min: 5.0
+  rand_rps_max: 20.0
+  rand_epoch_s: 5.0
+  loadgen_seed: 12345
+
+generation:
+  # Match prod-YZ output cap. Short YZ96-like outs should come from tool-call turns.
+  max_tokens: 8192
+  temperature: 0.0
+  length_mode: "legacy"
+  target_output_tokens: null
+  target_total_tokens: null
+  think: false
+  use_dataset_output_len: false
+  min_output_tokens_floor: 1024
+
+output_log_mode: "summary"
+print_trace: false
+
+# No LLM-LA router in this path — leave router/redis collectors off.
+collect_router_log: false
+emit_logs_full: false
+collect_vllm_logs: true
+
+metrics:
+  enabled: true
+  scrape_interval_s: 1.0
+  window_s: 3.0
+  include_debug_metrics: false
+  model_name: null
+  max_instances: null
+
+# Real claude CLI → BooM Anthropic gateway (system prompt comes from Claude Code).
+transport:
+  mode: "claude"
+
+claude:
+  # Match YZ96 reference: full Claude Code system + tools.
+  bare: false
+  enable_tools: true
+  timeout_s: 10000.0
+
+users:
+  num_users: 16
+  convs_per_user: 10
+  interval_between_convs_s: 2.0
+  interval_between_convs_max_s: 10.0
+  ramp_window_s: 30.0
+
+boom:
+  chat_path: "/v1/chat/completions"
+  model: "served-model-minmax"
+  api_key: "sk-boom-master"
+  timeout_s: 10000.0
+  stream: true
+  # kvc_aware routes by cached KV prefix, not by API key — NO per-conversation
+  # key rotation. Single master key for all users.
+  key_affinity_keys: 0
+
+helm:
+  boom_claude_aliases: true
+  boom_max_inflight: 1000
+  # PURE BOOM: gateway → vLLM only (no LLM-LA router). Master method must be
+  # kvc_aware → boom.directRoutingStrategy=kvc_aware.
+  boom_route_via: direct
+  boom_key_affinity_bench: false
+
+  autoscaling_enabled: false
+  autoscaling_min: 1
+  autoscaling_max: 1
+
+  # Router knobs are inert in direct mode (router not deployed); left absent
+  # on purpose so nothing quietly re-enables the LLM-LA path.
+
+  expose_per_pod: true
+
+  nfs_path: "/data/models/MiniMax-M2.7-w8a8-QuaRot"
+  model_host_path: "/data/models"
+
+  aibrix_enabled: false
+  cache_warm_enabled: false
+  # Sidecar is forced OFF by boom_route_via=direct in sweep_methods; kvc_aware
+  # still gets KV events because 40-vllm-unified publishes them for boom kvc.
+  sidecar_prefetch: 2
+
+  mooncake_enabled: false
+  deploy_mooncake_master: false
+
+  # --- LMCache P2P / host-staging (the failure surface under soak) ---
+  lmcache_enabled: true
+  lmcache_mode: "p2p"
+  lmcache_chunk_size: 512
+  lmcache_max_local_cpu_size: 100
+
+  lmcache_use_host_staging: true
+  lmcache_os_staging_bytes: 8589934592   # 8 GiB
+
+  lmcache_p2p_controller_pull_url: "192.168.0.42:9800"
+  lmcache_p2p_controller_reply_url: "192.168.0.42:9900"
+  deploy_lmcache_controller: true
+  lmcache_controller_image: "reg.local:32000/lmcache-ascend:hccl-p2p-metrics-fix"
+  lmcache_nds_enabled: false
+
+  dtype: "bfloat16"
+  ascend_enable_flashcomm1: true
+  model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":16}'
+
+  vllm_image: "reg.local:32000/lmcache-ascend:hccl-p2p-metrics-fix"
+
+  models:
+    - name: minimax-m2
+      servedModelName: served-model-minmax
+      replicas: 2
+      streamingMode: true
+      modelSubPath: MiniMax-M2.7-w8a8-QuaRot
+      tensorParallelSize: 8
+      batchSize: 32
+      sidecarPrefetch: 2
+      dataParallel:
+        enabled: true
+        size: 2
+        sizeLocal: 1
+        rpcPort: 8888
+        pairTopologyKey: roce-pair
+        hcclBuffSize: 1024
+        ompNumThreads: 16
+      vllm:
+        gpuMemoryUtilization: 0.92
+        dtype: bfloat16
+        enableExpertParallel: true
+        compilationConfig:
+          cudagraphMode: "FULL_DECODE_ONLY"
+        trustRemoteCode: true
+        maxNumBatchedTokens: 32768
+        enablePrefixCaching: true
+        enablePromptTokensDetails: true
+        toolCallParser: minimax_m2
+        reasoningParser: minimax_m2_append_think
+        modelLoaderExtraConfig: '{"enable_multithread_load":true,"num_threads":16}'
+        ascendEnableFlashcomm1: true
+
+  values:
+    lmcacheController.nodeName: "k8s-worker1"
+    boom.image: "boom-gateway:v5"
+    # Strip Claude Code's rotating x-anthropic-billing-header block so KV-cache
+    # prefix matching is byte-stable (fair vs the router-side STRIP_CCH path).
+    boom.stripClaudeCodeAttribution: true

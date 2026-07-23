@@ -109,14 +109,12 @@ REGISTRY=myregistry.io ./build.sh         # change the cluster-facing pull name
 
 ## How the Toggle Works
 
-Pass a single Helm value:
+`sweep_methods.py` reads `helm.service_impl` from the experiment config and
+passes a single Helm value:
 
 ```
 --set serviceImpl=go
 ```
-
-(The benchmark harness can set the same flag from `helm.service_impl` in a
-client config; see the [benchmark harness](../benchmarking/harness.md).)
 
 The chart helpers `vllmkv.routerImage` / `vllmkv.sidecarImage` (in
 `templates/_helpers.tpl`) then select the image:
@@ -130,15 +128,21 @@ Everything else — env vars, ports, probes, volumes, RBAC — is identical.
 
 ## Running with Go Services
 
-Set `serviceImpl=go` on the chart:
+### Via sweep_methods.py
+
+Use any config with `helm.service_impl: "go"`, e.g.
+`configs/old/non-prod/router-go.yaml` or `configs/old/shadow/prod-yz-shadow-boom-minmax-lmcache-hq-go.yaml`:
+
+```bash
+python src/client/sweep_methods.py --config <master_config>
+```
+
+### Direct Helm override
 
 ```bash
 helm upgrade --install vllm ./src/core/vllm-kv-stack \
   --set serviceImpl=go
 ```
-
-Harness configs that set `helm.service_impl: "go"` are documented under the
-[benchmark harness](../benchmarking/harness.md).
 
 ## Parity Surface
 

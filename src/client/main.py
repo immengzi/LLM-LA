@@ -449,12 +449,19 @@ def main():
 
     try:
         if claude_mode:
+            # BooM key_affinity sticks each conversation to a pod by hashing the
+            # API key. Rotate a per-conversation key (sk-bench-{cid%N}) so the
+            # affinity actually spreads/pins conversations instead of collapsing
+            # all traffic onto one pod. Sourced from the boom proxy config.
+            _boom_cfg = getattr(cfg, "boom", None)
+            _n_aff_keys = int(getattr(_boom_cfg, "key_affinity_keys", 0) or 0)
             run_users_claude_load(
                 conversations=claude_conversations,
                 claude_cfg=cfg.claude,
                 users_cfg=cfg.users,
                 logger=run_logger,
                 output_log_mode=cfg.output_log_mode,
+                key_affinity_keys=_n_aff_keys,
             )
         else:
             run_open_loop_load(
