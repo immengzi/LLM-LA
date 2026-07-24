@@ -552,9 +552,18 @@ class VLLMWorker:
 
                     # ----------------------------------------------------
                     # Send result back to router (ASYNC via ResultPoster)
+                    #
+                    # The top-level "endpoint" field is the request-completion
+                    # signal the router uses to decrement its per-endpoint
+                    # in-flight counters (PushRouter.notify_result for
+                    # push-leastq-local, and RouterState.release_inflight for
+                    # pull fairness / central-push capacity). Send it explicitly
+                    # instead of relying on result["endpoint_id"] so the contract
+                    # is symmetric with the error path below.
                     # ----------------------------------------------------
                     result_payload = {
                         "req_id": req_id,
+                        "endpoint": _cfg.CONTAINER_NAME,
                         "result": result_obj,
                     }
 
@@ -586,8 +595,13 @@ class VLLMWorker:
 
                 except Exception as e:
                     print(f"[sidecar] vLLM request failed for req_id={req_id}: {e}")
+                    # Carry the top-level "endpoint" on the error path too — an
+                    # errored request still occupied a slot, so the router must
+                    # decrement its in-flight counter. Without this the counter
+                    # leaks on every failure and least-queue selection skews.
                     error_result = {
                         "req_id": req_id,
+                        "endpoint": _cfg.CONTAINER_NAME,
                         "result": {
                             "output": f"[sidecar error: {e}]",
                             "finish_reason": "error",

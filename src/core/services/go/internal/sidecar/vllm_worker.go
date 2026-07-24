@@ -184,9 +184,14 @@ func (w *VLLMWorker) process(item QueueItem) {
 
 	CompletedRequests.WithLabelValues(w.cfg.ContainerName).Inc()
 
+	// Top-level "endpoint" is the completion signal the gateway uses to
+	// decrement its per-endpoint in-flight counters (push-leastq NotifyResult
+	// and pull-fairness release). Sent explicitly and symmetrically with the
+	// error path in submitError.
 	w.poster.Submit(map[string]any{
-		"req_id": reqID,
-		"result": resultObj,
+		"req_id":   reqID,
+		"endpoint": w.cfg.ContainerName,
+		"result":   resultObj,
 	})
 }
 
@@ -505,8 +510,11 @@ func (w *VLLMWorker) forwardChunk(url string, payload map[string]any) {
 }
 
 func (w *VLLMWorker) submitError(reqID string, err error) {
+	// An errored request still consumed a slot, so carry the top-level
+	// "endpoint" here too or the gateway's in-flight counter leaks on failure.
 	w.poster.Submit(map[string]any{
-		"req_id": reqID,
+		"req_id":   reqID,
+		"endpoint": w.cfg.ContainerName,
 		"result": map[string]any{
 			"output":        fmt.Sprintf("[sidecar error: %v]", err),
 			"finish_reason": "error",
