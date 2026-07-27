@@ -113,6 +113,9 @@ spec:
         dnsPolicy: ClusterFirstWithHostNet
         restartPolicy: Always
         shareProcessNamespace: true
+        {{- if include "vllmkv.isNvidia" $ }}
+        runtimeClassName: {{ $.Values.vllm.runtimeClassName | default "nvidia" }}
+        {{- end }}
         tolerations:
           - key: "node-role.kubernetes.io/control-plane"
             operator: "Exists"
@@ -183,9 +186,11 @@ spec:
               - |
                 set -eo pipefail
 
+                {{- if not (include "vllmkv.isNvidia" $) }}
                 export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
                 source /usr/local/Ascend/ascend-toolkit/set_env.sh
                 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
+                {{- end }}
 
                 {{- if $dp.nicName }}
                 nic_name="{{ $dp.nicName }}"
@@ -284,9 +289,11 @@ spec:
                 mountPath: /dev/shm
               - name: cache-volume
                 mountPath: /root/.cache
+              {{- if not (include "vllmkv.isNvidia" $) }}
               - name: hccn-conf
                 mountPath: /etc/hccn.conf
                 readOnly: true
+              {{- end }}
               {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
               - name: mooncake-config
                 mountPath: /etc/mooncake/mooncake.json
@@ -335,7 +342,7 @@ spec:
               timeoutSeconds: 5
             resources:
               requests:
-                huawei.com/Ascend910: {{ $tp }}
+                {{ include "vllmkv.acceleratorResource" $ }}: {{ $tp }}
                 ephemeral-storage: "2Gi"
                 {{- with $.Values.vllm.engineResources.requests.cpu }}
                 cpu: {{ . | quote }}
@@ -344,7 +351,7 @@ spec:
                 memory: {{ . | quote }}
                 {{- end }}
               limits:
-                huawei.com/Ascend910: {{ $tp }}
+                {{ include "vllmkv.acceleratorResource" $ }}: {{ $tp }}
                 ephemeral-storage: "4Gi"
                 {{- with $.Values.vllm.engineResources.limits.cpu }}
                 cpu: {{ . | quote }}
@@ -509,10 +516,12 @@ spec:
             hostPath:
               path: /root/.cache
               type: DirectoryOrCreate
+          {{- if not (include "vllmkv.isNvidia" $) }}
           - name: hccn-conf
             hostPath:
               path: /etc/hccn.conf
               type: File
+          {{- end }}
           {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
           - name: mooncake-config
             configMap:
@@ -551,6 +560,9 @@ spec:
         dnsPolicy: ClusterFirstWithHostNet
         restartPolicy: Always
         shareProcessNamespace: true
+        {{- if include "vllmkv.isNvidia" $ }}
+        runtimeClassName: {{ $.Values.vllm.runtimeClassName | default "nvidia" }}
+        {{- end }}
         tolerations:
           - key: "node-role.kubernetes.io/control-plane"
             operator: "Exists"
@@ -621,9 +633,11 @@ spec:
               - |
                 set -eo pipefail
 
+                {{- if not (include "vllmkv.isNvidia" $) }}
                 export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
                 source /usr/local/Ascend/ascend-toolkit/set_env.sh
                 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
+                {{- end }}
 
                 {{- if $dp.nicName }}
                 nic_name="{{ $dp.nicName }}"
@@ -726,9 +740,11 @@ spec:
                 mountPath: /dev/shm
               - name: cache-volume
                 mountPath: /root/.cache
+              {{- if not (include "vllmkv.isNvidia" $) }}
               - name: hccn-conf
                 mountPath: /etc/hccn.conf
                 readOnly: true
+              {{- end }}
               {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
               - name: mooncake-config
                 mountPath: /etc/mooncake/mooncake.json
@@ -762,7 +778,7 @@ spec:
               failureThreshold: 3
             resources:
               requests:
-                huawei.com/Ascend910: {{ $tp }}
+                {{ include "vllmkv.acceleratorResource" $ }}: {{ $tp }}
                 ephemeral-storage: "2Gi"
                 {{- with $.Values.vllm.engineResources.requests.cpu }}
                 cpu: {{ . | quote }}
@@ -771,7 +787,7 @@ spec:
                 memory: {{ . | quote }}
                 {{- end }}
               limits:
-                huawei.com/Ascend910: {{ $tp }}
+                {{ include "vllmkv.acceleratorResource" $ }}: {{ $tp }}
                 ephemeral-storage: "4Gi"
                 {{- with $.Values.vllm.engineResources.limits.cpu }}
                 cpu: {{ . | quote }}
@@ -801,10 +817,12 @@ spec:
             hostPath:
               path: /root/.cache
               type: DirectoryOrCreate
+          {{- if not (include "vllmkv.isNvidia" $) }}
           - name: hccn-conf
             hostPath:
               path: /etc/hccn.conf
               type: File
+          {{- end }}
           {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
           - name: mooncake-config
             configMap:
@@ -861,6 +879,9 @@ spec:
     spec:
       restartPolicy: Always
       shareProcessNamespace: true
+      {{- if include "vllmkv.isNvidia" $ }}
+      runtimeClassName: {{ $.Values.vllm.runtimeClassName | default "nvidia" }}
+      {{- end }}
 
       {{- if and (or $.Values.mooncake.enabled $.Values.lmcache.enabled) $.Values.vllm.hostNetwork }}
       hostNetwork: true
@@ -929,10 +950,12 @@ spec:
             - |
               set -eo pipefail
 
+              {{- if not (include "vllmkv.isNvidia" $) }}
               export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
               echo "--- ASCEND_TOOLKIT_HOME before sourcing: [$ASCEND_TOOLKIT_HOME]"
               source /usr/local/Ascend/ascend-toolkit/set_env.sh
               export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
+              {{- end }}
 
               {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
 {{ include "vllmkv.nicDetectScript" . | trim | indent 14 }}
@@ -1032,6 +1055,7 @@ spec:
               subPath: {{ $modelSubPath }}
             - name: dshm
               mountPath: /dev/shm
+            {{- if not (include "vllmkv.isNvidia" $) }}
             - name: dcmi-volume
               mountPath: /usr/local/dcmi
             - name: npu-smi-volume
@@ -1042,12 +1066,15 @@ spec:
               mountPath: /usr/local/Ascend/driver/version.info
             - name: ascend-install-info-volume
               mountPath: /etc/ascend_install.info
+            {{- end }}
             - name: cache-volume
               mountPath: /root/.cache
+            {{- if not (include "vllmkv.isNvidia" $) }}
             - name: hisi-hdc-volume
               mountPath: /dev/hisi_hdc
             - name: devmm-svm-volume
               mountPath: /dev/devmm_svm
+            {{- end }}
             {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
             {{- if not $.Values.lmcache.enabled }}
             - name: mooncake-config
@@ -1104,7 +1131,7 @@ spec:
 
           resources:
             requests:
-              huawei.com/Ascend910: {{ $tp }}
+              {{ include "vllmkv.acceleratorResource" $ }}: {{ $tp }}
               ephemeral-storage: "2Gi"
               {{- with $.Values.vllm.engineResources.requests.cpu }}
               cpu: {{ . | quote }}
@@ -1113,7 +1140,7 @@ spec:
               memory: {{ . | quote }}
               {{- end }}
             limits:
-              huawei.com/Ascend910: {{ $tp }}
+              {{ include "vllmkv.acceleratorResource" $ }}: {{ $tp }}
               ephemeral-storage: "4Gi"
               {{- with $.Values.vllm.engineResources.limits.cpu }}
               cpu: {{ . | quote }}
@@ -1257,6 +1284,7 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: {{ mul $tp 16 }}Gi
+        {{- if not (include "vllmkv.isNvidia" $) }}
         - name: dcmi-volume
           hostPath:
             path: /usr/local/dcmi
@@ -1277,10 +1305,12 @@ spec:
           hostPath:
             path: /etc/ascend_install.info
             type: File
+        {{- end }}
         - name: cache-volume
           hostPath:
             path: /root/.cache
             type: DirectoryOrCreate
+        {{- if not (include "vllmkv.isNvidia" $) }}
         - name: hisi-hdc-volume
           hostPath:
             path: /dev/hisi_hdc
@@ -1289,6 +1319,7 @@ spec:
           hostPath:
             path: /dev/devmm_svm
             type: CharDevice
+        {{- end }}
         {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
         {{- if not $.Values.lmcache.enabled }}
         - name: mooncake-config

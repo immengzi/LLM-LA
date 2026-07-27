@@ -7,6 +7,18 @@ backend: router
 # 100%-parity port of the Python ones.
 serviceImpl: python
 
+# Accelerator backend for the vLLM engine pods:
+#   ascend (default) - Huawei Ascend NPUs. Requests huawei.com/Ascend910,
+#                      mounts the Ascend driver from the host, and sources the
+#                      Ascend toolkit. Historical behaviour, unchanged.
+#   nvidia           - NVIDIA GPUs. Requests nvidia.com/gpu (injected by the
+#                      NVIDIA device plugin), sets vllm.runtimeClassName, and
+#                      drops all Ascend driver mounts / toolkit setup.
+# This is a single, machine-level switch. Set it per cluster through
+# helm.values.hardware in src/client/configs/clusters.yaml rather than editing
+# the deploy scripts. See docs/deployment/gpu.md.
+hardware: ascend
+
 # Offset added to every hardcoded NodePort (redis, router, cpu-hash, vLLM).
 # Default 0 keeps original ports; set e.g. 100 for a shadow deployment to
 # avoid port collisions with the primary deployment on the same cluster.
@@ -355,6 +367,11 @@ aibrix:
 
 # vLLM runtime flags — all optional, set null to disable
 vllm:
+  # RuntimeClass applied to vLLM pods when hardware=nvidia (ignored on Ascend).
+  # Most GPU clusters install the NVIDIA container runtime under the class name
+  # "nvidia"; override if your cluster registers a different RuntimeClass.
+  runtimeClassName: nvidia
+
   # Nodes labelled avoid=<avoidLabelValue> are excluded from vLLM scheduling.
   # Override for shadow deployments (e.g. "vllm-shadow") so prod and shadow
   # use independent avoid labels.

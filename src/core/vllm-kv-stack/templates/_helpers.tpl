@@ -241,10 +241,34 @@ Examples:
 {{- end -}}
 
 {{/*
+Hardware backend switch. Selects the accelerator vendor for the vLLM engine.
+Set .Values.hardware to "nvidia" for NVIDIA GPUs; anything else (default
+"ascend") keeps the historical Ascend NPU behaviour byte-for-byte. Typically
+set per cluster via helm.values.hardware in configs/clusters.yaml.
+Returns the non-empty string "true" for NVIDIA and "" (falsey) otherwise, so it
+is safe to use directly in `if include "vllmkv.isNvidia" $`.
+*/}}
+{{- define "vllmkv.isNvidia" -}}
+{{- if eq (lower (default "ascend" .Values.hardware)) "nvidia" -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Kubernetes extended-resource name for the active hardware backend:
+NVIDIA GPUs are requested as "nvidia.com/gpu", Ascend NPUs as
+"huawei.com/Ascend910". Context: the root $ context.
+*/}}
+{{- define "vllmkv.acceleratorResource" -}}
+{{- if include "vllmkv.isNvidia" . -}}nvidia.com/gpu{{- else -}}huawei.com/Ascend910{{- end -}}
+{{- end -}}
+
+{{/*
 Ascend NPU driver host volumes — shared by all pods that need NPU access.
 Centralised here to avoid repeating 5 hostPath entries in every Deployment.
+No-op when hardware=nvidia so DP/LeaderWorkerSet and other callers inherit the
+same hardware switch as the standard Deployment path.
 */}}
 {{- define "vllmkv.ascendDriverVolumes" -}}
+{{- if not (include "vllmkv.isNvidia" .) -}}
 - name: dcmi-volume
   hostPath:
     path: /usr/local/dcmi
@@ -266,11 +290,14 @@ Centralised here to avoid repeating 5 hostPath entries in every Deployment.
     path: /etc/ascend_install.info
     type: File
 {{- end -}}
+{{- end -}}
 
 {{/*
 Ascend NPU driver volumeMounts — pairs with ascendDriverVolumes above.
+No-op when hardware=nvidia (see ascendDriverVolumes).
 */}}
 {{- define "vllmkv.ascendDriverMounts" -}}
+{{- if not (include "vllmkv.isNvidia" .) -}}
 - name: dcmi-volume
   mountPath: /usr/local/dcmi
 - name: npu-smi-volume
@@ -281,6 +308,7 @@ Ascend NPU driver volumeMounts — pairs with ascendDriverVolumes above.
   mountPath: /usr/local/Ascend/driver/version.info
 - name: ascend-install-info-volume
   mountPath: /etc/ascend_install.info
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -393,12 +421,13 @@ Context: dict with keys "tp" (tensor parallel size), "root" (the root $ context)
   valueFrom:
     fieldRef:
       fieldPath: metadata.name
+- name: VLLM_USE_V1
+  value: "1"
+{{- if not (include "vllmkv.isNvidia" .root) }}
 - name: ASCEND_RT_VISIBLE_DEVICES
   value: {{ include "vllmkv.tpDevices" (dict "tp" .tp) | quote }}
 - name: HCCL_OP_EXPANSION_MODE
   value: "AIV"
-- name: VLLM_USE_V1
-  value: "1"
 - name: PYTORCH_NPU_ALLOC_CONF
   value: "expandable_segments:True"
 - name: ASCEND_BUFFER_POOL
@@ -410,6 +439,7 @@ Context: dict with keys "tp" (tensor parallel size), "root" (the root $ context)
 {{- if or .root.Values.mooncake.enabled .root.Values.lmcache.enabled }}
 - name: OMP_PROC_BIND
   value: "false"
+{{- end }}
 {{- end }}
 {{- end -}}
 

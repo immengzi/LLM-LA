@@ -16,6 +16,7 @@ There are three ways values reach the chart:
 |-----|---------|---------|
 | `backend` | `router` | Selects the infra stack flavor. Note: gateways are **not** turned on by this — LiteLLM/BooM render only when `litellm.enabled`/`boom.enabled` are set. `litellm`/`boom` render the same router+redis+cpuHash stack as `router`. |
 | `serviceImpl` | `python` | Router/sidecar implementation: `python` or `go` (swaps images only) |
+| `hardware` | `ascend` | Accelerator backend for vLLM pods: `ascend` (Huawei NPU) or `nvidia` (GPU). `nvidia` requests `nvidia.com/gpu`, applies `vllm.runtimeClassName`, and drops Ascend driver mounts/toolkit. Set per cluster via `helm.values.hardware` ([GPU deployment](../deployment/gpu.md)) |
 | `portOffset` | `0` | Added to the NodePorts of **redis, router, cpu-hash, and vLLM only** (not LiteLLM/BooM). For shadow deployments. |
 | `replicas.router` | `1` | Router replica count |
 | `replicas.vllm` | `16` | Legacy fallback replica count when `models[]` is empty |
@@ -94,6 +95,7 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 | `pin.enabled` | `true` | Pin router, redis, hash, gateways to one node |
 | `pin.nodeName` | `node3` | Hostname to pin infra pods to (cluster-specific) |
 | `pin.tolerations` | control-plane/master | Allow scheduling on tainted control-plane nodes |
+| `vllm.runtimeClassName` | `nvidia` | RuntimeClass applied to vLLM pods when `hardware=nvidia` (ignored on Ascend) |
 | `vllm.avoidLabelValue` | `vllm` | Nodes labelled `avoid=<value>` are excluded from vLLM scheduling |
 | `vllm.nodeSelector` | (template-only; no `values.yaml` default) | Optional positive node selector for vLLM pods |
 | `vllm.leaderNodeSelector` | `{}` | Opt-in per-role selector for the DP LeaderWorkerSet **leader**; empty falls back to `vllm.nodeSelector` |

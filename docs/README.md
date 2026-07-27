@@ -46,6 +46,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | Doc | Description |
 |-----|-------------|
 | [multi-model.md](deployment/multi-model.md) | Serving multiple models from one cluster |
+| [gpu.md](deployment/gpu.md) | Deploy on NVIDIA GPUs: device plugin, RuntimeClass, and the `hardware` switch |
 | [data-parallel-lws.md](deployment/data-parallel-lws.md) | Data parallel + EP via LeaderWorkerSet |
 | [docker-reference/glm5-dp-docker.md](deployment/docker-reference/glm5-dp-docker.md) | Bare-Docker GLM-5 DP+EP — the reference ("HQ") deployment |
 | [mooncake/helm-integration.md](deployment/mooncake/helm-integration.md) | Mooncake KV transfer Helm wiring |
