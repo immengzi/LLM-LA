@@ -13,13 +13,36 @@ without needing a real model or GPU.
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse, JSONResponse
 
 app = FastAPI(title="mock-vllm")
+
+# Emulated model context window. A request whose (input + output) tokens exceed
+# this returns vLLM's real 400 (OpenAI-compatible) so the e2e stack can
+# reproduce the context-length overflow incident end to end.
+MAX_MODEL_LEN = int(os.environ.get("MOCK_MAX_MODEL_LEN", "196608"))
+
+
+def _estimate_input_tokens(body: Dict[str, Any], messages: List[Dict[str, Any]]) -> int:
+    """Approximate prompt tokens. A test may pass an explicit ``mock_input_tokens``
+    hint to reproduce exact incident numbers without shipping a huge prompt; real
+    vLLM ignores unknown fields, and production never sends this."""
+    hint = body.get("mock_input_tokens")
+    if isinstance(hint, int) and hint > 0:
+        return hint
+    total_chars = 0
+    for m in messages or []:
+        c = m.get("content")
+        if isinstance(c, str):
+            total_chars += len(c)
+        elif isinstance(c, list):
+            total_chars += sum(len(p.get("text", "")) for p in c if isinstance(p, dict))
+    return max(1, total_chars // 4)
 
 
 def _last_user_text(messages: List[Dict[str, Any]]) -> str:
@@ -82,6 +105,30 @@ async def chat_completions(request: Request):
     messages = body.get("messages", [])
     text = f"echo: {_last_user_text(messages)}"
     stream = bool(body.get("stream", False))
+
+    # Context-length overflow -> legitimate vLLM 400 (OpenAI-compatible body).
+    requested_output = int(body.get("max_tokens") or 16)
+    input_tokens = _estimate_input_tokens(body, messages)
+    total_tokens = input_tokens + requested_output
+    if total_tokens > MAX_MODEL_LEN:
+        msg = (
+            f"This model's maximum context length is {MAX_MODEL_LEN} tokens. "
+            f"However, you requested {requested_output} output tokens and your "
+            f"prompt contains at least {input_tokens} input tokens, for a total "
+            f"of at least {total_tokens} tokens. Please reduce the length of the "
+            f"input prompt or the number of requested output tokens."
+        )
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": msg,
+                    "type": "BadRequestError",
+                    "param": "input_tokens",
+                    "code": 400,
+                }
+            },
+        )
 
     if not stream:
         return _make_completion(model, text)

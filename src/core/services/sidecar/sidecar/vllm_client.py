@@ -271,6 +271,7 @@ class VLLMWorker:
                     raw_vllm: Optional[Dict[str, Any]] = None
                     latency_s: Optional[float] = None
                     ttft_s: Optional[float] = None
+                    upstream_error: Optional[Dict[str, Any]] = None
 
                     if use_stream:
                         # --------------------------------------------------
@@ -290,7 +291,20 @@ class VLLMWorker:
 
                         if not resp.ok:
                             print(f"[sidecar] vLLM stream error: {resp.status_code} {resp.text}")
-                            output_text = f"[vLLM error {resp.status_code}]"
+                            # Passthrough upstream 4xx (client-request errors, e.g.
+                            # context-length overflow) verbatim so the gateway sees
+                            # vLLM's real status + body. 5xx keeps the legacy marker.
+                            if 400 <= resp.status_code < 500:
+                                upstream_error = {
+                                    "status": resp.status_code,
+                                    "body": resp.text,
+                                    "content_type": resp.headers.get(
+                                        "content-type", "application/json"
+                                    ),
+                                }
+                                output_text = ""
+                            else:
+                                output_text = f"[vLLM error {resp.status_code}]"
                             resp.close()
                         else:
                             import json as _json
@@ -457,7 +471,20 @@ class VLLMWorker:
 
                         if not resp.ok:
                             print(f"[sidecar] vLLM error: {resp.status_code} {resp.text}")
-                            output_text = f"[vLLM error {resp.status_code}]"
+                            # Passthrough upstream 4xx (client-request errors, e.g.
+                            # context-length overflow) verbatim so the gateway sees
+                            # vLLM's real status + body. 5xx keeps the legacy marker.
+                            if 400 <= resp.status_code < 500:
+                                upstream_error = {
+                                    "status": resp.status_code,
+                                    "body": resp.text,
+                                    "content_type": resp.headers.get(
+                                        "content-type", "application/json"
+                                    ),
+                                }
+                                output_text = ""
+                            else:
+                                output_text = f"[vLLM error {resp.status_code}]"
                         else:
                             try:
                                 data = resp.json()
@@ -545,6 +572,11 @@ class VLLMWorker:
                     # Token usage from vLLM (prompt/completion/total)
                     if usage is not None:
                         result_obj["usage"] = usage
+
+                    # Non-2xx upstream (4xx) passthrough marker: carries vLLM's
+                    # original status + body so the router can relay it verbatim.
+                    if upstream_error is not None:
+                        result_obj["upstream_error"] = upstream_error
 
                     # Attach trace dictionary into result, if enabled
                     if getattr(_cfg, "TRACE_ENABLED", False):
