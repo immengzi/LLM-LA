@@ -168,9 +168,97 @@ func (pd *PushDispatcher) pickEndpoint() string {
 		return pd.pickLeastQHealth()
 	case "push-throughput":
 		return pd.pickThroughput()
+	case "push-p2c":
+		return pd.pickP2C()
 	default:
 		return pd.pickRR()
 	}
+}
+
+// chooseLowerLoad is the power-of-two-choices comparator: return the
+// less-loaded of two endpoints. A false ok flag means the load probe failed
+// for that endpoint (treated as +inf so a reachable peer wins); if both fail
+// the first sampled endpoint is returned. Mirrors _pick_lower_load in Python.
+func chooseLowerLoad(a string, sa int, aOK bool, b string, sb int, bOK bool) string {
+	if !aOK && !bOK {
+		return a
+	}
+	if !aOK {
+		return b
+	}
+	if !bOK {
+		return a
+	}
+	if sa <= sb {
+		return a
+	}
+	return b
+}
+
+// pickP2C samples two distinct pods and routes to the less loaded one. Load
+// comes from local logical inflight when PushLeastQMode=local, else each
+// candidate's /health. Mirrors PushRouter._pick_endpoint_p2c.
+func (pd *PushDispatcher) pickP2C() string {
+	pd.mu.Lock()
+	eps := append([]string{}, pd.endpoints...)
+	urls := make(map[string]string, len(pd.urls))
+	for k, v := range pd.urls {
+		urls[k] = v
+	}
+	inflight := make(map[string]int, len(pd.logicalInflight))
+	for k, v := range pd.logicalInflight {
+		inflight[k] = v
+	}
+	pd.mu.Unlock()
+
+	if len(eps) == 0 {
+		return ""
+	}
+	if len(eps) == 1 {
+		return eps[0]
+	}
+
+	i := rand.Intn(len(eps))
+	j := rand.Intn(len(eps) - 1)
+	if j >= i {
+		j++
+	}
+	a, b := eps[i], eps[j]
+
+	if pd.cfg.PushLeastQMode == "local" {
+		return chooseLowerLoad(a, inflight[a], true, b, inflight[b], true)
+	}
+	sa, aOK := pd.fetchHealthLoad(urls[a])
+	sb, bOK := pd.fetchHealthLoad(urls[b])
+	return chooseLowerLoad(a, sa, aOK, b, sb, bOK)
+}
+
+// fetchHealthLoad returns a single sidecar's load score (logical/queue_len)
+// from /health, and whether the probe succeeded.
+func (pd *PushDispatcher) fetchHealthLoad(url string) (int, bool) {
+	if url == "" {
+		return 0, false
+	}
+	resp, err := pd.client.Get(url + "/health")
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return 0, false
+	}
+	var data map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return 0, false
+	}
+	if v, ok := data["logical"]; ok {
+		return int(toFloat(v)), true
+	}
+	if v, ok := data["queue_len"]; ok {
+		return int(toFloat(v)), true
+	}
+	return 0, true
 }
 
 // epScore pairs an endpoint with a numeric score and whether the probe

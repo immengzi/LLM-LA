@@ -75,7 +75,7 @@ sidecar:
   streamingMode: false
 
 router:
-  # pull | push-rr | push-random | push-leastq | push-throughput | central-push | external-push
+  # pull | push-rr | push-random | push-leastq | push-throughput | push-p2c | central-push | external-push
   #
   # central-push can run WITHOUT the per-pod sidecar: set sidecar.enabled=false
   # and the router keeps pod discovery + the central queue (KV-affinity /

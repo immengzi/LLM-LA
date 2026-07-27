@@ -5,6 +5,7 @@ from router.push_router import (
     _pick_min_score,
     _parse_prom_sums,
     _total_tokens_from_sums,
+    _pick_lower_load,
 )
 
 _SAMPLE = """\
@@ -50,3 +51,21 @@ def test_total_tokens_absent_is_none():
         "vllm:prompt_tokens_total", "vllm:generation_tokens_total"
     ])
     assert _total_tokens_from_sums(sums) is None
+
+
+def test_pick_lower_load_prefers_smaller():
+    assert _pick_lower_load("a", 1, "b", 2) == "a"
+    assert _pick_lower_load("a", 3, "b", 2) == "b"
+
+
+def test_pick_lower_load_ties_go_to_first():
+    # power-of-two: on a tie, keep the first sampled endpoint (random pick).
+    assert _pick_lower_load("a", 2, "b", 2) == "a"
+
+
+def test_pick_lower_load_none_is_worst():
+    # A failed probe (None) is treated as +inf, so the reachable peer wins.
+    assert _pick_lower_load("a", None, "b", 5) == "b"
+    assert _pick_lower_load("a", 5, "b", None) == "a"
+    # Both probes failed -> fall back to the first sampled endpoint.
+    assert _pick_lower_load("a", None, "b", None) == "a"
