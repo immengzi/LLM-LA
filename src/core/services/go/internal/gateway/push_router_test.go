@@ -82,3 +82,54 @@ func TestChooseLowerLoad(t *testing.T) {
 		}
 	}
 }
+
+// TestKVCost mirrors the Python _kv_cost: cost = scale*max(prefill-credit*hits,0)+load.
+func TestKVCost(t *testing.T) {
+	if got := kvCost(10, 5, 5.0, 1.0, 1.0); got != 10.0 {
+		t.Fatalf("kvCost(10,5,5) = %v, want 10", got)
+	}
+	if got := kvCost(10, 8, 9.0, 1.0, 1.0); got != 11.0 {
+		t.Fatalf("kvCost(10,8,9) = %v, want 11", got)
+	}
+	// Overlap credit over-subtracts -> adjusted prefill floors at 0.
+	if got := kvCost(4, 10, 3.0, 1.0, 1.0); got != 3.0 {
+		t.Fatalf("kvCost clamp = %v, want 3", got)
+	}
+	// scale weights prefill: 2*(10-2)+1 = 17.
+	if got := kvCost(10, 2, 1.0, 1.0, 2.0); got != 17.0 {
+		t.Fatalf("kvCost scale = %v, want 17", got)
+	}
+}
+
+// TestSelectByCostArgmin verifies deterministic argmin (temperature 0), stable
+// tie-break, and empty handling.
+func TestSelectByCostArgmin(t *testing.T) {
+	eps := []string{"a", "b", "c"}
+	costs := map[string]float64{"a": 18, "b": 10, "c": 11}
+	if got := selectByCost(eps, costs, 0); got != "b" {
+		t.Fatalf("argmin = %q, want b", got)
+	}
+	// Tie -> first in eps order.
+	if got := selectByCost([]string{"a", "b"}, map[string]float64{"a": 5, "b": 5}, 0); got != "a" {
+		t.Fatalf("tie = %q, want a", got)
+	}
+	if got := selectByCost(nil, nil, 0); got != "" {
+		t.Fatalf("empty = %q, want empty", got)
+	}
+}
+
+// TestSelectByCostSoftmax verifies low-cost workers dominate sampling at low
+// temperature.
+func TestSelectByCostSoftmax(t *testing.T) {
+	eps := []string{"a", "b", "c"}
+	costs := map[string]float64{"a": 100, "b": 0, "c": 100}
+	b := 0
+	for i := 0; i < 400; i++ {
+		if selectByCost(eps, costs, 0.5) == "b" {
+			b++
+		}
+	}
+	if b < 360 {
+		t.Fatalf("softmax picked cheapest %d/400, want >360", b)
+	}
+}

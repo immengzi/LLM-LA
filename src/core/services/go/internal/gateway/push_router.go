@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -152,7 +153,7 @@ func (pd *PushDispatcher) refreshLocked(force bool) {
 // pickEndpoint selects an endpoint per RouterMode. For push-leastq it honors
 // PushLeastQMode ("health" queries each sidecar /health; "local" uses logical
 // inflight counters).
-func (pd *PushDispatcher) pickEndpoint() string {
+func (pd *PushDispatcher) pickEndpoint(reqID string) string {
 	switch pd.cfg.RouterMode {
 	case "push-random":
 		pd.mu.Lock()
@@ -170,11 +171,157 @@ func (pd *PushDispatcher) pickEndpoint() string {
 		return pd.pickThroughput()
 	case "push-p2c":
 		return pd.pickP2C()
+	case "push-kv-cost":
+		return pd.pickKVCost(reqID)
 	default:
 		return pd.pickRR()
 	}
 }
 
+// kvCost is the KV-aware routing cost for one worker:
+// cost = prefillLoadScale * max(prefillBlocks - overlapCredit*hits, 0) + load.
+// Lower is better. Mirrors _kv_cost in Python.
+func kvCost(prefillBlocks, hits int, load, overlapCredit, prefillLoadScale float64) float64 {
+	adjusted := float64(prefillBlocks) - overlapCredit*float64(hits)
+	if adjusted < 0 {
+		adjusted = 0
+	}
+	return prefillLoadScale*adjusted + load
+}
+
+// selectByCost picks a worker from a cost map. temperature <= 0 -> deterministic
+// argmin (ties keep the first in eps order); temperature > 0 -> softmax sampling
+// over negated, min-shifted costs. Mirrors _select_by_cost in Python. eps gives
+// a stable iteration order (Go maps are unordered).
+func selectByCost(eps []string, costs map[string]float64, temperature float64) string {
+	if len(eps) == 0 {
+		return ""
+	}
+	if temperature <= 0 {
+		best := eps[0]
+		bestC := costs[best]
+		for _, ep := range eps[1:] {
+			if costs[ep] < bestC {
+				bestC = costs[ep]
+				best = ep
+			}
+		}
+		return best
+	}
+	lo := costs[eps[0]]
+	for _, ep := range eps[1:] {
+		if costs[ep] < lo {
+			lo = costs[ep]
+		}
+	}
+	weights := make([]float64, len(eps))
+	total := 0.0
+	for i, ep := range eps {
+		weights[i] = math.Exp(-(costs[ep] - lo) / temperature)
+		total += weights[i]
+	}
+	if total <= 0 {
+		return eps[0]
+	}
+	r := rand.Float64() * total
+	acc := 0.0
+	for i, ep := range eps {
+		acc += weights[i]
+		if r <= acc {
+			return ep
+		}
+	}
+	return eps[len(eps)-1]
+}
+
+// fetchHealthLoads queries each sidecar /health in parallel for its decode-load
+// proxy (logical/queue_len). Missing/failed probes map to 0.0.
+func (pd *PushDispatcher) fetchHealthLoads(eps []string, urls map[string]string) map[string]float64 {
+	out := make(map[string]float64, len(eps))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, ep := range eps {
+		wg.Add(1)
+		go func(ep string) {
+			defer wg.Done()
+			load := 0.0
+			if url := urls[ep]; url != "" {
+				if resp, err := pd.client.Get(url + "/health"); err == nil {
+					if resp.StatusCode == http.StatusOK {
+						var data map[string]interface{}
+						if json.NewDecoder(resp.Body).Decode(&data) == nil {
+							if v, ok := data["logical"]; ok {
+								load = toFloat(v)
+							} else if v, ok := data["queue_len"]; ok {
+								load = toFloat(v)
+							}
+						}
+					} else {
+						io.Copy(io.Discard, resp.Body)
+					}
+					resp.Body.Close()
+				}
+			}
+			mu.Lock()
+			out[ep] = load
+			mu.Unlock()
+		}(ep)
+	}
+	wg.Wait()
+	return out
+}
+
+// pickKVCost implements KV-aware cost routing (push-kv-cost): it
+// scores each pod by cost = prefill_load_scale * max(prefill_blocks -
+// overlap_credit*cached_prefix, 0) + decode_load and picks the min-cost pod (or
+// softmax-samples when RouterTemperature > 0). Mirrors _pick_endpoint_kv_cost.
+func (pd *PushDispatcher) pickKVCost(reqID string) string {
+	pd.mu.Lock()
+	eps := append([]string{}, pd.endpoints...)
+	urls := make(map[string]string, len(pd.urls))
+	for k, v := range pd.urls {
+		urls[k] = v
+	}
+	inflight := make(map[string]int, len(pd.logicalInflight))
+	for k, v := range pd.logicalInflight {
+		inflight[k] = v
+	}
+	pd.mu.Unlock()
+
+	if len(eps) == 0 {
+		return ""
+	}
+	if len(eps) == 1 {
+		return eps[0]
+	}
+
+	var loads map[string]float64
+	if pd.cfg.PushLeastQMode == "local" {
+		loads = make(map[string]float64, len(eps))
+		for _, ep := range eps {
+			loads[ep] = float64(inflight[ep])
+		}
+	} else {
+		loads = pd.fetchHealthLoads(eps, urls)
+	}
+
+	prefillBlocks := 0
+	if pd.kv != nil && reqID != "" {
+		prefillBlocks = len(pd.kv.getRequestBlocks(reqID))
+	}
+	costs := make(map[string]float64, len(eps))
+	for _, ep := range eps {
+		hits := 0
+		if pd.kv != nil && reqID != "" {
+			hits = pd.kv.prefixLen(ep, reqID)
+		}
+		costs[ep] = kvCost(prefillBlocks, hits, loads[ep], pd.cfg.RouterKVOverlapCredit, pd.cfg.RouterPrefillLoadScale)
+	}
+	return selectByCost(eps, costs, pd.cfg.RouterTemperature)
+}
+
+// epScore pairs an endpoint with a numeric score and whether the probe
+// produced a usable value.
 // chooseLowerLoad is the power-of-two-choices comparator: return the
 // less-loaded of two endpoints. A false ok flag means the load probe failed
 // for that endpoint (treated as +inf so a reachable peer wins); if both fail
@@ -513,7 +660,7 @@ func (pd *PushDispatcher) RouteAndPush(reqID, prompt string, meta map[string]int
 			return fmt.Errorf("No endpoints available for push routing")
 		}
 
-		ep := pd.pickEndpoint()
+		ep := pd.pickEndpoint(reqID)
 		if ep == "" {
 			return fmt.Errorf("Failed to pick endpoint")
 		}

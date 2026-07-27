@@ -81,7 +81,7 @@ The router supports two main ways of distributing work to sidecars:
 
 This is the default and is easy to reason about: workers pull work when ready.
 
-### Push Modes (`"push-rr"`, `"push-random"`, `"push-leastq"`, `"push-throughput"`, `"push-p2c"`)
+### Push Modes (`"push-rr"`, `"push-random"`, `"push-leastq"`, `"push-throughput"`, `"push-p2c"`, `"push-kv-cost"`)
 
 - Router uses Kubernetes discovery to find sidecars.
 - For each request, it picks an endpoint and calls the sidecar’s `/push`.
@@ -101,9 +101,22 @@ This is the default and is easy to reason about: workers pull work when ready.
     the sidecar `/health` `logical` score (or local logical inflight when
     `PUSH_LEASTQ_MODE=local`). Aliases:
     `power-of-two`, `push-power-of-two`, `push-pow2`.
+  - **kv-cost** (`push-kv-cost`) – a KV-aware cost function that
+    trades cached-prefix reuse against decode load in one tunable score:
+    `cost = ROUTER_PREFILL_LOAD_SCALE * max(prefill_blocks - ROUTER_KV_OVERLAP_CREDIT * cached_prefix, 0) + decode_load`,
+    where `cached_prefix` is `prefix_len(pod, req)` and `decode_load` is the pod's
+    logical inflight (local or `/health`). The router picks the min-cost pod, or
+    softmax-samples over costs when `ROUTER_TEMPERATURE > 0` (spreads load).
+    Higher `ROUTER_KV_OVERLAP_CREDIT` favors cache reuse (lower TTFT); it degrades
+    to load-based selection when KV awareness is off. Aliases: `kv-cost`,
+    `push-cost`.
 
 Results still come back via `/result`; from the client’s viewpoint `/enqueue`
 is the same.
+
+Unlike the always-on `prefix` KV tiering (a pull-mode ranking), `push-kv-cost`
+is a push strategy that expresses cache-reuse and decode-load as a single tunable
+cost.
 
 ### Central-Push Mode (`"central-push"`)
 
@@ -397,8 +410,9 @@ not the count cap, was the binding constraint); both stay `0` while disabled.
 Most behavior is controlled via environment variables loaded into
 `RouterConfig`, for example:
 
-- `ROUTER_MODE` – `pull`, `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `central-push`,
+- `ROUTER_MODE` – `pull`, `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `central-push`,
   `external-push`.
+- `ROUTER_KV_OVERLAP_CREDIT` / `ROUTER_PREFILL_LOAD_SCALE` / `ROUTER_TEMPERATURE` – `push-kv-cost` tunables (defaults `1.0` / `1.0` / `0.0`).
 - `ROUTER_CENTRAL_PUSH_CAP` (default 8) – per-pod concurrency ceiling in
   central-push mode; the router dispatches `CAP − in-flight` items per pod. Set
   it to track the sidecar `batchSize + prefetch`.

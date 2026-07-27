@@ -182,7 +182,7 @@ class RouterConfig:
     # --------------------------------------------------------------------
     # Router mode + sidecar port
     # --------------------------------------------------------------------
-    ROUTER_MODE: str = "pull"        # "pull", "push-rr", "push-random", "push-leastq", "push-throughput", "push-p2c", "central-push", "external-push"
+    ROUTER_MODE: str = "pull"        # "pull", "push-rr", "push-random", "push-leastq", "push-throughput", "push-p2c", "push-kv-cost", "central-push", "external-push"
     SIDECAR_PORT: int = 9000         # sidecar FastAPI port
 
     # --------------------------------------------------------------------
@@ -289,6 +289,17 @@ class RouterConfig:
     # Push least-queue behavior
     # --------------------------------------------------------------------
     PUSH_LEASTQ_MODE: str = "health"     # health | local
+
+    # --------------------------------------------------------------------
+    # KV-cost routing (push-kv-cost) — KV-aware cost function.
+    #   cost = PREFILL_LOAD_SCALE * max(prefill_blocks - KV_OVERLAP_CREDIT*hits, 0)
+    #          + decode_load
+    # Higher overlap credit favors cache reuse (lower TTFT); higher temperature
+    # spreads load via softmax sampling over costs (0 = deterministic argmin).
+    # --------------------------------------------------------------------
+    ROUTER_KV_OVERLAP_CREDIT: float = 1.0
+    ROUTER_PREFILL_LOAD_SCALE: float = 1.0
+    ROUTER_TEMPERATURE: float = 0.0
 
     # --------------------------------------------------------------------
     # Push-mode decoupling (ACK fast; dispatch in background)
@@ -670,6 +681,9 @@ def get_config() -> RouterConfig:
 
     # Push leastq
     cfg.PUSH_LEASTQ_MODE = os.getenv("PUSH_LEASTQ_MODE", cfg.PUSH_LEASTQ_MODE)
+    cfg.ROUTER_KV_OVERLAP_CREDIT = float(os.getenv("ROUTER_KV_OVERLAP_CREDIT", cfg.ROUTER_KV_OVERLAP_CREDIT))
+    cfg.ROUTER_PREFILL_LOAD_SCALE = float(os.getenv("ROUTER_PREFILL_LOAD_SCALE", cfg.ROUTER_PREFILL_LOAD_SCALE))
+    cfg.ROUTER_TEMPERATURE = float(os.getenv("ROUTER_TEMPERATURE", cfg.ROUTER_TEMPERATURE))
 
     # Push-mode decoupling knobs
     if "PUSH_DECOUPLE_DISPATCH" in os.environ:
@@ -721,7 +735,10 @@ def get_config() -> RouterConfig:
     if rm in ("push-power-of-two", "push-pow2", "push_p2c", "power-of-two", "push-power-of-two-choices"):
         rm = "push-p2c"
 
-    if rm not in ("pull", "push-rr", "push-random", "push-leastq", "push-throughput", "push-p2c", "central-push", "external-push"):
+    if rm in ("push-kv-cost", "kv-cost", "push-cost", "push_kv_cost"):
+        rm = "push-kv-cost"
+
+    if rm not in ("pull", "push-rr", "push-random", "push-leastq", "push-throughput", "push-p2c", "push-kv-cost", "central-push", "external-push"):
         rm = "pull"
     cfg.ROUTER_MODE = rm
 
@@ -735,6 +752,11 @@ def get_config() -> RouterConfig:
             f"for ROUTER_MODE=central-push (got {rm!r}); ignoring (sidecar stays on)."
         )
         cfg.ROUTER_SIDECAR_ENABLED = True
+
+    # KV-cost knobs: clamp to sane ranges.
+    cfg.ROUTER_KV_OVERLAP_CREDIT = max(0.0, float(cfg.ROUTER_KV_OVERLAP_CREDIT))
+    cfg.ROUTER_PREFILL_LOAD_SCALE = max(0.0, float(cfg.ROUTER_PREFILL_LOAD_SCALE))
+    cfg.ROUTER_TEMPERATURE = max(0.0, float(cfg.ROUTER_TEMPERATURE))
 
     # PUSH_LEASTQ_MODE normalization + allowlist
     lqm = _norm_mode(cfg.PUSH_LEASTQ_MODE)
