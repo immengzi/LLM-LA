@@ -20,7 +20,7 @@ The same routing behaviour is expressed under three names depending on the layer
 | Client `helm:` key | Chart value (`router.*`) | Router env var | Values |
 |--------------------|--------------------------|----------------|--------|
 | `router_mode` (or sweep method) | `router.mode` | `ROUTER_MODE` | `pull`, `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`, `central-push`, `external-push` |
-| `values: { sidecar.enabled: false }` | `sidecar.enabled` | `ROUTER_SIDECAR_ENABLED` | bool. With `router.mode=central-push` → sidecar-less direct-to-vLLM delivery ([details](../architecture/router.md#sidecar-less-central-push-router_sidecar_enabledfalse)); see the `benchmark-bz-central-push-nosidecar-*` configs |
+| `values: { sidecar.enabled: false }` | `sidecar.enabled` | `ROUTER_SIDECAR_ENABLED` | bool. With `router.mode=push-*` or `central-push` → sidecar-less direct-to-vLLM delivery ([details](../architecture/router.md#sidecar-less-push--central-push-router_sidecar_enabledfalse)); see the `benchmark-bz-central-push-nosidecar-*` configs |
 | `router_kv_aware` | `router.kvAware` | `KV_AWARE` | bool |
 | `router_len_aware` | `router.lenAware` | `LEN_AWARE` | bool |
 | `router_len_policy` | `router.lenPolicy` | `LEN_POLICY` | `short_first`, `long_first` |

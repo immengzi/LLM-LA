@@ -140,31 +140,47 @@ func TestSidecarEnabledDefaultAndKvEvents(t *testing.T) {
 	}
 }
 
-// TestSidecarDisabledOnlyForCentralPush: the disable flag takes effect for
-// central-push, but is ignored (kept on) for any other mode so existing
-// deployments stay byte-identical.
-func TestSidecarDisabledOnlyForCentralPush(t *testing.T) {
-	t.Run("central-push", func(t *testing.T) {
-		t.Setenv("ROUTER_MODE", "central-push")
-		t.Setenv("ROUTER_SIDECAR_ENABLED", "false")
-		cfg := LoadConfig()
-		if cfg.SidecarEnabled {
-			t.Error("SidecarEnabled should stay false for central-push")
-		}
-		if !cfg.IsCentralPushDirect() {
-			t.Error("IsCentralPushDirect() should be true")
-		}
-		if cfg.UsesPushDelivery() {
-			t.Error("UsesPushDelivery() should be false (direct delivery)")
-		}
-		if !cfg.UsesDirectDelivery() {
-			t.Error("UsesDirectDelivery() should be true")
-		}
-		if !cfg.UsesCentralQueue() {
-			t.Error("UsesCentralQueue() should stay true")
-		}
-	})
-	for _, mode := range []string{"pull", "push-rr", "external-push"} {
+// TestSidecarDisabledForPushAndCentralPush: the disable flag takes effect for
+// push-* and central-push, but is ignored (kept on) for pull / external-push.
+func TestSidecarDisabledForPushAndCentralPush(t *testing.T) {
+	pushModes := []string{
+		"central-push",
+		"push-rr", "push-random", "push-leastq",
+		"push-throughput", "push-p2c", "push-kv-cost",
+		"push-least-kv", "push-least-latency", "push-least-busy",
+	}
+	for _, mode := range pushModes {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("ROUTER_MODE", mode)
+			t.Setenv("ROUTER_SIDECAR_ENABLED", "false")
+			cfg := LoadConfig()
+			if cfg.SidecarEnabled {
+				t.Errorf("SidecarEnabled should stay false for mode %q", mode)
+			}
+			if mode == "central-push" {
+				if !cfg.IsCentralPushDirect() {
+					t.Error("IsCentralPushDirect() should be true")
+				}
+				if cfg.UsesPushDelivery() {
+					t.Error("UsesPushDelivery() should be false (central-queue direct)")
+				}
+				if !cfg.UsesDirectDelivery() {
+					t.Error("UsesDirectDelivery() should be true")
+				}
+			} else {
+				if !cfg.IsPushDirect() {
+					t.Errorf("IsPushDirect() should be true for mode %q", mode)
+				}
+				if !cfg.UsesPushDelivery() {
+					t.Errorf("UsesPushDelivery() should be true for push-* direct (PushDispatcher)")
+				}
+				if cfg.UsesDirectDelivery() {
+					t.Errorf("UsesDirectDelivery() should be false for push-* (not ExternalPushDispatcher)")
+				}
+			}
+		})
+	}
+	for _, mode := range []string{"pull", "external-push"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("ROUTER_MODE", mode)
 			t.Setenv("ROUTER_SIDECAR_ENABLED", "false")
@@ -172,8 +188,8 @@ func TestSidecarDisabledOnlyForCentralPush(t *testing.T) {
 			if !cfg.SidecarEnabled {
 				t.Errorf("SidecarEnabled should be forced true for mode %q", mode)
 			}
-			if cfg.IsCentralPushDirect() {
-				t.Errorf("IsCentralPushDirect() should be false for mode %q", mode)
+			if cfg.IsCentralPushDirect() || cfg.IsPushDirect() {
+				t.Errorf("direct predicates should be false for mode %q", mode)
 			}
 		})
 	}

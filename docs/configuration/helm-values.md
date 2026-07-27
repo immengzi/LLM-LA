@@ -41,7 +41,7 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `enabled` | `true` | `false` drops the per-pod sidecar container. Used for BooM direct mode **and** sidecar-less central-push (`router.mode=central-push`): the chart sources `ROUTER_SIDECAR_ENABLED` from this, so one switch flips central-push to direct-to-vLLM delivery + a router-hosted KV-events subscriber ([details](../architecture/router.md#sidecar-less-central-push-router_sidecar_enabledfalse)) |
+| `enabled` | `true` | `false` drops the per-pod sidecar container. Used for BooM direct mode **and** sidecar-less push-*/central-push: the chart sources `ROUTER_SIDECAR_ENABLED` from this, so one switch flips those modes to direct-to-vLLM delivery + a router-hosted KV-events subscriber ([details](../architecture/router.md#sidecar-less-push--central-push-router_sidecar_enabledfalse)) |
 | `logLevel` | `info` | `debug` \| `info` \| `warning` \| `error` |
 | `prefetch` | `0` | Extra items buffered beyond `BATCH_SIZE` (pull cap = `BATCH_SIZE + PREFETCH`) |
 | `forceIgnoreEos` | `false` | Force `ignore_eos=true` (replay mode: generate exactly `max_tokens`) |
@@ -51,7 +51,7 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `mode` | `pull` | `pull` \| `push-rr` \| `push-random` \| `push-leastq` \| `push-throughput` \| `push-p2c` \| `push-kv-cost` \| `push-least-kv` \| `push-least-latency` \| `push-least-busy` \| `central-push` (admit like pull, dispatch centrally by capacity) \| `external-push` (static external vLLM, no k8s/sidecar); [details](../architecture/router.md). For sidecar-less central-push set `sidecar.enabled=false` |
+| `mode` | `pull` | `pull` \| `push-rr` \| `push-random` \| `push-leastq` \| `push-throughput` \| `push-p2c` \| `push-kv-cost` \| `push-least-kv` \| `push-least-latency` \| `push-least-busy` \| `central-push` (admit like pull, dispatch centrally by capacity) \| `external-push` (static external vLLM, no k8s/sidecar); [details](../architecture/router.md). For sidecar-less push-*/central-push set `sidecar.enabled=false` |
 | `apiKey` | `""` | Auth for `/v1/chat/completions` (empty = no auth) |
 | `strategy` | `""` | Unified selector: `none` \| `prefix` \| `affinity` \| `both`. When set, overrides `kvAware`/`affinityEnabled` ([details](../architecture/key-affinity.md)) |
 | `hashSource` | `inline` | KV-block hash source: `inline` (in-process/in-container `prefix_hash.py`) \| `external` (legacy `vllm-cpu-hash` pod, auto-deployed in this mode) ([details](../architecture/prefix-hash.md)) |
@@ -78,7 +78,7 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 | `kvCost.overlapCredit` | `1.0` | `push-kv-cost` only: credit for cached-prefix blocks in the cost function (`ROUTER_KV_OVERLAP_CREDIT`) |
 | `kvCost.prefillLoadScale` | `1.0` | `push-kv-cost` only: weight on residual prefill work (`ROUTER_PREFILL_LOAD_SCALE`) |
 | `kvCost.temperature` | `0.0` | `push-kv-cost` only: `0` = deterministic argmin; `>0` = softmax sample over costs (`ROUTER_TEMPERATURE`) |
-| `vllmKvEventsPort` | `5557` | Sidecar-less central-push only (`sidecar.enabled=false`, prefix/`both`): vLLM KV-events ZMQ port the router subscribes to per pod (`tcp://{pod_ip}:{port}`); must match the engine's `--kv-events-config` |
+| `vllmKvEventsPort` | `5557` | Sidecar-less push-*/central-push (`sidecar.enabled=false`, prefix/`both`): vLLM KV-events ZMQ port the router subscribes to per pod (`tcp://{pod_ip}:{port}`); must match the engine's `--kv-events-config` |
 | `vllmKvEventsTopic` | `"kv@"` | Sidecar-less central-push only: ZMQ topic prefix the router subscribes to (vLLM publishes `kv@{POD_NAME}@{model}`; `kv@` matches all) |
 | `outputLenPredictor` | `simple` | Output-length predictor |
 | `batchSizeEstimate` / `fixedBatchEstimate` | `fixed` / `8` | Batch-size estimation for SLO |
@@ -365,7 +365,7 @@ NodePorts marked with `+offset` add `portOffset`; LiteLLM/BooM NodePorts are fix
 | Sweep method | Helm value |
 |--------------|------------|
 | `pull` / `push-rr` / `push-random` / `push-leastq` / `push-throughput` / `push-p2c` / `push-kv-cost` / `push-least-kv` / `push-least-latency` / `push-least-busy` / `central-push` / `external-push` | `router.mode` |
-| sidecar-less `central-push` | `router.mode=central-push` + `sidecar.enabled=false` |
+| sidecar-less `push-*` / `central-push` | `router.mode=push-*` or `central-push` + `sidecar.enabled=false` |
 | `round_robin` / `key_affinity` (BooM direct) | `boom.directRoutingStrategy` |
 | AIBrix strategies | `aibrix.routing_strategy` (client-side, not Helm) |
 
