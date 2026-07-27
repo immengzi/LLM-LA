@@ -18,8 +18,18 @@
 #    1.26 and run in CI (.github/workflows/ci.yml), not locally.
 #  * The full Python unit suite runs on `pre-push` (fast, ~7s), keeping commits
 #    quick while gating pushes.
+#  * Lint/format hooks run at BOTH `pre-commit` and `pre-push` (see
+#    `default_stages`), so the exact CI lint (ruff correctness) also gates every
+#    push locally -- catching issues before they reach the `core-ci` PR check,
+#    even if a commit was made through a client that skipped the commit hook.
 
 default_install_hook_types: [pre-commit, pre-push]
+
+# Run every hook at commit AND push time (the pre-push-only test hook overrides
+# this with its own `stages`). This is what makes `git push` re-run the same
+# lint as CI. Requires the hooks to be installed once per clone:
+#   make -C src/core hooks     # or: pre-commit install --install-hooks
+default_stages: [pre-commit, pre-push]
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

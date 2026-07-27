@@ -2274,6 +2274,35 @@ def _build_sse_chunks_with_tool_calls(
     return "".join(lines)
 
 
+def _upstream_error_response(result: Any) -> Optional[Response]:
+    """Relay a passthrough upstream (vLLM) error to the caller verbatim.
+
+    When the sidecar flags a non-2xx upstream response via
+    ``result["upstream_error"]`` (currently 4xx only), return vLLM's original
+    status code + body + Content-Type so the gateway sees the real error
+    instead of a generic 200 wrapper. Only vLLM's own body is forwarded; no
+    internal upstream URLs/headers/IPs are exposed. Returns None when the
+    result is a normal (success or non-passthrough) result.
+    """
+    if not isinstance(result, dict):
+        return None
+    ue = result.get("upstream_error")
+    if not isinstance(ue, dict) or "status" not in ue:
+        return None
+    try:
+        status_code = int(ue["status"])
+    except (TypeError, ValueError):
+        return None
+    body = ue.get("body")
+    if not isinstance(body, str):
+        try:
+            body = json.dumps(body)
+        except Exception:
+            body = str(body)
+    media_type = ue.get("content_type") or "application/json"
+    return Response(content=body, status_code=status_code, media_type=str(media_type))
+
+
 @app.post("/v1/chat/completions")
 async def openai_chat_completions(req: _ChatCompletionRequest, request: Request):
     """
@@ -2357,12 +2386,41 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
         chunk_id = f"chatcmpl-{rid}"
         created = int(t_start)
 
-        async def _real_stream_generator():
+        # Register the full-result fallback FIRST so a completed result
+        # (including a non-2xx upstream error from a non-streaming sidecar)
+        # is delivered onto chunk_q even when no SSE chunks are produced.
+        async def _wait_and_push_fallback():
+            """If full result arrives (non-streaming sidecar), push it to chunk_q."""
+            result = await router_state.wait_for_result_async(rid, _cfg.RESULT_TIMEOUT_S)
+            if result is not None:
+                if not isinstance(result, dict):
+                    result = {"output": result}
+                router_state.push_chunk(rid, {"__full_result__": result})
+
+        asyncio.ensure_future(_wait_and_push_fallback())
+
+        # Peek the first item before committing to an SSE response: if vLLM
+        # returned a 4xx before generation started, relay its status + body
+        # verbatim instead of opening a 200 event-stream (the HTTP status can no
+        # longer change once the stream has started).
+        try:
+            first_item = await asyncio.wait_for(
+                chunk_q.get(), timeout=_cfg.RESULT_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            first_item = None
+
+        if first_item is not None and isinstance(first_item.get("__full_result__"), dict):
+            _err = _upstream_error_response(first_item["__full_result__"])
+            if _err is not None:
+                router_state.remove_chunk_queue(rid)
+                return _err
+
+        async def _real_stream_generator(preloaded_first):
             """
             Yield real SSE from /result_chunk, with fallback to fake-SSE
             if the full result arrives before any chunks.
             """
-            first_chunk_timeout = _cfg.RESULT_TIMEOUT_S
             t_first_chunk: Optional[float] = None
 
             def _emit_latency_metrics(u: Dict[str, Any], finish_reason: str = "stop") -> Dict[str, Any]:
@@ -2396,9 +2454,8 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
 
             stream_endpoint_id: Optional[str] = None
             try:
-                try:
-                    first = await asyncio.wait_for(chunk_q.get(), timeout=first_chunk_timeout)
-                except asyncio.TimeoutError:
+                first = preloaded_first
+                if first is None:
                     yield "data: [DONE]\n\n"
                     return
 
@@ -2524,19 +2581,8 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
             finally:
                 router_state.remove_chunk_queue(rid)
 
-        # Also register a result listener that pushes to chunk_q as fallback
-        async def _wait_and_push_fallback():
-            """If full result arrives (non-streaming sidecar), push it to chunk_q."""
-            result = await router_state.wait_for_result_async(rid, _cfg.RESULT_TIMEOUT_S)
-            if result is not None:
-                if not isinstance(result, dict):
-                    result = {"output": result}
-                router_state.push_chunk(rid, {"__full_result__": result})
-
-        asyncio.ensure_future(_wait_and_push_fallback())
-
         return StreamingResponse(
-            _real_stream_generator(),
+            _real_stream_generator(first_item),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -2553,6 +2599,12 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
         chat_messages=chat_messages,
         chat_tools=chat_tools,
     )
+
+    # Passthrough upstream 4xx (e.g. context-length overflow): relay vLLM's
+    # real status + body instead of wrapping it in a 200 chat.completion.
+    _err = _upstream_error_response(result)
+    if _err is not None:
+        return _err
 
     t_done = time.time()
     e2e_s = t_done - t_start
