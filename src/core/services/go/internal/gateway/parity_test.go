@@ -370,10 +370,23 @@ func TestCentralPushModePredicates(t *testing.T) {
 		t.Fatalf("pull predicates wrong: queue=%v delivery=%v", pull.UsesCentralQueue(), pull.UsesPushDelivery())
 	}
 	// push-rr: push delivery, no central queue.
-	push := &Config{RouterMode: "push-rr"}
+	push := &Config{RouterMode: "push-rr", SidecarEnabled: true}
 	push.normalize()
 	if push.UsesCentralQueue() || !push.UsesPushDelivery() {
 		t.Fatalf("push-rr predicates wrong: queue=%v delivery=%v", push.UsesCentralQueue(), push.UsesPushDelivery())
+	}
+	if push.IsPushDirect() {
+		t.Fatalf("sidecar-backed push-rr must not report IsPushDirect")
+	}
+
+	// Sidecar-less push-rr: still UsesPushDelivery (PushDispatcher), IsPushDirect.
+	pushDirect := &Config{RouterMode: "push-rr", SidecarEnabled: false}
+	pushDirect.normalize()
+	if !pushDirect.IsPushDirect() || !pushDirect.UsesPushDelivery() {
+		t.Fatalf("sidecar-less push-rr predicates wrong: direct=%v push=%v", pushDirect.IsPushDirect(), pushDirect.UsesPushDelivery())
+	}
+	if pushDirect.UsesDirectDelivery() || pushDirect.UsesCentralQueue() {
+		t.Fatalf("sidecar-less push-rr must not use ExternalPushDispatcher / central queue")
 	}
 
 	// Cap/interval sanitation.

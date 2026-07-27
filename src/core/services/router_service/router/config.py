@@ -228,21 +228,23 @@ class RouterConfig:
     CENTRAL_PUSH_INTERVAL_S: float = 0.05
 
     # --------------------------------------------------------------------
-    # SIDECAR-OPTIONAL CENTRAL-PUSH (direct-to-vLLM delivery knob)
+    # SIDECAR-OPTIONAL PUSH / CENTRAL-PUSH (direct-to-vLLM delivery knob)
     # --------------------------------------------------------------------
     # Default True = today's behavior (deliver via the per-pod sidecar /push).
-    # When set False AND ROUTER_MODE=central-push, the router keeps k8s pod
-    # discovery + the central queue (KV-affinity/fairness/SLO all still apply),
-    # but delivers each request DIRECTLY to the pod's vLLM OpenAI endpoint (no
-    # sidecar) and hosts the KV-cache-events ZMQ->Redis subscriber itself so
-    # prefix/both routing keeps working. The flag is a no-op for every other
-    # mode (pull/push-*/external-push are unaffected). Fully backward compatible.
+    # When set False AND ROUTER_MODE is push-* or central-push, the router keeps
+    # k8s pod discovery (and for central-push the central queue — KV-affinity /
+    # fairness / SLO all still apply), but delivers each request DIRECTLY to the
+    # pod's vLLM OpenAI endpoint (no sidecar) and hosts the KV-cache-events
+    # ZMQ->Redis subscriber itself so prefix/both routing keeps working.
+    # Ignored for pull (sidecars must pull) and external-push (already direct).
+    # Fully backward compatible.
     ROUTER_SIDECAR_ENABLED: bool = True
-    # vLLM KV-cache-events ZMQ publisher, per pod, used ONLY by the sidecar-less
-    # central-push path (the router subscribes at tcp://{pod_ip}:{port}). Must
-    # match the vLLM engine's kv-events publish port (sidecar uses VLLM_SUB_PORT
-    # 5557 in-pod). vLLM must bind this on a router-reachable address (not just
-    # 127.0.0.1) for prefix routing; otherwise routing degrades to affinity-only.
+    # vLLM KV-cache-events ZMQ publisher, per pod, used by any sidecar-less
+    # push-*/central-push path (the router subscribes at tcp://{pod_ip}:{port}).
+    # Must match the vLLM engine's kv-events publish port (sidecar uses
+    # VLLM_SUB_PORT 5557 in-pod). vLLM must bind this on a router-reachable
+    # address (not just 127.0.0.1) for prefix routing; otherwise routing
+    # degrades to affinity-only.
     VLLM_KV_EVENTS_PORT: int = 5557
     VLLM_KV_EVENTS_TOPIC: str = "kv@"
 
@@ -751,14 +753,15 @@ def get_config() -> RouterConfig:
         rm = "pull"
     cfg.ROUTER_MODE = rm
 
-    # ROUTER_SIDECAR_ENABLED only takes effect for central-push (the only mode
-    # with a sidecar-less direct-delivery path). For any other mode a False
-    # value is a misconfiguration: ignore it (keep sidecar semantics) and warn,
-    # so existing pull/push-*/external-push deployments stay byte-identical.
-    if not cfg.ROUTER_SIDECAR_ENABLED and rm != "central-push":
+    # ROUTER_SIDECAR_ENABLED takes effect for push-* and central-push (modes
+    # with a router-driven delivery path that can go direct-to-vLLM). For pull
+    # (sidecars must pull) and external-push (already direct) a False value is
+    # a misconfiguration: ignore it (keep sidecar semantics) and warn.
+    _sidecar_less_ok = rm.startswith("push-") or rm == "central-push"
+    if not cfg.ROUTER_SIDECAR_ENABLED and not _sidecar_less_ok:
         print(
             f"[config] WARNING: ROUTER_SIDECAR_ENABLED=false is only supported "
-            f"for ROUTER_MODE=central-push (got {rm!r}); ignoring (sidecar stays on)."
+            f"for push-* and central-push (got {rm!r}); ignoring (sidecar stays on)."
         )
         cfg.ROUTER_SIDECAR_ENABLED = True
 
