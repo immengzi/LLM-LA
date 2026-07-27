@@ -75,7 +75,7 @@ sidecar:
   streamingMode: false
 
 router:
-  # pull | push-rr | push-random | push-leastq | push-throughput | push-p2c | central-push | external-push
+  # pull | push-rr | push-random | push-leastq | push-throughput | push-p2c | push-kv-cost | central-push | external-push
   #
   # central-push can run WITHOUT the per-pod sidecar: set sidecar.enabled=false
   # and the router keeps pod discovery + the central queue (KV-affinity /
@@ -86,6 +86,16 @@ router:
   # (vllm prompt+generation token counters scraped from each pod's vLLM /metrics;
   # VLLM_METRICS_PORT default 8200, cached PUSH_METRIC_TTL_S default 1s).
   mode: pull
+
+  # push-kv-cost tunables (KV-aware cost function). Only used
+  # when mode: push-kv-cost. cost = prefillLoadScale * max(prefill_blocks -
+  # overlapCredit*cached_prefix, 0) + decode_load; pick min (or softmax-sample
+  # when temperature > 0). Higher overlapCredit favors cache reuse (lower TTFT);
+  # higher temperature spreads load.
+  kvCost:
+    overlapCredit: 1.0
+    prefillLoadScale: 1.0
+    temperature: 0.0
 
   # API key for /v1/chat/completions (empty = no auth)
   apiKey: ""
