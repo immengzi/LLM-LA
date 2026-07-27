@@ -77,6 +77,22 @@ def _total_tokens_from_sums(sums: Dict[str, Optional[float]]) -> Optional[float]
     return (p or 0.0) + (g or 0.0)
 
 
+def _pick_lower_load(a: str, sa: Optional[float], b: str, sb: Optional[float]) -> str:
+    """Power-of-two-choices comparator: return the less-loaded of two endpoints.
+
+    A ``None`` score means the load probe failed for that endpoint; it is
+    treated as +inf so a reachable peer wins. If both fail, the first sampled
+    endpoint is returned (a random pick).
+    """
+    if sa is None and sb is None:
+        return a
+    if sa is None:
+        return b
+    if sb is None:
+        return a
+    return a if sa <= sb else b
+
+
 def _log_req(msg: str, *, level: str = "summary") -> None:
     """
     Centralized logging for push-routing decisions.
@@ -335,6 +351,49 @@ class PushRouter:
         _log_req(f"Throughput pick → {best} (tokens={scores.get(best)})", level="full")
         return best
 
+    async def _health_load(self, url: Optional[str]) -> Optional[int]:
+        """Fetch a single sidecar's load score (logical/queue_len) from /health."""
+        if not url:
+            return None
+        try:
+            r = await self._health_client.get(f"{url}/health")
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            return int(data.get("logical", data.get("queue_len", 0)))
+        except Exception:
+            return None
+
+    async def _pick_endpoint_p2c(self) -> Optional[str]:
+        """Power-of-two-choices: sample two pods, route to the less loaded one.
+
+        Cheaper than full least-queue (probes only 2 pods, not the fleet) while
+        avoiding the worst-case pile-ups of pure random. Load comes from local
+        logical inflight when PUSH_LEASTQ_MODE=local, else each candidate's
+        /health.
+        """
+        with self._lock:
+            eps = list(self._eps)
+            urls = dict(self._urls)
+            inflight = dict(self._logical_inflight)
+
+        if not eps:
+            return None
+        if len(eps) == 1:
+            return eps[0]
+
+        a, b = random.sample(eps, 2)
+        if self._leastq_mode == "local":
+            ep = _pick_lower_load(a, inflight.get(a, 0), b, inflight.get(b, 0))
+        else:
+            sa, sb = await asyncio.gather(
+                self._health_load(urls.get(a)), self._health_load(urls.get(b))
+            )
+            ep = _pick_lower_load(a, sa, b, sb)
+
+        _log_req(f"P2C pick → {ep} (candidates={a},{b})", level="full")
+        return ep
+
     async def _pick_endpoint(self) -> Optional[str]:
         if self.mode == "push-rr":
             return self._pick_endpoint_rr()
@@ -344,6 +403,8 @@ class PushRouter:
             return await self._pick_endpoint_leastq()
         if self.mode == "push-throughput":
             return await self._pick_endpoint_throughput()
+        if self.mode == "push-p2c":
+            return await self._pick_endpoint_p2c()
         return self._pick_endpoint_rr()
 
     # ---------------------------------------------------------

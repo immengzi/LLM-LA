@@ -81,7 +81,7 @@ The router supports two main ways of distributing work to sidecars:
 
 This is the default and is easy to reason about: workers pull work when ready.
 
-### Push Modes (`"push-rr"`, `"push-random"`, `"push-leastq"`, `"push-throughput"`)
+### Push Modes (`"push-rr"`, `"push-random"`, `"push-leastq"`, `"push-throughput"`, `"push-p2c"`)
 
 - Router uses Kubernetes discovery to find sidecars.
 - For each request, it picks an endpoint and calls the sidecar’s `/push`.
@@ -95,6 +95,12 @@ This is the default and is easy to reason about: workers pull work when ready.
     cached `PUSH_METRIC_TTL_S` default 1s), favoring underloaded pods. Falls back
     to round-robin if the counters are absent.
     Aliases: `throughput`, `push-least-tokens`.
+  - **power-of-two-choices** (`push-p2c`) – sample two random endpoints and route
+    to the less loaded one. A cheap approximation of least-queue that probes only
+    two pods (not the whole fleet) yet avoids the pile-ups of pure random. Load is
+    the sidecar `/health` `logical` score (or local logical inflight when
+    `PUSH_LEASTQ_MODE=local`). Aliases:
+    `power-of-two`, `push-power-of-two`, `push-pow2`.
 
 Results still come back via `/result`; from the client’s viewpoint `/enqueue`
 is the same.
@@ -391,7 +397,7 @@ not the count cap, was the binding constraint); both stay `0` while disabled.
 Most behavior is controlled via environment variables loaded into
 `RouterConfig`, for example:
 
-- `ROUTER_MODE` – `pull`, `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `central-push`,
+- `ROUTER_MODE` – `pull`, `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `central-push`,
   `external-push`.
 - `ROUTER_CENTRAL_PUSH_CAP` (default 8) – per-pod concurrency ceiling in
   central-push mode; the router dispatches `CAP − in-flight` items per pod. Set
