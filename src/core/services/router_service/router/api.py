@@ -682,11 +682,14 @@ async def _maybe_register_kv_blocks(
             block_hashes = await _compute_block_hashes_external(
                 prompt=prompt, messages=messages
             )
+            # External hashing yields only full-block hashes; approximate ISL at
+            # block granularity (tail partial block dropped, < KV_BLOCK_SIZE).
+            _isl_tokens = len(block_hashes) * int(_cfg.KV_BLOCK_SIZE)
             _hash_src = "external"
         else:
             from . import prefix_hash as _ph
 
-            block_hashes = _ph.compute_request_block_hashes_int(
+            block_hashes, _isl_tokens = _ph.compute_request_block_hashes_with_len(
                 messages=messages,
                 prompt=prompt if not messages else None,
                 tools=tools,
@@ -702,6 +705,12 @@ async def _maybe_register_kv_blocks(
         )
 
         register_request_blocks(req_id, block_hashes)
+
+        # Record the exact input token length (ISL) on meta so token/KV-block
+        # budgeted pull sizing and per-endpoint token-load metrics have an exact
+        # signal (falls back to block-granular estimate for the external path).
+        if _isl_tokens > 0:
+            m["__isl_tokens__"] = int(_isl_tokens)
 
         # Targeted, fresh ownership prefetch: HGETALL exactly this request's
         # block hashes so prefix_len() is exact and eviction-aware. Runs when KV
@@ -723,6 +732,7 @@ async def _maybe_register_kv_blocks(
         if getattr(_cfg, "TRACE_ENABLED", False):
             tr = dict(m.get("__trace__") or {})
             tr["router_block_hashes"] = block_hashes  # ALWAYS set (possibly [])
+            tr["isl_tokens"] = int(_isl_tokens)
             tr.pop("router_kv_hash_error", None)
             m["__trace__"] = tr
 
@@ -1844,6 +1854,7 @@ async def pull(req: PullRequest):
         endpoint=req.endpoint,
         want=req.want,
         model=model,
+        want_prefill_tokens=int(getattr(req, "want_prefill_tokens", 0) or 0),
     )
 
     if items:

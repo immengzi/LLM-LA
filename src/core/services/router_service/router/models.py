@@ -49,6 +49,10 @@ class PullRequest(BaseModel):
     # Optional GPU KV fill fraction [0,1] reported by the sidecar (soft divert).
     # Omitted / null => router treats as unknown (no divert for missing samples).
     kv_usage: Optional[float] = None
+    # Optional per-pull uncached-prefill token budget (P2). 0 / null => router
+    # falls back to its own PREFILL_TOKEN_BUDGET; budget filling only runs when
+    # PULL_BUDGET_ENABLED. Backward compatible: old sidecars simply omit it.
+    want_prefill_tokens: int = 0
 
 
 class JobItem(BaseModel):

@@ -298,3 +298,192 @@ def test_kv_soft_divert_composes_with_fair_pull(cfg):
     # Fair throttle alone would grant floor=1; soft divert then trims to 0.
     items = rs.pull_for_endpoint("epA", 5)
     assert len(items) == 0
+
+
+# ---------------------------------------------------------------------------
+# P2: prefill-token budgeted pull (PULL_BUDGET_ENABLED)
+# ---------------------------------------------------------------------------
+
+
+def test_budget_disabled_is_count_slice(cfg, monkeypatch):
+    monkeypatch.setattr(rs_mod._cfg, "PULL_BUDGET_ENABLED", False)
+    rs = RouterState()
+    _inject(rs, [
+        ("r1", "a", {"__isl_tokens__": 100000}),
+        ("r2", "b", {"__isl_tokens__": 100000}),
+    ])
+    # Tokens are ignored when the feature is off -> pure count slice.
+    items = rs.pull_for_endpoint("epA", 2)
+    assert [i.req_id for i in items] == ["r1", "r2"]
+
+
+def test_budget_zero_is_count_only(cfg, monkeypatch):
+    monkeypatch.setattr(rs_mod._cfg, "PULL_BUDGET_ENABLED", True)
+    monkeypatch.setattr(rs_mod._cfg, "PREFILL_TOKEN_BUDGET", 0)
+    rs = RouterState()
+    _inject(rs, [
+        ("r1", "a", {"__isl_tokens__": 9999}),
+        ("r2", "b", {"__isl_tokens__": 9999}),
+    ])
+    # No budget configured -> no-op (count-only), even when enabled.
+    items = rs.pull_for_endpoint("epA", 2)
+    assert len(items) == 2
+
+
+def test_budget_caps_grant_by_tokens(cfg, monkeypatch):
+    monkeypatch.setattr(rs_mod._cfg, "PULL_BUDGET_ENABLED", True)
+    monkeypatch.setattr(rs_mod._cfg, "PREFILL_TOKEN_BUDGET", 1000)
+    rs = RouterState()
+    _inject(rs, [
+        ("r1", "a", {"__isl_tokens__": 400}),
+        ("r2", "b", {"__isl_tokens__": 400}),
+        ("r3", "c", {"__isl_tokens__": 400}),
+    ])
+    # 400+400=800 <= 1000; +400 = 1200 > 1000 -> stop at 2 (budget binds, not count).
+    items = rs.pull_for_endpoint("epA", 3)
+    assert [i.req_id for i in items] == ["r1", "r2"]
+    assert rs.size() == 1
+
+
+def test_budget_always_admits_first_item(cfg, monkeypatch):
+    monkeypatch.setattr(rs_mod._cfg, "PULL_BUDGET_ENABLED", True)
+    monkeypatch.setattr(rs_mod._cfg, "PREFILL_TOKEN_BUDGET", 100)
+    rs = RouterState()
+    _inject(rs, [
+        ("big", "a", {"__isl_tokens__": 50000}),
+        ("small", "b", {"__isl_tokens__": 10}),
+    ])
+    # `big` alone exceeds the whole budget but is still admitted (no deadlock);
+    # `small` would then exceed -> not taken.
+    items = rs.pull_for_endpoint("epA", 2)
+    assert [i.req_id for i in items] == ["big"]
+
+
+def test_budget_sidecar_value_overrides_config(cfg, monkeypatch):
+    monkeypatch.setattr(rs_mod._cfg, "PULL_BUDGET_ENABLED", True)
+    monkeypatch.setattr(rs_mod._cfg, "PREFILL_TOKEN_BUDGET", 100000)
+    rs = RouterState()
+    _inject(rs, [
+        ("r1", "a", {"__isl_tokens__": 400}),
+        ("r2", "b", {"__isl_tokens__": 400}),
+    ])
+    # Sidecar-provided per-pull budget (500) wins over the config default:
+    # 400 (ok), +400 = 800 > 500 -> stop at 1.
+    items = rs.pull_for_endpoint("epA", 2, want_prefill_tokens=500)
+    assert [i.req_id for i in items] == ["r1"]
+
+
+def test_budget_credits_kv_cache_hits(cfg, clean_kv_state, monkeypatch):
+    monkeypatch_kv = clean_kv_state
+    monkeypatch.setattr(rs_mod._cfg, "KV_AWARE", True)
+    monkeypatch.setattr(rs_mod._cfg, "KV_BLOCK_SIZE", 128)
+    monkeypatch.setattr(rs_mod._cfg, "PULL_BUDGET_ENABLED", True)
+    monkeypatch.setattr(rs_mod._cfg, "PREFILL_TOKEN_BUDGET", 1000)
+    rs = RouterState()
+    # Both isl=1000 with 4 cached blocks (512 tok) on epA -> uncached=488 each,
+    # so both fit (976 <= 1000). Without the cache credit each costs 1000 and
+    # only one would fit -- see test_budget_no_credit_when_cold.
+    for rid in ("r1", "r2"):
+        monkeypatch_kv.register_request_blocks(rid, [1, 2, 3, 4])
+        monkeypatch_kv.set_request_owners(
+            rid, {1: {"epA"}, 2: {"epA"}, 3: {"epA"}, 4: {"epA"}}
+        )
+    _inject(rs, [
+        ("r1", "a", {"__isl_tokens__": 1000}),
+        ("r2", "b", {"__isl_tokens__": 1000}),
+    ])
+    items = rs.pull_for_endpoint("epA", 2)
+    assert len(items) == 2
+
+
+def test_budget_no_credit_when_cold(cfg, monkeypatch):
+    monkeypatch.setattr(rs_mod._cfg, "KV_AWARE", True)
+    monkeypatch.setattr(rs_mod._cfg, "KV_BLOCK_SIZE", 128)
+    monkeypatch.setattr(rs_mod._cfg, "PULL_BUDGET_ENABLED", True)
+    monkeypatch.setattr(rs_mod._cfg, "PREFILL_TOKEN_BUDGET", 1000)
+    rs = RouterState()
+    # No cached blocks -> uncached = full isl. 1000 fills the budget; the second
+    # would exceed -> only one granted.
+    _inject(rs, [
+        ("r1", "a", {"__isl_tokens__": 1000}),
+        ("r2", "b", {"__isl_tokens__": 1000}),
+    ])
+    items = rs.pull_for_endpoint("epA", 2)
+    assert len(items) == 1
+
+
+# ---------------------------------------------------------------------------
+# P0: per-endpoint in-flight ISL-token accounting
+# (router_endpoint_inflight_tokens dispatch-accumulate / release-decrement)
+# ---------------------------------------------------------------------------
+
+
+def test_isl_tokens_for_prefers_meta_exact(cfg):
+    rs = RouterState()
+    # The exact router-stamped count wins.
+    assert rs._isl_tokens_for("r1", {"__isl_tokens__": 1234}) == 1234
+    # Absent / junk / no blocks -> 0.
+    assert rs._isl_tokens_for("r1", {}) == 0
+    assert rs._isl_tokens_for("r1", None) == 0
+    assert rs._isl_tokens_for("r1", {"__isl_tokens__": "oops"}) == 0
+
+
+def test_isl_tokens_for_block_fallback(cfg, clean_kv_state, monkeypatch):
+    monkeypatch_kv = clean_kv_state
+    monkeypatch.setattr(rs_mod._cfg, "KV_BLOCK_SIZE", 128)
+    rs = RouterState()
+    monkeypatch_kv.register_request_blocks("r1", [1, 2, 3])
+    # No meta -> block-granular estimate (len(blocks) * KV_BLOCK_SIZE).
+    assert rs._isl_tokens_for("r1", {}) == 3 * 128
+    # Exact meta still wins over the estimate.
+    assert rs._isl_tokens_for("r1", {"__isl_tokens__": 999}) == 999
+
+
+def test_inflight_tokens_accumulate_on_dispatch(cfg):
+    rs = RouterState()
+    _inject(rs, [
+        ("r1", "a", {"__isl_tokens__": 500}),
+        ("r2", "b", {"__isl_tokens__": 300}),
+    ])
+    rs.pull_for_endpoint("epA", 2)
+    assert rs._inflight_tokens_by_endpoint.get("epA", 0) == 800
+
+
+def test_inflight_tokens_released_exactly_and_idempotent(cfg):
+    rs = RouterState()
+    _inject(rs, [
+        ("r1", "a", {"__isl_tokens__": 500}),
+        ("r2", "b", {"__isl_tokens__": 300}),
+    ])
+    rs.pull_for_endpoint("epA", 2)
+    assert rs._inflight_tokens_by_endpoint.get("epA", 0) == 800
+
+    rs.release_inflight("r1")
+    assert rs._inflight_tokens_by_endpoint.get("epA", 0) == 300
+    # Second release must not double-subtract (mirrors the count-path invariant).
+    rs.release_inflight("r1")
+    assert rs._inflight_tokens_by_endpoint.get("epA", 0) == 300
+
+
+def test_inflight_tokens_zero_when_untracked(cfg):
+    # Requests without __isl_tokens__ and no registered blocks contribute 0 to
+    # the token sum; the count path is unaffected.
+    rs = RouterState()
+    _inject(rs, [("r1", "a", {}), ("r2", "b", {})])
+    rs.pull_for_endpoint("epA", 2)
+    assert rs.get_endpoint_inflight("epA") == 2
+    assert rs._inflight_tokens_by_endpoint.get("epA", 0) == 0
+
+
+def test_inflight_tokens_block_estimate_on_dispatch(cfg, clean_kv_state, monkeypatch):
+    # When KV blocks are registered but no exact meta is present, dispatch charges
+    # the block-granular estimate (len(blocks) * KV_BLOCK_SIZE).
+    monkeypatch_kv = clean_kv_state
+    monkeypatch.setattr(rs_mod._cfg, "KV_BLOCK_SIZE", 128)
+    rs = RouterState()
+    monkeypatch_kv.register_request_blocks("r1", [1, 2, 3, 4])  # 4 * 128 = 512
+    _inject(rs, [("r1", "a", {})])
+    rs.pull_for_endpoint("epA", 1)
+    assert rs._inflight_tokens_by_endpoint.get("epA", 0) == 512
+    rs.release_inflight("r1")
+    assert rs._inflight_tokens_by_endpoint.get("epA", 0) == 0

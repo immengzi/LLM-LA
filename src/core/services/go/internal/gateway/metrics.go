@@ -38,6 +38,25 @@ var (
 		Help: "Requests currently in flight (dispatched, not yet completed) per endpoint",
 	}, []string{"endpoint"})
 
+	// Sum of input (ISL) tokens for requests currently in flight per endpoint
+	// (P0). Token-weighted companion to router_endpoint_inflight; surfaces the
+	// count-vs-token load imbalance. Mirrors Python router_endpoint_inflight_tokens.
+	RouterEndpointInflightTokens = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "router_endpoint_inflight_tokens",
+		Help: "Sum of input (ISL) tokens for requests currently in flight per endpoint",
+	}, []string{"endpoint"})
+
+	// P2 prefill-token budgeted pull observability. Only move when
+	// PULL_BUDGET_ENABLED. Mirror Python router_pull_* metrics.
+	RouterPullGrantedPrefillTokens = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "router_pull_granted_prefill_tokens",
+		Help: "Uncached prefill tokens granted in the most recent budgeted /pull per endpoint",
+	}, []string{"endpoint"})
+	RouterPullBudgetBoundTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_pull_budget_bound_total",
+		Help: "Count of /pull grants where the prefill-token budget (not the count cap) was the binding constraint, per endpoint",
+	}, []string{"endpoint"})
+
 	// Pull-mode fairness liveness signals (only updated when STUCK_PULL_SECONDS > 0).
 	RouterEndpointLastPullSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "router_endpoint_last_pull_seconds",
@@ -174,6 +193,9 @@ func RegisterMetrics() {
 		RouterAdmissionRequestsTotal,
 		RouterDispatchRequestsTotal,
 		RouterEndpointInflight,
+		RouterEndpointInflightTokens,
+		RouterPullGrantedPrefillTokens,
+		RouterPullBudgetBoundTotal,
 		RouterEndpointLastPullSeconds,
 		RouterEndpointStuck,
 		RouterAffinityHitsTotal,
@@ -214,6 +236,15 @@ func incAdmission()               { RouterAdmissionRequestsTotal.Inc() }
 func incDispatch(endpoint string) { RouterDispatchRequestsTotal.WithLabelValues(endpoint).Inc() }
 func setEndpointInflight(endpoint string, n int) {
 	RouterEndpointInflight.WithLabelValues(endpoint).Set(float64(n))
+}
+func setEndpointInflightTokens(endpoint string, n int) {
+	RouterEndpointInflightTokens.WithLabelValues(endpoint).Set(float64(n))
+}
+func setPullGrantedPrefillTokens(endpoint string, n int) {
+	RouterPullGrantedPrefillTokens.WithLabelValues(endpoint).Set(float64(n))
+}
+func incPullBudgetBound(endpoint string) {
+	RouterPullBudgetBoundTotal.WithLabelValues(endpoint).Inc()
 }
 func setEndpointLastPullSeconds(endpoint string, seconds float64) {
 	RouterEndpointLastPullSeconds.WithLabelValues(endpoint).Set(seconds)

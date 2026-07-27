@@ -339,6 +339,23 @@ class RouterConfig:
     FIXED_BATCH_SIZE: int = 0               # 0 = no cap
 
     # --------------------------------------------------------------------
+    # PULL-MODE PREFILL-TOKEN BUDGET (P2; default OFF)
+    # --------------------------------------------------------------------
+    # A /pull grant is normally sliced purely by *count* (chosen = ordered[:want]).
+    # Under long-sequence coding traffic one 30k-token request and one 200-token
+    # chat count the same, so a count slice systematically over/under-loads pods.
+    # When PULL_BUDGET_ENABLED, the grant is instead filled greedily (KV/affinity
+    # order preserved) until either the count cap OR an *uncached prefill token*
+    # budget is hit -- whichever binds first. Uncached prefill for a request =
+    # isl_tokens - cached_prefix_tokens (KV hits are free). The first item is
+    # always admitted (never starve a request larger than the whole budget).
+    # PREFILL_TOKEN_BUDGET is the default budget when the sidecar does not send
+    # want_prefill_tokens; 0 => count-only (feature no-ops). Recommended value
+    # ~= vLLM max_num_batched_tokens (e.g. 8192).
+    PULL_BUDGET_ENABLED: bool = False
+    PREFILL_TOKEN_BUDGET: int = 0
+
+    # --------------------------------------------------------------------
     # PULL-MODE FAIRNESS (load-aware grant throttle)
     # --------------------------------------------------------------------
     # When FAIR_PULL is on, each /pull grant is modulated by fleet in-flight
@@ -752,6 +769,14 @@ def get_config() -> RouterConfig:
     cfg.ADMISSION_THROTTLE = os.getenv("ADMISSION_THROTTLE", str(cfg.ADMISSION_THROTTLE)).lower() == "true"
     cfg.FIXED_BATCH_SIZE = int(os.getenv("FIXED_BATCH_SIZE", cfg.FIXED_BATCH_SIZE))
     cfg.FIXED_BATCH_SIZE = max(0, cfg.FIXED_BATCH_SIZE)
+
+    # Pull-mode prefill-token budget (P2)
+    cfg.PULL_BUDGET_ENABLED = (
+        os.getenv("PULL_BUDGET_ENABLED", str(cfg.PULL_BUDGET_ENABLED)).lower() == "true"
+    )
+    cfg.PREFILL_TOKEN_BUDGET = max(
+        0, int(os.getenv("PREFILL_TOKEN_BUDGET", cfg.PREFILL_TOKEN_BUDGET))
+    )
 
     # Pull-mode fairness knobs
     cfg.FAIR_PULL = os.getenv("ROUTER_FAIR_PULL", str(cfg.FAIR_PULL)).lower() == "true"

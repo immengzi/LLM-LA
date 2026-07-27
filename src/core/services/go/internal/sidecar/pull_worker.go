@@ -71,10 +71,58 @@ func (w *RouterPullWorker) currentPullCap() int {
 // Start launches the background poll loop that keeps the local queue warm,
 // mirroring RouterPullWorker._poll_loop.
 func (w *RouterPullWorker) Start() {
+	// KV-memory pull gate: register its gauges only when enabled so the disabled
+	// path's /metrics output is unchanged. Warn if it can never fire because no
+	// kv_usage samples are produced.
+	if w.cfg.KVPullGateEnabled {
+		initKvPullGateMetrics()
+		if !w.cfg.KVUsageReport {
+			log.Println("[sidecar] WARNING: KV_PULL_GATE_ENABLED but KV_USAGE_REPORT is off -> no kv_usage samples, gate stays open (no-op).")
+		}
+	}
 	pullCap := w.currentPullCap()
-	log.Printf("[sidecar] RouterPullWorker ready (endpoint_id=%s, BATCH_SIZE=%d, PREFETCH=%d, pull_cap=%d)",
-		w.endpointID, w.cfg.BatchSize, w.cfg.Prefetch, pullCap)
+	gate := "off"
+	if w.cfg.KVPullGateEnabled {
+		gate = "on"
+	}
+	log.Printf("[sidecar] RouterPullWorker ready (endpoint_id=%s, BATCH_SIZE=%d, PREFETCH=%d, pull_cap=%d, kv_pull_gate=%s)",
+		w.endpointID, w.cfg.BatchSize, w.cfg.Prefetch, pullCap, gate)
 	go w.pollLoop()
+}
+
+// applyKvPullGate shrinks/stops pulling when the local vLLM GPU KV cache fill is
+// high. Returns want unchanged when the gate is disabled or no fresh kv_usage
+// sample exists (fail-open). Otherwise: kv >= HIGH -> 0; kv <= LOW -> want;
+// between -> linear taper toward 0. Only ever reduces want. Mirrors the Python
+// RouterPullWorker._apply_kv_pull_gate.
+func (w *RouterPullWorker) applyKvPullGate(want int) int {
+	if !w.cfg.KVPullGateEnabled {
+		return want
+	}
+	kv, ok := GetCachedKvUsage()
+	if !ok {
+		return want // no sample (e.g. KV_USAGE_REPORT off) -> fail open
+	}
+	hi, lo := w.cfg.KVPullGateHigh, w.cfg.KVPullGateLow
+	var scale float64
+	switch {
+	case kv >= hi:
+		scale = 0.0
+	case kv <= lo:
+		scale = 1.0
+	default:
+		denom := hi - lo
+		if denom < 1e-6 {
+			denom = 1e-6
+		}
+		scale = (hi - kv) / denom
+	}
+	setKvPullGateState(w.endpointID, scale, kv)
+	gated := int(float64(want) * scale)
+	if gated < 0 {
+		gated = 0
+	}
+	return gated
 }
 
 // probeVLLM issues a GET to vLLM /health with a short timeout.
@@ -195,6 +243,12 @@ func (w *RouterPullWorker) doPull() {
 		return
 	}
 	want := pullCap - totalReserved
+	if want <= 0 {
+		return
+	}
+
+	// Pull-side memory guard: shrink/stop when GPU KV cache is near full.
+	want = w.applyKvPullGate(want)
 	if want <= 0 {
 		return
 	}

@@ -23,6 +23,9 @@ from .metrics import (
     set_central_queue_length_by_model,
     inc_dispatch,
     set_endpoint_inflight,
+    set_endpoint_inflight_tokens,
+    set_pull_granted_prefill_tokens,
+    inc_pull_budget_bound,
     set_endpoint_last_pull_seconds,
     set_endpoint_stuck,
     inc_affinity_hit,
@@ -191,6 +194,13 @@ class RouterState:
         # in-flight count and starve central-push (want = CAP - in-flight).
         self._req_endpoint: Dict[str, str] = {}
 
+        # Token-weighted companion to _inflight_by_endpoint: sum of ISL tokens for
+        # requests currently in flight per endpoint, plus the per-request token
+        # count so release can subtract exactly. Observability-only in P0 (feeds
+        # router_endpoint_inflight_tokens); the sizing path may reuse it later.
+        self._inflight_tokens_by_endpoint: Dict[str, int] = {}
+        self._req_isl_tokens: Dict[str, int] = {}
+
         # Per-endpoint last-successful-result wall-clock timestamp. In central-push
         # the sidecar never pulls (so _last_pull_ts is stamped by the dispatcher,
         # not the sidecar), and this becomes the liveness signal: a pod holding
@@ -326,8 +336,89 @@ class RouterState:
         """
         with self._lock:
             ep = self._req_endpoint.pop(str(req_id), None)
+            tok = self._req_isl_tokens.pop(str(req_id), 0)
         if ep:
             self.dec_endpoint_inflight(ep)
+            self._dec_endpoint_tokens(ep, tok)
+
+    def _isl_tokens_for(self, rid: str, meta: Optional[dict]) -> int:
+        """Best-effort ISL token count for a request.
+
+        Prefers the exact ``meta['__isl_tokens__']`` stamped by the router at
+        block registration; falls back to block-granular estimate from the
+        registered block hashes. Returns 0 when nothing is known.
+        """
+        try:
+            v = int((meta or {}).get("__isl_tokens__", 0) or 0)
+        except (TypeError, ValueError):
+            v = 0
+        if v > 0:
+            return v
+        try:
+            blocks = get_request_blocks(rid)
+            if blocks:
+                return len(blocks) * int(getattr(_cfg, "KV_BLOCK_SIZE", 128))
+        except Exception:
+            pass
+        return 0
+
+    def _apply_prefill_token_budget(
+        self,
+        endpoint: str,
+        effective_want: int,
+        ordered: List[Tuple[str, str, float, dict]],
+        kv_enabled: bool,
+        want_prefill_tokens: int = 0,
+    ) -> int:
+        """Shrink ``effective_want`` so the grant fits an uncached-prefill token
+        budget (P2). Returns the number of leading items from ``ordered`` to take.
+
+        No-op (returns ``effective_want``) unless ``PULL_BUDGET_ENABLED`` and a
+        positive budget is resolvable. Ordering is never changed -- items are
+        admitted in the given (KV/affinity/SLO) order until the budget would be
+        exceeded. The first item is always admitted so a request larger than the
+        whole budget can still make progress (no deadlock). Only ever reduces the
+        count, so it composes with the count caps applied earlier.
+        """
+        if not getattr(_cfg, "PULL_BUDGET_ENABLED", False):
+            return effective_want
+        if effective_want <= 0:
+            return effective_want
+        budget = int(want_prefill_tokens or 0)
+        if budget <= 0:
+            budget = int(getattr(_cfg, "PREFILL_TOKEN_BUDGET", 0) or 0)
+        if budget <= 0:
+            return effective_want  # no budget configured -> count-only
+
+        blk = int(getattr(_cfg, "KV_BLOCK_SIZE", 128))
+        spent = 0
+        k = 0
+        for rid, _p, _t, _m in ordered[:effective_want]:
+            isl = self._isl_tokens_for(rid, _m)
+            cached = (int(prefix_len(endpoint, rid)) * blk) if kv_enabled else 0
+            uncached = isl - cached
+            if uncached < 0:
+                uncached = 0
+            # Always admit the first item; otherwise stop before exceeding budget.
+            if k > 0 and (spent + uncached) > budget:
+                break
+            spent += uncached
+            k += 1
+
+        set_pull_granted_prefill_tokens(endpoint, spent)
+        if k < effective_want:
+            inc_pull_budget_bound(endpoint)
+        return k
+
+    def _dec_endpoint_tokens(self, endpoint: str, tokens: int) -> None:
+        """Subtract released ISL tokens from an endpoint's in-flight token sum."""
+        if not endpoint or tokens <= 0:
+            return
+        with self._lock:
+            cur = self._inflight_tokens_by_endpoint.get(endpoint, 0)
+            new_val = max(0, cur - int(tokens))
+            self._inflight_tokens_by_endpoint[endpoint] = new_val
+        set_endpoint_inflight_tokens(endpoint, new_val)
 
     def get_endpoint_inflight(self, endpoint: str) -> int:
         """Current in-flight count for one endpoint (0 if unknown)."""
@@ -355,7 +446,13 @@ class RouterState:
             models.append(default)
         return models
 
-    def pull_for_endpoint(self, endpoint: str, want: int, model: str = "") -> List[JobItem]:
+    def pull_for_endpoint(
+        self,
+        endpoint: str,
+        want: int,
+        model: str = "",
+        want_prefill_tokens: int = 0,
+    ) -> List[JobItem]:
         if want <= 0:
             return []
 
@@ -469,6 +566,14 @@ class RouterState:
 
             # 5) Choose
             kv_enabled = bool(_cfg.KV_AWARE)
+
+            # Step 8: Prefill-token budget (P2). Further shrinks effective_want so
+            # the grant fits an uncached-prefill token budget instead of a pure
+            # count slice. No-op unless PULL_BUDGET_ENABLED + a positive budget.
+            effective_want = self._apply_prefill_token_budget(
+                endpoint, effective_want, ordered, kv_enabled, want_prefill_tokens,
+            )
+
             chosen_raw = ordered[:effective_want]
             chosen_ids = [rid for (rid, _p, _t, _m) in chosen_raw]
             chosen_kv_hits = [(rid, prefix_len(endpoint, rid)) for rid in chosen_ids] if kv_enabled else []
@@ -572,9 +677,19 @@ class RouterState:
             # Prom: outgoing dispatch (router -> sidecar) for each assigned item.
             # Also remember which endpoint each request went to, for idempotent
             # in-flight release on result/timeout.
+            added_tokens = 0
             for _rid, _prompt, _ts, _meta in chosen:
                 inc_dispatch(endpoint)
                 self._req_endpoint[_rid] = endpoint
+                _tok = self._isl_tokens_for(_rid, _meta)
+                if _tok > 0:
+                    self._req_isl_tokens[_rid] = _tok
+                    added_tokens += _tok
+            if added_tokens > 0:
+                # Re-entrant lock (already held here) makes this direct update safe.
+                new_tok = self._inflight_tokens_by_endpoint.get(endpoint, 0) + added_tokens
+                self._inflight_tokens_by_endpoint[endpoint] = new_tok
+                set_endpoint_inflight_tokens(endpoint, new_tok)
 
             # Affinity: record where each keyed conversation was dispatched so
             # subsequent turns follow the cache to this endpoint.

@@ -22,14 +22,26 @@ import json
 import logging
 import os
 import threading
-from typing import Any, List, Optional
+from typing import Dict, List, Optional, Tuple, Union
 
 import cbor2
 
 logger = logging.getLogger("router.prefix_hash")
 
+# A JSON/CBOR-serialisable value as handled by the router hash path.
+JSONValue = Union[
+    None,
+    bool,
+    int,
+    float,
+    str,
+    List["JSONValue"],
+    Tuple["JSONValue", ...],
+    Dict[str, "JSONValue"],
+]
 
-def _canonicalise_value(obj: Any) -> Any:
+
+def _canonicalise_value(obj: JSONValue) -> JSONValue:
     """Recursively sort dict keys to mirror older BooM serde_json Value output.
 
     This router-side compatibility hook must be revalidated if BooM's
@@ -83,7 +95,7 @@ def canonicalise_tools_for_boom(tools: Optional[list]) -> Optional[list]:
     return out
 
 
-def sha256_cbor(obj: Any) -> bytes:
+def sha256_cbor(obj: object) -> bytes:
     """sha256(cbor2.dumps(obj)) using the same primitive as vLLM block hashing."""
     return hashlib.sha256(cbor2.dumps(obj)).digest()
 
@@ -256,14 +268,19 @@ def tokenize_messages(
     return tok.encode(text, add_special_tokens=False)
 
 
-def compute_request_block_hashes_int(
+def compute_request_block_hashes_with_len(
     *,
     messages: Optional[list] = None,
     prompt: Optional[str] = None,
     tools: Optional[list] = None,
     block_size: int,
-) -> List[int]:
-    """Tokenize messages/prompt and return vLLM-compatible full-block hashes."""
+) -> Tuple[List[int], int]:
+    """Tokenize messages/prompt once and return (full-block hashes, token count).
+
+    The token count is the exact rendered input length (ISL), needed for
+    token/KV-block-budgeted pull sizing. Returns ([], 0) when there is nothing
+    to tokenize.
+    """
     canon_tools = canonicalise_tools_for_boom(tools) if tools and canonicalise_tools_enabled() else tools
 
     if messages:
@@ -279,6 +296,23 @@ def compute_request_block_hashes_int(
             add_generation_prompt=True,
         )
     else:
-        return []
+        return [], 0
 
-    return compute_block_hashes_int(token_ids, block_size)
+    return compute_block_hashes_int(token_ids, block_size), len(token_ids)
+
+
+def compute_request_block_hashes_int(
+    *,
+    messages: Optional[list] = None,
+    prompt: Optional[str] = None,
+    tools: Optional[list] = None,
+    block_size: int,
+) -> List[int]:
+    """Tokenize messages/prompt and return vLLM-compatible full-block hashes."""
+    hashes, _ = compute_request_block_hashes_with_len(
+        messages=messages,
+        prompt=prompt,
+        tools=tools,
+        block_size=block_size,
+    )
+    return hashes

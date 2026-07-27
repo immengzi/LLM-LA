@@ -100,3 +100,39 @@ func setSLOBackpressureState(endpoint string, cap int, observedTpot float64, has
 		sloViolation.WithLabelValues(endpoint).Set(v)
 	}
 }
+
+// --------------------------------
+// KV-memory pull gate metrics (lazily registered)
+// --------------------------------
+// Registered only when KV_PULL_GATE_ENABLED (initKvPullGateMetrics is called
+// from RouterPullWorker.Start), so a disabled sidecar's /metrics output is
+// unchanged. Mirrors the Python sidecar_kv_pull_gate_* metrics.
+
+var (
+	kvPullGateMetricsOnce sync.Once
+	kvPullGateScale       *prometheus.GaugeVec
+	kvPullGateKvUsage     *prometheus.GaugeVec
+)
+
+func initKvPullGateMetrics() {
+	kvPullGateMetricsOnce.Do(func() {
+		kvPullGateScale = promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "sidecar_kv_pull_gate_scale",
+			Help: "Multiplier the KV-memory pull gate applied to want this tick (1=no throttle, 0=blocked)",
+		}, []string{"endpoint"})
+		kvPullGateKvUsage = promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "sidecar_kv_pull_gate_kv_usage",
+			Help: "GPU KV cache fill fraction [0,1] the pull gate last acted on",
+		}, []string{"endpoint"})
+	})
+}
+
+// setKvPullGateState publishes the gate scale and the kv_usage it acted on.
+// No-op until initKvPullGateMetrics has run (feature enabled).
+func setKvPullGateState(endpoint string, scale, kvUsage float64) {
+	if kvPullGateScale == nil {
+		return
+	}
+	kvPullGateScale.WithLabelValues(endpoint).Set(scale)
+	kvPullGateKvUsage.WithLabelValues(endpoint).Set(kvUsage)
+}

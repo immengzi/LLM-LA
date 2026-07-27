@@ -88,6 +88,55 @@ def init_slo_metrics() -> None:
     _SLO_METRICS_INITED = True
 
 # --------------------------------
+# KV-memory pull gate metrics (lazily registered)
+# --------------------------------
+# Registered only when KV_PULL_GATE_ENABLED, so the disabled path's /metrics
+# output stays byte-for-byte identical (no HELP/TYPE headers), mirroring the SLO
+# metrics pattern above.
+
+SIDECAR_KV_PULL_GATE_SCALE: "Gauge | None" = None
+SIDECAR_KV_PULL_GATE_KV_USAGE: "Gauge | None" = None
+
+_KV_PULL_GATE_METRICS_INITED = False
+
+
+def init_kv_pull_gate_metrics() -> None:
+    """Register the KV-memory pull gate gauges. Idempotent; call when enabled."""
+    global _KV_PULL_GATE_METRICS_INITED
+    global SIDECAR_KV_PULL_GATE_SCALE
+    global SIDECAR_KV_PULL_GATE_KV_USAGE
+    if _KV_PULL_GATE_METRICS_INITED:
+        return
+    SIDECAR_KV_PULL_GATE_SCALE = Gauge(
+        "sidecar_kv_pull_gate_scale",
+        "Multiplier the KV-memory pull gate applied to want this tick "
+        "(1=no throttle, 0=blocked)",
+        ["endpoint"],
+    )
+    SIDECAR_KV_PULL_GATE_KV_USAGE = Gauge(
+        "sidecar_kv_pull_gate_kv_usage",
+        "GPU KV cache fill fraction [0,1] the pull gate last acted on",
+        ["endpoint"],
+    )
+    _KV_PULL_GATE_METRICS_INITED = True
+
+
+def set_kv_pull_gate_state(endpoint: str, scale: float, kv_usage=None) -> None:
+    """Publish the KV pull gate scale (and the kv_usage it acted on).
+
+    No-op until init_kv_pull_gate_metrics() has run (feature enabled).
+    """
+    if not _KV_PULL_GATE_METRICS_INITED:
+        return
+    try:
+        SIDECAR_KV_PULL_GATE_SCALE.labels(endpoint=str(endpoint)).set(float(scale))
+        if kv_usage is not None:
+            SIDECAR_KV_PULL_GATE_KV_USAGE.labels(endpoint=str(endpoint)).set(float(kv_usage))
+    except Exception:
+        pass
+
+
+# --------------------------------
 # Existing helpers
 # --------------------------------
 

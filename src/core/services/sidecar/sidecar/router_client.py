@@ -9,7 +9,7 @@ from requests.adapters import HTTPAdapter
 
 from .config import get_config
 from .local_queue import LocalQueue
-from .metrics import inc_received
+from .metrics import inc_received, init_kv_pull_gate_metrics, set_kv_pull_gate_state
 
 _cfg = get_config()
 
@@ -93,6 +93,36 @@ class RouterPullWorker:
             # Fail safe to the static cap if the provider misbehaves.
             return _cfg.BATCH_SIZE + _cfg.PREFETCH
 
+    # ---------------- KV-memory pull gate ----------------
+
+    def _apply_kv_pull_gate(self, want: int) -> int:
+        """Shrink/stop pulling when local vLLM GPU KV cache fill is high.
+
+        Pull-side hard memory guard. Returns ``want`` unchanged when the gate is
+        disabled or no fresh kv_usage sample exists (fail-open). Otherwise:
+          kv >= HIGH -> 0; kv <= LOW -> want; between -> linear taper toward 0.
+        Only ever *reduces* ``want`` (composes with the static / SLO caps).
+        """
+        if not _cfg.KV_PULL_GATE_ENABLED:
+            return want
+        from .kv_usage import get_cached_kv_usage
+
+        kv = get_cached_kv_usage()
+        if kv is None:
+            return want  # no sample (e.g. KV_USAGE_REPORT off) -> fail open
+
+        hi = _cfg.KV_PULL_GATE_HIGH
+        lo = _cfg.KV_PULL_GATE_LOW
+        if kv >= hi:
+            scale = 0.0
+        elif kv <= lo:
+            scale = 1.0
+        else:
+            scale = (hi - kv) / max(1e-6, (hi - lo))
+
+        set_kv_pull_gate_state(self.endpoint_id, scale, kv)
+        return max(0, int(want * scale))
+
     # ---------------- lifecycle ----------------
 
     def start(self):
@@ -109,6 +139,17 @@ class RouterPullWorker:
             pool_maxsize=_cfg.ROUTER_POOL_MAXSIZE,
         )
 
+        # KV-memory pull gate: register its gauges only when enabled so the
+        # disabled path's /metrics output is unchanged. Warn if it can never fire
+        # because no kv_usage samples are being produced.
+        if _cfg.KV_PULL_GATE_ENABLED:
+            init_kv_pull_gate_metrics()
+            if not _cfg.KV_USAGE_REPORT:
+                print(
+                    "[sidecar] WARNING: KV_PULL_GATE_ENABLED but KV_USAGE_REPORT is "
+                    "off -> no kv_usage samples, gate stays open (no-op)."
+                )
+
         self._poll_thread = threading.Thread(
             target=self._poll_loop, daemon=True, name="pull-poller",
         )
@@ -117,7 +158,8 @@ class RouterPullWorker:
         pull_cap = _cfg.BATCH_SIZE + _cfg.PREFETCH
         print(
             f"[sidecar] RouterPullWorker ready (endpoint_id={self.endpoint_id}, "
-            f"BATCH_SIZE={_cfg.BATCH_SIZE}, PREFETCH={_cfg.PREFETCH}, pull_cap={pull_cap})"
+            f"BATCH_SIZE={_cfg.BATCH_SIZE}, PREFETCH={_cfg.PREFETCH}, pull_cap={pull_cap}, "
+            f"kv_pull_gate={'on' if _cfg.KV_PULL_GATE_ENABLED else 'off'})"
         )
 
     def stop(self):
@@ -230,6 +272,11 @@ class RouterPullWorker:
                 return
 
             want = pull_cap - total_reserved
+            if want <= 0:
+                return
+
+            # Pull-side memory guard: shrink/stop when GPU KV cache is near full.
+            want = self._apply_kv_pull_gate(want)
             if want <= 0:
                 return
 

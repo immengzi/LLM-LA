@@ -540,7 +540,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items := s.queue.Pull(req.Endpoint, req.Want, model)
+	items := s.queue.Pull(req.Endpoint, req.Want, model, req.WantPrefillTokens)
 	if items == nil {
 		items = []JobItem{}
 	}
