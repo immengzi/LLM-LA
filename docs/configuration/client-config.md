@@ -365,6 +365,19 @@ environment variables on the router deployment (e.g. in Kubernetes YAML).
   - `push-rr`
   - `push-random`
   - `push-leastq`
+  - `central-push`
+  - `external-push`
+
+- `ROUTER_SIDECAR_ENABLED: bool` (default `true`)
+  When `false` **and** `ROUTER_MODE=central-push`, run sidecar-less central-push:
+  the router delivers directly to each pod's vLLM and hosts the KV-events
+  subscriber itself. No-op (with a warning) for other modes. Set via the chart
+  from `sidecar.enabled`. See [router.md](../architecture/router.md#sidecar-less-central-push-router_sidecar_enabledfalse).
+
+- `VLLM_KV_EVENTS_PORT: int` (default `5557`) / `VLLM_KV_EVENTS_TOPIC: str` (default `kv@`)
+  Per-pod vLLM KV-cache-events ZMQ port + topic prefix the router subscribes to in
+  sidecar-less central-push with prefix/`both` routing (must match the engine's
+  `--kv-events-config`).
 
 - `KV_AWARE: bool`
   Enable/disable KV-aware scoring when assigning work.

@@ -54,7 +54,11 @@ images:
   mooncakeMaster: docker.io/library/vllm-ascend:v0.18.0
 
 sidecar:
-  enabled: true     # set false in boom direct mode (no router/sidecar needed)
+  # true  = per-pod sidecar container runs (pull / push-* / sidecar central-push).
+  # false = no sidecar container. Used by: boom direct mode, AND sidecar-less
+  #         central-push (mode: central-push) where the router delivers directly
+  #         to each pod's vLLM and hosts the KV-events subscriber itself.
+  enabled: true
   logLevel: info    # debug | info | warning | error
   # Always re-pull the sidecar image. Needed because the image ships as a
   # mutable :latest tag — IfNotPresent would keep a stale cached copy on the
@@ -71,7 +75,13 @@ sidecar:
   streamingMode: false
 
 router:
-  # pull | push-rr | push-random | push-leastq | central-push
+  # pull | push-rr | push-random | push-leastq | central-push | external-push
+  #
+  # central-push can run WITHOUT the per-pod sidecar: set sidecar.enabled=false
+  # and the router keeps pod discovery + the central queue (KV-affinity /
+  # fairness / SLO all still apply) but delivers DIRECTLY to each pod's vLLM and
+  # hosts the KV-events subscriber itself. See sidecar.enabled + the
+  # vllmKvEvents* knobs below. The flag is a no-op for every other mode.
   mode: pull
 
   # API key for /v1/chat/completions (empty = no auth)
@@ -206,6 +216,16 @@ router:
   # sidecar batchSize + prefetch so a pod is kept busy without overrunning it.
   centralPushCap: 8
   centralPushIntervalS: 0.05
+  # Sidecar-optional central-push (direct-to-vLLM delivery). The router reads
+  # ROUTER_SIDECAR_ENABLED from sidecar.enabled (one switch drops the sidecar
+  # container AND flips central-push to direct delivery). These two only matter
+  # when sidecar.enabled=false AND mode=central-push AND prefix/both routing is
+  # on: the router subscribes to each pod's vLLM KV-events ZMQ at
+  # tcp://{pod_ip}:{vllmKvEventsPort} with topic prefix {vllmKvEventsTopic}.
+  # Must match the engine's --kv-events-config (chart publishes port 5557,
+  # topic "kv@{POD_NAME}@{model}"; the "kv@" prefix matches all pods).
+  vllmKvEventsPort: 5557
+  vllmKvEventsTopic: "kv@"
   outputLenPredictor: simple
   batchSizeEstimate: fixed
   fixedBatchEstimate: 8

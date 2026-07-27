@@ -125,6 +125,77 @@ func TestStaticEndpointsParsing(t *testing.T) {
 	}
 }
 
+// TestSidecarEnabledDefaultAndKvEvents mirrors the Python config tests for the
+// sidecar-optional central-push knob.
+func TestSidecarEnabledDefaultAndKvEvents(t *testing.T) {
+	cfg := LoadConfig()
+	if !cfg.SidecarEnabled {
+		t.Error("SidecarEnabled should default to true")
+	}
+	if cfg.VLLMKvEventsPort != 5557 {
+		t.Errorf("VLLMKvEventsPort = %d, want 5557", cfg.VLLMKvEventsPort)
+	}
+	if cfg.VLLMKvEventsTopic != "kv@" {
+		t.Errorf("VLLMKvEventsTopic = %q, want kv@", cfg.VLLMKvEventsTopic)
+	}
+}
+
+// TestSidecarDisabledOnlyForCentralPush: the disable flag takes effect for
+// central-push, but is ignored (kept on) for any other mode so existing
+// deployments stay byte-identical.
+func TestSidecarDisabledOnlyForCentralPush(t *testing.T) {
+	t.Run("central-push", func(t *testing.T) {
+		t.Setenv("ROUTER_MODE", "central-push")
+		t.Setenv("ROUTER_SIDECAR_ENABLED", "false")
+		cfg := LoadConfig()
+		if cfg.SidecarEnabled {
+			t.Error("SidecarEnabled should stay false for central-push")
+		}
+		if !cfg.IsCentralPushDirect() {
+			t.Error("IsCentralPushDirect() should be true")
+		}
+		if cfg.UsesPushDelivery() {
+			t.Error("UsesPushDelivery() should be false (direct delivery)")
+		}
+		if !cfg.UsesDirectDelivery() {
+			t.Error("UsesDirectDelivery() should be true")
+		}
+		if !cfg.UsesCentralQueue() {
+			t.Error("UsesCentralQueue() should stay true")
+		}
+	})
+	for _, mode := range []string{"pull", "push-rr", "external-push"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("ROUTER_MODE", mode)
+			t.Setenv("ROUTER_SIDECAR_ENABLED", "false")
+			cfg := LoadConfig()
+			if !cfg.SidecarEnabled {
+				t.Errorf("SidecarEnabled should be forced true for mode %q", mode)
+			}
+			if cfg.IsCentralPushDirect() {
+				t.Errorf("IsCentralPushDirect() should be false for mode %q", mode)
+			}
+		})
+	}
+}
+
+// TestSidecarCentralPushUsesPushDelivery: default central-push (sidecar on)
+// still delivers via the sidecar PushRouter.
+func TestSidecarCentralPushUsesPushDelivery(t *testing.T) {
+	t.Setenv("ROUTER_MODE", "central-push")
+	t.Setenv("ROUTER_SIDECAR_ENABLED", "true")
+	cfg := LoadConfig()
+	if cfg.IsCentralPushDirect() {
+		t.Error("IsCentralPushDirect() should be false when sidecar enabled")
+	}
+	if !cfg.UsesPushDelivery() {
+		t.Error("UsesPushDelivery() should be true for sidecar central-push")
+	}
+	if cfg.UsesDirectDelivery() {
+		t.Error("UsesDirectDelivery() should be false for sidecar central-push")
+	}
+}
+
 func TestExternalPushClamps(t *testing.T) {
 	t.Setenv("ROUTER_EXTERNAL_PUSH_CAP", "0")
 	t.Setenv("ROUTER_EXTERNAL_PUSH_INTERVAL_S", "0")

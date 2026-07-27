@@ -87,6 +87,16 @@ func parseStaticEndpoints(raw string) []ExternalEndpointConfig {
 	return out
 }
 
+// VLLMRegistry is the minimal surface the direct-delivery dispatcher +
+// client need from a registry. Implemented by *ExternalRegistry (static
+// external endpoints) and *K8sVLLMRegistry (sidecar-less central-push over live
+// k8s pods), so ExternalPushDispatcher/ExternalVLLMClient drive either one.
+type VLLMRegistry interface {
+	RefreshHealth(force bool)
+	HealthyIDs() []string
+	Get(id string) (ExternalEndpointConfig, bool)
+}
+
 // ============================================================
 // Registry (static endpoints + /health readiness gating)
 // ============================================================
@@ -219,11 +229,11 @@ func (r *ExternalRegistry) RefreshHealth(force bool) {
 // router/external_endpoints.py:ExternalVLLMClient.
 type ExternalVLLMClient struct {
 	cfg      *Config
-	registry *ExternalRegistry
+	registry VLLMRegistry
 	client   *http.Client
 }
 
-func NewExternalVLLMClient(cfg *Config, registry *ExternalRegistry) *ExternalVLLMClient {
+func NewExternalVLLMClient(cfg *Config, registry VLLMRegistry) *ExternalVLLMClient {
 	t := time.Duration(cfg.ExternalVLLMTimeoutS * float64(time.Second))
 	return &ExternalVLLMClient{
 		cfg:      cfg,

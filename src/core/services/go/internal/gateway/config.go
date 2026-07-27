@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"sort"
@@ -78,6 +79,15 @@ type Config struct {
 	// never pulls. CentralPushCap should track sidecar BATCH_SIZE + PREFETCH.
 	CentralPushCap       int
 	CentralPushIntervalS float64
+
+	// Sidecar-optional central-push. Default true = deliver via the per-pod
+	// sidecar /push (today's behavior). When false AND RouterMode=central-push,
+	// the router keeps k8s discovery + the central queue but delivers DIRECTLY
+	// to each pod's vLLM (no sidecar) and hosts the KV-events subscriber itself.
+	// No-op for every other mode. Mirrors router/config.py ROUTER_SIDECAR_ENABLED.
+	SidecarEnabled    bool
+	VLLMKvEventsPort  int
+	VLLMKvEventsTopic string
 
 	// External-push mode (static external vLLM endpoints; no k8s pods, no
 	// sidecar). Admits + schedules like central-push, but the router delivers
@@ -207,6 +217,10 @@ func LoadConfig() *Config {
 		CentralPushCap:       common.EnvInt("ROUTER_CENTRAL_PUSH_CAP", 8),
 		CentralPushIntervalS: common.EnvFloat("ROUTER_CENTRAL_PUSH_INTERVAL_S", 0.05),
 
+		SidecarEnabled:    common.EnvBool("ROUTER_SIDECAR_ENABLED", true),
+		VLLMKvEventsPort:  common.EnvInt("VLLM_KV_EVENTS_PORT", 5557),
+		VLLMKvEventsTopic: common.EnvStr("VLLM_KV_EVENTS_TOPIC", "kv@"),
+
 		StaticEndpointsRaw:      common.EnvStr("ROUTER_STATIC_ENDPOINTS", ""),
 		ExternalKVEvents:        common.EnvBool("ROUTER_EXTERNAL_KV_EVENTS", true),
 		ExternalVLLMTimeoutS:    common.EnvFloat("ROUTER_EXTERNAL_VLLM_TIMEOUT_S", 300.0),
@@ -306,6 +320,21 @@ func (c *Config) normalize() {
 	}
 	if c.CentralPushIntervalS <= 0 {
 		c.CentralPushIntervalS = 0.05
+	}
+
+	// ROUTER_SIDECAR_ENABLED only takes effect for central-push (the only mode
+	// with a sidecar-less direct-delivery path). For any other mode a false
+	// value is a misconfiguration: ignore it (keep sidecar semantics) and warn,
+	// so existing pull/push-*/external-push deployments stay byte-identical.
+	if !c.SidecarEnabled && c.RouterMode != "central-push" {
+		log.Printf("[config] WARNING: ROUTER_SIDECAR_ENABLED=false is only supported for ROUTER_MODE=central-push (got %q); ignoring (sidecar stays on).", c.RouterMode)
+		c.SidecarEnabled = true
+	}
+	if c.VLLMKvEventsPort <= 0 {
+		c.VLLMKvEventsPort = 5557
+	}
+	if strings.TrimSpace(c.VLLMKvEventsTopic) == "" {
+		c.VLLMKvEventsTopic = "kv@"
 	}
 
 	c.StaticEndpoints = parseStaticEndpoints(c.StaticEndpointsRaw)
@@ -477,10 +506,26 @@ func (c *Config) UsesCentralQueue() bool {
 	return c.RouterMode == "pull" || c.RouterMode == "central-push" || c.RouterMode == "external-push"
 }
 
+// IsCentralPushDirect reports sidecar-less central-push: RouterMode=central-push
+// with SidecarEnabled=false. Same central-queue scheduling as central-push, but
+// delivery goes DIRECTLY to each k8s-discovered vLLM (no sidecar), reusing the
+// external-push direct-delivery dispatcher over a k8s-backed registry.
+func (c *Config) IsCentralPushDirect() bool {
+	return c.RouterMode == "central-push" && !c.SidecarEnabled
+}
+
+// UsesDirectDelivery reports whether the router delivers requests DIRECTLY to
+// vLLM (no sidecar): external-push and sidecar-less central-push. Both drive the
+// ExternalPushDispatcher; they differ only in the backing registry.
+func (c *Config) UsesDirectDelivery() bool {
+	return c.RouterMode == "external-push" || c.IsCentralPushDirect()
+}
+
 // UsesPushDelivery reports whether the router delivers to sidecars via POST
-// /push (needs PushRouter/discovery): push-* and central-push.
+// /push (needs PushRouter/discovery): push-* and sidecar-backed central-push.
+// External-push and sidecar-less central-push deliver directly instead.
 func (c *Config) UsesPushDelivery() bool {
-	return strings.HasPrefix(c.RouterMode, "push-") || c.RouterMode == "central-push"
+	return strings.HasPrefix(c.RouterMode, "push-") || (c.RouterMode == "central-push" && c.SidecarEnabled)
 }
 
 // MeasurePrefixEnabled reports whether per-request prefix blocks should be
@@ -532,6 +577,9 @@ func (c *Config) PrintBanner() {
 		"SIDECAR_PORT":                      c.SidecarPort,
 		"ROUTER_CENTRAL_PUSH_CAP":           c.CentralPushCap,
 		"ROUTER_CENTRAL_PUSH_INTERVAL_S":    c.CentralPushIntervalS,
+		"ROUTER_SIDECAR_ENABLED":            c.SidecarEnabled,
+		"VLLM_KV_EVENTS_PORT":               c.VLLMKvEventsPort,
+		"VLLM_KV_EVENTS_TOPIC":              c.VLLMKvEventsTopic,
 		"ROUTER_STATIC_ENDPOINTS":           len(c.StaticEndpoints),
 		"ROUTER_EXTERNAL_KV_EVENTS":         c.ExternalKVEvents,
 		"ROUTER_EXTERNAL_VLLM_TIMEOUT_S":    c.ExternalVLLMTimeoutS,
