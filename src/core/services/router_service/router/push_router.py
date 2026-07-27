@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import os
 import re
+import math
 import random
 import time
 import asyncio
@@ -91,6 +92,56 @@ def _pick_lower_load(a: str, sa: Optional[float], b: str, sb: Optional[float]) -
     if sb is None:
         return a
     return a if sa <= sb else b
+
+
+def _kv_cost(prefill_blocks: int, hits: int, load: float,
+             overlap_credit: float, prefill_load_scale: float) -> float:
+    """KV-aware routing cost for one worker.
+
+    cost = prefill_load_scale * max(prefill_blocks - overlap_credit * hits, 0) + load
+
+    ``prefill_blocks`` is the request's total block count, ``hits`` is the
+    contiguous cached-prefix blocks already resident on the worker, and
+    ``load`` is a decode-load proxy (logical inflight). Higher ``overlap_credit``
+    rewards cache reuse (lower TTFT); larger ``prefill_load_scale`` weights
+    prompt-side work over decode load. Lower cost = better worker.
+    """
+    adjusted = prefill_blocks - overlap_credit * hits
+    if adjusted < 0:
+        adjusted = 0.0
+    return prefill_load_scale * adjusted + load
+
+
+def _select_by_cost(costs: Dict[str, float], temperature: float,
+                    rng: Optional["random.Random"] = None) -> Optional[str]:
+    """Pick a worker from a cost map.
+
+    temperature <= 0 -> deterministic argmin (ties: first inserted).
+    temperature  > 0 -> softmax sampling over the negated, normalized costs
+    (a ``ROUTER_TEMPERATURE`` knob that spreads load).
+    """
+    if not costs:
+        return None
+    items = list(costs.items())
+    if temperature is None or temperature <= 0:
+        best_ep, best = items[0]
+        for ep, c in items[1:]:
+            if c < best:
+                best, best_ep = c, ep
+        return best_ep
+    # Softmax over -cost/temperature, shifted by the min cost for stability.
+    lo = min(c for _, c in items)
+    weights = [math.exp(-(c - lo) / temperature) for _, c in items]
+    total = sum(weights)
+    if total <= 0:
+        return items[0][0]
+    r = (rng or random).random() * total
+    acc = 0.0
+    for (ep, _), w in zip(items, weights):
+        acc += w
+        if r <= acc:
+            return ep
+    return items[-1][0]
 
 
 def _log_req(msg: str, *, level: str = "summary") -> None:
@@ -394,7 +445,66 @@ class PushRouter:
         _log_req(f"P2C pick → {ep} (candidates={a},{b})", level="full")
         return ep
 
-    async def _pick_endpoint(self) -> Optional[str]:
+    async def _fetch_health_loads(self, eps, urls) -> Dict[str, float]:
+        """Fetch each sidecar's decode-load proxy (logical/queue_len) from /health.
+
+        Missing/failed probes map to 0.0 (optimistic) so a pod is still eligible.
+        """
+        async def one(ep: str):
+            url = urls.get(ep)
+            if not url:
+                return ep, 0.0
+            try:
+                r = await self._health_client.get(f"{url}/health")
+                if r.status_code != 200:
+                    return ep, 0.0
+                data = r.json()
+                return ep, float(data.get("logical", data.get("queue_len", 0)))
+            except Exception:
+                return ep, 0.0
+
+        results = await asyncio.gather(*(one(ep) for ep in eps))
+        return {ep: v for ep, v in results}
+
+    async def _pick_endpoint_kv_cost(self, req_id: Optional[str]) -> Optional[str]:
+        """KV-aware cost routing (`push-kv-cost`).
+
+        Scores each pod by a single tunable cost that trades cached-prefix reuse
+        against decode load: cost = prefill_load_scale * max(prefill_blocks -
+        overlap_credit * cached_prefix, 0) + decode_load. Picks the min-cost pod
+        (or softmax-samples when ROUTER_TEMPERATURE > 0). Degrades to load-based
+        selection when KV awareness is off (prefill_blocks = 0).
+        """
+        with self._lock:
+            eps = list(self._eps)
+            urls = dict(self._urls)
+            inflight = dict(self._logical_inflight)
+        if not eps:
+            return None
+        if len(eps) == 1:
+            return eps[0]
+
+        if self._leastq_mode == "local":
+            loads = {ep: float(inflight.get(ep, 0)) for ep in eps}
+        else:
+            loads = await self._fetch_health_loads(eps, urls)
+
+        prefill_blocks = len(get_request_blocks(req_id)) if req_id else 0
+        overlap_credit = float(getattr(_cfg, "ROUTER_KV_OVERLAP_CREDIT", 1.0))
+        prefill_scale = float(getattr(_cfg, "ROUTER_PREFILL_LOAD_SCALE", 1.0))
+        temperature = float(getattr(_cfg, "ROUTER_TEMPERATURE", 0.0))
+
+        costs: Dict[str, float] = {}
+        for ep in eps:
+            hits = prefix_len(ep, req_id) if req_id else 0
+            costs[ep] = _kv_cost(prefill_blocks, hits, loads.get(ep, 0.0),
+                                 overlap_credit, prefill_scale)
+
+        ep = _select_by_cost(costs, temperature)
+        _log_req(f"KVCost pick → {ep} (cost={costs.get(ep) if ep else None})", level="full")
+        return ep
+
+    async def _pick_endpoint(self, req_id: Optional[str] = None) -> Optional[str]:
         if self.mode == "push-rr":
             return self._pick_endpoint_rr()
         if self.mode == "push-random":
@@ -405,6 +515,8 @@ class PushRouter:
             return await self._pick_endpoint_throughput()
         if self.mode == "push-p2c":
             return await self._pick_endpoint_p2c()
+        if self.mode == "push-kv-cost":
+            return await self._pick_endpoint_kv_cost(req_id)
         return self._pick_endpoint_rr()
 
     # ---------------------------------------------------------
@@ -434,7 +546,7 @@ class PushRouter:
                 if not self._eps:
                     raise RuntimeError("No endpoints available for push routing")
 
-            ep = await self._pick_endpoint()
+            ep = await self._pick_endpoint(req_id)
             if not ep:
                 raise RuntimeError("Failed to pick endpoint")
 

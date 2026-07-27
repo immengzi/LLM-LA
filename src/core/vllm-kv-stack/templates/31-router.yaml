@@ -223,6 +223,15 @@ spec:
             - name: ROUTER_MODE
               value: {{ quote .Values.router.mode }}
 
+            {{- if .Values.router.kvCost }}
+            - name: ROUTER_KV_OVERLAP_CREDIT
+              value: {{ .Values.router.kvCost.overlapCredit | default 1.0 | quote }}
+            - name: ROUTER_PREFILL_LOAD_SCALE
+              value: {{ .Values.router.kvCost.prefillLoadScale | default 1.0 | quote }}
+            - name: ROUTER_TEMPERATURE
+              value: {{ .Values.router.kvCost.temperature | default 0.0 | quote }}
+            {{- end }}
+
             - name: SIDECAR_PORT
               value: "9000"
 
