@@ -80,7 +80,8 @@ these gauges are registered only when the gate is on, so a disabled sidecar's
 This is a local **memory** guard, distinct from the router-side soft KV divert,
 which instead reorders *which* requests a saturated pod keeps (see
 [router.md](router.md) §5d). The same `kv_usage` sample the sidecar reports on
-`/pull` and `/health` feeds both.
+`/pull` and `/health` feeds both. Applies only to pull-mode sidecars; see the
+[Routing Compatibility Matrix](router.md#routing-compatibility-matrix).
 
 ---
 

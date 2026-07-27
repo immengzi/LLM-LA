@@ -3,6 +3,9 @@
 > For a high-level overview of the routing strategies, see
 > [router-strategies.md](router-strategies.md).
 >
+> For which dispatch modes actually *schedule* on prefix hits (vs measure-only),
+> see the [Routing Compatibility Matrix](router.md#routing-compatibility-matrix).
+>
 > For a production incident where the prefix-cache hit rate collapsed under peak
 > load (GPU KV saturation + a full/lossy Mooncake remote tier), and the local-cache-first
 > fix, see [internal/kv-cache-hit-rate-collapse.md](../internal/kv-cache-hit-rate-collapse.md).

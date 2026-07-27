@@ -57,11 +57,13 @@ The design pillars:
 These capabilities exist in the codebase now (see the [architecture docs](../architecture/overview.md) for detail). They anchor the "LA-Boom status" column in §5.
 
 **Queueing & scheduling**
-- Centralized per-model request queue with pull-based dispatch (default); push strategies `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`; plus hybrid `central-push` and `external-push`. See [router.md](../architecture/router.md).
+- Centralized per-model request queue with pull-based dispatch (default); push strategies `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`; plus hybrid `central-push` and `external-push`. See [router.md](../architecture/router.md). Mode × placement × rebalancing coverage: [Routing Compatibility Matrix](../architecture/router.md#routing-compatibility-matrix).
 - Length-aware queue ordering within KV tiers (`short_first` / `long_first`).
 - SLO-aware slack scheduling (opt-in) with deadline math for TTFT / TPOT / E2E.
 - Admission control that binary-searches the largest batch keeping predicted TPOT under budget (opt-in).
 - Fair-pull throttle across models/keys (opt-in).
+- Sidecar-less delivery for all `push-*` and `central-push` (`ROUTER_SIDECAR_ENABLED=false` / `sidecar.enabled=false`).
+- Token-aware pull sizing (prefill-token budget + sidecar KV pull gate; inflight token gauge always on).
 
 **KV-cache-aware routing**
 - Inline, vLLM-compatible chained block hashing in the router (Python in-process; Go in-container hasher), with an optional external prefix-hash service.
@@ -114,7 +116,7 @@ The master table. "Seen in" lists frameworks from §4 that ship a comparable cap
 |---------|----------------|---------|----------|-----------|
 | Centralized admission queue | ✅ Shipped | llm-d, AIBrix, Dynamo | — | Done |
 | Pull-based scheduling | ✅ Shipped | (LA-Boom-distinctive) | — | Done |
-| Push dispatch strategies (`push-rr` / `push-random` / `push-leastq` / `push-throughput` / `push-p2c` / `push-kv-cost` / `push-least-kv` / `push-least-latency` / `push-least-busy` / `central-push` / `external-push`) | ✅ Shipped | SGLang (`power_of_two`/`round_robin`/`random`), AIBrix (least-GPU-memory), Dynamo, prod-stack | — | Done |
+| Push dispatch strategies (`push-rr` / `push-random` / `push-leastq` / `push-throughput` / `push-p2c` / `push-kv-cost` / `push-least-kv` / `push-least-latency` / `push-least-busy` / `central-push` / `external-push`) | ✅ Shipped | SGLang (`power_of_two`/`round_robin`/`random`), AIBrix (least-GPU-memory), Dynamo, prod-stack | — | Done; [compat matrix](../architecture/router.md#routing-compatibility-matrix) |
 | Token-length-aware ordering | ✅ Shipped | — | — | Done |
 | SLO-aware slack scheduling | ✅ Shipped (opt-in) | Dynamo, Mooncake | — | Done |
 | Admission control (TPOT budget) | ✅ Shipped (opt-in) | — | — | Done |
@@ -218,7 +220,7 @@ One paragraph per feature, grouped by area, so the table above is self-contained
 
 - **Centralized admission queue** ✅ — a global per-model queue receives all requests before assignment, making placement an explicit scheduling decision.
 - **Pull-based scheduling** ✅ — workers pull from the queue when capacity frees up (capacity-gated), which naturally load-balances and avoids head-of-line stalls from static hashing.
-- **Push dispatch strategies** ✅ — proactive routing modes: `push-rr`, `push-random`, `push-leastq`, `push-throughput` (token counters), `push-p2c` (power-of-two choices), `push-kv-cost` (KV-aware cost), `push-least-kv`, `push-least-latency`, `push-least-busy`, plus `central-push` and `external-push`. See [router.md](../architecture/router.md).
+- **Push dispatch strategies** ✅ — proactive routing modes: `push-rr`, `push-random`, `push-leastq`, `push-throughput` (token counters), `push-p2c` (power-of-two choices), `push-kv-cost` (KV-aware cost), `push-least-kv`, `push-least-latency`, `push-least-busy`, plus `central-push` and `external-push`. See [router.md](../architecture/router.md) and the [compatibility matrix](../architecture/router.md#routing-compatibility-matrix).
 - **Token-length-aware ordering** ✅ — within a KV tier, order by predicted output length (`short_first`/`long_first`) to reduce head-of-line blocking.
 - **SLO-aware slack scheduling** ✅ — sort by deadline headroom (`slack = deadline − predicted_completion`) in latency bands for TTFT/TPOT/E2E targets.
 - **Admission control (TPOT budget)** ✅ — binary-search the largest admit set that keeps predicted TPOT under budget.

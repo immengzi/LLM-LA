@@ -11,7 +11,9 @@ The strategy is selected with a single knob, `router_strategy`
 `router.mode` / `ROUTER_MODE`. Dispatch modes — `pull`, `push-rr`, `push-random`,
 `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`,
 `push-least-latency`, `push-least-busy`, `central-push`, `external-push` — are
-documented in [router.md](router.md).
+documented in [router.md](router.md). For which placement, sidecar-less, fair-pull,
+soft divert, and token-budget options compose with each dispatch mode, see the
+[Routing Compatibility Matrix](router.md#routing-compatibility-matrix).
 
 ---
 
@@ -190,6 +192,7 @@ helm:
 | Topic | Page |
 |-------|------|
 | Queue, pull/push dispatch, APIs | [router.md](router.md) |
+| Dispatch × placement × rebalancing matrix | [router.md § Routing Compatibility Matrix](router.md#routing-compatibility-matrix) |
 | Block hashing (request identity) | [prefix-hash.md](prefix-hash.md) |
 | KV ownership flow + scoring | [kv-cache-flow.md](kv-cache-flow.md) |
 | Conversation affinity internals | [key-affinity.md](key-affinity.md) |
