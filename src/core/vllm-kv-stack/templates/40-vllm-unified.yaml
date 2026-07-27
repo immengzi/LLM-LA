@@ -47,7 +47,7 @@
      runs in kvc_aware direct mode, where sidecars are OFF but BooM subscribes to
      each leader pod's ZMQ PUB socket remotely. */}}
 {{- $boomKvc := and (eq $backend "boom") (eq (lower ($.Values.boom.directRoutingStrategy | default "round_robin")) "kvc_aware") }}
-{{/* Sidecar-optional push-*/central-push: when the sidecar is OFF and the
+{{/* Sidecar-optional push-* or central-push: when the sidecar is OFF and the
      router runs any push-* or central-push mode with prefix/both routing, the
      ROUTER hosts the KV-events subscriber (not the sidecar), so vLLM must still
      publish events + expose 5557 on a router-reachable address. Affinity-only /
