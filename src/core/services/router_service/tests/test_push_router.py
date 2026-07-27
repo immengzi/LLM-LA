@@ -1,11 +1,14 @@
 # tests/test_push_router.py
 # -*- coding: utf-8 -*-
 """Unit tests for push-router endpoint-selection helpers."""
+import random
 from router.push_router import (
     _pick_min_score,
     _parse_prom_sums,
     _total_tokens_from_sums,
     _pick_lower_load,
+    _kv_cost,
+    _select_by_cost,
 )
 
 _SAMPLE = """\
@@ -69,3 +72,37 @@ def test_pick_lower_load_none_is_worst():
     assert _pick_lower_load("a", 5, "b", None) == "a"
     # Both probes failed -> fall back to the first sampled endpoint.
     assert _pick_lower_load("a", None, "b", None) == "a"
+
+def test_kv_cost_overlap_reduces_prefill():
+    # 10 prefill blocks, 5 cached, credit 1.0, scale 1.0, load 5 -> 5 + 5 = 10.
+    assert _kv_cost(10, 5, 5.0, 1.0, 1.0) == 10.0
+    # 8 cached -> adjusted 2, + load 9 = 11.
+    assert _kv_cost(10, 8, 9.0, 1.0, 1.0) == 11.0
+    # 2 cached -> adjusted 8, + load 10 = 18.
+    assert _kv_cost(10, 2, 10.0, 1.0, 1.0) == 18.0
+
+
+def test_kv_cost_clamped_nonnegative():
+    # Overlap credit > 1 can over-subtract; adjusted prefill floors at 0.
+    assert _kv_cost(4, 10, 3.0, 1.0, 1.0) == 3.0  # max(4-10,0)=0 -> 0 + 3
+
+
+def test_kv_cost_scale_weights_prefill():
+    # scale 2.0 doubles the prefill contribution: 2*(10-2) + 1 = 17.
+    assert _kv_cost(10, 2, 1.0, 1.0, 2.0) == 17.0
+
+
+def test_select_by_cost_argmin_deterministic():
+    costs = {"a": 18.0, "b": 10.0, "c": 11.0}
+    assert _select_by_cost(costs, 0.0) == "b"
+    # Tie -> first inserted wins.
+    assert _select_by_cost({"a": 5.0, "b": 5.0}, 0.0) == "a"
+    assert _select_by_cost({}, 0.0) is None
+
+
+def test_select_by_cost_softmax_favors_low_cost():
+    # With a small temperature, the lowest-cost worker should dominate samples.
+    costs = {"a": 100.0, "b": 0.0, "c": 100.0}
+    rng = random.Random(1234)
+    picks = [_select_by_cost(costs, 0.5, rng) for _ in range(200)]
+    assert picks.count("b") > 180  # near-deterministic toward the cheapest

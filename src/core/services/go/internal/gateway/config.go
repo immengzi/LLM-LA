@@ -103,10 +103,15 @@ type Config struct {
 	ExternalPushIntervalS   float64
 	ExternalHealthIntervalS float64
 
-	PushLeastQMode       string
-	PushHTTPTimeoutS     float64
-	PushMaxKeepalive     int
-	PushKeepaliveExpiryS float64
+	PushLeastQMode string
+
+	// KV-cost routing (push-kv-cost): KV-aware cost-function knobs.
+	RouterKVOverlapCredit  float64
+	RouterPrefillLoadScale float64
+	RouterTemperature      float64
+	PushHTTPTimeoutS       float64
+	PushMaxKeepalive       int
+	PushKeepaliveExpiryS   float64
 
 	PushDecoupleDispatch  bool
 	PushDispatchQueueMax  int
@@ -235,10 +240,13 @@ func LoadConfig() *Config {
 		ExternalPushIntervalS:   common.EnvFloat("ROUTER_EXTERNAL_PUSH_INTERVAL_S", 0.05),
 		ExternalHealthIntervalS: common.EnvFloat("ROUTER_EXTERNAL_HEALTH_INTERVAL_S", 5.0),
 
-		PushLeastQMode:       common.EnvStr("PUSH_LEASTQ_MODE", "health"),
-		PushHTTPTimeoutS:     common.EnvFloat("PUSH_HTTP_TIMEOUT_S", 2.0),
-		PushMaxKeepalive:     common.EnvInt("PUSH_MAX_KEEPALIVE", 200),
-		PushKeepaliveExpiryS: common.EnvFloat("PUSH_KEEPALIVE_EXPIRY_S", 30.0),
+		PushLeastQMode:         common.EnvStr("PUSH_LEASTQ_MODE", "health"),
+		RouterKVOverlapCredit:  common.EnvFloat("ROUTER_KV_OVERLAP_CREDIT", 1.0),
+		RouterPrefillLoadScale: common.EnvFloat("ROUTER_PREFILL_LOAD_SCALE", 1.0),
+		RouterTemperature:      common.EnvFloat("ROUTER_TEMPERATURE", 0.0),
+		PushHTTPTimeoutS:       common.EnvFloat("PUSH_HTTP_TIMEOUT_S", 2.0),
+		PushMaxKeepalive:       common.EnvInt("PUSH_MAX_KEEPALIVE", 200),
+		PushKeepaliveExpiryS:   common.EnvFloat("PUSH_KEEPALIVE_EXPIRY_S", 30.0),
 
 		PushDecoupleDispatch:  common.EnvBool("PUSH_DECOUPLE_DISPATCH", true),
 		PushDispatchQueueMax:  common.EnvInt("PUSH_DISPATCH_QUEUE_MAX", 100000),
@@ -325,11 +333,25 @@ func (c *Config) normalize() {
 	case "external_push", "externalpush", "external", "direct-external":
 		rm = "external-push"
 	}
-	allowed := map[string]bool{"pull": true, "push-rr": true, "push-random": true, "push-leastq": true, "push-throughput": true, "push-p2c": true, "central-push": true, "external-push": true}
+	switch rm {
+	case "kv-cost", "push-cost", "push_kv_cost":
+		rm = "push-kv-cost"
+	}
+	allowed := map[string]bool{"pull": true, "push-rr": true, "push-random": true, "push-leastq": true, "push-throughput": true, "push-p2c": true, "push-kv-cost": true, "central-push": true, "external-push": true}
 	if !allowed[rm] {
 		rm = "pull"
 	}
 	c.RouterMode = rm
+
+	if c.RouterKVOverlapCredit < 0 {
+		c.RouterKVOverlapCredit = 0
+	}
+	if c.RouterPrefillLoadScale < 0 {
+		c.RouterPrefillLoadScale = 0
+	}
+	if c.RouterTemperature < 0 {
+		c.RouterTemperature = 0
+	}
 
 	if c.CentralPushCap < 1 {
 		c.CentralPushCap = 1
