@@ -3022,3 +3022,36 @@ Setup:
 Purpose: short compare your affinity/prefix strategies vs boom-gateway-only
 Findings: (pending run)
 Observations: (pending)
+
+
+Series 6 — Claude mine-vs-BooM load sweep (u16 / u32 / u64 / u128) [DONE]
+Setup:
+- Cluster: bz (192.168.0.79); MiniMax-M2, 2 leader pods
+- Path A (mine): client → BooM → LLM-LA router → vLLM (LMCache P2P host-staging); method=pull,
+    router strategies {both+hard, aff-hard, aff-soft, prefix}
+- Path B (boom): client → BooM direct → vLLM; policies {round_robin, key_affinity, kvc_aware}
+- Transport: real Claude Code CLI (transport.mode=claude); dataset CodeFlowBench
+- strip_claude_code_attribution: ON for all cells (the cch-rotation fix — restores byte-stable
+    prefix so BooM-direct KV matching is fair); per-turn Claude timeout 10000s
+- Workload held constant per level (same 128-conv replay except u16=32 convs); concurrency ramp:
+    u16 = 16 users × 2 convs  → exps 122,123,124,125 (mine) + 129,130,131 (boom)
+    u32 = 32 users × 4 convs  → exps 132,133,134,135 (mine) + 136,137,138 (boom)
+    u64 = 64 users × 2 convs  → exps 139,140,141,142 (mine) + 143,144,145 (boom)
+    u128 = 128 users × 1 conv → exps 146,147,148,149 (mine) + 150,151,152 (boom)
+Purpose: full apples-to-apples ramp — do our router strategies beat BooM's schedulers, and how
+    does the margin move with load?
+Findings (overall = mean normalized score across TTFT/TPOT/E2E/RPS/TPS; best Ours vs best BooM):
+- u16 (LOW): Ours WINS big, +53%. best us-prefix vs boom-rr. E2E-mean +28%, TPS +82%, TTFT +9%,
+    TPOT +11%. BooM key_affinity pins to 1 pod.
+- u32: near-parity, Ours +1%. best us-aff-hard vs boom-kvc (boom-kvc strong here). E2E-mean +1%,
+    TPS +15%. BooM key_affinity still 1 pod.
+- u64: Ours +8%. best us-aff-hard vs boom-rr. E2E-mean +19%, RPS +5%, TPS +2%. NOTE: engine
+    TTFT/TPOT for 139-144 are past Prom retention (only 145 survives); E2E/RPS/TPS cover all 7.
+- u128 (SATURATION): BooM round-robin WINS, Ours -12%. boom-rr spreads best: TPS 375 vs
+    ours-best 254.7 (-32%), RPS -29%, makespan 84.9 vs 119.3 min, E2E-mean -12%. Ours keeps
+    per-token edge (TTFT +6%, TPOT +12%). BooM key_affinity degenerates (1 pod, e2e-mean 550s).
+- Trend: our advantage is largest at low load, shrinks through the ramp, and flips to BooM-RR at
+    128-user saturation on throughput while we retain TTFT/TPOT.
+Observations: per-method tables in the results-log entries below.
+Notebooks: analysis-notebooks/{u16,u32,u64,u128}-mine-vs-boom.ipynb
+Results-log: analysis-notebooks/results-log/05-bz-claude-mine-vs-boom/{000-u16,001-u32,002-u64,003-u128}
