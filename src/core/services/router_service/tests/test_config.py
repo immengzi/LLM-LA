@@ -63,17 +63,28 @@ def test_sidecar_enabled_default_true(reset_config, monkeypatch):
     assert cfg.VLLM_KV_EVENTS_TOPIC == "kv@"
 
 
-def test_sidecar_disabled_takes_effect_only_for_central_push(reset_config, monkeypatch):
-    # central-push honors the disable flag ...
-    monkeypatch.setenv("ROUTER_MODE", "central-push")
-    monkeypatch.setenv("ROUTER_SIDECAR_ENABLED", "false")
-    cfg = reset_config()
-    assert cfg.ROUTER_MODE == "central-push"
-    assert cfg.ROUTER_SIDECAR_ENABLED is False
+def test_sidecar_disabled_takes_effect_for_push_and_central_push(reset_config, monkeypatch):
+    # push-* and central-push honor the disable flag ...
+    for mode in (
+        "central-push",
+        "push-rr",
+        "push-random",
+        "push-leastq",
+        "push-throughput",
+        "push-p2c",
+        "push-kv-cost",
+        "push-least-kv",
+        "push-least-latency",
+        "push-least-busy",
+    ):
+        monkeypatch.setenv("ROUTER_MODE", mode)
+        monkeypatch.setenv("ROUTER_SIDECAR_ENABLED", "false")
+        cfg = reset_config()
+        assert cfg.ROUTER_MODE == mode
+        assert cfg.ROUTER_SIDECAR_ENABLED is False, mode
 
-    # ... but for any other mode the false value is ignored (kept on) so existing
-    # pull / push-* deployments stay byte-identical.
-    for mode in ("pull", "push-rr", "external-push"):
+    # ... but for pull / external-push the false value is ignored (kept on).
+    for mode in ("pull", "external-push"):
         monkeypatch.setenv("ROUTER_MODE", mode)
         monkeypatch.setenv("ROUTER_SIDECAR_ENABLED", "false")
         cfg = reset_config()

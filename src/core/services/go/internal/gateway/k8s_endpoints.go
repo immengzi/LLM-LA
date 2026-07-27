@@ -10,11 +10,11 @@ import (
 	"time"
 )
 
-// k8s_endpoints.go implements the registry for sidecar-less central-push
-// (ROUTER_MODE=central-push + ROUTER_SIDECAR_ENABLED=false). The router keeps
-// its k8s pod discovery + central queue (KV-affinity/fairness/SLO all still
-// apply via Pull), but delivers each request DIRECTLY to the pod's vLLM OpenAI
-// endpoint instead of the per-pod sidecar /push.
+// k8s_endpoints.go implements the registry for sidecar-less push-*/central-push
+// (ROUTER_SIDECAR_ENABLED=false with ROUTER_MODE push-* or central-push). The
+// router keeps k8s pod discovery (and for central-push the central queue —
+// KV-affinity/fairness/SLO still apply via Pull), but delivers each request
+// DIRECTLY to the pod's vLLM OpenAI endpoint instead of the per-pod sidecar /push.
 //
 // To maximize reuse it presents the same VLLMRegistry surface as
 // ExternalRegistry, so it drives the existing ExternalPushDispatcher +

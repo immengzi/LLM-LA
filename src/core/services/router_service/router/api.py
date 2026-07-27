@@ -468,6 +468,13 @@ def _is_central_push_direct() -> bool:
     return _is_central_push() and not bool(getattr(_cfg, "ROUTER_SIDECAR_ENABLED", True))
 
 
+def _is_push_direct() -> bool:
+    """True for sidecar-less queue-less push: ROUTER_MODE starts with push- and
+    ROUTER_SIDECAR_ENABLED=false. Selection still uses PushRouter; delivery goes
+    DIRECTLY to each pod's vLLM OpenAI endpoint (no sidecar /push)."""
+    return _is_push_mode() and not bool(getattr(_cfg, "ROUTER_SIDECAR_ENABLED", True))
+
+
 def _uses_central_queue() -> bool:
     """True when requests are admitted into the central queue (pull scheduling
     path): pull, central-push and external-push. Push-* skip the queue."""
@@ -475,16 +482,16 @@ def _uses_central_queue() -> bool:
 
 
 def _uses_direct_delivery() -> bool:
-    """True when the router delivers requests DIRECTLY to vLLM (no sidecar):
-    external-push (static endpoints) and sidecar-less central-push. Both drive
-    the ExternalPushDispatcher; they differ only in the registry backing them."""
+    """True when the router delivers via the central-queue ExternalPushDispatcher
+    (no sidecar): external-push and sidecar-less central-push. Queue-less
+    push-* direct delivery is handled by PushRouter itself (see _is_push_direct)."""
     return _is_external_push() or _is_central_push_direct()
 
 
 def _uses_push_delivery() -> bool:
-    """True when the router delivers to sidecars via POST /push (needs the
-    PushRouter + pod discovery): push-* and sidecar-backed central-push.
-    External-push and sidecar-less central-push deliver directly instead."""
+    """True when PushRouter is needed for pod discovery + delivery: all push-*
+    modes (sidecar or direct) and sidecar-backed central-push. External-push and
+    sidecar-less central-push use ExternalPushDispatcher instead."""
     return _is_push_mode() or (_is_central_push() and not _is_central_push_direct())
 
 
@@ -1119,10 +1126,28 @@ async def _startup():
             print(f"[router] WARNING: KV owner lookup init failed: {e!r}")
         sys.stdout.flush()
 
-    # Push router (used by push-* and central-push for pod discovery + delivery)
+    # Push router (used by push-* and sidecar-backed central-push for discovery
+    # + delivery). Sidecar-less push-* still uses PushRouter (direct-to-vLLM);
+    # sidecar-less central-push uses the ExternalPushDispatcher path below.
     if _uses_push_delivery():
-        _push_router = PushRouter(mode=_cfg.ROUTER_MODE)
-        print(f"[router] PushRouter started in mode={_cfg.ROUTER_MODE}")
+        ingest = _ingest_result_payload if _is_push_direct() else None
+        _push_router = PushRouter(mode=_cfg.ROUTER_MODE, ingest=ingest)
+        print(
+            f"[router] PushRouter started in mode={_cfg.ROUTER_MODE}"
+            f"{' (sidecar-less direct-to-vLLM)' if _is_push_direct() else ''}"
+        )
+
+        # Sidecar-less push-*: host per-pod KV-events subscribers so prefix/
+        # both routing keeps working without a sidecar. Reuses K8sVLLMRegistry
+        # (same as sidecar-less central-push); affinity/none skip subscribers.
+        if _is_push_direct() and bool(getattr(_cfg, "KV_AWARE", False)):
+            from .k8s_endpoints import K8sVLLMRegistry
+
+            _external_registry = K8sVLLMRegistry()
+            print(
+                f"[router] push-* (sidecar-less) KV subscribers for "
+                f"{_external_registry.all_ids()}"
+            )
 
         if _is_central_push():
             # Central-push: router-driven dispatch from the central queue.

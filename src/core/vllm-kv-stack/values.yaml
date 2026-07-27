@@ -68,8 +68,8 @@ images:
 sidecar:
   # true  = per-pod sidecar container runs (pull / push-* / sidecar central-push).
   # false = no sidecar container. Used by: boom direct mode, AND sidecar-less
-  #         central-push (mode: central-push) where the router delivers directly
-  #         to each pod's vLLM and hosts the KV-events subscriber itself.
+  #         push-*/central-push where the router delivers directly to each
+  #         pod's vLLM and hosts the KV-events subscriber itself.
   enabled: true
   logLevel: info    # debug | info | warning | error
   # Always re-pull the sidecar image. Needed because the image ships as a
@@ -89,18 +89,20 @@ sidecar:
 router:
   # pull | push-rr | push-random | push-leastq | push-throughput | push-p2c | push-kv-cost | push-least-kv | push-least-latency | push-least-busy | central-push | external-push
   #
-  # central-push can run WITHOUT the per-pod sidecar: set sidecar.enabled=false
-  # and the router keeps pod discovery + the central queue (KV-affinity /
-  # fairness / SLO all still apply) but delivers DIRECTLY to each pod's vLLM and
-  # hosts the KV-events subscriber itself. See sidecar.enabled + the
-  # vllmKvEvents* knobs below. The flag is a no-op for every other mode.
+  # Any push-* mode and central-push can run WITHOUT the per-pod sidecar: set
+  # sidecar.enabled=false and the router keeps pod discovery (and for
+  # central-push the central queue — KV-affinity / fairness / SLO still apply)
+  # but delivers DIRECTLY to each pod's vLLM and hosts the KV-events subscriber
+  # itself. See sidecar.enabled + the vllmKvEvents* knobs below. Ignored for
+  # pull (sidecars must pull) and external-push (already direct).
   # push-throughput routes to the pod that has processed the fewest total tokens
   # (vllm prompt+generation token counters scraped from each pod's vLLM /metrics;
   # VLLM_METRICS_PORT default 8200, cached PUSH_METRIC_TTL_S default 1s).
   # push-p2c (aliases: p2c, power-of-two) samples two random endpoints and picks
   # the one with the lower local queue / inflight pressure.
   # push-least-kv routes to the pod with the lowest KV-cache occupancy; it needs
-  # sidecar.kvUsageReport.enabled so sidecars publish kv_usage on /health.
+  # sidecar.kvUsageReport.enabled so sidecars publish kv_usage on /health
+  # (degrades without a sidecar — prefer metrics-based modes when sidecar-less).
   # push-least-latency routes to the pod with the lowest average end-to-end
   # latency, scraped from each pod's vLLM /metrics (VLLM_METRICS_PORT, default
   # 8200; cached PUSH_METRIC_TTL_S, default 1s).
@@ -251,14 +253,15 @@ router:
   # sidecar batchSize + prefetch so a pod is kept busy without overrunning it.
   centralPushCap: 8
   centralPushIntervalS: 0.05
-  # Sidecar-optional central-push (direct-to-vLLM delivery). The router reads
-  # ROUTER_SIDECAR_ENABLED from sidecar.enabled (one switch drops the sidecar
-  # container AND flips central-push to direct delivery). These two only matter
-  # when sidecar.enabled=false AND mode=central-push AND prefix/both routing is
-  # on: the router subscribes to each pod's vLLM KV-events ZMQ at
-  # tcp://{pod_ip}:{vllmKvEventsPort} with topic prefix {vllmKvEventsTopic}.
-  # Must match the engine's --kv-events-config (chart publishes port 5557,
-  # topic "kv@{POD_NAME}@{model}"; the "kv@" prefix matches all pods).
+  # Sidecar-optional push-*/central-push (direct-to-vLLM delivery). The router
+  # reads ROUTER_SIDECAR_ENABLED from sidecar.enabled (one switch drops the
+  # sidecar container AND flips push-*/central-push to direct delivery). These
+  # two only matter when sidecar.enabled=false AND mode is push-* or
+  # central-push AND prefix/both routing is on: the router subscribes to each
+  # pod's vLLM KV-events ZMQ at tcp://{pod_ip}:{vllmKvEventsPort} with topic
+  # prefix {vllmKvEventsTopic}. Must match the engine's --kv-events-config
+  # (chart publishes port 5557, topic "kv@{POD_NAME}@{model}"; the "kv@" prefix
+  # matches all pods).
   vllmKvEventsPort: 5557
   vllmKvEventsTopic: "kv@"
   outputLenPredictor: simple

@@ -1,11 +1,12 @@
 # router/k8s_endpoints.py
 # -*- coding: utf-8 -*-
-"""Kubernetes vLLM registry for sidecar-less central-push.
+"""Kubernetes vLLM registry for sidecar-less push-*/central-push.
 
-When ``ROUTER_MODE=central-push`` and ``ROUTER_SIDECAR_ENABLED=false``, the
-router keeps its k8s pod discovery + central queue (KV-affinity / fairness / SLO
-all still apply via ``pull_for_endpoint``), but delivers each request DIRECTLY to
-the pod's vLLM OpenAI endpoint instead of the per-pod sidecar ``/push``.
+When ``ROUTER_SIDECAR_ENABLED=false`` and ``ROUTER_MODE`` is ``push-*`` or
+``central-push``, the router discovers pods and (for central-push) keeps the
+central queue (KV-affinity / fairness / SLO all still apply via
+``pull_for_endpoint``), but delivers each request DIRECTLY to the pod's vLLM
+OpenAI endpoint instead of the per-pod sidecar ``/push``.
 
 To maximize reuse this presents the SAME interface as
 ``external_endpoints.ExternalRegistry`` (``all_ids`` / ``get`` / ``healthy_ids``
