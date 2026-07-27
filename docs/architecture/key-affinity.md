@@ -3,7 +3,9 @@
 > For a high-level overview of the routing strategies and where affinity fits,
 > see [router-strategies.md](router-strategies.md).
 >
-> **See also:** [internal/persistent-affinity-map.md](../internal/persistent-affinity-map.md)
+> **See also:** [Routing Compatibility Matrix](router.md#routing-compatibility-matrix)
+> — which dispatch modes run soft/hard affinity vs stamp-only.
+> [internal/persistent-affinity-map.md](../internal/persistent-affinity-map.md)
 > — an optional Redis-backed extension that persists the conversation→pod map so
 > pins survive router restarts/redeploys.
 
@@ -145,7 +147,8 @@ flowchart TD
   (`push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`,
   `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`; see
   [router.md](router.md)) the key is still stamped into `meta` but the
-  central-queue sort is not used.
+  central-queue sort is not used. Full mode × feature table:
+  [Routing Compatibility Matrix](router.md#routing-compatibility-matrix).
 - **Central-push (incl. sidecar-less):** central-push admits through the SAME
   central queue and calls the SAME `pull_for_endpoint` scheduler, so affinity
   (soft and hard) behaves identically to pull. This holds whether or not the

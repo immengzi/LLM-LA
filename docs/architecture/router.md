@@ -69,7 +69,10 @@ inside the router.
 
 ## 3. Routing Modes
 
-The router supports two main ways of distributing work to sidecars:
+The router supports two main ways of distributing work to sidecars.
+Which placement, rebalancing, and sidecar-less options compose with each
+mode is summarized in the [Routing Compatibility Matrix](#routing-compatibility-matrix)
+at the end of this section.
 
 ### Pull Mode (`ROUTER_MODE = "pull"`)
 
@@ -248,6 +251,65 @@ needs prefix routing it also keeps vLLM publishing KV events on `5557`. See
 [helm-values.md](../configuration/helm-values.md) and the
 `benchmark-bz-central-push-nosidecar-*` client configs.
 
+### Routing Compatibility Matrix
+
+Two independent levers control *where* work goes and *how* it is delivered:
+
+| Lever | Knob | Values |
+|-------|------|--------|
+| **Placement** | `router_strategy` / `KV_AWARE` + `AFFINITY_ENABLED` | `none` \| `prefix` \| `affinity` \| `both` ([router-strategies.md](router-strategies.md)) |
+| **Dispatch** | `ROUTER_MODE` | `pull`, `push-*`, `central-push`, `external-push` (this section) |
+
+Placement and dispatch compose, but not every rebalancing / token / sidecar-less
+feature applies to every dispatch mode. The tables below are the source of truth.
+
+#### Dispatch × features
+
+| `ROUTER_MODE` | Central queue | Prefix KV scheduling | Affinity scheduling | Sidecar-less (`ROUTER_SIDECAR_ENABLED=false`) | Fair-pull (§5c) | Soft KV divert (§5d) | Prefill-token budget (§5e) | Sidecar KV pull gate |
+|---------------|:-------------:|:--------------------:|:-------------------:|:--------------------------------------------:|:---------------:|:--------------------:|:-------------------------:|:--------------------:|
+| `pull` | yes | yes (tiers in `pull_for_endpoint`) | yes (soft/hard) | no (flag ignored) | yes | yes (via `/pull` `kv_usage`) | yes | yes ([sidecar.md](sidecar.md#kv-memory-pull-gate)) |
+| `central-push` | yes | yes (same scheduler as pull) | yes (same as pull) | **yes** | yes | yes with sidecar; no-op sidecar-less (no `/health` `kv_usage`) | yes | n/a (pods do not `/pull`) |
+| `push-rr` / `push-random` / `push-leastq` / `push-throughput` / `push-p2c` / `push-least-kv` / `push-least-latency` / `push-least-busy` | no | measure/stamp only |   soft only (no pin/hold) | **yes** | no | no | no | n/a |
+| `push-kv-cost` | no | **yes** (own cost score) | stamp only | **yes** | no | no | no | n/a |
+| `external-push` | yes (external registry) | yes (same scheduler as pull) | yes (same as pull) | n/a (no k8s sidecar) | yes | no-op (no sidecar `kv_usage`) | yes | n/a |
+
+Notes:
+
+- **Sidecar-less** is only honored for `push-*` and `central-push`; see
+  [Sidecar-less push / central-push](#sidecar-less-push--central-push-router_sidecar_enabledfalse).
+- **Stamp only** means the affinity key / block hashes are still written into
+  request meta and latency logs, but queue-less push does not run the central
+  soft/hard affinity or prefix-tier scheduler. Details:
+  [key-affinity.md](key-affinity.md#6-interaction-with-other-features).
+- **Token-load observability** (`router_endpoint_inflight_tokens`) is always on
+  for every mode; it does not change scheduling by itself (§5e).
+- `push-least-kv` needs sidecar-reported `kv_usage` (`sidecar.kvUsageReport`);
+  under sidecar-less it falls back to round-robin. Metrics-based push modes
+  (`push-throughput`, `push-least-latency`, `push-least-busy`) scrape vLLM
+  `/metrics` and work with or without a sidecar.
+
+#### Placement × dispatch
+
+| `router_strategy` | `pull` / `central-push` / `external-push` | Queue-less `push-*` (except `push-kv-cost`) | `push-kv-cost` |
+|-------------------|-------------------------------------------|--------------------------------------------|----------------|
+| `none` | no prefix tiers; no affinity | no KV/affinity effect on pick | load-only cost (no overlap credit) |
+| `prefix` | prefix tiers in `pull_for_endpoint` | blocks registered / logged; pick ignores prefix | cost uses `prefix_len` overlap credit |
+| `affinity` | soft prefer / hard pin+hold | key stamped; pick ignores pin | key stamped; pick ignores pin |
+| `both` | hard hold → prefix tiers → soft reorder | stamp + blocks; pick ignores both | cost uses prefix; affinity still stamp-only |
+
+Full placement figures: [router-strategies.md](router-strategies.md).
+Sidecar-less + prefix/`both` still needs KV events (router-hosted subscriber).
+
+#### Token / rebalancing features (detail)
+
+| Feature | Where documented | Applies when |
+|---------|------------------|--------------|
+| Fair-pull (`ROUTER_FAIR_PULL`) | [§5c](#5c-pull-mode-fairness-conceptual) | Modes that call `pull_for_endpoint` (`pull`, `central-push`, `external-push`) |
+| Soft KV divert (`ROUTER_KV_SOFT_DIVERT`) | [§5d](#5d-soft-kv-divert-conceptual) | Same modes, and only when fresh sidecar `kv_usage` is available |
+| Prefill-token budget (`PULL_BUDGET_ENABLED`) | [§5e](#5e-token-aware-pull-sizing-conceptual) | Same modes (shrinks the grant; never reorders) |
+| Sidecar KV pull gate (`KV_PULL_GATE_*`) | [sidecar.md](sidecar.md#kv-memory-pull-gate) | Pull-mode sidecars only (zeros `want` under KV pressure) |
+| Inflight token gauge | [§5e](#token-load-observability-always-on) | All modes (observability only) |
+
 ---
 
 ## 4. KV Awareness (Conceptual)
@@ -321,6 +383,8 @@ reference (modes, metrics, interactions, and source map).
 
 Fairness is an **off-by-default, load-aware grant throttle** for pull mode. It
 addresses pod-load imbalance without ever overriding KV/affinity decisions.
+(Also applies to `central-push` / `external-push`, which share `pull_for_endpoint`;
+see the [Routing Compatibility Matrix](#routing-compatibility-matrix).)
 
 Because `/pull` returns immediately (no long-poll), the router cannot choose
 between waiting pods; ordering also does not control balance (each puller still
@@ -373,7 +437,8 @@ cannot create capacity). Central-push refreshes samples by polling sidecar `/hea
 (`ROUTER_KV_HEALTH_POLL_INTERVAL_S`).
 
 Composes after fair-pull in `pull_for_endpoint`. Orthogonal to SLO dynamic pull
-(sidecar AIMD on `want`).
+(sidecar AIMD on `want`). Mode coverage:
+[Routing Compatibility Matrix](#routing-compatibility-matrix).
 
 ---
 
@@ -385,7 +450,8 @@ context and a 200-token chat turn both count as one, so a count slice
 systematically over- and under-loads otherwise-identical pods. Two additive,
 **off-by-default** mechanisms make pull sizing token-aware. Both only ever
 *reduce* how much is pulled, and neither reorders candidates, so they compose
-with KV/affinity, fair-pull (5c), and soft KV divert (5d).
+with KV/affinity, fair-pull (5c), and soft KV divert (5d). Mode coverage:
+[Routing Compatibility Matrix](#routing-compatibility-matrix).
 
 ### Token-load observability (always on)
 

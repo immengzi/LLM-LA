@@ -23,7 +23,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 |-----|-------------|
 | [overview.md](architecture/overview.md) | How the serving platform fits together (start here) |
 | [router-strategies.md](architecture/router-strategies.md) | Routing strategies overview with figures (`none/prefix/affinity/both`) |
-| [router.md](architecture/router.md) | Central queue, pull/push dispatch (`push-rr` … `push-least-busy`, `central-push`, `external-push`), HTTP/ZMQ APIs |
+| [router.md](architecture/router.md) | Central queue, pull/push dispatch (`push-rr` … `push-least-busy`, `central-push`, `external-push`), [compatibility matrix](architecture/router.md#routing-compatibility-matrix), HTTP/ZMQ APIs |
 | [sidecar.md](architecture/sidecar.md) | Local queue, vLLM forwarding, KV event reporting |
 | [kv-cache-flow.md](architecture/kv-cache-flow.md) | KV-aware routing deep dive (Redis schema, scoring) |
 | [key-affinity.md](architecture/key-affinity.md) | Conversation stickiness (same chat → same pod) |

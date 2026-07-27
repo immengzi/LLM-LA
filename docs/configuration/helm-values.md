@@ -51,7 +51,7 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `mode` | `pull` | `pull` \| `push-rr` \| `push-random` \| `push-leastq` \| `push-throughput` \| `push-p2c` \| `push-kv-cost` \| `push-least-kv` \| `push-least-latency` \| `push-least-busy` \| `central-push` (admit like pull, dispatch centrally by capacity) \| `external-push` (static external vLLM, no k8s/sidecar); [details](../architecture/router.md). For sidecar-less push-*/central-push set `sidecar.enabled=false` |
+| `mode` | `pull` | `pull` \| `push-rr` \| `push-random` \| `push-leastq` \| `push-throughput` \| `push-p2c` \| `push-kv-cost` \| `push-least-kv` \| `push-least-latency` \| `push-least-busy` \| `central-push` (admit like pull, dispatch centrally by capacity) \| `external-push` (static external vLLM, no k8s/sidecar); [details](../architecture/router.md) and [compatibility matrix](../architecture/router.md#routing-compatibility-matrix). For sidecar-less push-*/central-push set `sidecar.enabled=false` |
 | `apiKey` | `""` | Auth for `/v1/chat/completions` (empty = no auth) |
 | `strategy` | `""` | Unified selector: `none` \| `prefix` \| `affinity` \| `both`. When set, overrides `kvAware`/`affinityEnabled` ([details](../architecture/key-affinity.md)) |
 | `hashSource` | `inline` | KV-block hash source: `inline` (in-process/in-container `prefix_hash.py`) \| `external` (legacy `vllm-cpu-hash` pod, auto-deployed in this mode) ([details](../architecture/prefix-hash.md)) |

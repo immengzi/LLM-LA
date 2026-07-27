@@ -47,7 +47,7 @@ Each sidecar subscribes to vLLM's ZMQ KV-cache events and writes block ownership
 
 ## Routing modes and policies
 
-- **Dispatch modes**: `pull` (capacity-gated, default); push strategies `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`; plus `central-push` / `external-push`. Full descriptions: [router.md](router.md).
+- **Dispatch modes**: `pull` (capacity-gated, default); push strategies `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`; plus `central-push` / `external-push`. Full descriptions: [router.md](router.md). Compatibility of each mode with prefix KV, affinity, sidecar-less delivery, fair-pull, soft divert, and token budgets: [Routing Compatibility Matrix](router.md#routing-compatibility-matrix).
 - **Length-aware policies**: `short_first`, `long_first` (applied within KV tiers).
 - **SLO-aware scheduling**: an alternative slack-based sort that orders by deadline headroom; see [slo-aware-routing.md](slo-aware-routing.md).
 
@@ -62,6 +62,7 @@ The router and sidecar exist in both **Python** (FastAPI) and **Go** (chi), sele
 
 ## See also
 
+- [Routing Compatibility Matrix](router.md#routing-compatibility-matrix) — dispatch × placement × rebalancing
 - [Request tracing](trace.md) — per-request stage timing
 - [Autoscaling](../operations/autoscaling.md) — per-model KEDA scaling on queue/KV-cache signals
 - [Configuration: client config](../configuration/client-config.md) and [Helm values](../configuration/helm-values.md)
