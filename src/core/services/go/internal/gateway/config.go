@@ -314,6 +314,8 @@ func (c *Config) normalize() {
 	switch rm {
 	case "throughput", "least-throughput", "push_throughput", "push-least-tokens":
 		rm = "push-throughput"
+	case "push-power-of-two", "push-pow2", "push_p2c", "power-of-two", "push-power-of-two-choices":
+		rm = "push-p2c"
 	}
 	switch rm {
 	case "central_push", "centralpush":
@@ -323,7 +325,7 @@ func (c *Config) normalize() {
 	case "external_push", "externalpush", "external", "direct-external":
 		rm = "external-push"
 	}
-	allowed := map[string]bool{"pull": true, "push-rr": true, "push-random": true, "push-leastq": true, "push-throughput": true, "central-push": true, "external-push": true}
+	allowed := map[string]bool{"pull": true, "push-rr": true, "push-random": true, "push-leastq": true, "push-throughput": true, "push-p2c": true, "central-push": true, "external-push": true}
 	if !allowed[rm] {
 		rm = "pull"
 	}

@@ -54,3 +54,31 @@ func TestTotalTokensFromSums(t *testing.T) {
 		t.Fatal("absent counters should be ok=false")
 	}
 }
+
+// TestChooseLowerLoad verifies the power-of-two-choices comparator mirrors
+// the Python _pick_lower_load: smaller load wins, ties keep the first sampled
+// endpoint, and a failed probe (ok=false) is treated as worst.
+func TestChooseLowerLoad(t *testing.T) {
+	cases := []struct {
+		name string
+		a    string
+		sa   int
+		aOK  bool
+		b    string
+		sb   int
+		bOK  bool
+		want string
+	}{
+		{"a-smaller", "a", 1, true, "b", 2, true, "a"},
+		{"b-smaller", "a", 3, true, "b", 2, true, "b"},
+		{"tie-first", "a", 2, true, "b", 2, true, "a"},
+		{"a-failed", "a", 0, false, "b", 5, true, "b"},
+		{"b-failed", "a", 5, true, "b", 0, false, "a"},
+		{"both-failed", "a", 0, false, "b", 0, false, "a"},
+	}
+	for _, c := range cases {
+		if got := chooseLowerLoad(c.a, c.sa, c.aOK, c.b, c.sb, c.bOK); got != c.want {
+			t.Fatalf("%s: chooseLowerLoad = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
