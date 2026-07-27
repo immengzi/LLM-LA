@@ -81,7 +81,7 @@ The router supports two main ways of distributing work to sidecars:
 
 This is the default and is easy to reason about: workers pull work when ready.
 
-### Push Modes (`"push-rr"`, `"push-random"`, `"push-leastq"`, `"push-throughput"`, `"push-p2c"`, `"push-kv-cost"`)
+### Push Modes (`"push-rr"`, `"push-random"`, `"push-leastq"`, `"push-throughput"`, `"push-p2c"`, `"push-kv-cost"`, `"push-least-kv"`)
 
 - Router uses Kubernetes discovery to find sidecars.
 - For each request, it picks an endpoint and calls the sidecar’s `/push`.
@@ -110,6 +110,12 @@ This is the default and is easy to reason about: workers pull work when ready.
     Higher `ROUTER_KV_OVERLAP_CREDIT` favors cache reuse (lower TTFT); it degrades
     to load-based selection when KV awareness is off. Aliases: `kv-cost`,
     `push-cost`.
+  - **least-kv-cache** (`push-least-kv`) – route to the pod with the lowest
+    KV-cache occupancy, read from the sidecar-reported `kv_usage` on `/health`
+    (vLLM `kv_cache_usage_perc`, falling back to `gpu_cache_usage_perc`). Requires
+    `sidecar.kvUsageReport.enabled`; falls back to round-robin if no pod reports
+    `kv_usage`. The `least-kv-cache` and `least-gpu-cache` names map to the same
+    signal here. Aliases: `least-kv-cache`, `least-gpu-cache`, `push-least-gpu`.
 
 Results still come back via `/result`; from the client’s viewpoint `/enqueue`
 is the same.
@@ -410,7 +416,7 @@ not the count cap, was the binding constraint); both stay `0` while disabled.
 Most behavior is controlled via environment variables loaded into
 `RouterConfig`, for example:
 
-- `ROUTER_MODE` – `pull`, `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `central-push`,
+- `ROUTER_MODE` – `pull`, `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `central-push`,
   `external-push`.
 - `ROUTER_KV_OVERLAP_CREDIT` / `ROUTER_PREFILL_LOAD_SCALE` / `ROUTER_TEMPERATURE` – `push-kv-cost` tunables (defaults `1.0` / `1.0` / `0.0`).
 - `ROUTER_CENTRAL_PUSH_CAP` (default 8) – per-pod concurrency ceiling in

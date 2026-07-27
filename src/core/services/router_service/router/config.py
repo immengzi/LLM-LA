@@ -182,7 +182,7 @@ class RouterConfig:
     # --------------------------------------------------------------------
     # Router mode + sidecar port
     # --------------------------------------------------------------------
-    ROUTER_MODE: str = "pull"        # "pull", "push-rr", "push-random", "push-leastq", "push-throughput", "push-p2c", "push-kv-cost", "central-push", "external-push"
+    ROUTER_MODE: str = "pull"        # "pull", "push-rr", "push-random", "push-leastq", "push-throughput", "push-p2c", "push-kv-cost", "push-least-kv", "central-push", "external-push"
     SIDECAR_PORT: int = 9000         # sidecar FastAPI port
 
     # --------------------------------------------------------------------
@@ -738,7 +738,10 @@ def get_config() -> RouterConfig:
     if rm in ("push-kv-cost", "kv-cost", "push-cost", "push_kv_cost"):
         rm = "push-kv-cost"
 
-    if rm not in ("pull", "push-rr", "push-random", "push-leastq", "push-throughput", "push-p2c", "push-kv-cost", "central-push", "external-push"):
+    if rm in ("least-kv-cache", "least-gpu-cache", "push-least-gpu", "push-least-kv-cache", "push-least-gpu-cache"):
+        rm = "push-least-kv"
+
+    if rm not in ("pull", "push-rr", "push-random", "push-leastq", "push-throughput", "push-p2c", "push-kv-cost", "push-least-kv", "central-push", "external-push"):
         rm = "pull"
     cfg.ROUTER_MODE = rm
 
