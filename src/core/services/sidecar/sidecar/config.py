@@ -168,6 +168,22 @@ class SidecarConfig:
     KV_USAGE_SCRAPE_TIMEOUT_S: float = 2.0
 
     # ------------------------------------------------
+    # KV-memory pull gate (default OFF)
+    # ------------------------------------------------
+    # A pull-side hard memory guard: when the local vLLM GPU KV cache fill
+    # fraction (kv_usage) is high, shrink or stop pulling so long-decode work
+    # does not drive the pod into preemption / OOM. Needs KV_USAGE_REPORT=on to
+    # receive samples; with no sample the gate fails open (never blocks). It only
+    # ever *reduces* the pull, so it composes with the static cap and the SLO
+    # (TPOT) backpressure controller.
+    #   kv_usage >= HIGH        -> want := 0 (stop pulling)
+    #   kv_usage <= LOW         -> want unchanged
+    #   LOW < kv_usage < HIGH   -> linear taper of want toward 0
+    KV_PULL_GATE_ENABLED: bool = False
+    KV_PULL_GATE_HIGH: float = 0.90
+    KV_PULL_GATE_LOW: float = 0.70
+
+    # ------------------------------------------------
     # Logging
     # ------------------------------------------------
 
@@ -295,6 +311,18 @@ def get_config() -> SidecarConfig:
     cfg.KV_USAGE_SCRAPE_TIMEOUT_S = float(
         os.getenv("KV_USAGE_SCRAPE_TIMEOUT_S", cfg.KV_USAGE_SCRAPE_TIMEOUT_S)
     )
+
+    # ------------------------------------------------
+    # KV-memory pull gate
+    # ------------------------------------------------
+    cfg.KV_PULL_GATE_ENABLED = (
+        os.getenv("KV_PULL_GATE_ENABLED", str(cfg.KV_PULL_GATE_ENABLED)).lower() == "true"
+    )
+    cfg.KV_PULL_GATE_HIGH = float(os.getenv("KV_PULL_GATE_HIGH", cfg.KV_PULL_GATE_HIGH))
+    cfg.KV_PULL_GATE_LOW = float(os.getenv("KV_PULL_GATE_LOW", cfg.KV_PULL_GATE_LOW))
+    # Keep the window well-formed: 0 <= LOW <= HIGH <= 1.
+    cfg.KV_PULL_GATE_HIGH = min(1.0, max(0.0, cfg.KV_PULL_GATE_HIGH))
+    cfg.KV_PULL_GATE_LOW = min(cfg.KV_PULL_GATE_HIGH, max(0.0, cfg.KV_PULL_GATE_LOW))
 
     # ------------------------------------------------
     # Logging

@@ -73,6 +73,14 @@ type Config struct {
 	KVUsageScrapeIntervalS float64
 	KVUsageScrapeTimeoutS  float64
 
+	// KV-memory pull gate (P1; default OFF). Shrink/stop pulling when the local
+	// vLLM GPU KV fill fraction is high, to avoid preemption/OOM under long
+	// decode. Needs KVUsageReport for samples; fails open when no sample exists.
+	// Only ever reduces the pull. Mirrors the Python KV_PULL_GATE_* knobs.
+	KVPullGateEnabled bool
+	KVPullGateHigh    float64
+	KVPullGateLow     float64
+
 	LogLevel string
 }
 
@@ -136,6 +144,10 @@ func LoadConfig() *Config {
 		KVUsageScrapeIntervalS: common.EnvFloat("KV_USAGE_SCRAPE_INTERVAL_S", 5.0),
 		KVUsageScrapeTimeoutS:  common.EnvFloat("KV_USAGE_SCRAPE_TIMEOUT_S", 2.0),
 
+		KVPullGateEnabled: common.EnvBool("KV_PULL_GATE_ENABLED", false),
+		KVPullGateHigh:    common.EnvFloat("KV_PULL_GATE_HIGH", 0.90),
+		KVPullGateLow:     common.EnvFloat("KV_PULL_GATE_LOW", 0.70),
+
 		LogLevel: common.EnvStr("LOG_LEVEL", "info"),
 	}
 	cfg.normalize()
@@ -168,6 +180,19 @@ func (c *Config) normalize() {
 	c.SLODecreaseMode = strings.TrimSpace(strings.ToLower(c.SLODecreaseMode))
 	if c.SLODecreaseMode != "additive" && c.SLODecreaseMode != "multiplicative" {
 		c.SLODecreaseMode = "additive"
+	}
+	// Keep the KV pull gate window well-formed: 0 <= LOW <= HIGH <= 1.
+	if c.KVPullGateHigh > 1.0 {
+		c.KVPullGateHigh = 1.0
+	}
+	if c.KVPullGateHigh < 0 {
+		c.KVPullGateHigh = 0
+	}
+	if c.KVPullGateLow < 0 {
+		c.KVPullGateLow = 0
+	}
+	if c.KVPullGateLow > c.KVPullGateHigh {
+		c.KVPullGateLow = c.KVPullGateHigh
 	}
 }
 

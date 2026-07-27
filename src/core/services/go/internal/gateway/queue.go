@@ -56,6 +56,13 @@ type CentralQueue struct {
 	// RouterState._inflight_by_endpoint in router_state.py.
 	inflightByEndpoint map[string]int
 
+	// Sum of ISL tokens in flight per endpoint (P0 observability): the
+	// token-weighted companion to inflightByEndpoint. Mirrors
+	// RouterState._inflight_tokens_by_endpoint. reqISLTokens remembers the token
+	// count charged for each in-flight req so release subtracts it exactly.
+	inflightTokensByEndpoint map[string]int
+	reqISLTokens             map[string]int
+
 	// Per-endpoint last /pull wall-clock timestamp. Feeds the fairness liveness
 	// signal + the fleet-average denominator. Mirrors RouterState._last_pull_ts.
 	lastPullByEndpoint map[string]float64
@@ -78,17 +85,19 @@ func NewCentralQueue(cfg *Config, kv *kvAware) *CentralQueue {
 		aff = NewAffinityMap(cfg.AffinityTTLS)
 	}
 	return &CentralQueue{
-		cfg:                  cfg,
-		kv:                   kv,
-		pred:                 getLengthPredictor(cfg),
-		defaultModel:         cfg.ModelName,
-		queues:               make(map[string][]queueItem),
-		affinity:             aff,
-		reqEndpoint:          make(map[string]string),
-		inflightByEndpoint:   make(map[string]int),
-		lastPullByEndpoint:   make(map[string]float64),
-		lastResultByEndpoint: make(map[string]float64),
-		chunkQueues:          make(map[string]chan map[string]interface{}),
+		cfg:                      cfg,
+		kv:                       kv,
+		pred:                     getLengthPredictor(cfg),
+		defaultModel:             cfg.ModelName,
+		queues:                   make(map[string][]queueItem),
+		affinity:                 aff,
+		reqEndpoint:              make(map[string]string),
+		inflightByEndpoint:       make(map[string]int),
+		inflightTokensByEndpoint: make(map[string]int),
+		reqISLTokens:             make(map[string]int),
+		lastPullByEndpoint:       make(map[string]float64),
+		lastResultByEndpoint:     make(map[string]float64),
+		chunkQueues:              make(map[string]chan map[string]interface{}),
 	}
 }
 
@@ -353,10 +362,16 @@ func (q *CentralQueue) UpdateMeta(reqID string, meta map[string]interface{}) {
 
 // Pull removes up to `want` items for the endpoint+model, applying KV-aware,
 // length-aware, and (optionally) SLO-aware ordering. Mirrors
-// RouterState.pull_for_endpoint.
-func (q *CentralQueue) Pull(endpoint string, want int, model string) []JobItem {
+// RouterState.pull_for_endpoint. The optional wantPrefillTokens (P2) is the
+// per-pull uncached-prefill token budget; when omitted (or 0) the router falls
+// back to its PrefillTokenBudget and, if that is also 0, to a pure count slice.
+func (q *CentralQueue) Pull(endpoint string, want int, model string, wantPrefillTokens ...int) []JobItem {
 	if want <= 0 {
 		return nil
+	}
+	budgetTokens := 0
+	if len(wantPrefillTokens) > 0 {
+		budgetTokens = wantPrefillTokens[0]
 	}
 
 	q.mu.Lock()
@@ -425,10 +440,16 @@ func (q *CentralQueue) Pull(endpoint string, want int, model string) []JobItem {
 	if takeN > len(ordered) {
 		takeN = len(ordered)
 	}
-	chosenRaw := ordered[:takeN]
-	leftovers := ordered[takeN:]
 
 	kvEnabled := q.cfg.KVAware
+
+	// Prefill-token budget (P2): further shrink takeN so the grant fits an
+	// uncached-prefill token budget instead of a pure count slice. No-op unless
+	// PullBudgetEnabled + a positive budget. Mirrors _apply_prefill_token_budget.
+	takeN = q.applyPrefillTokenBudgetLocked(endpoint, takeN, ordered, kvEnabled, budgetTokens)
+
+	chosenRaw := ordered[:takeN]
+	leftovers := ordered[takeN:]
 
 	// Trace enrichment.
 	dispatchTS := nowS()
@@ -474,9 +495,16 @@ func (q *CentralQueue) Pull(endpoint string, want int, model string) []JobItem {
 	// Mirrors record_routing in router_state.py: reuse the sort's kv_hits when KV
 	// routing is on, else compute prefixLen directly (0 when measurement is off).
 	logBlockHashes := q.cfg.LogBlockHashes
+	addedTokens := 0
 	for _, it := range chosen {
 		incDispatch(endpoint)
 		q.reqEndpoint[it.reqID] = endpoint
+
+		// P0: charge this endpoint's in-flight token sum with the request's ISL.
+		if tok := q.islTokensFor(it.reqID, it.meta); tok > 0 {
+			q.reqISLTokens[it.reqID] = tok
+			addedTokens += tok
+		}
 
 		hits := 0
 		if kvEnabled {
@@ -495,6 +523,10 @@ func (q *CentralQueue) Pull(endpoint string, want int, model string) []JobItem {
 			info.blockHashes, info.hasBlocks = blocks, true
 		}
 		q.kv.recordRouting(it.reqID, info)
+	}
+	if addedTokens > 0 {
+		q.inflightTokensByEndpoint[endpoint] += addedTokens
+		setEndpointInflightTokens(endpoint, q.inflightTokensByEndpoint[endpoint])
 	}
 
 	// Affinity: record where each keyed conversation was dispatched so
@@ -519,6 +551,102 @@ func (q *CentralQueue) Pull(endpoint string, want int, model string) []JobItem {
 		items[i] = JobItem{ReqID: it.reqID, Prompt: it.prompt, TEnqClient: it.tEnq, Meta: meta}
 	}
 	return items
+}
+
+// islTokensFor returns the best-effort ISL token count for a request: the exact
+// meta["__isl_tokens__"] when present, else a block-granular estimate from the
+// registered block hashes (len(blocks) * KVBlockSize). Returns 0 when unknown.
+// Mirrors RouterState._isl_tokens_for; the Go hash service only returns block
+// hashes (no exact token length), so in practice the block estimate is used.
+func (q *CentralQueue) islTokensFor(reqID string, meta map[string]interface{}) int {
+	if meta != nil {
+		switch n := meta["__isl_tokens__"].(type) {
+		case int:
+			if n > 0 {
+				return n
+			}
+		case int64:
+			if n > 0 {
+				return int(n)
+			}
+		case float64:
+			if n > 0 {
+				return int(n)
+			}
+		}
+	}
+	blocks := q.kv.getRequestBlocks(reqID)
+	if len(blocks) > 0 {
+		blk := q.cfg.KVBlockSize
+		if blk <= 0 {
+			blk = 128
+		}
+		return len(blocks) * blk
+	}
+	return 0
+}
+
+// decEndpointTokens subtracts released ISL tokens from an endpoint's in-flight
+// token sum (clamped at 0) and republishes the gauge. Acquires q.mu itself, so
+// callers must NOT hold it. Mirrors RouterState._dec_endpoint_tokens.
+func (q *CentralQueue) decEndpointTokens(endpoint string, tokens int) {
+	if endpoint == "" || tokens <= 0 {
+		return
+	}
+	q.mu.Lock()
+	v := q.inflightTokensByEndpoint[endpoint] - tokens
+	if v < 0 {
+		v = 0
+	}
+	q.inflightTokensByEndpoint[endpoint] = v
+	q.mu.Unlock()
+	setEndpointInflightTokens(endpoint, v)
+}
+
+// applyPrefillTokenBudgetLocked shrinks takeN so the grant fits an uncached-
+// prefill token budget (P2). Must hold q.mu. Returns the number of leading items
+// from ordered to take. No-op unless PullBudgetEnabled + a positive budget is
+// resolvable. Ordering is never changed; the first item is always admitted so a
+// request larger than the whole budget still makes progress. Only ever reduces
+// the count. Mirrors RouterState._apply_prefill_token_budget.
+func (q *CentralQueue) applyPrefillTokenBudgetLocked(endpoint string, takeN int, ordered []queueItem, kvEnabled bool, wantPrefillTokens int) int {
+	if !q.cfg.PullBudgetEnabled || takeN <= 0 {
+		return takeN
+	}
+	budget := wantPrefillTokens
+	if budget <= 0 {
+		budget = q.cfg.PrefillTokenBudget
+	}
+	if budget <= 0 {
+		return takeN
+	}
+	blk := q.cfg.KVBlockSize
+	if blk <= 0 {
+		blk = 128
+	}
+	spent, k := 0, 0
+	for _, it := range ordered[:takeN] {
+		isl := q.islTokensFor(it.reqID, it.meta)
+		cached := 0
+		if kvEnabled {
+			cached = q.kv.prefixLen(endpoint, it.reqID) * blk
+		}
+		uncached := isl - cached
+		if uncached < 0 {
+			uncached = 0
+		}
+		// Always admit the first item; else stop before exceeding the budget.
+		if k > 0 && spent+uncached > budget {
+			break
+		}
+		spent += uncached
+		k++
+	}
+	setPullGrantedPrefillTokens(endpoint, spent)
+	if k < takeN {
+		incPullBudgetBound(endpoint)
+	}
+	return k
 }
 
 // legacySort mirrors RouterState._legacy_sort exactly.
@@ -791,9 +919,14 @@ func (q *CentralQueue) ReleaseInflight(reqID, endpointHint string) {
 	if ok {
 		delete(q.reqEndpoint, reqID)
 	}
+	tok := q.reqISLTokens[reqID]
+	delete(q.reqISLTokens, reqID)
 	q.mu.Unlock()
 	if ep != "" {
 		q.DecEndpointInflight(ep, 1)
+		if tok > 0 {
+			q.decEndpointTokens(ep, tok)
+		}
 	}
 }
 

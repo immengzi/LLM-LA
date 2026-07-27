@@ -43,6 +43,32 @@ ROUTER_ENDPOINT_INFLIGHT = Gauge(
     ["endpoint"],
 )
 
+# Sum of input (prompt/ISL) tokens for requests currently in flight per endpoint.
+# The token-weighted companion to router_endpoint_inflight: two pods with the
+# same in-flight *count* can differ 100x in token load under long-sequence
+# coding traffic. This surfaces the count-vs-token imbalance that motivates
+# token/KV-block-budgeted pull sizing.
+ROUTER_ENDPOINT_INFLIGHT_TOKENS = Gauge(
+    "router_endpoint_inflight_tokens",
+    "Sum of input (ISL) tokens for requests currently in flight per endpoint",
+    ["endpoint"],
+)
+
+# P2 (prefill-token budgeted pull) observability. Only move when
+# PULL_BUDGET_ENABLED; otherwise these stay at 0.
+ROUTER_PULL_GRANTED_PREFILL_TOKENS = Gauge(
+    "router_pull_granted_prefill_tokens",
+    "Uncached prefill tokens granted in the most recent budgeted /pull per endpoint",
+    ["endpoint"],
+)
+
+ROUTER_PULL_BUDGET_BOUND_TOTAL = Counter(
+    "router_pull_budget_bound_total",
+    "Count of /pull grants where the prefill-token budget (not the count cap) "
+    "was the binding constraint, per endpoint",
+    ["endpoint"],
+)
+
 # Pull-mode fairness liveness signals (only updated when STUCK_PULL_SECONDS > 0).
 ROUTER_ENDPOINT_LAST_PULL_SECONDS = Gauge(
     "router_endpoint_last_pull_seconds",
@@ -279,6 +305,27 @@ def inc_dispatch(endpoint: str) -> None:
 def set_endpoint_inflight(endpoint: str, n: int) -> None:
     try:
         ROUTER_ENDPOINT_INFLIGHT.labels(endpoint=str(endpoint)).set(int(n))
+    except Exception:
+        pass
+
+
+def set_endpoint_inflight_tokens(endpoint: str, n: int) -> None:
+    try:
+        ROUTER_ENDPOINT_INFLIGHT_TOKENS.labels(endpoint=str(endpoint)).set(int(n))
+    except Exception:
+        pass
+
+
+def set_pull_granted_prefill_tokens(endpoint: str, n: int) -> None:
+    try:
+        ROUTER_PULL_GRANTED_PREFILL_TOKENS.labels(endpoint=str(endpoint)).set(int(n))
+    except Exception:
+        pass
+
+
+def inc_pull_budget_bound(endpoint: str) -> None:
+    try:
+        ROUTER_PULL_BUDGET_BOUND_TOTAL.labels(endpoint=str(endpoint)).inc()
     except Exception:
         pass
 

@@ -82,6 +82,23 @@ what the model path actually serves so the hashes line up:
   tool-call `arguments` JSON strings are parsed into objects. Model-specific
   reasoning-field rewrites are intentionally **not** done here.
 
+### Input token count (ISL)
+
+The inline path also captures the request's exact rendered **input token
+count** (ISL) in the *same* tokenize pass, via
+`compute_request_block_hashes_with_len()` — the older
+`compute_request_block_hashes_int()` is now a thin wrapper over it with
+unchanged behavior. `_maybe_register_kv_blocks` stamps this onto the request as
+`meta['__isl_tokens__']` (only when `> 0`) and into the trace as `isl_tokens`.
+On the `external` path only full-block hashes are available, so the ISL is
+approximated at block granularity (`len(block_hashes) * KV_BLOCK_SIZE`, dropping
+the tail partial block).
+
+This exact-token signal is what the router's per-endpoint token-load metric and
+the prefill-token pull budget consume (see [router.md](router.md) §5e); when it
+is absent those consumers fall back to the same block-granular estimate. It is
+additive and default-safe — no routing decision changes.
+
 ### Tool canonicalization
 
 Tool schemas are JSON objects whose key order is semantically irrelevant, but key

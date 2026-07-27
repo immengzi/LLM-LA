@@ -38,15 +38,49 @@ This ensures each pod only runs as many vLLM requests as it can handle.
 A pull helper checks the local queue state and, when there is spare capacity,
 asks the router for more items with a single `/pull` call that includes:
 
-- the pod identity (used as the endpoint name), and  
+- the pod identity (used as the endpoint name), and
 - how many new requests it can accept.
 
 The helper is triggered by events:
 
-- after each completed request to immediately top up, and  
+- after each completed request to immediately top up, and
 - occasionally while idle to see if new work is available.
 
 There is no tight polling loop; traffic is proportional to actual activity.
+
+---
+
+## KV-Memory Pull Gate
+
+An **off-by-default** pull-side memory guard. When the pod's local vLLM GPU KV
+cache fill fraction (`kv_usage`, from `vllm:kv_cache_usage_perc`) is high, the
+sidecar shrinks or stops pulling so that long-decode / long-sequence work does
+not drive the pod into KV preemption (recompute) or OOM.
+
+After the static window computes how many items to request
+(`want = (BATCH_SIZE + PREFETCH) − (pending + inflight)`), the gate scales it:
+
+- `kv_usage ≥ KV_PULL_GATE_HIGH` (default `0.90`) → `want := 0` (stop pulling)
+- `kv_usage ≤ KV_PULL_GATE_LOW` (default `0.70`) → `want` unchanged
+- in between → linear taper of `want` toward 0
+
+It only ever *reduces* `want`, so it composes with the static cap and the
+SLO/TPOT AIMD backpressure controller (whichever is smallest wins). It needs
+`KV_USAGE_REPORT=true` for samples; with no sample it **fails open** (never
+blocks) and logs a one-time startup warning. The `[LOW, HIGH]` band gives
+hysteresis so pulling does not thrash near the threshold.
+
+Enable with `KV_PULL_GATE_ENABLED=true` (`KV_PULL_GATE_HIGH` / `KV_PULL_GATE_LOW`
+tune the band; normalized to `0 ≤ LOW ≤ HIGH ≤ 1`). When enabled it exports
+`sidecar_kv_pull_gate_scale` (the multiplier applied this tick, `1`=no throttle,
+`0`=blocked) and `sidecar_kv_pull_gate_kv_usage` (the fill fraction it acted on);
+these gauges are registered only when the gate is on, so a disabled sidecar's
+`/metrics` is byte-for-byte unchanged.
+
+This is a local **memory** guard, distinct from the router-side soft KV divert,
+which instead reorders *which* requests a saturated pod keeps (see
+[router.md](router.md) §5d). The same `kv_usage` sample the sidecar reports on
+`/pull` and `/health` feeds both.
 
 ---
 
@@ -54,10 +88,10 @@ There is no tight polling loop; traffic is proportional to actual activity.
 
 Worker threads repeatedly:
 
-1. Take a request from the local queue.  
+1. Take a request from the local queue.
 2. Call the pod’s vLLM `/v1/chat/completions` endpoint using the stored
-   prompt and meta.  
-3. Extract the generated text from the response.  
+   prompt and meta.
+3. Extract the generated text from the response.
 4. Send the result back to the router via a `/result` call that includes the
    original `req_id`.
 
@@ -75,7 +109,7 @@ A background subscriber connects to vLLM over ZMQ and receives KV-cache events
 such as blocks being stored, removed, or fully cleared. For each event, it
 updates Redis so that other components know:
 
-- which block hashes belong to this pod, and  
+- which block hashes belong to this pod, and
 - which pods are associated with each block hash.
 
 The router can then use this information to send requests to pods that already
@@ -87,7 +121,7 @@ hold matching KV blocks, enabling cache reuse.
 
 The sidecar exposes a small internal API:
 
-- `GET /health` — reports basic status, queue length, and inflight count.  
+- `GET /health` — reports basic status, queue length, and inflight count.
 - `POST /push` — optional way to inject work directly into the local queue
   (useful for testing or alternative routing modes).
 
@@ -97,11 +131,11 @@ The sidecar exposes a small internal API:
 
 On startup the sidecar:
 
-1. Loads configuration from environment variables.  
-2. Creates the local queue and binds it to the HTTP API.  
-3. Starts the pull helper (in pull mode).  
-4. Launches vLLM worker threads.  
-5. Starts the KV subscriber.  
+1. Loads configuration from environment variables.
+2. Creates the local queue and binds it to the HTTP API.
+3. Starts the pull helper (in pull mode).
+4. Launches vLLM worker threads.
+5. Starts the KV subscriber.
 6. Runs the FastAPI server with Uvicorn.
 
 On shutdown it stops workers, the pull helper, and the subscriber cleanly.

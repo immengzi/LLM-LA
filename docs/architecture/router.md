@@ -304,6 +304,82 @@ unavailable-target path.
 
 ---
 
+## 5d. Soft KV Divert (Conceptual)
+
+Soft KV divert is an **off-by-default grant filter** for pull / central-push. When a
+pod’s GPU KV usage is high **and another pod still has headroom**, the saturated
+pod keeps only:
+
+- affinity self-pins, and
+- requests with local `prefix_len >= ROUTER_KV_SOFT_MIN_HITS`,
+
+and leaves cold / low-hit work for healthier pullers. It does **not** dump
+prefix-local conversations onto peers (that would be hard divert).
+
+**Signal:** each sidecar optionally scrapes **local** vLLM `/metrics`
+(`vllm:kv_cache_usage_perc`, fallback `vllm:gpu_cache_usage_perc`; `max` across
+engines) and reports `kv_usage` on `/pull` and `/health`. Direct pod-local HTTP —
+not cluster Prometheus. Sidecar switch: `KV_USAGE_REPORT` (default off).
+
+**Activation:** `ROUTER_KV_SOFT_DIVERT=true`, self `kv_usage ≥ ROUTER_KV_PRESSURE_HIGH`
+(with LOW hysteresis), and some peer with fresh `kv_usage < ROUTER_KV_PRESSURE_PEER_OK`.
+If every peer is also high / samples are missing or stale → **no-op** (rebalance
+cannot create capacity). Central-push refreshes samples by polling sidecar `/health`
+(`ROUTER_KV_HEALTH_POLL_INTERVAL_S`).
+
+Composes after fair-pull in `pull_for_endpoint`. Orthogonal to SLO dynamic pull
+(sidecar AIMD on `want`).
+
+---
+
+## 5e. Token-Aware Pull Sizing (Conceptual)
+
+Pull grants are sized by **request count** by default, but under long-sequence
+coding / agentic traffic a count is a poor proxy for load: a 30k-token repo
+context and a 200-token chat turn both count as one, so a count slice
+systematically over- and under-loads otherwise-identical pods. Two additive,
+**off-by-default** mechanisms make pull sizing token-aware. Both only ever
+*reduce* how much is pulled, and neither reorders candidates, so they compose
+with KV/affinity, fair-pull (5c), and soft KV divert (5d).
+
+### Token-load observability (always on)
+
+Alongside the count gauge `router_endpoint_inflight`, the router exposes
+`router_endpoint_inflight_tokens{endpoint}` — the sum of input (ISL) tokens for
+requests currently in flight on each pod. It uses the exact
+`meta['__isl_tokens__']` stamped at block registration (see
+[prefix-hash.md](prefix-hash.md#input-token-count-isl)), falling back to a
+block-granular estimate. Tokens are accumulated at dispatch and released
+idempotently on result/timeout, exactly like the count. A wide token spread
+across pods whose counts are even is the imbalance the budget below removes;
+this metric itself changes no scheduling decision.
+
+### Prefill-token budget (`PULL_BUDGET_ENABLED`)
+
+When enabled, the final grant is filled **greedily by uncached prefill tokens**
+instead of a pure count slice. Walking the already-ordered candidates
+(KV/affinity/SLO order preserved), the router admits requests until either the
+count cap or an *uncached-prefill token* budget would be exceeded:
+
+- **uncached prefill** per request = `isl_tokens − cached_prefix_tokens`, where
+  `cached_prefix_tokens = prefix_len(endpoint, req) × KV_BLOCK_SIZE` when KV is
+  enabled. KV hits are therefore *credited* — a long prompt already warm on this
+  pod costs almost no budget — so this rewards rather than fights KV affinity.
+- the **first** candidate is always admitted, so a request larger than the whole
+  budget still makes progress (no starvation / deadlock).
+- it runs **last** and only shrinks the count, composing with `FIXED_BATCH_SIZE`,
+  fair-pull, and soft divert.
+
+The budget is `PullRequest.want_prefill_tokens` (a per-pull override sent by the
+sidecar) if set, else the router's `PREFILL_TOKEN_BUDGET`; `0` on both ⇒
+count-only no-op. Recommended `PREFILL_TOKEN_BUDGET ≈` vLLM
+`max_num_batched_tokens` (e.g. `8192`). Observability:
+`router_pull_granted_prefill_tokens{endpoint}` and
+`router_pull_budget_bound_total{endpoint}` (incremented when the token budget,
+not the count cap, was the binding constraint); both stay `0` while disabled.
+
+---
+
 ## 6. Configuration (High-Level)
 
 Most behavior is controlled via environment variables loaded into
@@ -341,6 +417,16 @@ Most behavior is controlled via environment variables loaded into
   items an overloaded pod still gets. `ROUTER_STUCK_PULL_SECONDS` (0 = off) and
   `ROUTER_AFFINITY_RELEASE_ON_STUCK` are the optional stuck-pod controls. All
   default off; never override KV/affinity.
+- `ROUTER_KV_SOFT_DIVERT` – soft GPU-KV pressure divert (see 5d). Defaults off.
+  Thresholds: `ROUTER_KV_PRESSURE_HIGH` / `LOW` / `PEER_OK`,
+  `ROUTER_KV_SOFT_MIN_HITS`, `ROUTER_KV_USAGE_STALE_S`,
+  `ROUTER_KV_HEALTH_POLL_INTERVAL_S`. Sidecar must set `KV_USAGE_REPORT=true`.
+- `PULL_BUDGET_ENABLED` – size pull grants by uncached prefill tokens instead of
+  a pure count slice (see 5e). `PREFILL_TOKEN_BUDGET` (default `0` = count-only)
+  is the default per-pull budget used when the sidecar sends no
+  `want_prefill_tokens`; set it near vLLM `max_num_batched_tokens`. The token
+  gauge `router_endpoint_inflight_tokens` is always exported regardless. Defaults
+  off (byte-identical behavior when off).
 - `ROUTER_LOG_REQUEST_BODY` – also store each request's full body (messages +
   sampling params) under `request_body` in the `/latency_log` ring. Opt-in, off
   by default; the body rides the bounded ring so it evicts automatically.
@@ -355,8 +441,10 @@ The Go gateway and the Python router are kept at parity: both honor
 (`ROUTER_FAIR_PULL`, `ROUTER_FAIR_MARGIN`, `ROUTER_FAIR_FLOOR`,
 `ROUTER_STUCK_PULL_SECONDS`, `ROUTER_AFFINITY_RELEASE_ON_STUCK`), and the
 central-push knobs (`ROUTER_MODE=central-push`, `ROUTER_CENTRAL_PUSH_CAP`,
-`ROUTER_CENTRAL_PUSH_INTERVAL_S`), and both enrich `/latency_log` with the same
-prefix/KV fields.
+`ROUTER_CENTRAL_PUSH_INTERVAL_S`), the token-aware pull knobs
+(`PULL_BUDGET_ENABLED`, `PREFILL_TOKEN_BUDGET`, plus the always-on
+`router_endpoint_inflight_tokens` gauge), and both enrich `/latency_log` with the
+same prefix/KV fields.
 - `REDIS_HOST`, `REDIS_PORT`, `MODEL_NAME` – KV watcher’s view of Redis keys.
 - `NAMESPACE`, `LABEL_SELECTOR`, `SIDECAR_PORT` – how to find sidecars in K8s.
 - `RESULT_TIMEOUT_S` – how long `/enqueue` will wait for a result.

@@ -19,9 +19,13 @@ type EnqueueRequest struct {
 
 // PullRequest matches the Python PullRequest pydantic model.
 type PullRequest struct {
-	Endpoint string `json:"endpoint"`
-	Want     int    `json:"want"`
-	Model    string `json:"model,omitempty"`
+	Endpoint string   `json:"endpoint"`
+	Want     int      `json:"want"`
+	Model    string   `json:"model,omitempty"`
+	KvUsage  *float64 `json:"kv_usage,omitempty"`
+	// Optional per-pull uncached-prefill token budget (P2). 0 => router uses its
+	// own PREFILL_TOKEN_BUDGET; budgeting only runs when PULL_BUDGET_ENABLED.
+	WantPrefillTokens int `json:"want_prefill_tokens,omitempty"`
 }
 
 // PullResponse matches the Python PullResponse pydantic model.

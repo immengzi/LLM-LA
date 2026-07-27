@@ -157,6 +157,7 @@ helm upgrade --install vllm ./src/core/vllm-kv-stack \
 | Push decoupling | bounded dispatch queue + worker pool (`PUSH_DECOUPLE_DISPATCH`) with `push_dispatch_*` metrics |
 | Multi-model | `MODEL_CONFIG_PATH` registry, per-model queues + per-model KV watcher, 404 on unknown model |
 | Sidecar | PREFETCH, FORCE_IGNORE_EOS, STREAMING_MODE + `/result_chunk` forwarding, ZMQ→Redis KV subscriber (msgpack) |
+| Token-aware pull | P0 in-flight token gauge (`router_endpoint_inflight_tokens` + `__isl_tokens__` on the request meta), P1 sidecar KV-memory pull gate (`KV_PULL_GATE_ENABLED/HIGH/LOW`, `sidecar_kv_pull_gate_*`), P2 router prefill-token budget (`PULL_BUDGET_ENABLED`/`PREFILL_TOKEN_BUDGET`, per-pull `want_prefill_tokens`, `router_pull_granted_prefill_tokens`, `router_pull_budget_bound_total`) — same env vars, metric names, and algorithm. See [router.md](router.md) §5e and [sidecar.md](sidecar.md#kv-memory-pull-gate) |
 | Tracing | identical `__trace__` field set end-to-end |
 
 ### Prometheus Metrics

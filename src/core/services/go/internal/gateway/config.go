@@ -138,6 +138,13 @@ type Config struct {
 	AdmissionThrottle bool
 	FixedBatchSize    int
 
+	// Pull-mode prefill-token budget (P2). Off by default; mirrors
+	// PULL_BUDGET_ENABLED / PREFILL_TOKEN_BUDGET in the Python router config.
+	// When enabled with a positive budget, /pull grants are filled greedily by
+	// uncached prefill tokens instead of a pure count slice.
+	PullBudgetEnabled  bool
+	PrefillTokenBudget int
+
 	// Pull-mode fairness (load-aware grant throttle). Off by default; mirrors
 	// FAIR_* in src/core/services/router_service/router/config.py.
 	FairPull               bool
@@ -262,6 +269,9 @@ func LoadConfig() *Config {
 		SLOWithKV:         common.EnvBool("SLO_WITH_KV", true),
 		AdmissionThrottle: common.EnvBool("ADMISSION_THROTTLE", false),
 		FixedBatchSize:    common.EnvInt("FIXED_BATCH_SIZE", 0),
+
+		PullBudgetEnabled:  common.EnvBool("PULL_BUDGET_ENABLED", false),
+		PrefillTokenBudget: common.EnvInt("PREFILL_TOKEN_BUDGET", 0),
 
 		FairPull:               common.EnvBool("ROUTER_FAIR_PULL", false),
 		FairMargin:             common.EnvFloat("ROUTER_FAIR_MARGIN", 1.25),
@@ -439,6 +449,9 @@ func (c *Config) normalize() {
 	if c.FixedBatchSize < 0 {
 		c.FixedBatchSize = 0
 	}
+	if c.PrefillTokenBudget < 0 {
+		c.PrefillTokenBudget = 0
+	}
 	if c.FairMargin < 1.0 {
 		c.FairMargin = 1.0
 	}
@@ -605,6 +618,8 @@ func (c *Config) PrintBanner() {
 		"SLO_WITH_KV":                       c.SLOWithKV,
 		"ADMISSION_THROTTLE":                c.AdmissionThrottle,
 		"FIXED_BATCH_SIZE":                  c.FixedBatchSize,
+		"PULL_BUDGET_ENABLED":               c.PullBudgetEnabled,
+		"PREFILL_TOKEN_BUDGET":              c.PrefillTokenBudget,
 		"ROUTER_FAIR_PULL":                  c.FairPull,
 		"ROUTER_FAIR_MARGIN":                c.FairMargin,
 		"ROUTER_FAIR_FLOOR":                 c.FairFloor,
