@@ -105,9 +105,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 
 | Doc | Description |
 |-----|-------------|
-| [internal/vision.md](internal/vision.md) | Project vision and design goals |
-| [internal/open-sourcing-plan.md](internal/open-sourcing-plan.md) | Open-source feature plan and roadmap |
-| [internal/open-sourcing-v01.md](internal/open-sourcing-v01.md) | Go v0.1 runtime/migration design |
+| [internal/roadmap.md](internal/roadmap.md) | **Consolidated roadmap**: vision, what ships today, competitive landscape, the complete feature-request mapping, and the condensed Go v0.1 implementation spec |
 | [internal/boom-integration-notes.md](internal/boom-integration-notes.md) | Dev record: adding `backend: boom` to the framework |
 | [internal/stability-test-findings.md](internal/stability-test-findings.md) | Incident report: 24h stability test |
 | [internal/kv-cache-hit-rate-collapse.md](internal/kv-cache-hit-rate-collapse.md) | Investigation: prefix-cache hit-rate collapse under peak load |

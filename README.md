@@ -135,7 +135,7 @@ Everything lives in the **[documentation index](docs/README.md)**. Jump by role:
 | Deploy at scale | [Multi-model serving](docs/deployment/multi-model.md) · [GLM-5 reference ("HQ") deployment](docs/deployment/docker-reference/glm5-dp-docker.md) |
 | Operate the cluster | [Cluster setup](docs/operations/cluster-setup.md) · [Registry & image builds](docs/operations/registry.md) · [Image patches](docs/operations/image-patches.md) |
 | Benchmark & analyze | [Benchmark harness](docs/benchmarking/harness.md) · [Load patterns](docs/benchmarking/load-patterns.md) · [Artifacts & analysis](docs/benchmarking/artifacts-and-analysis.md) |
-| See the roadmap | [docs/internal/](docs/internal/) |
+| See the roadmap | [docs/internal/roadmap.md](docs/internal/roadmap.md) |
 
 ## Repository layout
 
