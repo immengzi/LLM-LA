@@ -75,6 +75,25 @@ def _coerce_set_value(v):
     return str(v)
 
 
+def _flatten_helm_values(prefix: str, value) -> Dict[str, object]:
+    """Flatten a nested helm.values mapping into Helm --set dot paths.
+
+    Mirrors sweep_methods._flatten_helm_values so a config's helm.values
+    (typically supplied per cluster via configs/clusters.yaml) apply the same
+    way for a standalone vLLM deploy — e.g. hardware: nvidia, images.*.
+    """
+    if not isinstance(value, dict):
+        return {prefix: value} if prefix else {}
+
+    flattened: Dict[str, object] = {}
+    for key, child in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise click.ClickException(f"Invalid helm.values key: {key!r}")
+        path = f"{prefix}.{key}" if prefix else key
+        flattened.update(_flatten_helm_values(path, child))
+    return flattened
+
+
 def _helm_uninstall(*, release: str, namespace: str) -> None:
     _helm(["uninstall", release, "-n", namespace], check=False, capture=True)
 
@@ -264,6 +283,17 @@ def cli(client_config: str, reinstall: bool, timeout_s: int) -> None:
     model_host_path = str(getattr(h, "model_host_path", "")).strip()
     if model_host_path:
         set_values["modelVolume.hostPath"] = model_host_path
+
+    # Explicit Helm dot-path overlay (helm.values), e.g. the per-cluster
+    # hardware switch and image registry from configs/clusters.yaml. Config
+    # values win over the generated defaults above, matching sweep_methods.py.
+    raw_helm_values = getattr(h, "values", {}) or {}
+    if raw_helm_values:
+        if not isinstance(raw_helm_values, dict):
+            raise click.ClickException("helm.values must be a mapping of Helm dot-paths to values")
+        explicit_values = _flatten_helm_values("", raw_helm_values)
+        set_values.update(explicit_values)
+        click.echo(f"[deploy-vllm] applied {len(explicit_values)} explicit helm.values override(s)")
 
     _models_tmp = tempfile.NamedTemporaryFile(
         mode="w", prefix="deploy_models_", suffix=".yaml",

@@ -89,3 +89,47 @@ clusters:
         cpuHash.ascendDriverMounts: true
         pin.enabled: true
         pin.nodeName: "k8s-master"
+
+  # NVIDIA GPU machine profile. Deploys the same KV-aware stack on a GPU cluster
+  # by flipping a single hardware switch (helm.values.hardware: nvidia). The
+  # chart then requests nvidia.com/gpu, applies the nvidia RuntimeClass, and
+  # drops every Ascend driver mount / toolkit step — no deploy-script changes.
+  # See docs/deployment/gpu.md for the device-plugin and cluster setup. Adjust
+  # the endpoints, model_host_path, and images to match your cluster.
+  gpu:
+    router_url: "http://127.0.0.1:30080"
+    experiments_root: "/data/experiments"
+
+    hf_lmsys:
+      dataset_name: "/data/datasets/lmsys_chat_1m"
+      tokenizer_name: "/data/models/qwen3-8b"
+
+    metrics:
+      prometheus_base_url: "http://127.0.0.1:31190"
+
+    transport:
+      results_zmq: "tcp://127.0.0.1:30559"
+
+    boom:
+      base_url: "http://127.0.0.1:30401"
+
+    helm:
+      # Local hostPath model store; set nfs_path instead to use an NFS PVC.
+      model_host_path: "/data/models"
+      values:
+        # ---- The GPU switch: everything below is standard per-cluster config ----
+        hardware: nvidia
+        # Empty registry => images pull from the paths below as-is (the public
+        # vLLM image + your local stack images), with no registry rewrite.
+        global.imageRegistry: ""
+        images.vllm: "vllm/vllm-openai:latest"
+        images.router: "reg.local:32000/kv-router:latest"
+        images.sidecar: "reg.local:32000/kv-sidecar:latest"
+        images.cpuHash: "reg.local:32000/vllm-cpu-hash:latest"
+        images.redis: "redis:7-alpine"
+        router.imagePullPolicy: "Always"
+        sidecar.imagePullPolicy: "Always"
+        # cpu-hash runs as a plain CPU pod on GPU nodes (no Ascend driver mounts).
+        cpuHash.ascendDriverMounts: false
+        # No node pinning by default; GPU pods land on any GPU-labelled node.
+        pin.enabled: false
