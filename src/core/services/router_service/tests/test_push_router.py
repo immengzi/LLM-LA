@@ -10,6 +10,7 @@ from router.push_router import (
     _kv_cost,
     _select_by_cost,
     _avg_latency_from_sums,
+    _busy_time_from_sums,
 )
 
 _SAMPLE = """\
@@ -131,3 +132,21 @@ vllm:e2e_request_latency_seconds_count{model_name="m2"} 4.0
         "vllm:e2e_request_latency_seconds_sum": None,
         "vllm:e2e_request_latency_seconds_count": None,
     }) is None
+
+def test_busy_time_sums_across_labels():
+    busy_sample = """\
+# HELP vllm:request_inference_time_seconds inference time
+# TYPE vllm:request_inference_time_seconds histogram
+vllm:request_inference_time_seconds_sum{model_name="m"} 30.0
+vllm:request_inference_time_seconds_sum{model_name="m2"} 12.0
+vllm:num_requests_running 3
+"""
+    sums = _parse_prom_sums(busy_sample, ["vllm:request_inference_time_seconds_sum"])
+    assert _busy_time_from_sums(sums) == 42.0  # 30 + 12
+
+
+def test_busy_time_absent_is_none():
+    sums = _parse_prom_sums("vllm:num_requests_running 3\n", [
+        "vllm:request_inference_time_seconds_sum"
+    ])
+    assert _busy_time_from_sums(sums) is None
