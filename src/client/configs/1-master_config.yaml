@@ -199,3 +199,13 @@ benchmark-bz-boom-kvc-claude-u128:               # boom: kvc_aware
 #   - central-push
 # benchmark-bz-central-push-fair-both:
 #   - central-push
+
+# ---- central-push SIDECAR-LESS (direct-to-vLLM delivery; sidecar.enabled=false) ----
+# Same scheduling as central-push above, but the router delivers directly to each
+# pod's vLLM and hosts the KV-events subscriber itself (no per-pod sidecar). The
+# -both variant exercises the router-hosted KV subscriber (prefix routing); the
+# -affinity-hard variant is affinity-only (no KV events). See docs/architecture/router.md.
+# benchmark-bz-central-push-nosidecar-both:
+#   - central-push
+# benchmark-bz-central-push-nosidecar-affinity-hard:
+#   - central-push

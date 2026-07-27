@@ -460,17 +460,32 @@ def _is_external_push() -> bool:
     return str(_cfg.ROUTER_MODE) == "external-push"
 
 
+def _is_central_push_direct() -> bool:
+    """True for sidecar-less central-push: ROUTER_MODE=central-push with
+    ROUTER_SIDECAR_ENABLED=false. Same central-queue scheduling as central-push,
+    but delivery goes DIRECTLY to each k8s-discovered vLLM (no sidecar), reusing
+    the external-push direct-delivery dispatcher over a k8s-backed registry."""
+    return _is_central_push() and not bool(getattr(_cfg, "ROUTER_SIDECAR_ENABLED", True))
+
+
 def _uses_central_queue() -> bool:
     """True when requests are admitted into the central queue (pull scheduling
     path): pull, central-push and external-push. Push-* skip the queue."""
     return (not _is_push_mode())
 
 
+def _uses_direct_delivery() -> bool:
+    """True when the router delivers requests DIRECTLY to vLLM (no sidecar):
+    external-push (static endpoints) and sidecar-less central-push. Both drive
+    the ExternalPushDispatcher; they differ only in the registry backing them."""
+    return _is_external_push() or _is_central_push_direct()
+
+
 def _uses_push_delivery() -> bool:
     """True when the router delivers to sidecars via POST /push (needs the
-    PushRouter + pod discovery): push-* and central-push. External-push does NOT
-    use the sidecar PushRouter -- it has its own direct-delivery dispatcher."""
-    return _is_push_mode() or _is_central_push()
+    PushRouter + pod discovery): push-* and sidecar-backed central-push.
+    External-push and sidecar-less central-push deliver directly instead."""
+    return _is_push_mode() or (_is_central_push() and not _is_central_push_direct())
 
 
 def _resolve_model(model: str) -> str:
@@ -1137,30 +1152,45 @@ async def _startup():
             _push_dispatcher = None
             print("[router] PushDispatch disabled (synchronous push in handlers).")
 
-    elif _is_external_push():
-        # External-push: static external vLLM endpoints, no k8s pods, no sidecar.
-        # Admission uses the central queue (pull_for_endpoint scheduling), but the
-        # dispatcher delivers directly to each external vLLM and ingests results.
-        from .external_endpoints import (
-            ExternalRegistry,
-            ExternalVLLMClient,
-            RouterKVSubscriberPool,
-        )
+    elif _uses_direct_delivery():
+        # Direct-to-vLLM delivery (NO sidecar). Two flavors share one dispatcher:
+        #   * external-push        -> static external endpoints (ExternalRegistry)
+        #   * central-push, sidecar off -> live k8s pods (K8sVLLMRegistry)
+        # Both admit via the central queue (pull_for_endpoint scheduling) and
+        # deliver directly to each vLLM's OpenAI endpoint, ingesting results
+        # inline. The registry is the only difference.
+        from .external_endpoints import ExternalVLLMClient
         from .external_push import ExternalPushDispatcher
 
-        _external_registry = ExternalRegistry()
+        if _is_central_push_direct():
+            from .k8s_endpoints import K8sVLLMRegistry
+
+            _external_registry = K8sVLLMRegistry()
+            # K8sVLLMRegistry owns its per-pod KV subscribers (pods churn), so
+            # there is no separate static subscriber pool to start here.
+            _external_kv_subs = None
+            cap = int(getattr(_cfg, "CENTRAL_PUSH_CAP", 8))
+            interval_s = float(getattr(_cfg, "CENTRAL_PUSH_INTERVAL_S", 0.05))
+            print(
+                f"[router] central-push (sidecar-less) endpoints: "
+                f"{_external_registry.all_ids()}"
+            )
+        else:
+            from .external_endpoints import (
+                ExternalRegistry,
+                RouterKVSubscriberPool,
+            )
+
+            _external_registry = ExternalRegistry()
+            print(f"[router] external-push endpoints: {_external_registry.all_ids()}")
+            # Router-side KV-events subscriber(s) so prefix routing works without
+            # a sidecar (no-op when EXTERNAL_KV_EVENTS off or none declared).
+            _external_kv_subs = RouterKVSubscriberPool(_external_registry)
+            _external_kv_subs.start()
+            cap = int(getattr(_cfg, "EXTERNAL_PUSH_CAP", 8))
+            interval_s = float(getattr(_cfg, "EXTERNAL_PUSH_INTERVAL_S", 0.05))
+
         _external_client = ExternalVLLMClient(_external_registry)
-        print(
-            f"[router] external-push endpoints: {_external_registry.all_ids()}"
-        )
-
-        # Router-side KV-events subscriber(s) so prefix routing works without a
-        # sidecar (no-op when EXTERNAL_KV_EVENTS off or no kv_events declared).
-        _external_kv_subs = RouterKVSubscriberPool(_external_registry)
-        _external_kv_subs.start()
-
-        cap = int(getattr(_cfg, "EXTERNAL_PUSH_CAP", 8))
-        interval_s = float(getattr(_cfg, "EXTERNAL_PUSH_INTERVAL_S", 0.05))
         _external_push_dispatcher = ExternalPushDispatcher(
             router_state,
             _external_registry,
@@ -1173,8 +1203,8 @@ async def _startup():
         _push_router = None
         _push_dispatcher = None
         print(
-            f"[router] ExternalPushDispatch started (cap={cap} "
-            f"interval_s={interval_s})"
+            f"[router] {'central-push (sidecar-less)' if _is_central_push_direct() else 'ExternalPushDispatch'} "
+            f"started (cap={cap} interval_s={interval_s})"
         )
 
     else:
