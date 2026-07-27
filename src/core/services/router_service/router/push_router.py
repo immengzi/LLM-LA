@@ -78,6 +78,15 @@ def _total_tokens_from_sums(sums: Dict[str, Optional[float]]) -> Optional[float]
     return (p or 0.0) + (g or 0.0)
 
 
+def _busy_time_from_sums(sums: Dict[str, Optional[float]]) -> Optional[float]:
+    """Cumulative busy (inference) time = vllm:request_inference_time_seconds_sum.
+
+    ``None`` when the metric is absent so the caller can fall back.
+    """
+    return sums.get("vllm:request_inference_time_seconds_sum")
+
+
+
 def _avg_latency_from_sums(sums: Dict[str, Optional[float]]) -> Optional[float]:
     """Average e2e latency = sum/count. Idle pod (count 0) scores 0.0 (free)."""
     s = sums.get("vllm:e2e_request_latency_seconds_sum")
@@ -582,6 +591,28 @@ class PushRouter:
         return best
 
 
+    async def _pick_endpoint_least_busy(self) -> Optional[str]:
+        """Route to the pod with the least cumulative busy (inference) time.
+
+        Score = vllm:request_inference_time_seconds_sum scraped from each pod's
+        vLLM /metrics. Falls back to round-robin when the metric is absent.
+        """
+        with self._lock:
+            eps = list(self._eps)
+            urls = dict(self._urls)
+        if not eps:
+            return None
+        bases = ["vllm:request_inference_time_seconds_sum"]
+        metrics = await self._scrape_metric_sums(eps, urls, bases)
+        scores = {ep: _busy_time_from_sums(sums) for ep, sums in metrics.items()}
+        best = _pick_min_score(scores)
+        if best is None:
+            _log_req("LeastBusy: no busy-time metric, falling back to RR", level="full")
+            return self._pick_endpoint_rr()
+        _log_req(f"LeastBusy pick → {best} (busy_s={scores.get(best)})", level="full")
+        return best
+
+
     async def _pick_endpoint(self, req_id: Optional[str] = None) -> Optional[str]:
         if self.mode == "push-rr":
             return self._pick_endpoint_rr()
@@ -599,6 +630,8 @@ class PushRouter:
             return await self._pick_endpoint_least_kv()
         if self.mode == "push-least-latency":
             return await self._pick_endpoint_least_latency()
+        if self.mode == "push-least-busy":
+            return await self._pick_endpoint_least_busy()
         return self._pick_endpoint_rr()
 
     # ---------------------------------------------------------

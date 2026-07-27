@@ -161,3 +161,21 @@ vllm:e2e_request_latency_seconds_count{model_name="m2"} 4.0
 		t.Fatal("missing metric should be ok=false")
 	}
 }
+
+// TestBusyTimeFromSums checks cumulative busy-time sum and the absent-metric case.
+func TestBusyTimeFromSums(t *testing.T) {
+	busySample := `# HELP vllm:request_inference_time_seconds inference time
+# TYPE vllm:request_inference_time_seconds histogram
+vllm:request_inference_time_seconds_sum{model_name="m"} 30.0
+vllm:request_inference_time_seconds_sum{model_name="m2"} 12.0
+vllm:num_requests_running 3
+`
+	sums, seen := parsePromSums(busySample, []string{"vllm:request_inference_time_seconds_sum"})
+	if v, ok := busyTimeFromSums(sums, seen); !ok || v != 42.0 {
+		t.Fatalf("busy = %v ok=%v, want 42 true", v, ok)
+	}
+	s2, se2 := parsePromSums("vllm:num_requests_running 3\n", []string{"vllm:request_inference_time_seconds_sum"})
+	if _, ok := busyTimeFromSums(s2, se2); ok {
+		t.Fatal("absent metric should be ok=false")
+	}
+}

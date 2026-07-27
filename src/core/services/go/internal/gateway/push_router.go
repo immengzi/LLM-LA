@@ -177,6 +177,8 @@ func (pd *PushDispatcher) pickEndpoint(reqID string) string {
 		return pd.pickLeastKV()
 	case "push-least-latency":
 		return pd.pickLeastLatency()
+	case "push-least-busy":
+		return pd.pickLeastBusy()
 	default:
 		return pd.pickRR()
 	}
@@ -406,6 +408,31 @@ func (pd *PushDispatcher) pickLeastLatency() string {
 	scores := make([]epScore, 0, len(samples))
 	for ep, s := range samples {
 		v, ok := avgLatencyFromSums(s.sums, s.seen)
+		scores = append(scores, epScore{ep: ep, score: v, ok: ok})
+	}
+	if best := pickMinScore(scores); best != "" {
+		return best
+	}
+	return pd.pickRR()
+}
+
+// busyTimeFromSums returns cumulative inference/busy time. ok=false when the
+// metric is absent.
+func busyTimeFromSums(sums map[string]float64, seen map[string]bool) (float64, bool) {
+	if !seen["vllm:request_inference_time_seconds_sum"] {
+		return 0, false
+	}
+	return sums["vllm:request_inference_time_seconds_sum"], true
+}
+
+// pickLeastBusy routes to the pod with the least cumulative busy (inference)
+// time (vllm:request_inference_time_seconds_sum). Falls back to round-robin
+// when the metric is absent. Mirrors _pick_endpoint_least_busy.
+func (pd *PushDispatcher) pickLeastBusy() string {
+	samples := pd.scrapeMetricSums([]string{"vllm:request_inference_time_seconds_sum"})
+	scores := make([]epScore, 0, len(samples))
+	for ep, s := range samples {
+		v, ok := busyTimeFromSums(s.sums, s.seen)
 		scores = append(scores, epScore{ep: ep, score: v, ok: ok})
 	}
 	if best := pickMinScore(scores); best != "" {
