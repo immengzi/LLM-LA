@@ -3,6 +3,7 @@ package gateway
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -79,16 +80,56 @@ type affinityEntry struct {
 
 // AffinityMap is a thread-safe conversation-key -> endpoint map with TTL expiry,
 // mirroring router/affinity.py:AffinityMap.
+//
+// Optional durability: when a store is provided, Claim is write-through to the
+// store (off the hot path via the store's background writer), Warm bulk-loads
+// the store into memory at startup, and Prefetch does the single per-request
+// Redis GET at admission on a memory miss. The pull hot path (Lookup) stays
+// purely in-memory. With no store, behavior is identical to before.
 type AffinityMap struct {
-	mu  sync.Mutex
-	m   map[string]affinityEntry
-	ttl time.Duration
+	mu       sync.Mutex
+	m        map[string]affinityEntry
+	ttl      time.Duration
+	store    affinityStore
+	cacheMax int
 }
 
 func NewAffinityMap(ttlS float64) *AffinityMap {
+	return NewAffinityMapWithStore(ttlS, nil, 0)
+}
+
+// NewAffinityMapWithStore builds an affinity map optionally backed by a durable
+// store and bounded by cacheMax in-memory entries (0 = unbounded).
+func NewAffinityMapWithStore(ttlS float64, store affinityStore, cacheMax int) *AffinityMap {
 	return &AffinityMap{
-		m:   make(map[string]affinityEntry),
-		ttl: time.Duration(ttlS * float64(time.Second)),
+		m:        make(map[string]affinityEntry),
+		ttl:      time.Duration(ttlS * float64(time.Second)),
+		store:    store,
+		cacheMax: cacheMax,
+	}
+}
+
+// Persistent reports whether a durable store is attached.
+func (a *AffinityMap) Persistent() bool { return a.store != nil }
+
+// evictIfNeededLocked bounds the in-memory cache; evicted keys stay durable in
+// the store. Evicts oldest-by-lastSeen down to the bound. Caller holds a.mu.
+func (a *AffinityMap) evictIfNeededLocked() {
+	if a.cacheMax <= 0 || len(a.m) <= a.cacheMax {
+		return
+	}
+	overflow := len(a.m) - a.cacheMax
+	type kt struct {
+		k string
+		t time.Time
+	}
+	arr := make([]kt, 0, len(a.m))
+	for k, e := range a.m {
+		arr = append(arr, kt{k, e.lastSeen})
+	}
+	sort.Slice(arr, func(i, j int) bool { return arr[i].t.Before(arr[j].t) })
+	for i := 0; i < overflow; i++ {
+		delete(a.m, arr[i].k)
 	}
 }
 
@@ -110,14 +151,70 @@ func (a *AffinityMap) Lookup(key string) string {
 	return e.endpoint
 }
 
-// Claim records (or refreshes) that this conversation key is served by endpoint.
+// Claim records (or refreshes) that this conversation key is served by
+// endpoint. Write-through to the durable store when one is configured (the
+// store's writer is asynchronous, so this stays off the hot path).
 func (a *AffinityMap) Claim(key, endpoint string) {
 	if key == "" || endpoint == "" {
 		return
 	}
 	a.mu.Lock()
 	a.m[key] = affinityEntry{endpoint: endpoint, lastSeen: time.Now()}
+	a.evictIfNeededLocked()
 	a.mu.Unlock()
+	if a.store != nil {
+		a.store.Put(key, endpoint)
+	}
+}
+
+// Prefetch warms one key from the durable store into memory on an in-memory
+// miss. Called once per request at admission. No-op (falls back to Lookup) when
+// there is no store. Returns the resolved endpoint or "".
+func (a *AffinityMap) Prefetch(key string) string {
+	if key == "" {
+		return ""
+	}
+	if hit := a.Lookup(key); hit != "" || a.store == nil {
+		return hit
+	}
+	ep, ok := a.store.Get(key)
+	if ok && ep != "" {
+		a.mu.Lock()
+		a.m[key] = affinityEntry{endpoint: ep, lastSeen: time.Now()}
+		a.evictIfNeededLocked()
+		a.mu.Unlock()
+		return ep
+	}
+	return ""
+}
+
+// Warm bulk-loads the durable store into the in-memory cache. Returns the
+// resulting map size.
+func (a *AffinityMap) Warm() int {
+	if a.store == nil {
+		return 0
+	}
+	loaded := a.store.Warm()
+	if len(loaded) == 0 {
+		return 0
+	}
+	now := time.Now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for k, ep := range loaded {
+		if ep != "" {
+			a.m[k] = affinityEntry{endpoint: ep, lastSeen: now}
+		}
+	}
+	a.evictIfNeededLocked()
+	return len(a.m)
+}
+
+// Close flushes and closes the durable store (shutdown). No-op with no store.
+func (a *AffinityMap) Close() {
+	if a.store != nil {
+		a.store.Close()
+	}
 }
 
 // Size returns the number of live mappings.

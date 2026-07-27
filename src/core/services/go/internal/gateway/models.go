@@ -19,10 +19,13 @@ type EnqueueRequest struct {
 
 // PullRequest matches the Python PullRequest pydantic model.
 type PullRequest struct {
-	Endpoint string   `json:"endpoint"`
-	Want     int      `json:"want"`
-	Model    string   `json:"model,omitempty"`
-	KvUsage  *float64 `json:"kv_usage,omitempty"`
+	Endpoint string `json:"endpoint"`
+	Want     int    `json:"want"`
+	Model    string `json:"model,omitempty"`
+	// KvUsage is the sidecar's optional GPU KV cache usage fraction [0,1],
+	// piggybacked on /pull to feed soft KV divert. Nil when the sidecar does
+	// not report it (KV_USAGE_REPORT off). Mirrors PullRequest.kv_usage.
+	KvUsage *float64 `json:"kv_usage,omitempty"`
 	// Optional per-pull uncached-prefill token budget (P2). 0 => router uses its
 	// own PREFILL_TOKEN_BUDGET; budgeting only runs when PULL_BUDGET_ENABLED.
 	WantPrefillTokens int `json:"want_prefill_tokens,omitempty"`

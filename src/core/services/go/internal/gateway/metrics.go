@@ -68,6 +68,20 @@ var (
 		Help: "1 when an endpoint has not pulled within ROUTER_STUCK_PULL_SECONDS while the central queue is backed up, else 0",
 	}, []string{"endpoint"})
 
+	// Soft KV divert metrics (mirror metrics.py). All labeled by endpoint.
+	RouterEndpointKVUsage = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "router_endpoint_kv_usage",
+		Help: "Latest GPU KV usage fraction [0,1] reported by the sidecar for soft divert",
+	}, []string{"endpoint"})
+	RouterKVSoftDivertActive = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "router_kv_soft_divert_active",
+		Help: "1 when soft KV divert is currently trimming grants for this endpoint",
+	}, []string{"endpoint"})
+	RouterKVSoftDivertTrimmedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_kv_soft_divert_trimmed_total",
+		Help: "Items withheld from a high-KV endpoint grant by soft divert",
+	}, []string{"endpoint"})
+
 	// Key-affinity routing metrics.
 	RouterAffinityHitsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "router_affinity_hits_total",
@@ -198,6 +212,9 @@ func RegisterMetrics() {
 		RouterPullBudgetBoundTotal,
 		RouterEndpointLastPullSeconds,
 		RouterEndpointStuck,
+		RouterEndpointKVUsage,
+		RouterKVSoftDivertActive,
+		RouterKVSoftDivertTrimmedTotal,
 		RouterAffinityHitsTotal,
 		RouterAffinityHoldsTotal,
 		RouterAffinityReleasesTotal,
@@ -251,6 +268,17 @@ func setEndpointLastPullSeconds(endpoint string, seconds float64) {
 }
 func setEndpointStuck(endpoint string, v int) {
 	RouterEndpointStuck.WithLabelValues(endpoint).Set(float64(v))
+}
+func setEndpointKVUsage(endpoint string, v float64) {
+	RouterEndpointKVUsage.WithLabelValues(endpoint).Set(v)
+}
+func setKVSoftDivertActive(endpoint string, v int) {
+	RouterKVSoftDivertActive.WithLabelValues(endpoint).Set(float64(v))
+}
+func incKVSoftDivertTrimmed(endpoint string, n int) {
+	if n > 0 {
+		RouterKVSoftDivertTrimmedTotal.WithLabelValues(endpoint).Add(float64(n))
+	}
 }
 func incAffinityHit(n int)             { RouterAffinityHitsTotal.Add(float64(n)) }
 func incAffinityHold(n int)            { RouterAffinityHoldsTotal.Add(float64(n)) }

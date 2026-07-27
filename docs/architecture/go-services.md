@@ -51,6 +51,8 @@ services/go/
     │   ├── result_store.go    # result correlation
     │   ├── handlers.go        # HTTP handlers (chi)
     │   ├── kv_aware.go        # per-request owner map (reqOwners) + block-owner map + longest-prefix match
+│   ├── affinity.go        # conversation key-affinity map (TTL, prefetch, warm, cache bound)
+│   ├── affinity_store.go  # durable Redis-backed affinity store (async write-through + warm)
     │   ├── owner_lookup.go    # default owner source: targeted per-request Redis HGETALL (KV_OWNER_SOURCE=lookup)
     │   ├── hash_client.go     # KV-hash client: in-container hasher (inline) or legacy service (external)
     │   ├── kv_watcher.go      # legacy owner source + pod discovery: Redis KV block scanner (KV_OWNER_SOURCE=watcher)
@@ -149,14 +151,16 @@ helm upgrade --install vllm ./src/core/vllm-kv-stack \
 | Area | Notes |
 |------|-------|
 | HTTP endpoints | `/enqueue`, `/submit`, `/pull`, `/result`, `/result_chunk`, `/v1/chat/completions`, `/health*`, `/metrics`, `/latency_log`, `/debug/slo`, `/debug/slo/{req_id}`; `/result_submit` only when `RESULT_TRANSPORT_MODE=submit_ack` |
-| Routing modes | `pull`, `push-rr`, `push-random`, `push-leastq` (both `health` and `local` modes) |
+| Routing modes | `pull`, `push-rr`, `push-random`, `push-leastq` (both `health` and `local` modes), `central-push` |
 | KV-aware routing | Owner source `lookup` (default: targeted per-request Redis `HGETALL`, `KVLookupMaxBlocks` cap) or `watcher` (legacy background scan) + longest-prefix match; request hashes from the in-container `prefix_hash.py` (inline) or the legacy `vllm-cpu-hash` service (external) |
+| Key-affinity | `soft` / `hard` modes, hard-timeout hold + release, and optional **persistent (Redis-backed) affinity** (`AFFINITY_PERSIST_ENABLED`): write-through claims, startup warm, admission prefetch, per-pod readiness (`AFFINITY_ENDPOINT_STALE_S`) + cache bound (`AFFINITY_CACHE_MAX`) |
+| Fairness & soft KV divert | Load-aware fair-pull throttle (`ROUTER_FAIR_*`), stuck-pod release (`ROUTER_STUCK_PULL_SECONDS`, `ROUTER_AFFINITY_RELEASE_ON_STUCK`), and **soft KV divert** (`ROUTER_KV_SOFT_DIVERT`): trims cold work off GPU-KV-saturated pods (hysteresis + healthy-peer gate) using sidecar `kv_usage` from `/pull` and central-push `/health` polls |
 | SLO-aware scheduling | slack-based sort, admission throttle, latency predictors (`linear` default, `bayesian`/`hybrid`; `piecewise` accepted but not implemented), batch/queue-wait estimators, full `/debug/slo` |
 | Length-aware batching | `short_first`, `long_first` |
 | Client transports | `sync`, `async_pubsub` (ZMQ PUB publisher). Note: `submit_ack` is a router-side `RESULT_TRANSPORT_MODE` (sidecar→router result delivery), not a client transport mode. |
 | Push decoupling | bounded dispatch queue + worker pool (`PUSH_DECOUPLE_DISPATCH`) with `push_dispatch_*` metrics |
 | Multi-model | `MODEL_CONFIG_PATH` registry, per-model queues + per-model KV watcher, 404 on unknown model |
-| Sidecar | PREFETCH, FORCE_IGNORE_EOS, STREAMING_MODE + `/result_chunk` forwarding, ZMQ→Redis KV subscriber (msgpack) |
+| Sidecar | PREFETCH, FORCE_IGNORE_EOS, STREAMING_MODE + `/result_chunk` forwarding, ZMQ→Redis KV subscriber (msgpack), SLO-driven dynamic pull backpressure (`SLO_DYNAMIC_PULL_ENABLED`), GPU KV-usage reporting on `/pull` + `/health` (`KV_USAGE_REPORT`) |
 | Token-aware pull | P0 in-flight token gauge (`router_endpoint_inflight_tokens` + `__isl_tokens__` on the request meta), P1 sidecar KV-memory pull gate (`KV_PULL_GATE_ENABLED/HIGH/LOW`, `sidecar_kv_pull_gate_*`), P2 router prefill-token budget (`PULL_BUDGET_ENABLED`/`PREFILL_TOKEN_BUDGET`, per-pull `want_prefill_tokens`, `router_pull_granted_prefill_tokens`, `router_pull_budget_bound_total`) — same env vars, metric names, and algorithm. See [router.md](router.md) §5e and [sidecar.md](sidecar.md#kv-memory-pull-gate) |
 | Tracing | identical `__trace__` field set end-to-end |
 

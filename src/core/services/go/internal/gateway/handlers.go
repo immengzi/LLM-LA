@@ -451,6 +451,10 @@ func (s *Server) injectAffinity(meta map[string]interface{}, model string, chatB
 	if key != "" {
 		meta["__affinity_key__"] = key
 		meta["__affinity_ts__"] = nowS()
+		// Warm this conversation key from the durable store on a memory miss
+		// (once per request). No-op when persistence is off. Mirrors
+		// _inject_affinity -> router_state.affinity_prefetch.
+		s.queue.AffinityPrefetch(key)
 	}
 }
 
@@ -538,6 +542,11 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("Unknown model '%s'. Available: %v", req.Model, s.registry.Names())})
 		return
+	}
+
+	// Piggybacked GPU KV usage feeds soft divert (mirrors api.py /pull).
+	if req.KvUsage != nil {
+		s.queue.RecordKVUsage(req.Endpoint, *req.KvUsage)
 	}
 
 	items := s.queue.Pull(req.Endpoint, req.Want, model, req.WantPrefillTokens)
