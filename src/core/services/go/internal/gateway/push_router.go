@@ -175,6 +175,8 @@ func (pd *PushDispatcher) pickEndpoint(reqID string) string {
 		return pd.pickKVCost(reqID)
 	case "push-least-kv":
 		return pd.pickLeastKV()
+	case "push-least-latency":
+		return pd.pickLeastLatency()
 	default:
 		return pd.pickRR()
 	}
@@ -378,6 +380,38 @@ func (pd *PushDispatcher) pickLeastKV() string {
 		return pd.pickRR()
 	}
 	return best
+}
+
+// avgLatencyFromSums returns average e2e latency = sum/count. Idle pod
+// (count 0) scores 0.0. ok=false when the metric is absent.
+func avgLatencyFromSums(sums map[string]float64, seen map[string]bool) (float64, bool) {
+	if !seen["vllm:e2e_request_latency_seconds_sum"] || !seen["vllm:e2e_request_latency_seconds_count"] {
+		return 0, false
+	}
+	c := sums["vllm:e2e_request_latency_seconds_count"]
+	if c <= 0 {
+		return 0, true
+	}
+	return sums["vllm:e2e_request_latency_seconds_sum"] / c, true
+}
+
+// pickLeastLatency routes to the pod with the lowest average end-to-end request
+// latency (vllm:e2e_request_latency_seconds_sum/_count), a cumulative average.
+// Idle pods score 0.0; falls back to round-robin when no pod exposes the metric.
+func (pd *PushDispatcher) pickLeastLatency() string {
+	samples := pd.scrapeMetricSums([]string{
+		"vllm:e2e_request_latency_seconds_sum",
+		"vllm:e2e_request_latency_seconds_count",
+	})
+	scores := make([]epScore, 0, len(samples))
+	for ep, s := range samples {
+		v, ok := avgLatencyFromSums(s.sums, s.seen)
+		scores = append(scores, epScore{ep: ep, score: v, ok: ok})
+	}
+	if best := pickMinScore(scores); best != "" {
+		return best
+	}
+	return pd.pickRR()
 }
 
 // chooseLowerLoad is the power-of-two-choices comparator: return the

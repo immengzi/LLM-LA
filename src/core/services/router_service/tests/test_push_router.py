@@ -9,6 +9,7 @@ from router.push_router import (
     _pick_lower_load,
     _kv_cost,
     _select_by_cost,
+    _avg_latency_from_sums,
 )
 
 _SAMPLE = """\
@@ -106,3 +107,27 @@ def test_select_by_cost_softmax_favors_low_cost():
     rng = random.Random(1234)
     picks = [_select_by_cost(costs, 0.5, rng) for _ in range(200)]
     assert picks.count("b") > 180  # near-deterministic toward the cheapest
+
+def test_avg_latency_from_sums():
+    latency_sample = """\
+# HELP vllm:e2e_request_latency_seconds end to end latency
+# TYPE vllm:e2e_request_latency_seconds histogram
+vllm:e2e_request_latency_seconds_sum{model_name="m"} 12.0
+vllm:e2e_request_latency_seconds_count{model_name="m"} 4.0
+vllm:e2e_request_latency_seconds_sum{model_name="m2"} 8.0
+vllm:e2e_request_latency_seconds_count{model_name="m2"} 4.0
+"""
+    assert _avg_latency_from_sums(_parse_prom_sums(latency_sample, [
+        "vllm:e2e_request_latency_seconds_sum",
+        "vllm:e2e_request_latency_seconds_count",
+    ])) == 2.5  # 20 / 8
+    # Idle pod (count 0) -> 0.0 (most attractive).
+    assert _avg_latency_from_sums({
+        "vllm:e2e_request_latency_seconds_sum": 0.0,
+        "vllm:e2e_request_latency_seconds_count": 0.0,
+    }) == 0.0
+    # Missing metric -> None.
+    assert _avg_latency_from_sums({
+        "vllm:e2e_request_latency_seconds_sum": None,
+        "vllm:e2e_request_latency_seconds_count": None,
+    }) is None
