@@ -84,3 +84,14 @@ Add new entries with `new_entry.py` (see `template.md`).
 | Series | Entry | Exp IDs | Summary |
 |---|---|---|---|
 | 1-2 | [`000-fair-pull-a-b-at-96-users-prefix-tonight-placeholders.md`](04-bz-fair-highload/000-fair-pull-a-b-at-96-users-prefix-tonight-placeholders.md) | TBD | Tonight placeholders: fair OFF vs ON at 96 users (prefix). Analyse in `claude-strategy-comparison.ipynb`. |
+
+## 05-bz-claude-mine-vs-boom
+
+Claude-CLI head-to-head, LLM-LA router (mine, 4 strategies) vs BooM direct (3 policies), across a 16->32->64->128 user concurrency ramp on the same CodeFlowBench replay (strip-fix ON). One entry per load level; analyse in the matching `uN-mine-vs-boom.ipynb`.
+
+| Series | Entry | Exp IDs | Summary |
+|---|---|---|---|
+| u16 | [`000-low-load-16-users.md`](05-bz-claude-mine-vs-boom/000-low-load-16-users.md) | 122, 123, 124, 125, 129, 130, 131 | Ours wins decisively (+53% overall; best us-prefix vs boom-rr). BooM key_affinity pins to 1 pod. |
+| u32 | [`001-low-mid-load-32-users.md`](05-bz-claude-mine-vs-boom/001-low-mid-load-32-users.md) | 132, 133, 134, 135, 136, 137, 138 | Near-parity, Ours edges ahead (+1% overall; best us-aff-hard vs boom-kvc). |
+| u64 | [`002-medium-load-64-users.md`](05-bz-claude-mine-vs-boom/002-medium-load-64-users.md) | 139, 140, 141, 142, 143, 144, 145 | Ours ahead (+8% overall; us-aff-hard vs boom-rr). Engine TTFT/TPOT for 139-144 past Prom retention. |
+| u128 | [`003-high-load-128-users.md`](05-bz-claude-mine-vs-boom/003-high-load-128-users.md) | 146, 147, 148, 149, 150, 151, 152 | BooM round-robin wins at saturation (Ours -12% overall) on throughput; Ours keeps TTFT/TPOT edge. |
