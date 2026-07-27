@@ -75,7 +75,7 @@ sidecar:
   streamingMode: false
 
 router:
-  # pull | push-rr | push-random | push-leastq | push-throughput | push-p2c | push-kv-cost | central-push | external-push
+  # pull | push-rr | push-random | push-leastq | push-throughput | push-p2c | push-kv-cost | push-least-kv | central-push | external-push
   #
   # central-push can run WITHOUT the per-pod sidecar: set sidecar.enabled=false
   # and the router keeps pod discovery + the central queue (KV-affinity /
@@ -85,6 +85,8 @@ router:
   # push-throughput routes to the pod that has processed the fewest total tokens
   # (vllm prompt+generation token counters scraped from each pod's vLLM /metrics;
   # VLLM_METRICS_PORT default 8200, cached PUSH_METRIC_TTL_S default 1s).
+  # push-least-kv routes to the pod with the lowest KV-cache occupancy; it needs
+  # sidecar.kvUsageReport.enabled so sidecars publish kv_usage on /health.
   mode: pull
 
   # push-kv-cost tunables (KV-aware cost function). Only used

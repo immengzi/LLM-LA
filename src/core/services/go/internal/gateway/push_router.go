@@ -173,6 +173,8 @@ func (pd *PushDispatcher) pickEndpoint(reqID string) string {
 		return pd.pickP2C()
 	case "push-kv-cost":
 		return pd.pickKVCost(reqID)
+	case "push-least-kv":
+		return pd.pickLeastKV()
 	default:
 		return pd.pickRR()
 	}
@@ -322,6 +324,62 @@ func (pd *PushDispatcher) pickKVCost(reqID string) string {
 
 // epScore pairs an endpoint with a numeric score and whether the probe
 // produced a usable value.
+// fetchHealthField queries every sidecar's /health in parallel and reads a
+// numeric field (e.g. "kv_usage") from each. Missing/failed probes are ok=false.
+func (pd *PushDispatcher) fetchHealthField(field string) []epScore {
+	pd.mu.Lock()
+	eps := append([]string{}, pd.endpoints...)
+	urls := make(map[string]string, len(pd.urls))
+	for k, v := range pd.urls {
+		urls[k] = v
+	}
+	pd.mu.Unlock()
+
+	scores := make([]epScore, len(eps))
+	var wg sync.WaitGroup
+	for i, ep := range eps {
+		wg.Add(1)
+		go func(i int, ep string) {
+			defer wg.Done()
+			scores[i] = epScore{ep: ep, ok: false}
+			url := urls[ep]
+			if url == "" {
+				return
+			}
+			resp, err := pd.client.Get(url + "/health")
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				io.Copy(io.Discard, resp.Body)
+				return
+			}
+			var data map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+				return
+			}
+			if v, ok := data[field]; ok && v != nil {
+				scores[i] = epScore{ep: ep, score: toFloat(v), ok: true}
+			}
+		}(i, ep)
+	}
+	wg.Wait()
+	return scores
+}
+
+// pickLeastKV routes to the pod with the lowest KV-cache occupancy, read from
+// the sidecar-reported kv_usage on /health (requires sidecar.kvUsageReport).
+// Covers the least-kv-cache and least-gpu-cache names. Falls back to round-robin
+// if no pod reports kv_usage. Mirrors _pick_endpoint_least_kv.
+func (pd *PushDispatcher) pickLeastKV() string {
+	best := pickMinScore(pd.fetchHealthField("kv_usage"))
+	if best == "" {
+		return pd.pickRR()
+	}
+	return best
+}
+
 // chooseLowerLoad is the power-of-two-choices comparator: return the
 // less-loaded of two endpoints. A false ok flag means the load probe failed
 // for that endpoint (treated as +inf so a reachable peer wins); if both fail
