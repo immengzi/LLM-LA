@@ -55,6 +55,39 @@ def test_router_mode_aliases_and_fallback(reset_config, monkeypatch):
     assert reset_config().ROUTER_MODE == "pull"
 
 
+def test_sidecar_enabled_default_true(reset_config, monkeypatch):
+    monkeypatch.delenv("ROUTER_SIDECAR_ENABLED", raising=False)
+    cfg = reset_config()
+    assert cfg.ROUTER_SIDECAR_ENABLED is True
+    assert cfg.VLLM_KV_EVENTS_PORT == 5557
+    assert cfg.VLLM_KV_EVENTS_TOPIC == "kv@"
+
+
+def test_sidecar_disabled_takes_effect_only_for_central_push(reset_config, monkeypatch):
+    # central-push honors the disable flag ...
+    monkeypatch.setenv("ROUTER_MODE", "central-push")
+    monkeypatch.setenv("ROUTER_SIDECAR_ENABLED", "false")
+    cfg = reset_config()
+    assert cfg.ROUTER_MODE == "central-push"
+    assert cfg.ROUTER_SIDECAR_ENABLED is False
+
+    # ... but for any other mode the false value is ignored (kept on) so existing
+    # pull / push-* deployments stay byte-identical.
+    for mode in ("pull", "push-rr", "external-push"):
+        monkeypatch.setenv("ROUTER_MODE", mode)
+        monkeypatch.setenv("ROUTER_SIDECAR_ENABLED", "false")
+        cfg = reset_config()
+        assert cfg.ROUTER_SIDECAR_ENABLED is True, mode
+
+
+def test_vllm_kv_events_overrides(reset_config, monkeypatch):
+    monkeypatch.setenv("VLLM_KV_EVENTS_PORT", "6000")
+    monkeypatch.setenv("VLLM_KV_EVENTS_TOPIC", "  ")  # blank -> default
+    cfg = reset_config()
+    assert cfg.VLLM_KV_EVENTS_PORT == 6000
+    assert cfg.VLLM_KV_EVENTS_TOPIC == "kv@"
+
+
 def test_numeric_clamps(reset_config, monkeypatch):
     monkeypatch.setenv("POOL_FACTOR", "0")
     monkeypatch.setenv("KV_BLOCK_SIZE", "-5")

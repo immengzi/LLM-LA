@@ -173,6 +173,22 @@ spec:
               value: {{ quote (toString (.Values.router.centralPushCap | default 8)) }}
             - name: ROUTER_CENTRAL_PUSH_INTERVAL_S
               value: {{ quote (toString (.Values.router.centralPushIntervalS | default 0.05)) }}
+            # ---- sidecar-optional central-push (direct-to-vLLM delivery) ----
+            # False only takes effect for mode=central-push: the router then
+            # discovers pods + admits via the central queue exactly like
+            # central-push, but delivers DIRECTLY to each pod's vLLM (no sidecar)
+            # and hosts the KV-events subscriber itself. Sourced from
+            # sidecar.enabled so one switch drops the sidecar container AND flips
+            # the router to direct delivery. Ignored for every other mode.
+            - name: ROUTER_SIDECAR_ENABLED
+              value: {{ if eq (toString .Values.sidecar.enabled) "false" }}"false"{{ else }}"true"{{ end }}
+            # vLLM KV-cache-events ZMQ publish port + topic prefix the router
+            # subscribes to per pod in sidecar-less central-push (must match the
+            # engine's --kv-events-config port 5557 / "kv@" topic prefix).
+            - name: VLLM_KV_EVENTS_PORT
+              value: {{ quote (toString (.Values.router.vllmKvEventsPort | default 5557)) }}
+            - name: VLLM_KV_EVENTS_TOPIC
+              value: {{ quote (.Values.router.vllmKvEventsTopic | default "kv@") }}
             - name: OUTPUT_LEN_PREDICTOR
               value: {{ quote .Values.router.outputLenPredictor }}
             - name: BATCH_SIZE_ESTIMATE

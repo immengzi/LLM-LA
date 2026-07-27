@@ -1,6 +1,5 @@
 # router/push_router.py
 # -*- coding: utf-8 -*-
-import os
 import random
 import time
 import asyncio
@@ -9,9 +8,9 @@ from typing import Dict, List, Optional
 from threading import RLock
 
 import httpx
-from kubernetes import client as k8s_client, config as k8s_config
 
 from .config import get_config
+from .k8s_discovery import discover_running_pods
 from .metrics import inc_dispatch
 from .kv_aware import get_request_blocks, prefix_len, record_routing
 
@@ -98,31 +97,10 @@ class PushRouter:
     # ---------------------------------------------------------
 
     def _discover_pods(self) -> Dict[str, str]:
-        running_in_cluster = os.getenv("KUBERNETES_SERVICE_HOST") is not None
-        try:
-            if running_in_cluster:
-                k8s_config.load_incluster_config()
-            else:
-                k8s_config.load_kube_config()
-        except Exception as e:
-            print(f"[PushRouter] failed to load K8s config: {e}")
-            return {}
-
-        v1 = k8s_client.CoreV1Api()
-        try:
-            pods = v1.list_namespaced_pod(
-                namespace=_cfg.NAMESPACE,
-                label_selector=_cfg.LABEL_SELECTOR,
-            ).items
-        except Exception as e:
-            print(f"[PushRouter] list_namespaced_pod failed: {e}")
-            return {}
-
-        out: Dict[str, str] = {}
-        for pod in pods:
-            if pod.status.phase == "Running" and pod.status.pod_ip:
-                out[pod.metadata.name] = pod.status.pod_ip
-        return out
+        # Shared implementation (see k8s_discovery.discover_running_pods); kept as
+        # a thin wrapper so both the sidecar push path and the sidecar-less
+        # central-push registry discover pods identically.
+        return discover_running_pods(log_prefix="[PushRouter]")
 
     def _refresh_endpoints_locked(self, *, force: bool = False) -> None:
         """

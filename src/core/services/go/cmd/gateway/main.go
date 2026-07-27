@@ -86,26 +86,45 @@ func main() {
 		log.Printf("[router] CentralPushDispatch started (cap=%d interval_s=%.3f)", cfg.CentralPushCap, cfg.CentralPushIntervalS)
 	}
 
-	// External-push: static external vLLM endpoints (no k8s pods, no sidecar).
-	// Admits + schedules like central-push, but delivers directly to each
-	// external vLLM and ingests inline. Prefix routing works via a router-side
-	// KV-events subscriber writing owners keyed by the endpoint id.
-	if cfg.IsExternalPush() {
-		externalReg := gateway.NewExternalRegistry(cfg)
-		externalReg.RefreshHealth(true)
-		externalClient := gateway.NewExternalVLLMClient(cfg, externalReg)
-		srv.SetExternalRegistry(externalReg)
+	// Direct-to-vLLM delivery (NO sidecar). Two flavors share one dispatcher:
+	//   * external-push          -> static external endpoints (ExternalRegistry)
+	//   * central-push + sidecar off -> live k8s pods (K8sVLLMRegistry)
+	// Both admit via the central queue (Pull scheduling) and deliver directly to
+	// each vLLM's OpenAI endpoint, ingesting results inline. The registry (and
+	// cap/interval) is the only difference.
+	if cfg.UsesDirectDelivery() {
+		var registry gateway.VLLMRegistry
+		capN := cfg.ExternalPushCap
+		intervalS := cfg.ExternalPushIntervalS
 
-		externalSubs := gateway.NewRouterKVSubscriberPool(cfg, externalReg)
-		externalSubs.Start(context.Background())
-		defer externalSubs.Stop()
+		if cfg.IsCentralPushDirect() {
+			k8sReg := gateway.NewK8sVLLMRegistry(context.Background(), cfg)
+			k8sReg.RefreshHealth(true)
+			registry = k8sReg
+			// K8sVLLMRegistry owns its per-pod KV subscribers; no static pool.
+			defer k8sReg.Stop()
+			capN = cfg.CentralPushCap
+			intervalS = cfg.CentralPushIntervalS
+			log.Printf("[router] central-push (sidecar-less) endpoints=%d cap=%d interval_s=%.3f kv_events=%v",
+				len(k8sReg.AllIDs()), capN, intervalS, cfg.KVAware)
+		} else {
+			externalReg := gateway.NewExternalRegistry(cfg)
+			externalReg.RefreshHealth(true)
+			registry = externalReg
+			srv.SetExternalRegistry(externalReg)
 
-		extPush := gateway.NewExternalPushDispatcher(queue, externalReg, externalClient, srv.IngestResult, cfg.ExternalPushCap, cfg.ExternalPushIntervalS)
+			externalSubs := gateway.NewRouterKVSubscriberPool(cfg, externalReg)
+			externalSubs.Start(context.Background())
+			defer externalSubs.Stop()
+			log.Printf("[router] ExternalPushDispatch endpoints=%d cap=%d interval_s=%.3f kv_events=%v",
+				len(cfg.StaticEndpoints), capN, intervalS, cfg.ExternalKVEvents)
+		}
+
+		client := gateway.NewExternalVLLMClient(cfg, registry)
+		extPush := gateway.NewExternalPushDispatcher(queue, registry, client, srv.IngestResult, capN, intervalS)
 		extPush.Start()
 		srv.SetExternalPush(extPush)
 		defer extPush.Stop()
-		log.Printf("[router] ExternalPushDispatch started (endpoints=%d cap=%d interval_s=%.3f kv_events=%v)",
-			len(cfg.StaticEndpoints), cfg.ExternalPushCap, cfg.ExternalPushIntervalS, cfg.ExternalKVEvents)
 	}
 
 	// SLO subsystem: the registry always exists (so requests carrying SLO

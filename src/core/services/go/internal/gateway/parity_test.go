@@ -327,7 +327,8 @@ func TestBayesianUpdate(t *testing.T) {
 // pull/push-delivery predicates for central-push mirror the Python config.
 func TestCentralPushModePredicates(t *testing.T) {
 	for _, alias := range []string{"central-push", "central_push", "centralpush", "CENTRAL-PUSH"} {
-		c := &Config{RouterMode: alias}
+		// SidecarEnabled true = today's default sidecar-backed central-push.
+		c := &Config{RouterMode: alias, SidecarEnabled: true}
 		c.normalize()
 		if c.RouterMode != "central-push" {
 			t.Fatalf("alias %q normalized to %q, want central-push", alias, c.RouterMode)
@@ -341,9 +342,25 @@ func TestCentralPushModePredicates(t *testing.T) {
 		if !c.UsesPushDelivery() {
 			t.Fatalf("central-push must use push delivery")
 		}
+		if c.IsCentralPushDirect() || c.UsesDirectDelivery() {
+			t.Fatalf("sidecar-backed central-push must not use direct delivery")
+		}
 		if c.IsPushMode() {
 			t.Fatalf("central-push must not report IsPushMode")
 		}
+	}
+
+	// Sidecar-less central-push: same central queue, but direct delivery.
+	direct := &Config{RouterMode: "central-push", SidecarEnabled: false}
+	direct.normalize()
+	if !direct.UsesCentralQueue() {
+		t.Fatalf("sidecar-less central-push must still use the central queue")
+	}
+	if direct.UsesPushDelivery() {
+		t.Fatalf("sidecar-less central-push must not use push delivery")
+	}
+	if !direct.IsCentralPushDirect() || !direct.UsesDirectDelivery() {
+		t.Fatalf("sidecar-less central-push must use direct delivery")
 	}
 
 	// pull: central queue, no push delivery.

@@ -228,6 +228,25 @@ class RouterConfig:
     CENTRAL_PUSH_INTERVAL_S: float = 0.05
 
     # --------------------------------------------------------------------
+    # SIDECAR-OPTIONAL CENTRAL-PUSH (direct-to-vLLM delivery knob)
+    # --------------------------------------------------------------------
+    # Default True = today's behavior (deliver via the per-pod sidecar /push).
+    # When set False AND ROUTER_MODE=central-push, the router keeps k8s pod
+    # discovery + the central queue (KV-affinity/fairness/SLO all still apply),
+    # but delivers each request DIRECTLY to the pod's vLLM OpenAI endpoint (no
+    # sidecar) and hosts the KV-cache-events ZMQ->Redis subscriber itself so
+    # prefix/both routing keeps working. The flag is a no-op for every other
+    # mode (pull/push-*/external-push are unaffected). Fully backward compatible.
+    ROUTER_SIDECAR_ENABLED: bool = True
+    # vLLM KV-cache-events ZMQ publisher, per pod, used ONLY by the sidecar-less
+    # central-push path (the router subscribes at tcp://{pod_ip}:{port}). Must
+    # match the vLLM engine's kv-events publish port (sidecar uses VLLM_SUB_PORT
+    # 5557 in-pod). vLLM must bind this on a router-reachable address (not just
+    # 127.0.0.1) for prefix routing; otherwise routing degrades to affinity-only.
+    VLLM_KV_EVENTS_PORT: int = 5557
+    VLLM_KV_EVENTS_TOPIC: str = "kv@"
+
+    # --------------------------------------------------------------------
     # Synchronous response flow (existing /enqueue)
     # --------------------------------------------------------------------
     RESULT_TIMEOUT_S: float = 60.0
@@ -547,6 +566,15 @@ def get_config() -> RouterConfig:
     if cfg.CENTRAL_PUSH_INTERVAL_S <= 0:
         cfg.CENTRAL_PUSH_INTERVAL_S = 0.05
 
+    # Sidecar-optional central-push (direct-to-vLLM delivery)
+    cfg.ROUTER_SIDECAR_ENABLED = (
+        os.getenv("ROUTER_SIDECAR_ENABLED", str(cfg.ROUTER_SIDECAR_ENABLED)).lower() == "true"
+    )
+    cfg.VLLM_KV_EVENTS_PORT = int(os.getenv("VLLM_KV_EVENTS_PORT", cfg.VLLM_KV_EVENTS_PORT))
+    cfg.VLLM_KV_EVENTS_TOPIC = (
+        os.getenv("VLLM_KV_EVENTS_TOPIC", cfg.VLLM_KV_EVENTS_TOPIC).strip() or "kv@"
+    )
+
     # External-push knobs (static external endpoints; no sidecar)
     cfg.STATIC_ENDPOINTS = os.getenv("ROUTER_STATIC_ENDPOINTS", cfg.STATIC_ENDPOINTS)
     cfg.STATIC_ENDPOINTS_PARSED = _parse_static_endpoints(cfg.STATIC_ENDPOINTS)
@@ -673,6 +701,17 @@ def get_config() -> RouterConfig:
     if rm not in ("pull", "push-rr", "push-random", "push-leastq", "central-push", "external-push"):
         rm = "pull"
     cfg.ROUTER_MODE = rm
+
+    # ROUTER_SIDECAR_ENABLED only takes effect for central-push (the only mode
+    # with a sidecar-less direct-delivery path). For any other mode a False
+    # value is a misconfiguration: ignore it (keep sidecar semantics) and warn,
+    # so existing pull/push-*/external-push deployments stay byte-identical.
+    if not cfg.ROUTER_SIDECAR_ENABLED and rm != "central-push":
+        print(
+            f"[config] WARNING: ROUTER_SIDECAR_ENABLED=false is only supported "
+            f"for ROUTER_MODE=central-push (got {rm!r}); ignoring (sidecar stays on)."
+        )
+        cfg.ROUTER_SIDECAR_ENABLED = True
 
     # PUSH_LEASTQ_MODE normalization + allowlist
     lqm = _norm_mode(cfg.PUSH_LEASTQ_MODE)

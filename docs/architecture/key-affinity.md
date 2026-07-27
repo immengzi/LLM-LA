@@ -143,6 +143,12 @@ flowchart TD
   can scale out. Affinity does not suppress the autoscaling signal.
 - **Push modes:** Affinity targets pull mode (`ROUTER_MODE=pull`). In push modes
   the key is still stamped into `meta` but the central-queue sort is not used.
+- **Central-push (incl. sidecar-less):** central-push admits through the SAME
+  central queue and calls the SAME `pull_for_endpoint` scheduler, so affinity
+  (soft and hard) behaves identically to pull. This holds whether or not the
+  sidecar is present: with `ROUTER_SIDECAR_ENABLED=false` the endpoint identity is
+  still the pod name, so pins, holds and releases are unchanged — only delivery
+  goes direct to vLLM instead of via the sidecar.
 
 ---
 
