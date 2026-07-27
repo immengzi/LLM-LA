@@ -504,6 +504,46 @@ class PushRouter:
         _log_req(f"KVCost pick → {ep} (cost={costs.get(ep) if ep else None})", level="full")
         return ep
 
+    async def _fetch_health_field(self, eps, urls, field: str) -> Dict[str, Optional[float]]:
+        """Fetch a numeric field from every sidecar's /health concurrently."""
+        async def one(ep: str):
+            url = urls.get(ep)
+            if not url:
+                return ep, None
+            try:
+                r = await self._health_client.get(f"{url}/health")
+                if r.status_code != 200:
+                    return ep, None
+                v = r.json().get(field)
+                return ep, (float(v) if v is not None else None)
+            except Exception:
+                return ep, None
+
+        results = await asyncio.gather(*(one(ep) for ep in eps))
+        return {ep: s for ep, s in results}
+
+    async def _pick_endpoint_least_kv(self) -> Optional[str]:
+        """Route to the pod with the lowest KV-cache occupancy.
+
+        Uses the sidecar-reported ``kv_usage`` (vLLM ``kv_cache_usage_perc``,
+        falling back to ``gpu_cache_usage_perc``) exposed on /health — so it
+        requires ``sidecar.kvUsageReport.enabled``. Covers both the
+        ``least-kv-cache`` and ``least-gpu-cache`` names (same underlying signal
+        here). Falls back to round-robin if no pod reports kv_usage.
+        """
+        with self._lock:
+            eps = list(self._eps)
+            urls = dict(self._urls)
+        if not eps:
+            return None
+        scores = await self._fetch_health_field(eps, urls, "kv_usage")
+        best = _pick_min_score(scores)
+        if best is None:
+            _log_req("LeastKV: no kv_usage reported, falling back to RR", level="full")
+            return self._pick_endpoint_rr()
+        _log_req(f"LeastKV pick → {best} (kv_usage={scores.get(best)})", level="full")
+        return best
+
     async def _pick_endpoint(self, req_id: Optional[str] = None) -> Optional[str]:
         if self.mode == "push-rr":
             return self._pick_endpoint_rr()
@@ -517,6 +557,8 @@ class PushRouter:
             return await self._pick_endpoint_p2c()
         if self.mode == "push-kv-cost":
             return await self._pick_endpoint_kv_cost(req_id)
+        if self.mode == "push-least-kv":
+            return await self._pick_endpoint_least_kv()
         return self._pick_endpoint_rr()
 
     # ---------------------------------------------------------
