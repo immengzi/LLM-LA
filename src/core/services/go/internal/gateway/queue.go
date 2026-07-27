@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"sync"
 )
@@ -14,6 +15,12 @@ type queueItem struct {
 	prompt string
 	tEnq   float64
 	meta   map[string]interface{}
+}
+
+// kvUsageSample is a single GPU KV usage reading with its wall-clock timestamp.
+type kvUsageSample struct {
+	value float64
+	ts    float64
 }
 
 // sloEngine is the integration point for SLO-aware scheduling. It is nil unless
@@ -45,6 +52,25 @@ type CentralQueue struct {
 
 	// Key-affinity conversation->endpoint map (nil unless AFFINITY_ENABLED).
 	affinity *AffinityMap
+	// True when the affinity map is backed by a durable Redis store. Gates the
+	// seenEndpoints readiness check + prefetch/warm. Mirrors
+	// RouterState._affinity_persist.
+	affinityPersist bool
+
+	// Endpoint (pod) liveness for persisted affinity: last time each endpoint
+	// pulled. Used only when persistence is on, to treat mappings to
+	// stale/absent (post-redeploy renamed) pods as misses. A sidecar /pull is
+	// health-gated, so this doubles as the per-pod READY timestamp. Mirrors
+	// RouterState._seen_endpoints.
+	seenEndpoints map[string]float64
+
+	// Soft KV divert: endpoint -> latest reported GPU KV usage sample. Updated
+	// from /pull kv_usage and central-push /health polls. Stale samples ignored.
+	// Mirrors RouterState._kv_usage_by_endpoint.
+	kvUsageByEndpoint map[string]kvUsageSample
+	// Hysteresis: endpoints currently considered under KV pressure. Mirrors
+	// RouterState._kv_pressure_active.
+	kvPressureActive map[string]bool
 
 	// req_id -> endpoint that pulled it (streaming identity / push notify).
 	reqEndpoint map[string]string
@@ -81,8 +107,16 @@ type CentralQueue struct {
 func NewCentralQueue(cfg *Config, kv *kvAware) *CentralQueue {
 	setCentralQueueLength(0)
 	var aff *AffinityMap
+	affinityPersist := false
 	if cfg.AffinityEnabled {
-		aff = NewAffinityMap(cfg.AffinityTTLS)
+		var store affinityStore
+		if cfg.AffinityPersistEnabled {
+			// build_affinity_store never fails hard: on any error persistence is
+			// simply disabled (log-and-continue), matching the Python router.
+			store = buildAffinityStore(cfg)
+		}
+		aff = NewAffinityMapWithStore(cfg.AffinityTTLS, store, cfg.AffinityCacheMax)
+		affinityPersist = store != nil
 	}
 	return &CentralQueue{
 		cfg:                      cfg,
@@ -91,6 +125,10 @@ func NewCentralQueue(cfg *Config, kv *kvAware) *CentralQueue {
 		defaultModel:             cfg.ModelName,
 		queues:                   make(map[string][]queueItem),
 		affinity:                 aff,
+		affinityPersist:          affinityPersist,
+		seenEndpoints:            make(map[string]float64),
+		kvUsageByEndpoint:        make(map[string]kvUsageSample),
+		kvPressureActive:         make(map[string]bool),
 		reqEndpoint:              make(map[string]string),
 		inflightByEndpoint:       make(map[string]int),
 		inflightTokensByEndpoint: make(map[string]int),
@@ -313,6 +351,222 @@ func (q *CentralQueue) applyFairThrottleLocked(endpoint string, want, effectiveW
 	return newOrdered, newEffective
 }
 
+// ---------------------------------------------------------------------------
+// Soft KV divert helpers (mirror router_state.py)
+// ---------------------------------------------------------------------------
+
+// RecordKVUsage stores a sidecar-reported GPU KV usage sample and updates the
+// pressure hysteresis. Normalizes >1 values (percent) and rejects NaN/negative.
+// Acquires q.mu itself (called outside the pull lock). Mirrors record_kv_usage.
+func (q *CentralQueue) RecordKVUsage(endpoint string, kvUsage float64) {
+	if endpoint == "" {
+		return
+	}
+	v := kvUsage
+	if math.IsNaN(v) || v < 0.0 {
+		return
+	}
+	if v > 1.0 {
+		if v > 100.0 {
+			v = 1.0
+		} else {
+			v = v / 100.0
+		}
+	}
+	now := nowS()
+	q.mu.Lock()
+	q.kvUsageByEndpoint[endpoint] = kvUsageSample{value: v, ts: now}
+	// Hysteresis bookkeeping (also updated in kvPressureForLocked at pull time).
+	if q.kvPressureActive[endpoint] {
+		if v < q.cfg.KVPressureLow {
+			q.kvPressureActive[endpoint] = false
+		}
+	} else if v >= q.cfg.KVPressureHigh {
+		q.kvPressureActive[endpoint] = true
+	}
+	q.mu.Unlock()
+	setEndpointKVUsage(endpoint, v)
+}
+
+// freshKVLocked returns the fresh kv_usage for endpoint, or ok=false when
+// missing/stale. Caller holds q.mu. Mirrors _fresh_kv.
+func (q *CentralQueue) freshKVLocked(endpoint string, now float64) (float64, bool) {
+	rec, ok := q.kvUsageByEndpoint[endpoint]
+	if !ok {
+		return 0, false
+	}
+	staleS := q.cfg.KVUsageStaleS
+	if staleS > 0 && (now-rec.ts) > staleS {
+		return 0, false
+	}
+	return rec.value, true
+}
+
+// kvPressureForLocked applies HIGH/LOW hysteresis and records the new state.
+// Caller holds q.mu. Mirrors _kv_pressure_for.
+func (q *CentralQueue) kvPressureForLocked(endpoint string, kv float64) bool {
+	var active bool
+	if q.kvPressureActive[endpoint] {
+		active = kv >= q.cfg.KVPressureLow
+	} else {
+		active = kv >= q.cfg.KVPressureHigh
+	}
+	q.kvPressureActive[endpoint] = active
+	return active
+}
+
+// hasHealthyPeerLocked reports whether some OTHER endpoint has a fresh
+// kv_usage < PEER_OK. Caller holds q.mu. Mirrors _has_healthy_peer.
+func (q *CentralQueue) hasHealthyPeerLocked(endpoint string, now float64) bool {
+	peerOK := q.cfg.KVPressurePeerOK
+	peers := make(map[string]struct{})
+	for ep := range q.kvUsageByEndpoint {
+		peers[ep] = struct{}{}
+	}
+	for ep := range q.lastPullByEndpoint {
+		peers[ep] = struct{}{}
+	}
+	for ep := range q.inflightByEndpoint {
+		peers[ep] = struct{}{}
+	}
+	for ep := range peers {
+		if ep == endpoint {
+			continue
+		}
+		if kv, ok := q.freshKVLocked(ep, now); ok && kv < peerOK {
+			return true
+		}
+	}
+	return false
+}
+
+// applyKVSoftDivertLocked trims cold work from a high-KV pod when a healthier
+// peer exists. Keeps affinity self-pins and items with prefixLen >=
+// KVSoftMinHits. Default-off / missing KV / fleet-full => no-op. Caller holds
+// q.mu. Mirrors _apply_kv_soft_divert.
+func (q *CentralQueue) applyKVSoftDivertLocked(endpoint string, effectiveWant int, ordered []queueItem) ([]queueItem, int) {
+	if !q.cfg.KVSoftDivert || endpoint == "" {
+		return ordered, effectiveWant
+	}
+	if effectiveWant <= 0 || len(ordered) == 0 {
+		setKVSoftDivertActive(endpoint, 0)
+		return ordered, effectiveWant
+	}
+
+	now := nowS()
+	kv, ok := q.freshKVLocked(endpoint, now)
+	if !ok {
+		setKVSoftDivertActive(endpoint, 0)
+		return ordered, effectiveWant
+	}
+	if !q.kvPressureForLocked(endpoint, kv) {
+		setKVSoftDivertActive(endpoint, 0)
+		return ordered, effectiveWant
+	}
+	if !q.hasHealthyPeerLocked(endpoint, now) {
+		setKVSoftDivertActive(endpoint, 0)
+		return ordered, effectiveWant
+	}
+
+	minHits := q.cfg.KVSoftMinHits
+	keep := make([]queueItem, 0, len(ordered))
+	rest := make([]queueItem, 0, len(ordered))
+	for _, it := range ordered {
+		if q.affinityMatch(endpoint, it.meta) {
+			keep = append(keep, it)
+			continue
+		}
+		if q.kv.prefixLen(endpoint, it.reqID) >= minHits {
+			keep = append(keep, it)
+		} else {
+			rest = append(rest, it)
+		}
+	}
+
+	// trimmed = min(want, len(ordered)) - min(want, len(keep)); newEffective =
+	// min(want, len(keep)).
+	grantable := effectiveWant
+	if grantable > len(ordered) {
+		grantable = len(ordered)
+	}
+	kept := effectiveWant
+	if kept > len(keep) {
+		kept = len(keep)
+	}
+	trimmed := grantable - kept
+	if trimmed < 0 {
+		trimmed = 0
+	}
+	setKVSoftDivertActive(endpoint, 1)
+	if trimmed > 0 {
+		incKVSoftDivertTrimmed(endpoint, trimmed)
+		q.logReq("kv soft divert endpoint=%s kv=%.3f kept=%d trimmed=%d eff %d->%d",
+			endpoint, kv, len(keep), trimmed, effectiveWant, kept)
+	}
+	// Kept items first (relative order preserved), then the rest (requeued from
+	// ordered[effectiveWant:] by the caller). Mirrors keep + rest in Python.
+	return append(keep, rest...), kept
+}
+
+// ---------------------------------------------------------------------------
+// Persistent-affinity helpers (mirror router_state.py)
+// ---------------------------------------------------------------------------
+
+// endpointAvailableLocked reports whether an affinity-target endpoint is a
+// valid, READY routing target. Caller holds q.mu. Mirrors _endpoint_available:
+//
+//	release-on-stuck && stuck            -> false (release pin to LB)
+//	persist off                          -> true  (legacy: honor in-memory pin)
+//	seenEndpoints[target] missing        -> false (never-ready / still loading)
+//	now - seenEndpoints[target] > STALE  -> false (gone / scaled down)
+//	otherwise                            -> true  (ready & serving -> honor pin)
+func (q *CentralQueue) endpointAvailableLocked(endpoint string) bool {
+	if q.cfg.AffinityReleaseOnStuck && q.isEndpointStuckLocked(endpoint) {
+		return false
+	}
+	if !q.affinityPersist {
+		return true
+	}
+	if endpoint == "" {
+		return false
+	}
+	last, ok := q.seenEndpoints[endpoint]
+	if !ok {
+		return false
+	}
+	return (nowS() - last) <= q.cfg.AffinityEndpointStaleS
+}
+
+// AffinityPrefetch warms one conversation key from the durable store into
+// memory at admission (once per request). No-op when affinity is disabled or
+// not persisted. Mirrors affinity_prefetch.
+func (q *CentralQueue) AffinityPrefetch(key string) {
+	if q.affinity == nil || !q.affinityPersist || key == "" {
+		return
+	}
+	q.affinity.Prefetch(key)
+}
+
+// WarmAffinityFromStore reloads the affinity map from Redis at startup and
+// returns the loaded count. No-op when not persisted. Mirrors
+// warm_affinity_from_store.
+func (q *CentralQueue) WarmAffinityFromStore() int {
+	if q.affinity == nil || !q.affinityPersist {
+		return 0
+	}
+	n := q.affinity.Warm()
+	setAffinityMapSize(q.affinity.Size())
+	log.Printf("[PullRouter] affinity map warmed from store: %d mappings", n)
+	return n
+}
+
+// CloseAffinityStore flushes + closes the durable affinity store (shutdown).
+func (q *CentralQueue) CloseAffinityStore() {
+	if q.affinity != nil {
+		q.affinity.Close()
+	}
+}
+
 // LastPullSnapshot returns a copy of the per-endpoint last-/pull timestamp map.
 func (q *CentralQueue) LastPullSnapshot() map[string]float64 {
 	q.mu.Lock()
@@ -377,6 +631,16 @@ func (q *CentralQueue) Pull(endpoint string, want int, model string, wantPrefill
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	// Track endpoint liveness for persisted-affinity availability. A sidecar
+	// only issues /pull when vLLM /health == 200 within the last ~5s (the
+	// health gate), so a pull ⟹ this pod was serviceable ≤5s ago; this table
+	// therefore doubles as the per-pod READY timestamp. Stamp before the empty
+	// -queue early return so a fresh pod becomes available on its first pull.
+	// See docs/internal/persistent-affinity-map.md. Mirrors router_state.py.
+	if q.affinityPersist && endpoint != "" {
+		q.seenEndpoints[endpoint] = nowS()
+	}
+
 	// Always record last-pull time (fairness liveness + fleet-average source).
 	if endpoint != "" {
 		q.lastPullByEndpoint[endpoint] = nowS()
@@ -435,6 +699,12 @@ func (q *CentralQueue) Pull(endpoint string, want int, model string, wantPrefill
 	// on; only trims the movable/unpinned tail (self-pinned items are kept), so
 	// KV/affinity ordering is never overridden. Mirrors _apply_fair_throttle.
 	ordered, effectiveWant = q.applyFairThrottleLocked(endpoint, want, effectiveWant, ordered)
+
+	// Soft KV divert: on a GPU-KV-saturated pod with a healthier peer, keep
+	// prefix hits + affinity pins and leave cold work for the peers. No-op when
+	// disabled / KV samples missing / fleet all-high. Mirrors
+	// _apply_kv_soft_divert.
+	ordered, effectiveWant = q.applyKVSoftDivertLocked(endpoint, effectiveWant, ordered)
 
 	takeN := effectiveWant
 	if takeN > len(ordered) {
@@ -746,14 +1016,12 @@ func (q *CentralQueue) affinityFilterHard(pool []queueItem, endpoint string) ([]
 			continue
 		}
 		target := q.affinity.Lookup(key)
-		if target == "" || target == endpoint {
+		// Fall back to normal LB when there is no pin, the pin is us, or the
+		// pinned pod is no longer an available/ready routing target (scaled
+		// down / renamed by a redeploy, or stuck when RELEASE_ON_STUCK is on).
+		// Matches router_state.py: this branch is NOT counted as a release.
+		if target == "" || target == endpoint || !q.endpointAvailableLocked(target) {
 			available = append(available, it)
-			continue
-		}
-		// Optional fairness liveness: a stuck target releases its pins to LB.
-		if q.cfg.AffinityReleaseOnStuck && q.isEndpointStuckLocked(target) {
-			available = append(available, it)
-			releases++
 			continue
 		}
 		affTS := it.tEnq
