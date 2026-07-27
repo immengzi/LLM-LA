@@ -1,5 +1,7 @@
 # router/push_router.py
 # -*- coding: utf-8 -*-
+import os
+import re
 import random
 import time
 import asyncio
@@ -15,6 +17,64 @@ from .metrics import inc_dispatch
 from .kv_aware import get_request_blocks, prefix_len, record_routing
 
 _cfg = get_config()
+
+# One Prometheus exposition line: name{labels} value  (comments/blank skipped).
+_PROM_LINE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([0-9eE.+-]+)\s*$")
+
+
+def _pick_min_score(scores: Dict[str, Optional[float]]) -> Optional[str]:
+    """Return the endpoint with the smallest numeric score.
+
+    Endpoints whose score is ``None`` (probe failed / metric absent) are
+    skipped. Returns ``None`` when no endpoint has a usable score.
+    """
+    best_ep: Optional[str] = None
+    best: Optional[float] = None
+    for ep, s in scores.items():
+        if s is None:
+            continue
+        if best is None or s < best:
+            best = s
+            best_ep = ep
+    return best_ep
+
+
+def _parse_prom_sums(text: str, bases) -> Dict[str, Optional[float]]:
+    """Sum each requested metric base name across all its label sets.
+
+    Returns ``{base: total}``, or ``None`` for a base that never appears.
+    """
+    wanted = set(bases)
+    out = {b: 0.0 for b in bases}
+    seen = {b: False for b in bases}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line[0] == "#":
+            continue
+        m = _PROM_LINE.match(line)
+        if not m:
+            continue
+        name, val = m.group(1), m.group(3)
+        if name in wanted:
+            try:
+                out[name] += float(val)
+                seen[name] = True
+            except ValueError:
+                pass
+    return {b: (out[b] if seen[b] else None) for b in bases}
+
+
+def _total_tokens_from_sums(sums: Dict[str, Optional[float]]) -> Optional[float]:
+    """Total tokens processed = prompt_tokens_total + generation_tokens_total.
+
+    Returns ``None`` only when neither counter is present; if just one is
+    missing it is treated as 0 so a partially-instrumented pod still scores.
+    """
+    p = sums.get("vllm:prompt_tokens_total")
+    g = sums.get("vllm:generation_tokens_total")
+    if p is None and g is None:
+        return None
+    return (p or 0.0) + (g or 0.0)
 
 
 def _log_req(msg: str, *, level: str = "summary") -> None:
@@ -213,6 +273,68 @@ class PushRouter:
             return self._pick_endpoint_leastq_local()
         return await self._pick_endpoint_leastq_health()
 
+    async def _scrape_metric_sums(self, eps, urls, bases):
+        """Scrape vLLM /metrics for each pod and sum the requested metric bases.
+
+        The vLLM metrics endpoint is derived from the sidecar URL by swapping the
+        port to VLLM_METRICS_PORT (default 8200). Results are cached for
+        PUSH_METRIC_TTL_S (default 1s). Returns {ep: {base: total|None}}.
+        """
+        now = time.time()
+        ttl = float(os.getenv("PUSH_METRIC_TTL_S", "1.0"))
+        key = tuple(bases)
+        with self._lock:
+            if (
+                getattr(self, "_metric_cache_key", None) == key
+                and (now - getattr(self, "_metric_cache_ts", 0.0)) < ttl
+            ):
+                return getattr(self, "_metric_cache", {})
+
+        port = int(os.getenv("VLLM_METRICS_PORT", "8200"))
+
+        async def one(ep: str):
+            url = urls.get(ep)
+            if not url:
+                return ep, {b: None for b in bases}
+            metrics_url = f"{url.rsplit(':', 1)[0]}:{port}/metrics"
+            try:
+                r = await self._health_client.get(metrics_url)
+                if r.status_code != 200:
+                    return ep, {b: None for b in bases}
+                return ep, _parse_prom_sums(r.text, bases)
+            except Exception:
+                return ep, {b: None for b in bases}
+
+        results = await asyncio.gather(*(one(ep) for ep in eps))
+        out = {ep: sums for ep, sums in results}
+        with self._lock:
+            self._metric_cache = out
+            self._metric_cache_ts = now
+            self._metric_cache_key = key
+        return out
+
+    async def _pick_endpoint_throughput(self) -> Optional[str]:
+        """Route to the pod that has processed the fewest total tokens.
+
+        Score = vllm:prompt_tokens_total + vllm:generation_tokens_total scraped
+        from each pod's vLLM /metrics, favoring underloaded pods. Falls back to
+        round-robin when no pod exposes the counters.
+        """
+        with self._lock:
+            eps = list(self._eps)
+            urls = dict(self._urls)
+        if not eps:
+            return None
+        bases = ["vllm:prompt_tokens_total", "vllm:generation_tokens_total"]
+        metrics = await self._scrape_metric_sums(eps, urls, bases)
+        scores = {ep: _total_tokens_from_sums(sums) for ep, sums in metrics.items()}
+        best = _pick_min_score(scores)
+        if best is None:
+            _log_req("Throughput: no token counters, falling back to RR", level="full")
+            return self._pick_endpoint_rr()
+        _log_req(f"Throughput pick → {best} (tokens={scores.get(best)})", level="full")
+        return best
+
     async def _pick_endpoint(self) -> Optional[str]:
         if self.mode == "push-rr":
             return self._pick_endpoint_rr()
@@ -220,6 +342,8 @@ class PushRouter:
             return self._pick_endpoint_random()
         if self.mode == "push-leastq":
             return await self._pick_endpoint_leastq()
+        if self.mode == "push-throughput":
+            return await self._pick_endpoint_throughput()
         return self._pick_endpoint_rr()
 
     # ---------------------------------------------------------

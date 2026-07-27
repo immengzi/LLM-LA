@@ -12,9 +12,60 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
+
+// promLineRE matches one Prometheus exposition line: name{labels} value.
+var promLineRE = regexp.MustCompile(`^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([0-9eE.+-]+)\s*$`)
+
+// promSample holds one pod's scraped metric sums plus a presence map.
+type promSample struct {
+	sums map[string]float64
+	seen map[string]bool
+}
+
+// parsePromSums sums each requested base metric across all its label sets.
+// seen is false for a base that never appears. Mirrors _parse_prom_sums.
+func parsePromSums(text string, bases []string) (map[string]float64, map[string]bool) {
+	wanted := make(map[string]bool, len(bases))
+	sums := make(map[string]float64, len(bases))
+	seen := make(map[string]bool, len(bases))
+	for _, b := range bases {
+		wanted[b] = true
+		sums[b] = 0
+		seen[b] = false
+	}
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		m := promLineRE.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		if wanted[m[1]] {
+			if v, err := strconv.ParseFloat(m[3], 64); err == nil {
+				sums[m[1]] += v
+				seen[m[1]] = true
+			}
+		}
+	}
+	return sums, seen
+}
+
+// totalTokensFromSums returns prompt+generation tokens processed. ok=false only
+// when neither counter is present; a single missing counter is treated as 0.
+func totalTokensFromSums(sums map[string]float64, seen map[string]bool) (float64, bool) {
+	if !seen["vllm:prompt_tokens_total"] && !seen["vllm:generation_tokens_total"] {
+		return 0, false
+	}
+	return sums["vllm:prompt_tokens_total"] + sums["vllm:generation_tokens_total"], true
+}
 
 // PushDispatcher discovers vLLM pods via the Kubernetes API and
 // dispatches requests to their sidecars. Supports round-robin,
@@ -29,6 +80,11 @@ type PushDispatcher struct {
 	rrIdx           int
 	lastDiscovery   time.Time
 	logicalInflight map[string]int
+
+	// TTL-cached vLLM /metrics scrape for metric-based push strategies.
+	metricCache    map[string]promSample
+	metricCacheTS  time.Time
+	metricCacheKey string
 
 	client *http.Client
 }
@@ -110,9 +166,139 @@ func (pd *PushDispatcher) pickEndpoint() string {
 			return pd.pickLeastQLocal()
 		}
 		return pd.pickLeastQHealth()
+	case "push-throughput":
+		return pd.pickThroughput()
 	default:
 		return pd.pickRR()
 	}
+}
+
+// epScore pairs an endpoint with a numeric score and whether the probe
+// produced a usable value.
+type epScore struct {
+	ep    string
+	score float64
+	ok    bool
+}
+
+// pickMinScore returns the endpoint with the smallest score, skipping entries
+// whose probe failed. Returns "" when none are usable. Mirrors _pick_min_score.
+func pickMinScore(scores []epScore) string {
+	best := ""
+	var bestS float64
+	for _, s := range scores {
+		if !s.ok {
+			continue
+		}
+		if best == "" || s.score < bestS {
+			bestS = s.score
+			best = s.ep
+		}
+	}
+	return best
+}
+
+// scrapeMetricSums scrapes vLLM /metrics for every pod (deriving the metrics
+// URL from the sidecar URL by swapping to VLLM_METRICS_PORT, default 8200) and
+// sums the requested metric bases per pod, cached for PUSH_METRIC_TTL_S
+// (default 1s). Mirrors _scrape_metric_sums.
+func (pd *PushDispatcher) scrapeMetricSums(bases []string) map[string]promSample {
+	now := time.Now()
+	ttlS := 1.0
+	if v := os.Getenv("PUSH_METRIC_TTL_S"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			ttlS = f
+		}
+	}
+	key := strings.Join(bases, ",")
+
+	pd.mu.Lock()
+	if pd.metricCache != nil && pd.metricCacheKey == key &&
+		now.Sub(pd.metricCacheTS) < time.Duration(ttlS*float64(time.Second)) {
+		cached := pd.metricCache
+		pd.mu.Unlock()
+		return cached
+	}
+	eps := append([]string{}, pd.endpoints...)
+	urls := make(map[string]string, len(pd.urls))
+	for k, v := range pd.urls {
+		urls[k] = v
+	}
+	pd.mu.Unlock()
+
+	port := os.Getenv("VLLM_METRICS_PORT")
+	if port == "" {
+		port = "8200"
+	}
+
+	out := make(map[string]promSample, len(eps))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, ep := range eps {
+		wg.Add(1)
+		go func(ep string) {
+			defer wg.Done()
+			empty := promSample{sums: map[string]float64{}, seen: map[string]bool{}}
+			url := urls[ep]
+			if url == "" {
+				mu.Lock()
+				out[ep] = empty
+				mu.Unlock()
+				return
+			}
+			base := url
+			if idx := strings.LastIndex(url, ":"); idx >= 0 {
+				base = url[:idx]
+			}
+			resp, err := pd.client.Get(base + ":" + port + "/metrics")
+			if err != nil {
+				mu.Lock()
+				out[ep] = empty
+				mu.Unlock()
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				io.Copy(io.Discard, resp.Body)
+				mu.Lock()
+				out[ep] = empty
+				mu.Unlock()
+				return
+			}
+			body, _ := io.ReadAll(resp.Body)
+			sums, seen := parsePromSums(string(body), bases)
+			mu.Lock()
+			out[ep] = promSample{sums: sums, seen: seen}
+			mu.Unlock()
+		}(ep)
+	}
+	wg.Wait()
+
+	pd.mu.Lock()
+	pd.metricCache = out
+	pd.metricCacheTS = now
+	pd.metricCacheKey = key
+	pd.mu.Unlock()
+	return out
+}
+
+// pickThroughput routes to the pod that has processed the fewest total tokens
+// (vllm:prompt_tokens_total + vllm:generation_tokens_total), favoring
+// underloaded pods. Falls back to round-robin when the counters are absent.
+func (pd *PushDispatcher) pickThroughput() string {
+	samples := pd.scrapeMetricSums([]string{
+		"vllm:prompt_tokens_total",
+		"vllm:generation_tokens_total",
+	})
+	scores := make([]epScore, 0, len(samples))
+	for ep, s := range samples {
+		v, ok := totalTokensFromSums(s.sums, s.seen)
+		scores = append(scores, epScore{ep: ep, score: v, ok: ok})
+	}
+	if best := pickMinScore(scores); best != "" {
+		return best
+	}
+	return pd.pickRR()
 }
 
 func (pd *PushDispatcher) pickRR() string {

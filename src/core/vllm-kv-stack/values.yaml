@@ -75,13 +75,16 @@ sidecar:
   streamingMode: false
 
 router:
-  # pull | push-rr | push-random | push-leastq | central-push | external-push
+  # pull | push-rr | push-random | push-leastq | push-throughput | central-push | external-push
   #
   # central-push can run WITHOUT the per-pod sidecar: set sidecar.enabled=false
   # and the router keeps pod discovery + the central queue (KV-affinity /
   # fairness / SLO all still apply) but delivers DIRECTLY to each pod's vLLM and
   # hosts the KV-events subscriber itself. See sidecar.enabled + the
   # vllmKvEvents* knobs below. The flag is a no-op for every other mode.
+  # push-throughput routes to the pod that has processed the fewest total tokens
+  # (vllm prompt+generation token counters scraped from each pod's vLLM /metrics;
+  # VLLM_METRICS_PORT default 8200, cached PUSH_METRIC_TTL_S default 1s).
   mode: pull
 
   # API key for /v1/chat/completions (empty = no auth)
