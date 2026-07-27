@@ -78,6 +78,18 @@ def _total_tokens_from_sums(sums: Dict[str, Optional[float]]) -> Optional[float]
     return (p or 0.0) + (g or 0.0)
 
 
+def _avg_latency_from_sums(sums: Dict[str, Optional[float]]) -> Optional[float]:
+    """Average e2e latency = sum/count. Idle pod (count 0) scores 0.0 (free)."""
+    s = sums.get("vllm:e2e_request_latency_seconds_sum")
+    c = sums.get("vllm:e2e_request_latency_seconds_count")
+    if s is None or c is None:
+        return None
+    if c <= 0:
+        return 0.0
+    return s / c
+
+
+
 def _pick_lower_load(a: str, sa: Optional[float], b: str, sb: Optional[float]) -> str:
     """Power-of-two-choices comparator: return the less-loaded of two endpoints.
 
@@ -544,6 +556,32 @@ class PushRouter:
         _log_req(f"LeastKV pick → {best} (kv_usage={scores.get(best)})", level="full")
         return best
 
+    async def _pick_endpoint_least_latency(self) -> Optional[str]:
+        """Route to the pod with the lowest average end-to-end request latency.
+
+        Score = vllm:e2e_request_latency_seconds_sum / _count scraped from each
+        pod's vLLM /metrics (a cumulative average). Idle pods score 0.0; falls
+        back to round-robin when no pod exposes the metric.
+        """
+        with self._lock:
+            eps = list(self._eps)
+            urls = dict(self._urls)
+        if not eps:
+            return None
+        bases = [
+            "vllm:e2e_request_latency_seconds_sum",
+            "vllm:e2e_request_latency_seconds_count",
+        ]
+        metrics = await self._scrape_metric_sums(eps, urls, bases)
+        scores = {ep: _avg_latency_from_sums(sums) for ep, sums in metrics.items()}
+        best = _pick_min_score(scores)
+        if best is None:
+            _log_req("LeastLatency: no metric, falling back to RR", level="full")
+            return self._pick_endpoint_rr()
+        _log_req(f"LeastLatency pick → {best} (avg_s={scores.get(best)})", level="full")
+        return best
+
+
     async def _pick_endpoint(self, req_id: Optional[str] = None) -> Optional[str]:
         if self.mode == "push-rr":
             return self._pick_endpoint_rr()
@@ -559,6 +597,8 @@ class PushRouter:
             return await self._pick_endpoint_kv_cost(req_id)
         if self.mode == "push-least-kv":
             return await self._pick_endpoint_least_kv()
+        if self.mode == "push-least-latency":
+            return await self._pick_endpoint_least_latency()
         return self._pick_endpoint_rr()
 
     # ---------------------------------------------------------

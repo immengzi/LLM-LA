@@ -133,3 +133,31 @@ func TestSelectByCostSoftmax(t *testing.T) {
 		t.Fatalf("softmax picked cheapest %d/400, want >360", b)
 	}
 }
+
+// TestAvgLatencyFromSums checks avg, idle, and missing cases.
+func TestAvgLatencyFromSums(t *testing.T) {
+	latencySample := `# HELP vllm:e2e_request_latency_seconds end to end latency
+# TYPE vllm:e2e_request_latency_seconds histogram
+vllm:e2e_request_latency_seconds_sum{model_name="m"} 12.0
+vllm:e2e_request_latency_seconds_count{model_name="m"} 4.0
+vllm:e2e_request_latency_seconds_sum{model_name="m2"} 8.0
+vllm:e2e_request_latency_seconds_count{model_name="m2"} 4.0
+`
+	sums, seen := parsePromSums(latencySample, []string{
+		"vllm:e2e_request_latency_seconds_sum",
+		"vllm:e2e_request_latency_seconds_count",
+	})
+	if v, ok := avgLatencyFromSums(sums, seen); !ok || v != 2.5 {
+		t.Fatalf("avg = %v ok=%v, want 2.5 true", v, ok)
+	}
+	// Idle pod (count 0) -> 0.0.
+	idle := map[string]float64{"vllm:e2e_request_latency_seconds_sum": 0, "vllm:e2e_request_latency_seconds_count": 0}
+	idleSeen := map[string]bool{"vllm:e2e_request_latency_seconds_sum": true, "vllm:e2e_request_latency_seconds_count": true}
+	if v, ok := avgLatencyFromSums(idle, idleSeen); !ok || v != 0 {
+		t.Fatalf("idle = %v ok=%v, want 0 true", v, ok)
+	}
+	// Missing metric -> ok=false.
+	if _, ok := avgLatencyFromSums(map[string]float64{}, map[string]bool{}); ok {
+		t.Fatal("missing metric should be ok=false")
+	}
+}
