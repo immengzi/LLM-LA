@@ -182,7 +182,7 @@ class RouterConfig:
     # --------------------------------------------------------------------
     # Router mode + sidecar port
     # --------------------------------------------------------------------
-    ROUTER_MODE: str = "pull"        # "pull", "push-rr", "push-random", "push-leastq", "push-throughput", "push-p2c", "push-kv-cost", "push-least-kv", "push-least-latency", "central-push", "external-push"
+    ROUTER_MODE: str = "pull"        # "pull", "push-rr", "push-random", "push-leastq", "push-throughput", "push-p2c", "push-kv-cost", "push-least-kv", "push-least-latency", "push-least-busy", "central-push", "external-push"
     SIDECAR_PORT: int = 9000         # sidecar FastAPI port
 
     # --------------------------------------------------------------------
@@ -744,7 +744,10 @@ def get_config() -> RouterConfig:
     if rm in ("least-latency", "push-latency", "push_least_latency"):
         rm = "push-least-latency"
 
-    if rm not in ("pull", "push-rr", "push-random", "push-leastq", "push-throughput", "push-p2c", "push-kv-cost", "push-least-kv", "push-least-latency", "central-push", "external-push"):
+    if rm in ("least-busy-time", "least-busy", "push-least-busy-time", "push_least_busy"):
+        rm = "push-least-busy"
+
+    if rm not in ("pull", "push-rr", "push-random", "push-leastq", "push-throughput", "push-p2c", "push-kv-cost", "push-least-kv", "push-least-latency", "push-least-busy", "central-push", "external-push"):
         rm = "pull"
     cfg.ROUTER_MODE = rm
 

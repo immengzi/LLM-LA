@@ -81,7 +81,7 @@ The router supports two main ways of distributing work to sidecars:
 
 This is the default and is easy to reason about: workers pull work when ready.
 
-### Push Modes (`"push-rr"`, `"push-random"`, `"push-leastq"`, `"push-throughput"`, `"push-p2c"`, `"push-kv-cost"`, `"push-least-kv"`, `"push-least-latency"`)
+### Push Modes (`"push-rr"`, `"push-random"`, `"push-leastq"`, `"push-throughput"`, `"push-p2c"`, `"push-kv-cost"`, `"push-least-kv"`, `"push-least-latency"`, `"push-least-busy"`)
 
 - Router uses Kubernetes discovery to find sidecars.
 - For each request, it picks an endpoint and calls the sidecar’s `/push`.
@@ -121,6 +121,11 @@ This is the default and is easy to reason about: workers pull work when ready.
     `_count` scraped from each pod's vLLM `/metrics`; `VLLM_METRICS_PORT` default
     8200, cached `PUSH_METRIC_TTL_S` default 1s). Idle pods score 0.0; falls back
     to round-robin if the metric is absent. Aliases: `least-latency`, `push-latency`.
+  - **least-busy-time** (`push-least-busy`) – route to the pod with the least
+    cumulative inference/busy time (`vllm:request_inference_time_seconds_sum`
+    scraped from each pod's vLLM `/metrics`; `VLLM_METRICS_PORT` default 8200,
+    cached `PUSH_METRIC_TTL_S` default 1s). Falls back to round-robin if the
+    metric is absent. Aliases: `least-busy-time`, `least-busy`.
 
 Results still come back via `/result`; from the client’s viewpoint `/enqueue`
 is the same.
@@ -421,7 +426,7 @@ not the count cap, was the binding constraint); both stay `0` while disabled.
 Most behavior is controlled via environment variables loaded into
 `RouterConfig`, for example:
 
-- `ROUTER_MODE` – `pull`, `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `central-push`,
+- `ROUTER_MODE` – `pull`, `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`, `central-push`,
   `external-push`.
 - `ROUTER_KV_OVERLAP_CREDIT` / `ROUTER_PREFILL_LOAD_SCALE` / `ROUTER_TEMPERATURE` – `push-kv-cost` tunables (defaults `1.0` / `1.0` / `0.0`).
 - `ROUTER_CENTRAL_PUSH_CAP` (default 8) – per-pod concurrency ceiling in
