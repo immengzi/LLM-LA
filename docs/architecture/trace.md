@@ -76,7 +76,7 @@ Time when the router receives `/result` from the sidecar.
 Time just before the router writes the final HTTP response back to the client.
 
 Router may also add:
-* `router_mode` (e.g. "pull", "push-rr", "push-random", "push-leastq") — the trace emits the normalized mode name `push-leastq`
+* `router_mode` (e.g. `"pull"`, `"push-rr"`, `"push-random"`, `"push-leastq"`, `"push-throughput"`, `"push-p2c"`, `"push-kv-cost"`, `"push-least-kv"`, `"push-least-latency"`, `"push-least-busy"`, `"central-push"`, `"external-push"`) — the trace emits the normalized mode name (aliases like `push-least-queue` → `push-leastq`)
 * `router_queue_len_at_arrive`
 * `router_queue_len_at_dispatch`
 
@@ -187,7 +187,7 @@ The same trace schema is used for all router modes:
 * `t_enq_router_queue` and `t_arrive_sidecar_pull` are present.
 * `t_arrive_sidecar_push` is typically absent.
 
-**ROUTER_MODE=push-rr, push-random, push-leastq**
+**ROUTER_MODE=push-\*** (`push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`)
 * `t_enq_router_queue` may be absent.
 * `t_arrive_sidecar_push` is present.
 * `t_arrive_sidecar_pull` is absent.

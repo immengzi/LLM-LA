@@ -19,7 +19,7 @@ The same routing behaviour is expressed under three names depending on the layer
 
 | Client `helm:` key | Chart value (`router.*`) | Router env var | Values |
 |--------------------|--------------------------|----------------|--------|
-| `router_mode` (or sweep method) | `router.mode` | `ROUTER_MODE` | `pull`, `push-rr`, `push-random`, `push-leastq`, `central-push`, `external-push` |
+| `router_mode` (or sweep method) | `router.mode` | `ROUTER_MODE` | `pull`, `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`, `central-push`, `external-push` |
 | `values: { sidecar.enabled: false }` | `sidecar.enabled` | `ROUTER_SIDECAR_ENABLED` | bool. With `router.mode=central-push` → sidecar-less direct-to-vLLM delivery ([details](../architecture/router.md#sidecar-less-central-push-router_sidecar_enabledfalse)); see the `benchmark-bz-central-push-nosidecar-*` configs |
 | `router_kv_aware` | `router.kvAware` | `KV_AWARE` | bool |
 | `router_len_aware` | `router.lenAware` | `LEN_AWARE` | bool |
@@ -56,13 +56,20 @@ router-tp8-glm:
   - pull
   - push-rr
   - push-random
+  - push-leastq
+  - push-throughput
+  - push-p2c
+  - push-kv-cost
+  - push-least-kv
+  - push-least-latency
+  - push-least-busy
 ```
 
 ## Method vocabulary by backend
 
 | Backend / mode | Valid methods | Where the method goes |
 |----------------|---------------|-----------------------|
-| `router` (and `litellm`/`boom` with `helm.boom_route_via: router`) | `pull`, `push-rr`, `push-random`, `push-leastq` | `router.mode` (Helm). The sweep passes the method verbatim; the router service accepts the `push-least-queue` alias and normalizes it to `push-leastq`. |
+| `router` (and `litellm`/`boom` with `helm.boom_route_via: router`) | `pull`, `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`, `central-push`, `external-push` | `router.mode` (Helm). The sweep passes the method verbatim; the router normalizes common aliases (e.g. `push-least-queue` → `push-leastq`, `power-of-two` → `push-p2c`, `least-kv-cache` → `push-least-kv`). See [router.md](../architecture/router.md). |
 | `boom` with `helm.boom_route_via: direct` | `round_robin`, `key_affinity` | `boom.directRoutingStrategy` (Helm) |
 | `aibrix` | strategy names (e.g. `random`, `prefix-cache`, `least-request`) | `aibrix.routing_strategy` (client-side, not Helm) |
 | `litellm` / `boom` (router mode) | any label | label only in `sweep_meta.json`; routing happens in the router behind the gateway |

@@ -365,8 +365,18 @@ environment variables on the router deployment (e.g. in Kubernetes YAML).
   - `push-rr`
   - `push-random`
   - `push-leastq`
+  - `push-throughput`
+  - `push-p2c` (aliases: `power-of-two`, `push-power-of-two`, `push-pow2`)
+  - `push-kv-cost` (aliases: `kv-cost`, `push-cost`)
+  - `push-least-kv` (aliases: `least-kv-cache`, `least-gpu-cache`, `push-least-gpu`)
+  - `push-least-latency` (aliases: `least-latency`, `push-latency`)
+  - `push-least-busy` (aliases: `least-busy-time`, `least-busy`)
   - `central-push`
   - `external-push`
+
+  See [router.md](../architecture/router.md) for strategy descriptions. `push-kv-cost` also uses
+  `ROUTER_KV_OVERLAP_CREDIT`, `ROUTER_PREFILL_LOAD_SCALE`, and `ROUTER_TEMPERATURE`
+  (Helm: `router.kvCost.*`).
 
 - `ROUTER_SIDECAR_ENABLED: bool` (default `true`)
   When `false` **and** `ROUTER_MODE=central-push`, run sidecar-less central-push:
