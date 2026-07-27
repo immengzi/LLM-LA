@@ -326,6 +326,8 @@ func (c *Config) normalize() {
 		rm = "push-p2c"
 	case "least-kv-cache", "least-gpu-cache", "push-least-gpu", "push-least-kv-cache", "push-least-gpu-cache":
 		rm = "push-least-kv"
+	case "least-latency", "push-latency", "push_least_latency":
+		rm = "push-least-latency"
 	}
 	switch rm {
 	case "central_push", "centralpush":
@@ -339,7 +341,7 @@ func (c *Config) normalize() {
 	case "kv-cost", "push-cost", "push_kv_cost":
 		rm = "push-kv-cost"
 	}
-	allowed := map[string]bool{"pull": true, "push-rr": true, "push-random": true, "push-leastq": true, "push-throughput": true, "push-p2c": true, "push-kv-cost": true, "push-least-kv": true, "central-push": true, "external-push": true}
+	allowed := map[string]bool{"pull": true, "push-rr": true, "push-random": true, "push-leastq": true, "push-throughput": true, "push-p2c": true, "push-kv-cost": true, "push-least-kv": true, "push-least-latency": true, "central-push": true, "external-push": true}
 	if !allowed[rm] {
 		rm = "pull"
 	}
