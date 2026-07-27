@@ -31,6 +31,12 @@
 
 {{- $as := .Values.autoscaling }}
 {{- range $idx, $m := $models }}
+{{/* P/D-disaggregated models are served by 41-vllm-pd-disagg.yaml (prefill +
+     decode Deployments), not a single vllm-<model> Deployment/LWS, so the
+     standard per-model ScaledObject target does not exist for them. */}}
+{{- if ($m.prefillDecode | default dict).enabled }}
+{{- continue }}
+{{- end }}
 {{- if eq (include "vllmkv.modelAutoscaled" (dict "root" $ "model" $m) | trim) "true" }}
 {{- $isDP := (default dict $m.dataParallel).enabled | default false }}
 {{- $sig := include "vllmkv.modelSignal" (dict "root" $ "model" $m) }}

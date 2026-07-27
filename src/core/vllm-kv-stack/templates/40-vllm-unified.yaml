@@ -63,6 +63,11 @@
 {{/* ---- Render resources per model ---- */}}
 {{- range $idx, $m := $models }}
 
+{{/* Prefill/decode-disaggregated models are served by 41-vllm-pd-disagg.yaml. */}}
+{{- if ($m.prefillDecode | default dict).enabled }}
+{{- continue }}
+{{- end }}
+
 {{/* Per-model variables */}}
 {{- $modelName := $m.name }}
 {{- $servedModelName := $m.servedModelName | default $modelName }}

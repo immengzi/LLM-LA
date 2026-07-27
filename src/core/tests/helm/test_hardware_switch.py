@@ -7,9 +7,10 @@ The chart selects the accelerator backend with a single value
 --set`` and assert the rendered manifests compile and contain the correct
 resources / runtime class / Ascend toolkit setup for each backend.
 
-Covers the standard Deployment path and the Data-Parallel LeaderWorkerSet path,
-because both must honour the same switch (a regression found and fixed while
-writing these tests left Ascend mounts on DP pods under ``hardware=nvidia``).
+Covers the standard Deployment path, the Data-Parallel LeaderWorkerSet path,
+and the prefill/decode (P/D) disaggregation path, because all three must honour
+the same switch (a regression found and fixed while writing these tests left
+Ascend mounts on DP pods under ``hardware=nvidia``).
 """
 from __future__ import annotations
 
@@ -305,3 +306,59 @@ def test_multi_model_list_honours_hardware_switch():
     ) == 2
     for marker in ASCEND_MARKERS:
         assert marker not in manifest
+
+
+# ---------------------------------------------------------------------------
+# Prefill/decode (P/D) disaggregation path — must honour the same switch
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("hardware,resource,want_runtime", [
+    ("ascend", "huawei.com/Ascend910", None),
+    ("nvidia", "nvidia.com/gpu", "nvidia"),
+])
+def test_pd_disaggregation_hardware_switch(hardware, resource, want_runtime):
+    """P/D prefill+decode pools must flip with ``hardware`` like template 40."""
+    models_json = (
+        '[{"name":"pdm","modelSubPath":"pdm","replicas":1,"tensorParallelSize":2,'
+        '"prefillDecode":{"enabled":true,'
+        '"prefill":{"replicas":1,"tensorParallelSize":2},'
+        '"decode":{"replicas":1,"tensorParallelSize":2}}}]'
+    )
+    manifest = _render(
+        "--set", f"hardware={hardware}",
+        "--set-json", f"models={models_json}",
+    )
+    docs = _docs(manifest)
+    pd_deploys = [
+        d for d in docs
+        if d.get("kind") == "Deployment"
+        and str(d.get("metadata", {}).get("name", "")) in {
+            "vllm-pdm-prefill", "vllm-pdm-decode",
+        }
+    ]
+    names = {d["metadata"]["name"] for d in pd_deploys}
+    assert names == {"vllm-pdm-prefill", "vllm-pdm-decode"}
+
+    if hardware == "nvidia":
+        for marker in ASCEND_MARKERS:
+            assert marker not in manifest, f"P/D Ascend leak under nvidia: {marker}"
+        assert "huawei.com/Ascend910" not in manifest
+    else:
+        assert "ascend-toolkit/set_env.sh" in manifest
+        assert "dcmi-volume" in manifest
+        assert "hisi-hdc-volume" in manifest
+        assert "nvidia.com/gpu" not in manifest
+
+    for d in pd_deploys:
+        pod = d["spec"]["template"]["spec"]
+        assert pod.get("runtimeClassName") == want_runtime
+        for c in _vllm_containers(pod):
+            assert _accelerator_count(c, resource) == 2
+            other = "nvidia.com/gpu" if resource.startswith("huawei") else "huawei.com/Ascend910"
+            assert _accelerator_count(c, other) is None
+            if hardware == "nvidia":
+                assert "hisi-hdc-volume" not in _mount_names(c)
+                assert "devmm-svm-volume" not in _mount_names(c)
+            else:
+                assert "hisi-hdc-volume" in _mount_names(c)
+                assert "devmm-svm-volume" in _mount_names(c)

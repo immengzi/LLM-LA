@@ -465,6 +465,13 @@ vllm:
 #                         # Label your nodes first:
 #                         #   kubectl label node n1 n2 roce-pair=pair-a
 #                         #   kubectl label node n3 n4 roce-pair=pair-b
+#   prefillDecode:      - optional vanilla prefill/decode (P/D) disaggregation.
+#     enabled: true       # serve this model via a prefill pool + decode pool +
+#                         # a proxy (see 41-vllm-pd-disagg.yaml and the global
+#                         # prefillDecode: block below for the full schema).
+#     prefill: { replicas: 1, tensorParallelSize: 1, batchSize: 32 }
+#     decode:  { replicas: 1, tensorParallelSize: 1, batchSize: 32 }
+#     proxy:   { nodePort: 30036 }
 #
 # Example — single model:
 # models:
@@ -526,6 +533,53 @@ dataParallel:
   hcclBuffSize: 200
   ompNumThreads: 16
   pairTopologyKey: ""   # node label for RoCE-pair pinning (K8s 1.29+)
+
+# -----------------------------------------------------------------------
+# Vanilla prefill/decode (P/D) disaggregation — DEFAULTS.
+#
+# Opt-in PER MODEL via models[].prefillDecode.enabled: true. When enabled for a
+# model, the chart SKIPS its standard Deployment and instead renders (in
+# 41-vllm-pd-disagg.yaml):
+#   - a PREFILL pool   (vllm-<model>-prefill)   — computes prompt KV
+#   - a DECODE  pool   (vllm-<model>-decode)    — generates output tokens
+#   - a lightweight PROXY (vllm-<model>, NodePort) — routes each request
+#     prefill(max_tokens=1) -> decode and streams the decode output back.
+#
+# KV moves between the pools over the SAME connector the chart already uses:
+# leave kvTransferConfig empty and the pools reuse the mooncake/lmcache
+# `kv_both` connector (recommended — the shared KV store makes decode pull the
+# prompt prefix by hash). For P2P connectors (NixlConnector, MooncakeConnector
+# point-to-point) set the raw --kv-transfer-config JSON per role instead.
+#
+# The values below are DEFAULTS merged under each model's prefillDecode block;
+# per-model settings (models[].prefillDecode.*) win. Off unless a model opts in.
+# See docs/deployment/prefill-decode-disaggregation.md.
+prefillDecode:
+  prefill:
+    replicas: 1
+    tensorParallelSize: null   # null -> model.tensorParallelSize (or global)
+    batchSize: null            # null -> model.batchSize (or global)
+  decode:
+    replicas: 1
+    tensorParallelSize: null
+    batchSize: null
+  proxy:
+    image: ""                  # "" -> images.vllm (guaranteed to ship aiohttp; CPU-only)
+    replicas: 1
+    port: 8200                 # proxy container listen port
+    nodePort: 30036            # +portOffset; the model's external endpoint
+    logLevel: info             # debug | info | warning | error
+    resources:
+      cpuRequest: "200m"
+      memoryRequest: "512Mi"
+      cpuLimit: "2000m"
+      memoryLimit: "2Gi"
+  # Raw --kv-transfer-config JSON per pool. Empty => reuse the mooncake/lmcache
+  # connector the standard deployment uses (kv_both). Only set these for P2P
+  # connectors that need explicit producer/consumer roles.
+  kvTransferConfig:
+    prefill: ""
+    decode: ""
 
 # -----------------------------------------------------------------------
 # NFS page cache warm — pre-reads model shards before vLLM pods start.

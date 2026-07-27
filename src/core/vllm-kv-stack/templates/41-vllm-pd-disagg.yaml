@@ -1,0 +1,672 @@
+{{/*
+  41-vllm-pd-disagg.yaml — Vanilla prefill/decode (P/D) disaggregation.
+
+  Opt-in PER MODEL via `models[].prefillDecode.enabled: true`. This is a
+  standalone topology that mirrors the LeaderWorkerSet (DP) branch in
+  40-vllm-unified.yaml: instead of one vLLM Deployment per model, a P/D model
+  is served by
+
+    - a PREFILL pool  (vllm-<model>-prefill, kv_role producer side)
+    - a DECODE  pool  (vllm-<model>-decode,  kv_role consumer side)
+    - a lightweight PROXY (vllm-<model>, NodePort) that routes each request
+      prefill(max_tokens=1) -> decode, and streams the decode output back.
+
+  KV state moves between the two pools over the SAME connector the chart
+  already uses (Mooncake / LMCache). The proxy handshake is connector-agnostic:
+  it forwards `kv_transfer_params` from the prefill response to decode when a
+  connector returns them (NIXL-style), and otherwise relies on the shared KV
+  store (Mooncake/LMCache) so decode pulls the prefix by hash.
+
+  P/D models are deliberately independent of the router/sidecar/Redis path —
+  the proxy IS the entry point. Router-integrated, KV-aware P/D orchestration is
+  a separate roadmap item. Models with prefillDecode.enabled are skipped by
+  40-vllm-unified.yaml, 60-keda-scaledobject.yaml, and 10-model-registry.yaml.
+*/}}
+
+{{- if .Values.deploy.vllm }}
+
+{{/* ---- Collect P/D-enabled models (only from an explicit models[] list) ---- */}}
+{{- $pdModels := list }}
+{{- range $m := (.Values.models | default list) }}
+  {{- if ($m.prefillDecode | default dict).enabled }}
+    {{- $pdModels = append $pdModels $m }}
+  {{- end }}
+{{- end }}
+
+{{- if $pdModels }}
+{{/* ---- Shared P/D proxy code (mounted read-only into every proxy pod) ---- */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-pd-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: pd-proxy
+    release: {{ .Release.Name }}
+data:
+  pd_proxy.py: |
+    # Vanilla prefill/decode disaggregation proxy.
+    #
+    # Two-phase HTTP flow per request:
+    #   1) send the request to a PREFILL instance with max_tokens=1 so it only
+    #      computes+publishes the prompt KV (no real decoding);
+    #   2) send the original request to a DECODE instance, which reuses that KV
+    #      (pulled over the configured KV connector) and streams the output.
+    #
+    # Connector-agnostic: if the prefill response carries `kv_transfer_params`
+    # (NIXL-style connectors), they are forwarded to decode; otherwise decode
+    # relies on the shared KV store (Mooncake/LMCache). If prefill fails, the
+    # proxy falls back to decode-only (correct, just not disaggregated).
+    #
+    # Only depends on aiohttp (ships with the vLLM image).
+    import asyncio, itertools, json, logging, os, sys, uuid
+    from aiohttp import web, ClientSession, ClientTimeout
+
+    LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL, logging.INFO),
+        format="%(asctime)s %(levelname)s [pd-proxy] %(message)s",
+    )
+    log = logging.getLogger("pd-proxy")
+
+    def _urls(env):
+        raw = os.environ.get(env, "") or ""
+        return [u.strip().rstrip("/") for u in raw.split(",") if u.strip()]
+
+    PREFILL = _urls("PREFILL_BASE")
+    DECODE = _urls("DECODE_BASE")
+    PORT = int(os.environ.get("PROXY_PORT", "8200"))
+    PD_PATHS = ("/v1/chat/completions", "/v1/completions")
+
+    _prefill_rr = itertools.cycle(PREFILL) if PREFILL else None
+    _decode_rr = itertools.cycle(DECODE) if DECODE else None
+    _rr_lock = asyncio.Lock()
+
+    async def _pick(rr):
+        async with _rr_lock:
+            return next(rr)
+
+    async def _get_session(app):
+        return app["session"]
+
+    async def health(request):
+        return web.Response(text="ok")
+
+    async def _relay(request, upstream):
+        """Stream an aiohttp upstream response back to the client verbatim."""
+        resp = web.StreamResponse(status=upstream.status)
+        resp.headers["Content-Type"] = upstream.headers.get(
+            "Content-Type", "application/json"
+        )
+        await resp.prepare(request)
+        async for chunk in upstream.content.iter_any():
+            await resp.write(chunk)
+        await resp.write_eof()
+        return resp
+
+    async def _passthrough(request, base):
+        """Forward a non-P/D request (e.g. GET /v1/models) to a decode pod."""
+        session = await _get_session(request.app)
+        url = f"{base}{request.rel_url}"
+        data = await request.read()
+        headers = {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() not in ("host", "content-length")
+        }
+        try:
+            upstream = await session.request(
+                request.method, url, data=data or None, headers=headers
+            )
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"error": f"upstream error: {e}"}, status=502)
+        return await _relay(request, upstream)
+
+    async def handle(request):
+        path = request.path
+        if request.method != "POST" or path not in PD_PATHS:
+            return await _passthrough(request, await _pick(_decode_rr))
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return await _passthrough(request, await _pick(_decode_rr))
+
+        req_id = request.headers.get("X-Request-Id") or f"pd-{uuid.uuid4().hex}"
+        prefill_base = await _pick(_prefill_rr)
+        decode_base = await _pick(_decode_rr)
+        session = await _get_session(request.app)
+
+        # --- Phase 1: prefill (max_tokens=1) ---
+        prefill_body = dict(body)
+        prefill_body["max_tokens"] = 1
+        if "max_completion_tokens" in prefill_body:
+            prefill_body["max_completion_tokens"] = 1
+        prefill_body["stream"] = False
+        prefill_body.pop("stream_options", None)
+        kv_params = None
+        try:
+            async with session.post(
+                f"{prefill_base}{path}",
+                json=prefill_body,
+                headers={"X-Request-Id": req_id},
+            ) as r:
+                text = await r.text()
+                if r.status // 100 == 2:
+                    try:
+                        kv_params = json.loads(text).get("kv_transfer_params")
+                    except Exception:  # noqa: BLE001
+                        kv_params = None
+                else:
+                    log.warning(
+                        "prefill non-2xx status=%s id=%s body=%.200s",
+                        r.status, req_id, text,
+                    )
+        except Exception as e:  # noqa: BLE001
+            log.warning("prefill error id=%s err=%s (decode-only fallback)", req_id, e)
+
+        # --- Phase 2: decode (original request), streamed back ---
+        decode_body = dict(body)
+        if kv_params is not None:
+            decode_body["kv_transfer_params"] = kv_params
+        try:
+            upstream = await session.post(
+                f"{decode_base}{path}",
+                json=decode_body,
+                headers={"X-Request-Id": req_id},
+            )
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"error": f"decode error: {e}"}, status=502)
+        return await _relay(request, upstream)
+
+    async def _on_startup(app):
+        app["session"] = ClientSession(timeout=ClientTimeout(total=None))
+
+    async def _on_cleanup(app):
+        await app["session"].close()
+
+    def main():
+        if not PREFILL or not DECODE:
+            log.error("PREFILL_BASE and DECODE_BASE must both be set")
+            sys.exit(1)
+        app = web.Application(client_max_size=1024 ** 3)
+        app.on_startup.append(_on_startup)
+        app.on_cleanup.append(_on_cleanup)
+        app.router.add_get("/health", health)
+        app.router.add_route("*", "/{tail:.*}", handle)
+        log.info("pd-proxy on :%d prefill=%s decode=%s", PORT, PREFILL, DECODE)
+        web.run_app(app, host="0.0.0.0", port=PORT, access_log=None)
+
+    if __name__ == "__main__":
+        main()
+{{- end }}
+
+{{/* ---- Per-model P/D resources ---- */}}
+{{- range $idx, $m := $pdModels }}
+{{- $modelName := $m.name }}
+{{- $servedModelName := $m.servedModelName | default $modelName }}
+{{- $modelSubPath := $m.modelSubPath | default $.Values.modelVolume.modelSubPath }}
+{{- if not $modelSubPath }}
+{{- fail (printf "modelSubPath must be set for P/D model '%s'" ($modelName | default "?")) }}
+{{- end }}
+{{- $mv := $m.vllm | default dict }}
+{{/* Merge global prefillDecode defaults under the per-model block (model wins). */}}
+{{- $pd := merge (deepCopy ($m.prefillDecode | default dict)) ($.Values.prefillDecode | default dict) }}
+{{- $prefill := $pd.prefill | default dict }}
+{{- $decode := $pd.decode | default dict }}
+{{- $proxy := $pd.proxy | default dict }}
+{{- $defBatch := $m.batchSize | default $.Values.batchSize | int }}
+{{- $defTp := $m.tensorParallelSize | default $.Values.tensorParallelSize | int }}
+
+{{/* Default KV-transfer-config: reuse the connector the standard deployment
+     uses, so P/D works out of the box on a Mooncake/LMCache-backed cluster. */}}
+{{- $defaultKv := "" }}
+{{- if $.Values.lmcache.enabled }}
+  {{- if eq $.Values.lmcache.mode "p2p" }}
+    {{- $defaultKv = `{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}` }}
+  {{- else }}
+    {{- $defaultKv = `{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}` }}
+  {{- end }}
+{{- else if $.Values.mooncake.enabled }}
+  {{- $defaultKv = printf `{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"master_server_address":"%s","lookup_rpc_port":"%s","backend":"mooncake"}}` $.Values.mooncake.masterServerAddress ($.Values.mooncake.lookupRpcPort | toString) }}
+{{- end }}
+{{- $kvOverride := $pd.kvTransferConfig | default dict }}
+{{- $prefillKv := $kvOverride.prefill | default $defaultKv }}
+{{- $decodeKv := $kvOverride.decode | default $defaultKv }}
+
+{{- $roles := list
+      (dict "role" "prefill" "kv" $prefillKv
+            "tp" ($prefill.tensorParallelSize | default $defTp | int)
+            "batch" ($prefill.batchSize | default $defBatch | int)
+            "replicas" ($prefill.replicas | default 1 | int))
+      (dict "role" "decode" "kv" $decodeKv
+            "tp" ($decode.tensorParallelSize | default $defTp | int)
+            "batch" ($decode.batchSize | default $defBatch | int)
+            "replicas" ($decode.replicas | default 1 | int)) }}
+
+{{- range $r := $roles }}
+{{- $tp := $r.tp }}
+{{- $flagCtx := dict "mv" $mv "gv" $.Values.vllm "batch" $r.batch }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-{{ $modelName }}-{{ $r.role }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app: vllm-{{ $modelName }}-{{ $r.role }}
+    component: vllm
+    model: {{ $modelName }}
+    pd-role: {{ $r.role }}
+spec:
+  replicas: {{ $r.replicas }}
+  selector:
+    matchLabels:
+      app: vllm-{{ $modelName }}-{{ $r.role }}
+  template:
+    metadata:
+      labels:
+        app: vllm-{{ $modelName }}-{{ $r.role }}
+        component: vllm
+        model: {{ $modelName }}
+        pd-role: {{ $r.role }}
+    spec:
+      restartPolicy: Always
+      shareProcessNamespace: true
+      {{- if include "vllmkv.isNvidia" $ }}
+      runtimeClassName: {{ $.Values.vllm.runtimeClassName | default "nvidia" }}
+      {{- end }}
+      {{- if and (or $.Values.mooncake.enabled $.Values.lmcache.enabled) $.Values.vllm.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
+      {{- $ns := $.Values.vllm.nodeSelector | default (dict) }}
+      {{- if $ns }}
+      nodeSelector:
+        {{- toYaml $ns | nindent 8 }}
+      {{- end }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: avoid
+                    operator: NotIn
+                    values:
+                      - {{ $.Values.vllm.avoidLabelValue | default "vllm" }}
+        {{- if gt (int $tp) 1 }}
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: model
+                    operator: Exists
+              topologyKey: kubernetes.io/hostname
+        {{- end }}
+      containers:
+        - name: vllm
+          {{- if $m.image }}
+          image: {{ $m.image }}
+          {{- else }}
+          image: {{ include "vllmkv.image" (list $ $.Values.images.vllm) }}
+          {{- end }}
+          imagePullPolicy: IfNotPresent
+          {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
+          securityContext:
+            privileged: true
+          {{- end }}
+          command:
+            - /bin/bash
+            - -c
+          args:
+            - |
+              set -eo pipefail
+
+              {{- if not (include "vllmkv.isNvidia" $) }}
+              export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64
+              {{- end }}
+
+              {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
+{{ include "vllmkv.nicDetectScript" $ | trim | indent 14 }}
+              echo "[vllm-{{ $r.role }}] local_ip=${local_ip} nic=${nic_name}"
+              export HCCL_IF_IP=${local_ip}
+              export GLOO_SOCKET_IFNAME=${nic_name}
+              export TP_SOCKET_IFNAME=${nic_name}
+              export HCCL_SOCKET_IFNAME=${nic_name}
+              export HCCL_BUFFSIZE=200
+              {{- if not (include "vllmkv.isNvidia" $) }}
+              export ASCEND_BUFFER_POOL={{ $.Values.vllm.ascendBufferPool | default "4:8" }}
+              {{- end }}
+              {{- if not $.Values.lmcache.enabled }}
+              export MOONCAKE_CONFIG_PATH="/etc/mooncake/mooncake.json"
+              {{- end }}
+              {{- end }}
+              {{- if $.Values.lmcache.enabled }}
+              sed -e "s/__LOCAL_HOSTNAME__/${NODE_IP}/" -e "s/__P2P_HOST__/${NODE_IP}/" -e "s/__LMCACHE_INSTANCE_ID__/${POD_NAME}/" /etc/lmcache/lmcache_config.yaml > /tmp/lmcache_config.yaml
+              export LMCACHE_CONFIG_FILE="/tmp/lmcache_config.yaml"
+              export PROMETHEUS_MULTIPROC_DIR=/tmp/lmcache_prometheus
+              rm -rf "${PROMETHEUS_MULTIPROC_DIR}" && mkdir -p "${PROMETHEUS_MULTIPROC_DIR}"
+              {{- end }}
+
+              export PYTHONPATH="/etc/fingerprint-mw:${PYTHONPATH:-}"
+
+              python -m vllm.entrypoints.openai.api_server \
+                --model /model \
+                --tokenizer /model \
+                --port 8200 \
+                --served-model-name {{ $servedModelName }} \
+                --tensor-parallel-size {{ $tp }} \
+                --middleware _fp_mw.HostnameFingerprint \
+{{ include "vllmkv.vllmRuntimeFlags" $flagCtx | trim | indent 16 }}
+                --host 0.0.0.0 \
+                {{- if $r.kv }}
+                --kv-transfer-config '{{ $r.kv }}' \
+                {{- end }}
+                &
+              VLLM_PID=$!
+              echo "[vllm-{{ $r.role }}] vLLM PID=$VLLM_PID model={{ $modelName }}"
+
+{{ include "vllmkv.threadExporter" $ | trim | indent 14 }}
+
+              wait "$VLLM_PID"
+          env:
+            {{- include "vllmkv.vllmBaseEnv" (dict "tp" $tp "root" $) | nindent 12 }}
+            - name: PD_ROLE
+              value: {{ $r.role | quote }}
+            {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            {{- end }}
+            {{- if and $.Values.mooncake.enabled (not $.Values.lmcache.enabled) }}
+            - name: MOONCAKE_CONFIG_PATH
+              value: "/etc/mooncake/mooncake.json"
+            {{- end }}
+          ports:
+            - containerPort: 8200
+              name: http
+              protocol: TCP
+            {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
+            - containerPort: {{ $.Values.mooncake.lookupRpcPort }}
+              name: kv-rpc
+              protocol: TCP
+            {{- end }}
+            - containerPort: 9101
+              name: vllmthr
+              protocol: TCP
+          volumeMounts:
+            - name: fingerprint-mw
+              mountPath: /etc/fingerprint-mw
+              readOnly: true
+            - name: model
+              mountPath: /model
+              readOnly: true
+              subPath: {{ $modelSubPath }}
+            - name: dshm
+              mountPath: /dev/shm
+            {{- include "vllmkv.ascendDriverMounts" $ | nindent 12 }}
+            - name: cache-volume
+              mountPath: /root/.cache
+            {{- if not (include "vllmkv.isNvidia" $) }}
+            - name: hisi-hdc-volume
+              mountPath: /dev/hisi_hdc
+            - name: devmm-svm-volume
+              mountPath: /dev/devmm_svm
+            {{- end }}
+            {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
+            {{- if not $.Values.lmcache.enabled }}
+            - name: mooncake-config
+              mountPath: /etc/mooncake/mooncake.json
+              subPath: mooncake.json
+              readOnly: true
+            {{- end }}
+            {{- if $.Values.lmcache.enabled }}
+            - name: lmcache-config
+              mountPath: /etc/lmcache/lmcache_config.yaml
+              subPath: lmcache_config.yaml
+              readOnly: true
+            {{- end }}
+            - name: hccn-conf
+              mountPath: /etc/hccn.conf
+              readOnly: true
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 720
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 12
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 720
+            timeoutSeconds: 5
+          resources:
+            requests:
+              {{ include "vllmkv.acceleratorResource" $ }}: {{ $tp }}
+              ephemeral-storage: "2Gi"
+              {{- with $.Values.vllm.engineResources.requests.cpu }}
+              cpu: {{ . | quote }}
+              {{- end }}
+              {{- with $.Values.vllm.engineResources.requests.memory }}
+              memory: {{ . | quote }}
+              {{- end }}
+            limits:
+              {{ include "vllmkv.acceleratorResource" $ }}: {{ $tp }}
+              ephemeral-storage: "4Gi"
+              {{- with $.Values.vllm.engineResources.limits.cpu }}
+              cpu: {{ . | quote }}
+              {{- end }}
+              {{- with $.Values.vllm.engineResources.limits.memory }}
+              memory: {{ . | quote }}
+              {{- end }}
+      volumes:
+        - name: fingerprint-mw
+          configMap:
+            name: {{ $.Release.Name }}-fingerprint-mw
+        - name: model
+          {{- if $.Values.modelVolume.hostPath }}
+          hostPath:
+            path: {{ $.Values.modelVolume.hostPath }}
+            type: Directory
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ $.Values.modelVolume.pvcName | default "models-nfs-pvc" }}
+          {{- end }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ mul $tp 16 }}Gi
+        {{- include "vllmkv.ascendDriverVolumes" $ | nindent 8 }}
+        - name: cache-volume
+          hostPath:
+            path: /root/.cache
+            type: DirectoryOrCreate
+        {{- if not (include "vllmkv.isNvidia" $) }}
+        - name: hisi-hdc-volume
+          hostPath:
+            path: /dev/hisi_hdc
+            type: CharDevice
+        - name: devmm-svm-volume
+          hostPath:
+            path: /dev/devmm_svm
+            type: CharDevice
+        {{- end }}
+        {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
+        {{- if not $.Values.lmcache.enabled }}
+        - name: mooncake-config
+          configMap:
+            name: mooncake-config
+        {{- end }}
+        {{- if $.Values.lmcache.enabled }}
+        - name: lmcache-config
+          configMap:
+            name: lmcache-config
+        {{- end }}
+        - name: hccn-conf
+          hostPath:
+            path: /etc/hccn.conf
+            type: File
+        {{- end }}
+---
+{{/* ---- Internal Service for this P/D pool ---- */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-{{ $modelName }}-{{ $r.role }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    component: vllm
+    model: {{ $modelName }}
+    pd-role: {{ $r.role }}
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-{{ $modelName }}-{{ $r.role }}
+  ports:
+    - name: http
+      port: 8200
+      targetPort: 8200
+{{- end }}
+{{/* end range roles */}}
+
+---
+{{/* ---- P/D proxy (the model endpoint) ---- */}}
+{{- $proxyPort := $proxy.port | default 8200 | int }}
+{{- $proxyImg := "" }}
+{{- if $proxy.image }}
+{{- $proxyImg = include "vllmkv.image" (list $ $proxy.image) }}
+{{- else }}
+{{- $proxyImg = include "vllmkv.image" (list $ $.Values.images.vllm) }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-{{ $modelName }}-pd-proxy
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app: vllm-{{ $modelName }}-pd-proxy
+    component: pd-proxy
+    model: {{ $modelName }}
+spec:
+  replicas: {{ $proxy.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: vllm-{{ $modelName }}-pd-proxy
+  template:
+    metadata:
+      labels:
+        app: vllm-{{ $modelName }}-pd-proxy
+        component: pd-proxy
+        model: {{ $modelName }}
+    spec:
+      restartPolicy: Always
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: pd-proxy
+          image: {{ $proxyImg }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+          args:
+            - |
+              set -eo pipefail
+              exec python /etc/pd-proxy/pd_proxy.py
+          env:
+            - name: PREFILL_BASE
+              value: "http://vllm-{{ $modelName }}-prefill:8200"
+            - name: DECODE_BASE
+              value: "http://vllm-{{ $modelName }}-decode:8200"
+            - name: PROXY_PORT
+              value: {{ $proxyPort | quote }}
+            - name: MODEL_NAME
+              value: {{ $servedModelName | quote }}
+            - name: LOG_LEVEL
+              value: {{ $proxy.logLevel | default "info" | quote }}
+          ports:
+            - containerPort: {{ $proxyPort }}
+              name: http
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ $proxyPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ $proxyPort }}
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            failureThreshold: 5
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: {{ ($proxy.resources | default dict).cpuRequest | default "200m" | quote }}
+              memory: {{ ($proxy.resources | default dict).memoryRequest | default "512Mi" | quote }}
+            limits:
+              cpu: {{ ($proxy.resources | default dict).cpuLimit | default "2000m" | quote }}
+              memory: {{ ($proxy.resources | default dict).memoryLimit | default "2Gi" | quote }}
+          volumeMounts:
+            - name: pd-proxy
+              mountPath: /etc/pd-proxy
+              readOnly: true
+      volumes:
+        - name: pd-proxy
+          configMap:
+            name: {{ $.Release.Name }}-pd-proxy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-{{ $modelName }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    component: pd-proxy
+    model: {{ $modelName }}
+spec:
+  type: NodePort
+  selector:
+    app: vllm-{{ $modelName }}-pd-proxy
+  ports:
+    - name: http
+      port: 8200
+      targetPort: {{ $proxyPort }}
+      nodePort: {{ add ($.Values.portOffset | int) ($proxy.nodePort | default 30036 | int) }}
+{{- end }}
+{{/* end range pdModels */}}
+
+{{- end }}
+{{/* end if deploy.vllm */}}
