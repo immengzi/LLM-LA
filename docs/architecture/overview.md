@@ -38,7 +38,7 @@ LA-Boom places a custom **router** and per-pod **sidecars** around stock vLLM, p
 
 1. A client sends a request to the router via `/enqueue` (synchronous, blocks for the result) or `/submit` (asynchronous, returns a `req_id`; results arrive over ZMQ).
 2. If KV-aware routing is on, the router computes the request's block hashes (inline via `prefix_hash.py` by default) and records them in memory.
-3. In **pull** mode, sidecars poll `/pull` when they have capacity; the router scores and returns the best-matching queued requests. In **push** mode, the router dispatches proactively (`push-rr`, `push-random`, `push-leastq`).
+3. In **pull** mode, sidecars poll `/pull` when they have capacity; the router scores and returns the best-matching queued requests. In **push** mode, the router dispatches proactively (`push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`; also `central-push` / `external-push`).
 4. The sidecar forwards the request to its local vLLM and returns the result to the router (via `/result` or, for async, the router publishes over ZMQ).
 
 ## KV-aware routing in one paragraph
@@ -47,7 +47,7 @@ Each sidecar subscribes to vLLM's ZMQ KV-cache events and writes block ownership
 
 ## Routing modes and policies
 
-- **Dispatch modes**: `pull` (capacity-gated, default), `push-rr`, `push-random`, `push-leastq`.
+- **Dispatch modes**: `pull` (capacity-gated, default); push strategies `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`; plus `central-push` / `external-push`. Full descriptions: [router.md](router.md).
 - **Length-aware policies**: `short_first`, `long_first` (applied within KV tiers).
 - **SLO-aware scheduling**: an alternative slack-based sort that orders by deadline headroom; see [slo-aware-routing.md](slo-aware-routing.md).
 

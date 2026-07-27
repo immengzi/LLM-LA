@@ -50,7 +50,7 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `mode` | `pull` | `pull` \| `push-rr` \| `push-random` \| `push-leastq` \| `central-push` (admit like pull, dispatch centrally by capacity) \| `external-push` (static external vLLM, no k8s/sidecar); [details](../architecture/router.md). For sidecar-less central-push set `sidecar.enabled=false` |
+| `mode` | `pull` | `pull` \| `push-rr` \| `push-random` \| `push-leastq` \| `push-throughput` \| `push-p2c` \| `push-kv-cost` \| `push-least-kv` \| `push-least-latency` \| `push-least-busy` \| `central-push` (admit like pull, dispatch centrally by capacity) \| `external-push` (static external vLLM, no k8s/sidecar); [details](../architecture/router.md). For sidecar-less central-push set `sidecar.enabled=false` |
 | `apiKey` | `""` | Auth for `/v1/chat/completions` (empty = no auth) |
 | `strategy` | `""` | Unified selector: `none` \| `prefix` \| `affinity` \| `both`. When set, overrides `kvAware`/`affinityEnabled` ([details](../architecture/key-affinity.md)) |
 | `hashSource` | `inline` | KV-block hash source: `inline` (in-process/in-container `prefix_hash.py`) \| `external` (legacy `vllm-cpu-hash` pod, auto-deployed in this mode) ([details](../architecture/prefix-hash.md)) |
@@ -74,6 +74,9 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 | `affinityReleaseOnStuck` | `false` | Let a stuck pod's affinity pins release to LB via the existing unavailable-target path |
 | `centralPushCap` | `8` | Central-push only: per-pod concurrency ceiling; router dispatches `cap − in-flight` items per pod. Track sidecar `batchSize + prefetch` |
 | `centralPushIntervalS` | `0.05` | Central-push only: periodic dispatch tick (also dispatched on every enqueue) |
+| `kvCost.overlapCredit` | `1.0` | `push-kv-cost` only: credit for cached-prefix blocks in the cost function (`ROUTER_KV_OVERLAP_CREDIT`) |
+| `kvCost.prefillLoadScale` | `1.0` | `push-kv-cost` only: weight on residual prefill work (`ROUTER_PREFILL_LOAD_SCALE`) |
+| `kvCost.temperature` | `0.0` | `push-kv-cost` only: `0` = deterministic argmin; `>0` = softmax sample over costs (`ROUTER_TEMPERATURE`) |
 | `vllmKvEventsPort` | `5557` | Sidecar-less central-push only (`sidecar.enabled=false`, prefix/`both`): vLLM KV-events ZMQ port the router subscribes to per pod (`tcp://{pod_ip}:{port}`); must match the engine's `--kv-events-config` |
 | `vllmKvEventsTopic` | `"kv@"` | Sidecar-less central-push only: ZMQ topic prefix the router subscribes to (vLLM publishes `kv@{POD_NAME}@{model}`; `kv@` matches all) |
 | `outputLenPredictor` | `simple` | Output-length predictor |
@@ -359,7 +362,7 @@ NodePorts marked with `+offset` add `portOffset`; LiteLLM/BooM NodePorts are fix
 
 | Sweep method | Helm value |
 |--------------|------------|
-| `pull` / `push-rr` / `push-random` / `push-leastq` / `central-push` / `external-push` | `router.mode` |
+| `pull` / `push-rr` / `push-random` / `push-leastq` / `push-throughput` / `push-p2c` / `push-kv-cost` / `push-least-kv` / `push-least-latency` / `push-least-busy` / `central-push` / `external-push` | `router.mode` |
 | sidecar-less `central-push` | `router.mode=central-push` + `sidecar.enabled=false` |
 | `round_robin` / `key_affinity` (BooM direct) | `boom.directRoutingStrategy` |
 | AIBrix strategies | `aibrix.routing_strategy` (client-side, not Helm) |

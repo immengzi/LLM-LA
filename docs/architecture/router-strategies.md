@@ -1,11 +1,17 @@
 # Router Strategies
 
 How the router decides **which pod serves which request**. This page covers the
-four strategies at a high level with figures; the deep-dive pages cover the
-internals (hashing, KV ownership, affinity mechanics).
+four **placement** strategies at a high level with figures; the deep-dive pages
+cover the internals (hashing, KV ownership, affinity mechanics).
 
 The strategy is selected with a single knob, `router_strategy`
 (`none | prefix | affinity | both`). See [Configuration](#configuration).
+
+**Placement vs dispatch:** `router_strategy` (this page) is independent of
+`router.mode` / `ROUTER_MODE`. Dispatch modes — `pull`, `push-rr`, `push-random`,
+`push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`,
+`push-least-latency`, `push-least-busy`, `central-push`, `external-push` — are
+documented in [router.md](router.md).
 
 ---
 

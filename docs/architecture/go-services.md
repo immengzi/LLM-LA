@@ -151,7 +151,7 @@ helm upgrade --install vllm ./src/core/vllm-kv-stack \
 | Area | Notes |
 |------|-------|
 | HTTP endpoints | `/enqueue`, `/submit`, `/pull`, `/result`, `/result_chunk`, `/v1/chat/completions`, `/health*`, `/metrics`, `/latency_log`, `/debug/slo`, `/debug/slo/{req_id}`; `/result_submit` only when `RESULT_TRANSPORT_MODE=submit_ack` |
-| Routing modes | `pull`, `push-rr`, `push-random`, `push-leastq` (both `health` and `local` modes), `central-push` |
+| Routing modes | `pull`; push: `push-rr`, `push-random`, `push-leastq` (`health`/`local`), `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`; plus `central-push` / `external-push` ([router.md](router.md)) |
 | KV-aware routing | Owner source `lookup` (default: targeted per-request Redis `HGETALL`, `KVLookupMaxBlocks` cap) or `watcher` (legacy background scan) + longest-prefix match; request hashes from the in-container `prefix_hash.py` (inline) or the legacy `vllm-cpu-hash` service (external) |
 | Key-affinity | `soft` / `hard` modes, hard-timeout hold + release, and optional **persistent (Redis-backed) affinity** (`AFFINITY_PERSIST_ENABLED`): write-through claims, startup warm, admission prefetch, per-pod readiness (`AFFINITY_ENDPOINT_STALE_S`) + cache bound (`AFFINITY_CACHE_MAX`) |
 | Fairness & soft KV divert | Load-aware fair-pull throttle (`ROUTER_FAIR_*`), stuck-pod release (`ROUTER_STUCK_PULL_SECONDS`, `ROUTER_AFFINITY_RELEASE_ON_STUCK`), and **soft KV divert** (`ROUTER_KV_SOFT_DIVERT`): trims cold work off GPU-KV-saturated pods (hysteresis + healthy-peer gate) using sidecar `kv_usage` from `/pull` and central-push `/health` polls |

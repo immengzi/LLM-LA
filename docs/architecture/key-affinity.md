@@ -142,7 +142,10 @@ flowchart TD
   central queue depth, so the queue-based autoscaler still sees the backlog and
   can scale out. Affinity does not suppress the autoscaling signal.
 - **Push modes:** Affinity targets pull mode (`ROUTER_MODE=pull`). In push modes
-  the key is still stamped into `meta` but the central-queue sort is not used.
+  (`push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`,
+  `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`; see
+  [router.md](router.md)) the key is still stamped into `meta` but the
+  central-queue sort is not used.
 - **Central-push (incl. sidecar-less):** central-push admits through the SAME
   central queue and calls the SAME `pull_for_endpoint` scheduler, so affinity
   (soft and hard) behaves identically to pull. This holds whether or not the

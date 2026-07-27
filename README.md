@@ -80,7 +80,7 @@ flowchart TB
 
 ## ⚡ Key capabilities
 
-- **Routing** — pull (capacity-gated, default) and push (`push-rr`, `push-random`, `push-leastq`); KV-aware prefix-tier ordering; length-aware batching (`short_first`, `long_first`); SLO-aware slack scheduling.
+- **Routing** — pull (capacity-gated, default) and push (`push-rr`, `push-random`, `push-leastq`, `push-throughput`, `push-p2c`, `push-kv-cost`, `push-least-kv`, `push-least-latency`, `push-least-busy`, plus `central-push` / `external-push`); KV-aware prefix-tier ordering; length-aware batching (`short_first`, `long_first`); SLO-aware slack scheduling. See [router.md](docs/architecture/router.md).
 - **Serving** — many models from one cluster; multi-node data parallel via [LeaderWorkerSet](docs/deployment/data-parallel-lws.md) with expert parallel for MoE models (e.g. GLM-5); cross-node KV transfer via [Mooncake / LMCache](docs/deployment/mooncake/helm-integration.md).
 - **Autoscaling** — per-model [KEDA autoscaling](docs/operations/autoscaling.md) across every topology (dense, multi-model, data-parallel LWS) on router-queue or vLLM KV-cache signals; off by default, fully backward compatible.
 - **Benchmarking** — a bundled client harness with an open-loop load generator and automated Helm sweeps that capture full artifacts; see [docs/benchmarking/harness.md](docs/benchmarking/harness.md).
