@@ -69,11 +69,12 @@ const ORDER = {
 
   "deployment/multi-model.md": { order: 1 },
   "deployment/data-parallel-lws.md": { order: 2 },
-  "deployment/lmcache-p2p-build.md": { order: 3 },
-  "deployment/docker-reference/glm5-dp-docker.md": { order: 4 },
-  "deployment/docker-reference/mooncake-pd-test.md": { order: 5 },
-  "deployment/mooncake/helm-integration.md": { order: 6 },
-  "deployment/mooncake/glm5-production.md": { order: 7 },
+  "deployment/prefill-decode-disaggregation.md": { order: 3 },
+  "deployment/lmcache-p2p-build.md": { order: 4 },
+  "deployment/docker-reference/glm5-dp-docker.md": { order: 5 },
+  "deployment/docker-reference/mooncake-pd-test.md": { order: 6 },
+  "deployment/mooncake/helm-integration.md": { order: 7 },
+  "deployment/mooncake/glm5-production.md": { order: 8 },
 
   "operations/cluster-setup.md": { order: 1 },
   "operations/cluster-prep-automation.md": { order: 2 },
