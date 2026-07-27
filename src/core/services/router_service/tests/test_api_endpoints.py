@@ -126,6 +126,44 @@ def test_enqueue_times_out_with_504(client, monkeypatch):
     assert r.status_code == 504
 
 
+def test_mode_helpers_sidecar_central_push(monkeypatch):
+    """Default central-push (sidecar on) delivers via the sidecar PushRouter."""
+    monkeypatch.setattr(api_mod._cfg, "ROUTER_MODE", "central-push")
+    monkeypatch.setattr(api_mod._cfg, "ROUTER_SIDECAR_ENABLED", True)
+    assert api_mod._is_central_push() is True
+    assert api_mod._is_central_push_direct() is False
+    assert api_mod._uses_push_delivery() is True
+    assert api_mod._uses_direct_delivery() is False
+    assert api_mod._uses_central_queue() is True
+
+
+def test_mode_helpers_sidecarless_central_push(monkeypatch):
+    """Sidecar-less central-push takes the direct-delivery path, not PushRouter."""
+    monkeypatch.setattr(api_mod._cfg, "ROUTER_MODE", "central-push")
+    monkeypatch.setattr(api_mod._cfg, "ROUTER_SIDECAR_ENABLED", False)
+    assert api_mod._is_central_push_direct() is True
+    assert api_mod._uses_push_delivery() is False
+    assert api_mod._uses_direct_delivery() is True
+    # Still admits through the central queue (same scheduling as pull/central-push).
+    assert api_mod._uses_central_queue() is True
+
+
+def test_mode_helpers_external_push_is_direct(monkeypatch):
+    monkeypatch.setattr(api_mod._cfg, "ROUTER_MODE", "external-push")
+    monkeypatch.setattr(api_mod._cfg, "ROUTER_SIDECAR_ENABLED", True)
+    assert api_mod._is_central_push_direct() is False
+    assert api_mod._uses_direct_delivery() is True
+    assert api_mod._uses_push_delivery() is False
+
+
+def test_mode_helpers_pull_unaffected_by_flag(monkeypatch):
+    monkeypatch.setattr(api_mod._cfg, "ROUTER_MODE", "pull")
+    monkeypatch.setattr(api_mod._cfg, "ROUTER_SIDECAR_ENABLED", False)
+    assert api_mod._is_central_push_direct() is False
+    assert api_mod._uses_direct_delivery() is False
+    assert api_mod._uses_push_delivery() is False
+
+
 def test_debug_slo_summary(client):
     r = client.get("/debug/slo")
     assert r.status_code == 200

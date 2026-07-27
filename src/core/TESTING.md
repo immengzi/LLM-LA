@@ -78,9 +78,14 @@ cd services/sidecar        && make test
 ## What is covered
 
 ### Python — unit tests (pure logic, no network)
-- **router**: `config`, `kv_aware`, `prefix_hash` (with a fake tokenizer so no
-  multi-GB model download), `predictors`, `latency_predictor`, `admission`,
-  `slo_state`, `slo_scoring`, `len_select`, `models`.
+- **router**: `config` (incl. `ROUTER_SIDECAR_ENABLED` parsing + the
+  central-push-only validation, and `VLLM_KV_EVENTS_PORT/TOPIC`), `kv_aware`,
+  `prefix_hash` (with a fake tokenizer so no multi-GB model download),
+  `predictors`, `latency_predictor`, `admission`, `slo_state`, `slo_scoring`,
+  `len_select`, `models`, `k8s_endpoints` (sidecar-less central-push
+  `K8sVLLMRegistry`: discovery→endpoints keyed by pod name, KV-subscriber gating
+  on prefix routing, pod churn add/remove/IP-change — discovery + subscriber
+  mocked).
 - **sidecar**: `config`, `local_queue`, tool-call merge/complete, ZMQ endpoint
   resolution + msgpack decode + Redis projection (via `fakeredis`).
 - **services**: `fingerprint_middleware` (JSON + SSE patching).
@@ -89,7 +94,13 @@ cd services/sidecar        && make test
 - **router**: `pull_for_endpoint` scheduling (FIFO, KV-aware, length-aware,
   fixed batch, fairness, affinity) and endpoints (`/health/router`, `/metrics`,
   `/health/backends`, `/pull`, `/result`, `/submit`, `/enqueue`, `/debug/slo`,
-  `/latency_log`).
+  `/latency_log`); routing-mode helpers (`_uses_push_delivery` /
+  `_uses_direct_delivery` / `_is_central_push_direct`) so sidecar-less
+  central-push takes the direct-delivery path while pull/push-* are unaffected.
+- **router direct-delivery** (`test_direct_delivery.py`): the sidecar-less /
+  external `ExternalPushDispatcher` loop against a real `RouterState` with a fake
+  registry + fake vLLM client — enqueue → dispatch → pull (in-flight++) → direct
+  deliver → ingest → release (in-flight--), and per-pod cap enforcement.
 - **sidecar**: `/metrics`, `/health`, `/push`.
 
 External dependencies are faked: Redis via `fakeredis`, the tokenizer via a
@@ -101,8 +112,11 @@ deterministic.
 - **sidecar**: local queue FIFO/inflight accounting, config load + normalization,
   vLLM payload building, tool-call merge/complete, `toBool`/`toInt` helpers.
 - **gateway**: `ROUTER_STRATEGY` → KV/affinity mapping, `ROUTER_MODE`
-  normalization + aliases, enum fallbacks, numeric clamps (plus the existing
-  parity/affinity tests).
+  normalization + aliases, enum fallbacks, numeric clamps, the
+  `ROUTER_SIDECAR_ENABLED` knob (default on; only honored for central-push, else
+  ignored with a warning) and the sidecar-less central-push predicates
+  (`IsCentralPushDirect` / `UsesDirectDelivery` / `UsesPushDelivery`), plus the
+  existing parity/affinity tests.
 
 Run in a container if you don't have Go 1.26:
 

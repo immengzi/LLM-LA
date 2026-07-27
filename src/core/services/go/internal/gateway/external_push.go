@@ -23,7 +23,7 @@ import (
 // Mirrors router/external_push.py ExternalPushDispatcher.
 type ExternalPushDispatcher struct {
 	queue    *CentralQueue
-	registry *ExternalRegistry
+	registry VLLMRegistry
 	client   *ExternalVLLMClient
 	ingest   func(map[string]interface{})
 	cap      int
@@ -38,7 +38,7 @@ type ExternalPushDispatcher struct {
 	wg      sync.WaitGroup // outstanding deliveries (drained on Stop)
 }
 
-func NewExternalPushDispatcher(queue *CentralQueue, registry *ExternalRegistry, client *ExternalVLLMClient, ingest func(map[string]interface{}), cap int, intervalS float64) *ExternalPushDispatcher {
+func NewExternalPushDispatcher(queue *CentralQueue, registry VLLMRegistry, client *ExternalVLLMClient, ingest func(map[string]interface{}), cap int, intervalS float64) *ExternalPushDispatcher {
 	if cap < 1 {
 		cap = 1
 	}
