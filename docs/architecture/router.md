@@ -81,14 +81,20 @@ The router supports two main ways of distributing work to sidecars:
 
 This is the default and is easy to reason about: workers pull work when ready.
 
-### Push Modes (`"push-rr"`, `"push-random"`, `"push-leastq"`)
+### Push Modes (`"push-rr"`, `"push-random"`, `"push-leastq"`, `"push-throughput"`)
 
 - Router uses Kubernetes discovery to find sidecars.
 - For each request, it picks an endpoint and calls the sidecar’s `/push`.
 - Different strategies:
-  - **round-robin** – cycle over endpoints,
-  - **random** – random endpoint,
-  - **least-queue** – query sidecar health and choose the least loaded one.
+  - **round-robin** (`push-rr`) – cycle over endpoints,
+  - **random** (`push-random`) – random endpoint,
+  - **least-queue** (`push-leastq`) – query sidecar health and choose the least loaded one,
+  - **throughput** (`push-throughput`) – route to the pod that has processed the
+    fewest total tokens (`vllm:prompt_tokens_total` + `vllm:generation_tokens_total`
+    scraped from each pod's vLLM `/metrics`; `VLLM_METRICS_PORT` default 8200,
+    cached `PUSH_METRIC_TTL_S` default 1s), favoring underloaded pods. Falls back
+    to round-robin if the counters are absent.
+    Aliases: `throughput`, `push-least-tokens`.
 
 Results still come back via `/result`; from the client’s viewpoint `/enqueue`
 is the same.
@@ -385,7 +391,7 @@ not the count cap, was the binding constraint); both stay `0` while disabled.
 Most behavior is controlled via environment variables loaded into
 `RouterConfig`, for example:
 
-- `ROUTER_MODE` – `pull`, `push-rr`, `push-random`, `push-leastq`, `central-push`,
+- `ROUTER_MODE` – `pull`, `push-rr`, `push-random`, `push-leastq`, `push-throughput`, `central-push`,
   `external-push`.
 - `ROUTER_CENTRAL_PUSH_CAP` (default 8) – per-pod concurrency ceiling in
   central-push mode; the router dispatches `CAP − in-flight` items per pod. Set
