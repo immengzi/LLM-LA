@@ -112,14 +112,12 @@ const ORDER = {
   "contributing/development.md": { order: 1, label: "Contributing" },
   "contributing/testing.md": { order: 2, label: "Testing" },
 
-  "internal/vision.md": { order: 1 },
-  "internal/open-sourcing-plan.md": { order: 2 },
-  "internal/open-sourcing-v01.md": { order: 3 },
-  "internal/boom-integration-notes.md": { order: 4 },
-  "internal/stability-test-findings.md": { order: 5 },
-  "internal/kv-cache-hit-rate-collapse.md": { order: 6 },
-  "internal/lmcache-p2p-host-staging.md": { order: 7 },
-  "internal/persistent-affinity-map.md": { order: 8 },
+  "internal/roadmap.md": { order: 1, label: "Roadmap" },
+  "internal/boom-integration-notes.md": { order: 2 },
+  "internal/stability-test-findings.md": { order: 3 },
+  "internal/kv-cache-hit-rate-collapse.md": { order: 4 },
+  "internal/lmcache-p2p-host-staging.md": { order: 5 },
+  "internal/persistent-affinity-map.md": { order: 6 },
 };
 
 function yamlString(value) {
