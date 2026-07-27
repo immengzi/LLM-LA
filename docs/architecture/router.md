@@ -195,21 +195,23 @@ never permanently consume a pod's capacity.
 Results still come back via `/result`; from the client’s viewpoint `/enqueue`
 is the same.
 
-#### Sidecar-less central-push (`ROUTER_SIDECAR_ENABLED=false`)
+#### Sidecar-less push / central-push (`ROUTER_SIDECAR_ENABLED=false`)
 
-Central-push can run **without the per-pod sidecar**. Set
-`ROUTER_SIDECAR_ENABLED=false` (only honored when `ROUTER_MODE=central-push`;
-ignored — with a warning — for every other mode). The router then keeps the
-**same** k8s pod discovery and the **same** central-queue scheduling
-(KV-affinity / fairness / SLO all still apply via the shared `pull_for_endpoint`
-path), but changes only the *delivery*:
+Any `push-*` mode and `central-push` can run **without the per-pod sidecar**.
+Set `ROUTER_SIDECAR_ENABLED=false` (honored when `ROUTER_MODE` is `push-*` or
+`central-push`; ignored — with a warning — for `pull` and `external-push`). The
+router then keeps the **same** k8s pod discovery (and for `central-push` the
+**same** central-queue scheduling — KV-affinity / fairness / SLO all still apply
+via the shared `pull_for_endpoint` path), but changes only the *delivery*:
 
 - **Direct delivery.** Instead of `POST /push` to a sidecar, the router calls
   each pod's vLLM OpenAI endpoint (`http://{pod_ip}:{VLLM_PORT}/v1/chat/completions`)
-  directly and ingests the response inline via the same `/result` code path. This
-  reuses the `external-push` dispatcher (`ExternalPushDispatcher` +
-  `ExternalVLLMClient`) over a k8s-backed registry (`K8sVLLMRegistry`), so
-  endpoint identity is still the **pod name** — affinity, in-flight bookkeeping,
+  directly and ingests the response inline via the same `/result` code path.
+  - `central-push` reuses the `external-push` dispatcher (`ExternalPushDispatcher` +
+    `ExternalVLLMClient`) over a k8s-backed registry (`K8sVLLMRegistry`).
+  - `push-*` keeps `PushRouter` / `PushDispatcher` for selection, but posts to
+    vLLM and ingests results in-process (queue-less, same as sidecar push).
+  Endpoint identity is still the **pod name** — affinity, in-flight bookkeeping,
   metrics and Redis KV owners are all keyed exactly as in sidecar mode.
 - **Router-hosted KV events.** With a sidecar, each pod's sidecar subscribes to
   vLLM's KV-cache-events ZMQ and writes block-owner data to Redis. Without a
@@ -219,12 +221,14 @@ path), but changes only the *delivery*:
   keeps working. This runs **only** when prefix routing is on (`KV_AWARE`); for
   `affinity`/`none` strategies no subscriber runs and vLLM need not publish
   events.
-- **Health / capacity.** The registry re-discovers pods (throttled by
-  `KV_DISCOVERY_INTERVAL_S`) and probes each pod's vLLM `/health`
+- **Health / capacity.** For `central-push`, the registry re-discovers pods
+  (throttled by `KV_DISCOVERY_INTERVAL_S`) and probes each pod's vLLM `/health`
   (`EXTERNAL_HEALTH_INTERVAL_S`) to gate dispatch. Capacity is still
-  `ROUTER_CENTRAL_PUSH_CAP − in-flight` per pod; in-flight is held from selection
-  until the direct call returns (success or error), so the per-pod cap is
-  respected without a sidecar's local queue.
+  `ROUTER_CENTRAL_PUSH_CAP − in-flight` per pod. For `push-*`, load-based
+  pickers that previously used sidecar `/health` (`logical` / `queue_len` /
+  `kv_usage`) fall back to local inflight accounting; metrics-based modes
+  (`push-throughput`, `push-least-latency`, `push-least-busy`) still scrape
+  vLLM `/metrics` and work unchanged.
 
 **Trade-offs vs. the sidecar.** The sidecar provides per-pod local admission /
 backpressure (its `/push` returns `503` when vLLM is not ready or its local queue
@@ -233,10 +237,10 @@ to the pod. Dropping it centralizes those concerns in the router: capacity is
 purely the router's `CAP − in-flight` estimate (no `503`-requeue safety valve),
 and the router process runs N KV subscribers instead of one-per-pod. The upside
 is one fewer container per pod, no sidecar hop on delivery, and a single control
-point. Prefer sidecar-less central-push for simpler/smaller deployments or when
+point. Prefer sidecar-less push-*/central-push for simpler/smaller deployments or when
 you cannot run a sidecar; keep the sidecar when you want per-pod backpressure and
 subscriber locality. **Fully backward compatible:** the default
-(`ROUTER_SIDECAR_ENABLED=true`) is byte-identical to today's sidecar central-push.
+(`ROUTER_SIDECAR_ENABLED=true`) is byte-identical to today's sidecar-backed modes.
 
 The Helm chart wires this from a single switch: `sidecar.enabled=false` drops the
 sidecar container **and** sets `ROUTER_SIDECAR_ENABLED=false`; when the strategy
@@ -435,12 +439,13 @@ Most behavior is controlled via environment variables loaded into
 - `ROUTER_CENTRAL_PUSH_INTERVAL_S` (default 0.05) – central-push periodic
   dispatch tick (dispatch is also triggered on every enqueue).
 - `ROUTER_SIDECAR_ENABLED` (default `true`) – when `false` **and**
-  `ROUTER_MODE=central-push`, run sidecar-less central-push: the router delivers
-  directly to each pod's vLLM and hosts the KV-events subscriber itself (see
-  "Sidecar-less central-push" above). No-op (with a warning) for other modes.
+  `ROUTER_MODE` is `push-*` or `central-push`, run sidecar-less direct-to-vLLM
+  delivery and host the KV-events subscriber in the router (see "Sidecar-less
+  push / central-push" above). Ignored (with a warning) for `pull` /
+  `external-push`.
 - `VLLM_KV_EVENTS_PORT` (default 5557) / `VLLM_KV_EVENTS_TOPIC` (default `kv@`) –
   the per-pod vLLM KV-cache-events ZMQ endpoint + topic prefix the router
-  subscribes to in sidecar-less central-push (must match the engine's
+  subscribes to in sidecar-less push-*/central-push (must match the engine's
   `--kv-events-config`). Only used when prefix routing is on.
 - `KV_AWARE` – enable/disable KV-aware routing.
 - `LEN_AWARE`, `LEN_POLICY` – enable length awareness and choose policy.

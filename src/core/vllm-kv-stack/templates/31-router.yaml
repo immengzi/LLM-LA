@@ -173,18 +173,17 @@ spec:
               value: {{ quote (toString (.Values.router.centralPushCap | default 8)) }}
             - name: ROUTER_CENTRAL_PUSH_INTERVAL_S
               value: {{ quote (toString (.Values.router.centralPushIntervalS | default 0.05)) }}
-            # ---- sidecar-optional central-push (direct-to-vLLM delivery) ----
-            # False only takes effect for mode=central-push: the router then
-            # discovers pods + admits via the central queue exactly like
-            # central-push, but delivers DIRECTLY to each pod's vLLM (no sidecar)
-            # and hosts the KV-events subscriber itself. Sourced from
+            # ---- sidecar-optional push-*/central-push (direct-to-vLLM) ----
+            # False takes effect for mode=push-* or central-push: the router
+            # then discovers pods and delivers DIRECTLY to each pod's vLLM (no
+            # sidecar) and hosts the KV-events subscriber itself. Sourced from
             # sidecar.enabled so one switch drops the sidecar container AND flips
-            # the router to direct delivery. Ignored for every other mode.
+            # the router to direct delivery. Ignored for pull / external-push.
             - name: ROUTER_SIDECAR_ENABLED
               value: {{ if eq (toString .Values.sidecar.enabled) "false" }}"false"{{ else }}"true"{{ end }}
             # vLLM KV-cache-events ZMQ publish port + topic prefix the router
-            # subscribes to per pod in sidecar-less central-push (must match the
-            # engine's --kv-events-config port 5557 / "kv@" topic prefix).
+            # subscribes to per pod in sidecar-less push-*/central-push (must
+            # match the engine's --kv-events-config port 5557 / "kv@" topic).
             - name: VLLM_KV_EVENTS_PORT
               value: {{ quote (toString (.Values.router.vllmKvEventsPort | default 5557)) }}
             - name: VLLM_KV_EVENTS_TOPIC

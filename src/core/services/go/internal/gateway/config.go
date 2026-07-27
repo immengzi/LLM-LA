@@ -93,11 +93,12 @@ type Config struct {
 	CentralPushCap       int
 	CentralPushIntervalS float64
 
-	// Sidecar-optional central-push. Default true = deliver via the per-pod
-	// sidecar /push (today's behavior). When false AND RouterMode=central-push,
-	// the router keeps k8s discovery + the central queue but delivers DIRECTLY
-	// to each pod's vLLM (no sidecar) and hosts the KV-events subscriber itself.
-	// No-op for every other mode. Mirrors router/config.py ROUTER_SIDECAR_ENABLED.
+	// Sidecar-optional push-*/central-push. Default true = deliver via the
+	// per-pod sidecar /push. When false AND RouterMode is push-* or
+	// central-push, the router keeps pod discovery (and for central-push the
+	// central queue) but delivers DIRECTLY to each pod's vLLM (no sidecar) and
+	// hosts the KV-events subscriber itself. Ignored for pull / external-push.
+	// Mirrors router/config.py ROUTER_SIDECAR_ENABLED.
 	SidecarEnabled    bool
 	VLLMKvEventsPort  int
 	VLLMKvEventsTopic string
@@ -407,12 +408,13 @@ func (c *Config) normalize() {
 		c.CentralPushIntervalS = 0.05
 	}
 
-	// ROUTER_SIDECAR_ENABLED only takes effect for central-push (the only mode
-	// with a sidecar-less direct-delivery path). For any other mode a false
-	// value is a misconfiguration: ignore it (keep sidecar semantics) and warn,
-	// so existing pull/push-*/external-push deployments stay byte-identical.
-	if !c.SidecarEnabled && c.RouterMode != "central-push" {
-		log.Printf("[config] WARNING: ROUTER_SIDECAR_ENABLED=false is only supported for ROUTER_MODE=central-push (got %q); ignoring (sidecar stays on).", c.RouterMode)
+	// ROUTER_SIDECAR_ENABLED takes effect for push-* and central-push (modes
+	// with a router-driven delivery path that can go direct-to-vLLM). For pull
+	// (sidecars must pull) and external-push (already direct) a false value is
+	// a misconfiguration: ignore it (keep sidecar semantics) and warn.
+	sidecarLessOK := strings.HasPrefix(c.RouterMode, "push-") || c.RouterMode == "central-push"
+	if !c.SidecarEnabled && !sidecarLessOK {
+		log.Printf("[config] WARNING: ROUTER_SIDECAR_ENABLED=false is only supported for push-* and central-push (got %q); ignoring (sidecar stays on).", c.RouterMode)
 		c.SidecarEnabled = true
 	}
 	if c.VLLMKvEventsPort <= 0 {
@@ -628,16 +630,25 @@ func (c *Config) IsCentralPushDirect() bool {
 	return c.RouterMode == "central-push" && !c.SidecarEnabled
 }
 
+// IsPushDirect reports sidecar-less queue-less push: RouterMode starts with
+// "push-" and SidecarEnabled=false. Selection still uses PushDispatcher, but
+// delivery goes DIRECTLY to each pod's vLLM OpenAI endpoint (no sidecar /push).
+func (c *Config) IsPushDirect() bool {
+	return strings.HasPrefix(c.RouterMode, "push-") && !c.SidecarEnabled
+}
+
 // UsesDirectDelivery reports whether the router delivers requests DIRECTLY to
-// vLLM (no sidecar): external-push and sidecar-less central-push. Both drive the
-// ExternalPushDispatcher; they differ only in the backing registry.
+// vLLM (no sidecar) via the central-queue ExternalPushDispatcher: external-push
+// and sidecar-less central-push. Queue-less push-* direct delivery is handled
+// by PushDispatcher itself (see IsPushDirect).
 func (c *Config) UsesDirectDelivery() bool {
 	return c.RouterMode == "external-push" || c.IsCentralPushDirect()
 }
 
-// UsesPushDelivery reports whether the router delivers to sidecars via POST
-// /push (needs PushRouter/discovery): push-* and sidecar-backed central-push.
-// External-push and sidecar-less central-push deliver directly instead.
+// UsesPushDelivery reports whether the PushDispatcher is needed for pod
+// discovery + delivery: all push-* modes (sidecar or direct) and
+// sidecar-backed central-push. External-push and sidecar-less central-push
+// use the ExternalPushDispatcher instead.
 func (c *Config) UsesPushDelivery() bool {
 	return strings.HasPrefix(c.RouterMode, "push-") || (c.RouterMode == "central-push" && c.SidecarEnabled)
 }

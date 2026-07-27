@@ -69,15 +69,16 @@ func totalTokensFromSums(sums map[string]float64, seen map[string]bool) (float64
 }
 
 // PushDispatcher discovers vLLM pods via the Kubernetes API and
-// dispatches requests to their sidecars. Supports round-robin,
-// random, and least-queue selection modes.
+// dispatches requests to their sidecars (or directly to vLLM when
+// SidecarEnabled=false for push-* modes). Supports round-robin,
+// random, least-queue, and the other push-* selection modes.
 type PushDispatcher struct {
 	cfg *Config
 	kv  *kvAware
 
 	mu              sync.Mutex
 	endpoints       []string          // pod names
-	urls            map[string]string // pod name -> sidecar base URL
+	urls            map[string]string // pod name -> sidecar or vLLM base URL
 	rrIdx           int
 	lastDiscovery   time.Time
 	logicalInflight map[string]int
@@ -88,23 +89,39 @@ type PushDispatcher struct {
 	metricCacheKey string
 
 	client *http.Client
+	// ingest is set for sidecar-less push-* so direct vLLM responses are
+	// fed through the same /result path as sidecar callbacks.
+	ingest func(map[string]interface{})
+}
+
+// SetIngest wires the result-ingest callback used by sidecar-less push-*.
+func (pd *PushDispatcher) SetIngest(fn func(map[string]interface{})) {
+	pd.ingest = fn
 }
 
 func NewPushDispatcher(cfg *Config, kv *kvAware) *PushDispatcher {
+	timeoutS := cfg.PushHTTPTimeoutS
+	if cfg.IsPushDirect() {
+		timeoutS = cfg.ExternalVLLMTimeoutS
+	}
+	dialTimeout := timeoutS
+	if cfg.IsPushDirect() && dialTimeout > 10 {
+		dialTimeout = 10
+	}
 	transport := &http.Transport{
 		MaxIdleConns:        200,
 		MaxIdleConnsPerHost: 50,
 		IdleConnTimeout:     30 * time.Second,
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 		DialContext: (&net.Dialer{
-			Timeout:   time.Duration(cfg.PushHTTPTimeoutS * float64(time.Second)),
+			Timeout:   time.Duration(dialTimeout * float64(time.Second)),
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	}
 
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   time.Duration(cfg.PushHTTPTimeoutS * float64(time.Second)),
+		Timeout:   time.Duration(timeoutS * float64(time.Second)),
 	}
 
 	return &PushDispatcher{
@@ -132,9 +149,13 @@ func (pd *PushDispatcher) refreshLocked(force bool) {
 	pods := discoverPods(pd.cfg)
 	eps := make([]string, 0, len(pods))
 	urls := make(map[string]string, len(pods))
+	port := pd.cfg.SidecarPort
+	if pd.cfg.IsPushDirect() {
+		port = pd.cfg.VLLMPort
+	}
 	for name, ip := range pods {
 		eps = append(eps, name)
-		urls[name] = fmt.Sprintf("http://%s:%d", ip, pd.cfg.SidecarPort)
+		urls[name] = fmt.Sprintf("http://%s:%d", ip, port)
 	}
 
 	pd.endpoints = eps
@@ -150,9 +171,16 @@ func (pd *PushDispatcher) refreshLocked(force bool) {
 	log.Printf("[PushRouter] discovered %d pods: %v", len(pd.endpoints), pd.endpoints)
 }
 
+// useLocalLoad reports whether load-based pickers should use in-process
+// logical inflight instead of sidecar /health (leastq-local, or any
+// sidecar-less push-* path where sidecar health fields are unavailable).
+func (pd *PushDispatcher) useLocalLoad() bool {
+	return pd.cfg.PushLeastQMode == "local" || pd.cfg.IsPushDirect()
+}
+
 // pickEndpoint selects an endpoint per RouterMode. For push-leastq it honors
 // PushLeastQMode ("health" queries each sidecar /health; "local" uses logical
-// inflight counters).
+// inflight counters). Sidecar-less push-* always uses local load.
 func (pd *PushDispatcher) pickEndpoint(reqID string) string {
 	switch pd.cfg.RouterMode {
 	case "push-random":
@@ -163,7 +191,7 @@ func (pd *PushDispatcher) pickEndpoint(reqID string) string {
 		}
 		return pd.endpoints[rand.Intn(len(pd.endpoints))]
 	case "push-leastq":
-		if pd.cfg.PushLeastQMode == "local" {
+		if pd.useLocalLoad() {
 			return pd.pickLeastQLocal()
 		}
 		return pd.pickLeastQHealth()
@@ -302,7 +330,7 @@ func (pd *PushDispatcher) pickKVCost(reqID string) string {
 	}
 
 	var loads map[string]float64
-	if pd.cfg.PushLeastQMode == "local" {
+	if pd.useLocalLoad() {
 		loads = make(map[string]float64, len(eps))
 		for _, ep := range eps {
 			loads[ep] = float64(inflight[ep])
@@ -491,7 +519,7 @@ func (pd *PushDispatcher) pickP2C() string {
 	}
 	a, b := eps[i], eps[j]
 
-	if pd.cfg.PushLeastQMode == "local" {
+	if pd.useLocalLoad() {
 		return chooseLowerLoad(a, inflight[a], true, b, inflight[b], true)
 	}
 	sa, aOK := pd.fetchHealthLoad(urls[a])
@@ -762,7 +790,9 @@ func (pd *PushDispatcher) RouteAndPush(reqID, prompt string, meta map[string]int
 	pd.refreshLocked(false)
 	pd.mu.Unlock()
 
-	localMode := pd.cfg.RouterMode == "push-leastq" && pd.cfg.PushLeastQMode == "local"
+	// Track local inflight for leastq-local and for any sidecar-less push path
+	// (health probes lack sidecar logical/queue_len fields when direct).
+	localMode := pd.cfg.PushLeastQMode == "local" || pd.cfg.IsPushDirect()
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
@@ -864,6 +894,18 @@ func (pd *PushDispatcher) RouteAndPush(reqID, prompt string, meta map[string]int
 			}
 			lastErr = err
 			continue
+		}
+
+		if pd.cfg.IsPushDirect() {
+			if err := pd.deliverDirect(ep, url, reqID, prompt, sendMeta); err != nil {
+				if localMode {
+					pd.decrementInflight(ep)
+				}
+				lastErr = err
+				log.Printf("[PushRouter] direct deliver failed for %s: %v", ep, err)
+				continue
+			}
+			return nil
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(pd.cfg.PushHTTPTimeoutS*float64(time.Second)))
@@ -1043,6 +1085,110 @@ func (pd *PushDispatcher) PushToEndpoint(endpoint, reqID, prompt string, meta ma
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("push to %s failed: status %d", endpoint, resp.StatusCode)
 	}
+	return nil
+}
+
+// deliverDirect POSTs to a pod's vLLM OpenAI endpoint and ingests a
+// sidecar-shaped result. Used when SidecarEnabled=false for push-* modes.
+func (pd *PushDispatcher) deliverDirect(ep, baseURL, reqID, prompt string, meta map[string]interface{}) error {
+	if pd.ingest == nil {
+		return fmt.Errorf("direct push delivery requires an ingest callback")
+	}
+	epCfg := ExternalEndpointConfig{ID: ep, URL: baseURL, Model: pd.cfg.ModelName}
+	client := &ExternalVLLMClient{cfg: pd.cfg, registry: nil, client: pd.client}
+	// buildPayload needs ep config; call it directly rather than Deliver (no registry).
+	payload := client.buildPayload(epCfg, prompt, meta)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		pd.ingest(map[string]interface{}{
+			"req_id": reqID,
+			"result": map[string]interface{}{
+				"output": fmt.Sprintf("[external error: %v]", err), "finish_reason": "error",
+				"error": err.Error(), "endpoint_id": ep,
+			},
+			"endpoint": ep,
+		})
+		return nil
+	}
+	url := baseURL + "/v1/chat/completions"
+	t0 := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(pd.cfg.ExternalVLLMTimeoutS*float64(time.Second)))
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		pd.ingest(map[string]interface{}{
+			"req_id": reqID,
+			"result": map[string]interface{}{
+				"output": fmt.Sprintf("[external error: %v]", err), "finish_reason": "error",
+				"error": err.Error(), "endpoint_id": ep,
+			},
+			"endpoint": ep,
+		})
+		return nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := pd.client.Do(req)
+	if err != nil {
+		pd.ingest(map[string]interface{}{
+			"req_id": reqID,
+			"result": map[string]interface{}{
+				"output": fmt.Sprintf("[external error: %v]", err), "finish_reason": "error",
+				"error": err.Error(), "endpoint_id": ep, "latency_s": time.Since(t0).Seconds(),
+			},
+			"endpoint": ep,
+		})
+		return nil
+	}
+	defer resp.Body.Close()
+	var raw bytes.Buffer
+	_, _ = raw.ReadFrom(resp.Body)
+	latencyS := time.Since(t0).Seconds()
+	result := map[string]interface{}{"endpoint_id": ep, "latency_s": latencyS}
+	if resp.StatusCode != http.StatusOK {
+		snippet := raw.String()
+		if len(snippet) > 300 {
+			snippet = snippet[:300]
+		}
+		result["output"] = fmt.Sprintf("[vLLM error %d]", resp.StatusCode)
+		result["finish_reason"] = "error"
+		result["error"] = fmt.Sprintf("http_%d: %s", resp.StatusCode, snippet)
+		pd.ingest(map[string]interface{}{"req_id": reqID, "result": result, "endpoint": ep})
+		return nil
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw.Bytes(), &data); err != nil {
+		result["output"] = "[parse error in vLLM response]"
+		result["finish_reason"] = "error"
+		result["error"] = fmt.Sprintf("parse: %v", err)
+		pd.ingest(map[string]interface{}{"req_id": reqID, "result": result, "endpoint": ep})
+		return nil
+	}
+	result["raw"] = data
+	if choices, ok := data["choices"].([]interface{}); ok && len(choices) > 0 {
+		if first, ok := choices[0].(map[string]interface{}); ok {
+			if msg, ok := first["message"].(map[string]interface{}); ok {
+				if content, ok := msg["content"].(string); ok {
+					result["output"] = content
+				} else {
+					result["output"] = fmt.Sprintf("%v", first)
+				}
+				if tc, ok := msg["tool_calls"].([]interface{}); ok && len(tc) > 0 {
+					result["tool_calls"] = tc
+				}
+			} else {
+				result["output"] = fmt.Sprintf("%v", first)
+			}
+			if fr, ok := first["finish_reason"]; ok {
+				result["finish_reason"] = fr
+			}
+		}
+	} else {
+		result["output"] = string(raw.Bytes())
+	}
+	if usage, ok := data["usage"].(map[string]interface{}); ok {
+		result["usage"] = usage
+	}
+	pd.ingest(map[string]interface{}{"req_id": reqID, "result": result, "endpoint": ep})
 	return nil
 }
 

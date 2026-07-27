@@ -183,24 +183,35 @@ def _log_req(msg: str, *, level: str = "summary") -> None:
 
 class PushRouter:
     """
-    Push-mode endpoint selector + sidecar push client.
+    Push-mode endpoint selector + delivery client.
+
+    When ``ROUTER_SIDECAR_ENABLED`` is true (default), delivers via sidecar
+    ``POST /push``. When false (sidecar-less push-*), delivers DIRECTLY to each
+    pod's vLLM OpenAI endpoint and ingests the shaped result via ``ingest``.
 
     IMPORTANT for decoupled dispatch:
       - route_and_push() can be called concurrently by many background workers.
       - so endpoint discovery / endpoint lists / logical inflight bookkeeping must be guarded.
     """
 
-    def __init__(self, mode: str):
-        self.mode = mode  # "push-rr", "push-random", "push-leastq"
+    def __init__(self, mode: str, *, ingest=None):
+        self.mode = mode  # "push-rr", "push-random", "push-leastq", ...
+        # Sidecar-less direct-to-vLLM for queue-less push-* modes.
+        self._direct = not bool(getattr(_cfg, "ROUTER_SIDECAR_ENABLED", True))
+        self._ingest = ingest  # callable(payload_dict) for direct-delivery results
 
         # shared mutable state guarded by _lock
         self._lock = RLock()
         self._eps: List[str] = []        # pod names
-        self._urls: Dict[str, str] = {}  # pod_name -> sidecar base URL
+        self._urls: Dict[str, str] = {}  # pod_name -> sidecar or vLLM base URL
         self._rr_idx: int = 0
         self._last_discovery = 0.0
         self._discovery_interval_s = float(getattr(_cfg, "KV_DISCOVERY_INTERVAL_S", 5.0))
         self._leastq_mode: str = getattr(_cfg, "PUSH_LEASTQ_MODE", "health")
+        # Without a sidecar there is no /health logical/queue_len; prefer local
+        # inflight accounting so leastq/p2c stay meaningful.
+        if self._direct and self._leastq_mode == "health":
+            self._leastq_mode = "local"
         # local logical queue lengths: sent - completed
         self._logical_inflight = defaultdict(int)
 
@@ -209,9 +220,14 @@ class PushRouter:
         #
         # IMPORTANT: httpx.Timeout must include either a default timeout
         # or explicitly set all four: connect/read/write/pool.
+        # Direct delivery waits for full inference, so use EXTERNAL_VLLM_TIMEOUT_S.
         # ------------------------------------------------------------------
-        t = float(getattr(_cfg, "PUSH_HTTP_TIMEOUT_S", 2.0))
-        timeout = httpx.Timeout(connect=t, read=t, write=t, pool=t)
+        if self._direct:
+            t = float(getattr(_cfg, "EXTERNAL_VLLM_TIMEOUT_S", 300.0))
+            timeout = httpx.Timeout(connect=min(t, 10.0), read=t, write=t, pool=t)
+        else:
+            t = float(getattr(_cfg, "PUSH_HTTP_TIMEOUT_S", 2.0))
+            timeout = httpx.Timeout(connect=t, read=t, write=t, pool=t)
 
         limits_health = httpx.Limits(
             max_keepalive_connections=int(getattr(_cfg, "PUSH_MAX_KEEPALIVE", 200)),
@@ -261,7 +277,8 @@ class PushRouter:
 
         pods = self._discover_pods()
         eps = list(pods.keys())
-        urls = {pod: f"http://{ip}:{_cfg.SIDECAR_PORT}" for pod, ip in pods.items()}
+        port = int(_cfg.VLLM_PORT) if self._direct else int(_cfg.SIDECAR_PORT)
+        urls = {pod: f"http://{ip}:{port}" for pod, ip in pods.items()}
 
         self._eps = eps
         self._urls = urls
@@ -635,6 +652,103 @@ class PushRouter:
         return self._pick_endpoint_rr()
 
     # ---------------------------------------------------------
+    # Direct-to-vLLM delivery (sidecar-less push-*)
+    # ---------------------------------------------------------
+
+    def _build_direct_payload(self, prompt: str, meta: dict) -> dict:
+        """Shape an OpenAI chat.completions body (mirrors ExternalVLLMClient)."""
+        chat_req = (meta or {}).get("__chat_request__")
+        model = str(getattr(_cfg, "MODEL_NAME", "default"))
+        if isinstance(chat_req, dict) and chat_req:
+            payload = dict(chat_req)
+            payload["model"] = payload.get("model") or model
+            payload["stream"] = False
+        else:
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": str(prompt)}],
+                "max_tokens": int((meta or {}).get("max_tokens", 128)),
+                "temperature": float((meta or {}).get("temperature", 0.0)),
+                "chat_template_kwargs": {
+                    "enable_thinking": bool((meta or {}).get("enable_thinking", False)),
+                },
+            }
+            if "min_tokens" in (meta or {}):
+                try:
+                    payload["min_tokens"] = int(meta["min_tokens"])
+                except Exception:
+                    pass
+        if (meta or {}).get("ignore_eos"):
+            payload["ignore_eos"] = True
+        payload["stream"] = False
+        return payload
+
+    async def _deliver_direct(self, ep: str, url: str, req_id: str, prompt: str, meta: dict) -> None:
+        """POST to vLLM OpenAI endpoint and ingest a sidecar-shaped result."""
+        if self._ingest is None:
+            raise RuntimeError("direct push delivery requires an ingest callback")
+
+        payload = self._build_direct_payload(prompt, meta)
+        t0 = time.time()
+        result_obj: dict = {"endpoint_id": ep}
+        try:
+            resp = await self._push_client.post(f"{url}/v1/chat/completions", json=payload)
+        except Exception as e:
+            result_obj.update({
+                "output": f"[external error: {e}]",
+                "finish_reason": "error",
+                "error": str(e),
+                "latency_s": time.time() - t0,
+            })
+            self._ingest({"req_id": req_id, "result": result_obj, "endpoint": ep})
+            return
+
+        result_obj["latency_s"] = time.time() - t0
+        if resp.status_code != 200:
+            body = ""
+            try:
+                body = resp.text[:300]
+            except Exception:
+                pass
+            result_obj.update({
+                "output": f"[vLLM error {resp.status_code}]",
+                "finish_reason": "error",
+                "error": f"http_{resp.status_code}: {body}",
+            })
+            self._ingest({"req_id": req_id, "result": result_obj, "endpoint": ep})
+            return
+
+        try:
+            data = resp.json()
+        except Exception as e:
+            result_obj.update({
+                "output": "[parse error in vLLM response]",
+                "finish_reason": "error",
+                "error": f"parse: {e}",
+            })
+            self._ingest({"req_id": req_id, "result": result_obj, "endpoint": ep})
+            return
+
+        result_obj["raw"] = data
+        choices = data.get("choices") or []
+        if choices:
+            first = choices[0]
+            msg = first.get("message") or {}
+            result_obj["output"] = msg.get("content") or str(first)
+            fr = first.get("finish_reason") or data.get("finish_reason")
+            if fr is not None:
+                result_obj["finish_reason"] = fr
+            tc = msg.get("tool_calls")
+            if isinstance(tc, list) and tc:
+                result_obj["tool_calls"] = tc
+        else:
+            result_obj["output"] = str(data)
+        if isinstance(data.get("usage"), dict):
+            result_obj["usage"] = data["usage"]
+
+        self._ingest({"req_id": req_id, "result": result_obj, "endpoint": ep})
+
+    # ---------------------------------------------------------
     # Push operation (trace added)
     # ---------------------------------------------------------
 
@@ -679,7 +793,9 @@ class PushRouter:
             # Logical queue length (for leastq-local)
             # ---------------------------------------------------------
             logical_before: Optional[int] = None
-            if self.mode == "push-leastq" and self._leastq_mode == "local":
+            # Track local inflight for leastq-local and for any sidecar-less path
+            # (p2c/health modes fall back to local when direct).
+            if self._leastq_mode == "local" or self._direct:
                 with self._lock:
                     logical_before = int(self._logical_inflight.get(ep, 0))
                     self._logical_inflight[ep] = logical_before + 1
@@ -732,14 +848,18 @@ class PushRouter:
             if self._leastq_mode == "local":
                 payload["endpoint"] = ep
 
-            _log_req(f"push req_id={req_id} → {ep} ({url})", level="summary")
+            kind = "direct" if self._direct else "push"
+            _log_req(f"{kind} req_id={req_id} → {ep} ({url})", level="summary")
 
             try:
+                if self._direct:
+                    await self._deliver_direct(ep, url, req_id, prompt, meta)
+                    return
                 r = await self._push_client.post(f"{url}/push", json=payload)
             except Exception as e:
                 last_err = e
                 _log_req(f"push failed for {ep}: {e}", level="full")
-                if self.mode == "push-leastq" and self._leastq_mode == "local":
+                if self._leastq_mode == "local" or self._direct:
                     with self._lock:
                         if self._logical_inflight[ep] > 0:
                             self._logical_inflight[ep] -= 1
@@ -748,7 +868,7 @@ class PushRouter:
             if r.status_code != 200:
                 last_err = RuntimeError(f"push to {ep} failed: {r.status_code} {r.text}")
                 _log_req(f"push to {ep} failed: {r.status_code} {r.text}", level="full")
-                if self.mode == "push-leastq" and self._leastq_mode == "local":
+                if self._leastq_mode == "local" or self._direct:
                     with self._lock:
                         if self._logical_inflight[ep] > 0:
                             self._logical_inflight[ep] -= 1

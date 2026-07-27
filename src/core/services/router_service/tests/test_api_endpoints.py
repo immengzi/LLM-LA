@@ -142,16 +142,30 @@ def test_mode_helpers_sidecarless_central_push(monkeypatch):
     monkeypatch.setattr(api_mod._cfg, "ROUTER_MODE", "central-push")
     monkeypatch.setattr(api_mod._cfg, "ROUTER_SIDECAR_ENABLED", False)
     assert api_mod._is_central_push_direct() is True
+    assert api_mod._is_push_direct() is False
     assert api_mod._uses_push_delivery() is False
     assert api_mod._uses_direct_delivery() is True
     # Still admits through the central queue (same scheduling as pull/central-push).
     assert api_mod._uses_central_queue() is True
 
 
+def test_mode_helpers_sidecarless_push_rr(monkeypatch):
+    """Sidecar-less push-* keeps PushRouter (queue-less) and delivers direct-to-vLLM."""
+    monkeypatch.setattr(api_mod._cfg, "ROUTER_MODE", "push-rr")
+    monkeypatch.setattr(api_mod._cfg, "ROUTER_SIDECAR_ENABLED", False)
+    assert api_mod._is_push_mode() is True
+    assert api_mod._is_push_direct() is True
+    assert api_mod._is_central_push_direct() is False
+    assert api_mod._uses_push_delivery() is True
+    assert api_mod._uses_direct_delivery() is False
+    assert api_mod._uses_central_queue() is False
+
+
 def test_mode_helpers_external_push_is_direct(monkeypatch):
     monkeypatch.setattr(api_mod._cfg, "ROUTER_MODE", "external-push")
     monkeypatch.setattr(api_mod._cfg, "ROUTER_SIDECAR_ENABLED", True)
     assert api_mod._is_central_push_direct() is False
+    assert api_mod._is_push_direct() is False
     assert api_mod._uses_direct_delivery() is True
     assert api_mod._uses_push_delivery() is False
 
@@ -160,6 +174,7 @@ def test_mode_helpers_pull_unaffected_by_flag(monkeypatch):
     monkeypatch.setattr(api_mod._cfg, "ROUTER_MODE", "pull")
     monkeypatch.setattr(api_mod._cfg, "ROUTER_SIDECAR_ENABLED", False)
     assert api_mod._is_central_push_direct() is False
+    assert api_mod._is_push_direct() is False
     assert api_mod._uses_direct_delivery() is False
     assert api_mod._uses_push_delivery() is False
 

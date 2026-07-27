@@ -48,18 +48,34 @@ func main() {
 		time.Duration(cfg.PollCleanupIntervalS*float64(time.Second)),
 	)
 
-	// PushRouter is used for pod discovery + delivery by push-* AND central-push.
+	// PushRouter is used for pod discovery + delivery by push-* AND
+	// sidecar-backed central-push. Sidecar-less push-* still uses PushRouter
+	// (direct-to-vLLM); sidecar-less central-push uses ExternalPushDispatcher.
 	var pushRouter *gateway.PushDispatcher
 	if cfg.UsesPushDelivery() {
 		pushRouter = gateway.NewPushDispatcher(cfg, kv)
 		pushRouter.RefreshEndpoints()
-		log.Printf("[router] PushRouter started in mode=%s", cfg.RouterMode)
-	} else {
+		modeNote := ""
+		if cfg.IsPushDirect() {
+			modeNote = " (sidecar-less direct-to-vLLM)"
+		}
+		log.Printf("[router] PushRouter started in mode=%s%s", cfg.RouterMode, modeNote)
+	} else if !cfg.UsesDirectDelivery() {
 		log.Println("[router] running in PULL mode.")
 	}
 
 	srv := gateway.NewServer(cfg, queue, results, kv, hashClient, registry, kvWatcher, pushRouter)
 
+	if pushRouter != nil && cfg.IsPushDirect() {
+		pushRouter.SetIngest(srv.IngestResult)
+		// Host per-pod KV-events subscribers so prefix/both routing keeps
+		// working without a sidecar (affinity/none skip subscribers).
+		if cfg.KVAware {
+			k8sReg := gateway.NewK8sVLLMRegistry(context.Background(), cfg)
+			defer k8sReg.Stop()
+			log.Printf("[router] push-* (sidecar-less) KV subscribers for %d pods", len(k8sReg.AllIDs()))
+		}
+	}
 	// Targeted per-request block-owner lookup (preferred routing source; also
 	// used for exact, eviction-aware kv_hit measurement when only measuring).
 	var ownerLookup *gateway.OwnerLookup

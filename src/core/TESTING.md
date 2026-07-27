@@ -113,10 +113,10 @@ deterministic.
   vLLM payload building, tool-call merge/complete, `toBool`/`toInt` helpers.
 - **gateway**: `ROUTER_STRATEGY` → KV/affinity mapping, `ROUTER_MODE`
   normalization + aliases, enum fallbacks, numeric clamps, the
-  `ROUTER_SIDECAR_ENABLED` knob (default on; only honored for central-push, else
-  ignored with a warning) and the sidecar-less central-push predicates
-  (`IsCentralPushDirect` / `UsesDirectDelivery` / `UsesPushDelivery`), plus the
-  existing parity/affinity tests.
+  `ROUTER_SIDECAR_ENABLED` knob (default on; honored for push-* and central-push,
+  else ignored with a warning) and the sidecar-less predicates
+  (`IsCentralPushDirect` / `IsPushDirect` / `UsesDirectDelivery` /
+  `UsesPushDelivery`), plus the existing parity/affinity tests.
 
 Run in a container if you don't have Go 1.26:
 
