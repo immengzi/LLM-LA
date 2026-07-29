@@ -18,14 +18,18 @@
 #   - pull
 # prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity-fair:
 #   - pull
+# BZ with one lmcache_controller per DP pair (co-located on each leader;
+# partitions who-has / no cross-pair P2P). Twin of the yz per-pair config:
+prod-bz-boom-minmax-lmcache-p2p-hoststaging-affinity-per-pair:
+  - pull
 #
 # YZ primary + its shadow-pool equivalent:
 # prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
 # YZ primary with one lmcache_controller per DP pair (co-located on each leader;
 # partitions who-has / no cross-pair P2P). Sibling of the shared-controller config:
-prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity-per-pair:
-  - pull
+# prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity-per-pair:
+#   - pull
 # prod-yz-shadow-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
 

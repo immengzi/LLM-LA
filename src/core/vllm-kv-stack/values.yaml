@@ -701,7 +701,11 @@ lmcache:
 # controllerReplyUrl (raw node IP:port; hostNetwork, so no Service needed).
 lmcacheController:
   image: "127.0.0.1:32000/lmcache-ascend:hccl-p2p"
-  port: 9000
+  # Control/admin port (probes + lmcache_controller --port). NOT the P2P
+  # pull/reply ports. Must NOT be 9000 when co-located with a vLLM leader:
+  # kv-sidecar already binds hostNetwork :9000, and the scheduler rejects the
+  # leader with "didn't have free ports". Engines dial pull/reply only.
+  port: 9010
   pullPort: 9800
   replyPort: 9900
   # Pin the controller to a fixed node so its host IP is stable and matches
@@ -715,7 +719,15 @@ lmcacheController:
   # Example: nodeNames: [node7, node1]  or  nodeNamesCsv: "node7,node1"
   nodeNames: []
   nodeNamesCsv: ""
-  tolerations: []
+  # Same control-plane / master tolerations as vLLM engines — required when a
+  # per-leader controller is pinned to a control-plane node (e.g. BZ k8s-master).
+  tolerations:
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+    - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
 
   # Resource requests/limits for the standalone lmcache_controller pod (the P2P
   # lookup directory). Shared mode often runs it on its own node; per-leader
