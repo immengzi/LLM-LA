@@ -1,0 +1,20 @@
+# Multi-stage Go router image for bench_mock (external-push / pull, no KV hash needed).
+# Build context: src/core/services/go
+ARG GOPROXY=https://proxy.golang.org,direct
+FROM golang:1.26-bookworm AS build
+ARG GOPROXY
+WORKDIR /src
+ENV CGO_ENABLED=0 GOOS=linux GOPROXY=${GOPROXY} GOTOOLCHAIN=auto
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -buildvcs=false -o /out/gateway ./cmd/gateway
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/gateway /usr/bin/gateway
+# Mock bench cells use ROUTER_STRATEGY=none / KV_AWARE=false — no in-container hasher.
+ENV KV_HASH_SOURCE=external
+EXPOSE 8080
+ENTRYPOINT ["gateway"]

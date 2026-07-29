@@ -1,0 +1,37 @@
+# Shared fake OpenAI backend for gateway-overhead benchmarks.
+# Path-specific gateways are added via configs/<path>/compose.override.yml.
+#
+#   docker compose -f docker-compose.yml -f configs/litellm/compose.override.yml up -d --scale litellm=2
+
+services:
+  mock-vllm:
+    build:
+      context: ../../core/tests/e2e/mock_vllm
+    environment:
+      MOCK_LATENCY_MS: ${MOCK_LATENCY_MS:-0}
+      MOCK_MAX_MODEL_LEN: ${MOCK_MAX_MODEL_LEN:-196608}
+    ports:
+      - "${MOCK_HOST_PORT:-18000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # Fronts scaled gateway replicas so Locust always targets :14000.
+  gateway-lb:
+    image: nginx:1.27-alpine
+    ports:
+      - "${GATEWAY_HOST_PORT:-14000}:80"
+    volumes:
+      - ./gateway-lb/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - mock-vllm

@@ -1,0 +1,17 @@
+# LiteLLM network_mock mode — pure proxy overhead, no outbound HTTP.
+# Same shape as https://docs.litellm.ai/docs/benchmarks
+model_list:
+  - model_name: db-openai-endpoint
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: "sk-fake-key"
+      api_base: "https://api.openai.com"
+
+litellm_settings:
+  network_mock: true
+  callbacks: []
+  num_retries: 0
+  request_timeout: 30
+
+general_settings:
+  master_key: "sk-1234"

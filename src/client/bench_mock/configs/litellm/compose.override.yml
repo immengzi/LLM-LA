@@ -1,0 +1,28 @@
+# LiteLLM proxy scaled via: --scale litellm=N
+# Paths relative to bench_mock/ project dir.
+services:
+  litellm:
+    image: ${LITELLM_IMAGE:-ghcr.io/berriai/litellm:main-stable}
+    environment:
+      LITELLM_MASTER_KEY: "sk-1234"
+      LITELLM_LOG: "ERROR"
+    volumes:
+      - ./configs/litellm/${LITELLM_CONFIG:-proxy.yaml}:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "${LITELLM_NUM_WORKERS:-4}"]
+    depends_on:
+      mock-vllm:
+        condition: service_healthy
+    expose:
+      - "4000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  gateway-lb:
+    volumes:
+      - ./gateway-lb/nginx.litellm.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - litellm

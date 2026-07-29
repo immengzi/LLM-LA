@@ -93,6 +93,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | [multi-turn.md](benchmarking/multi-turn.md) | Multi-turn conversation benchmarking |
 | [codeflowbench.md](benchmarking/codeflowbench.md) | CodeFlowBench dataset experiments |
 | [artifacts-and-analysis.md](benchmarking/artifacts-and-analysis.md) | `experiments/<N>/` layout and analysis notebooks |
+| [gateway-overhead-benchmark.md](benchmarking/gateway-overhead-benchmark.md) | LiteLLM-style mock/overhead: LLM-LA vs BooM vs LiteLLM (`src/client/bench_mock/`) |
 
 ## Comparisons (research)
 

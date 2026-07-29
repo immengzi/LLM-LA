@@ -1,0 +1,16 @@
+# BooM direct → shared fake OpenAI (mock-vllm). Same LiteLLM-shaped model_list.
+model_list:
+  - model_name: served-model
+    model_info:
+      id: "mock-0"
+    litellm_params:
+      model: openai/served-model
+      api_base: http://mock-vllm:8000/v1
+      api_key: "test"
+      timeout: 60
+
+general_settings:
+  master_key: "sk-1234"
+
+router_settings:
+  routing_strategy: simple-shuffle

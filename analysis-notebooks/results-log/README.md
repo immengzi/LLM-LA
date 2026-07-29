@@ -95,3 +95,11 @@ Claude-CLI head-to-head, LLM-LA router (mine, 4 strategies) vs BooM direct (3 po
 | u32 | [`001-low-mid-load-32-users.md`](05-bz-claude-mine-vs-boom/001-low-mid-load-32-users.md) | 132, 133, 134, 135, 136, 137, 138 | Near-parity, Ours edges ahead (+1% overall; best us-aff-hard vs boom-kvc). |
 | u64 | [`002-medium-load-64-users.md`](05-bz-claude-mine-vs-boom/002-medium-load-64-users.md) | 139, 140, 141, 142, 143, 144, 145 | Ours ahead (+8% overall; us-aff-hard vs boom-rr). Engine TTFT/TPOT for 139-144 past Prom retention. |
 | u128 | [`003-high-load-128-users.md`](05-bz-claude-mine-vs-boom/003-high-load-128-users.md) | 146, 147, 148, 149, 150, 151, 152 | BooM round-robin wins at saturation (Ours -12% overall) on throughput; Ours keeps TTFT/TPOT edge. |
+
+## 06-gateway-overhead-mock
+
+LiteLLM-style fake-OpenAI gateway overhead (Locust 1k users / 2 vs 4 instances). Harness: `src/client/bench_mock/`. Spec: `docs/benchmarking/gateway-overhead-benchmark.md`.
+
+| Series | Entry | Exp IDs | Summary |
+|---|---|---|---|
+| pending | [`000-pending-matrix.md`](06-gateway-overhead-mock/000-pending-matrix.md) | — | Harness ready; fill after `./scripts/run_all.sh` |

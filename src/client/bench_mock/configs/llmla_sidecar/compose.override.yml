@@ -1,0 +1,54 @@
+# LLM-LA with sidecar: Locust → router → sidecar → mock-vllm (e2e topology).
+# Pull mode: scale sidecars only (router stays 1). See scripts/run_path.sh.
+services:
+  router:
+    build:
+      context: ../../core/services/router_service
+      dockerfile: ../../tests/e2e/router.e2e.Dockerfile
+    env_file:
+      - configs/llmla_sidecar/router.env
+    depends_on:
+      redis:
+        condition: service_healthy
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health/router')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  sidecar:
+    build:
+      context: ../../core/services/sidecar
+      dockerfile: ../../tests/e2e/sidecar.e2e.Dockerfile
+    env_file:
+      - configs/llmla_sidecar/sidecar.env
+    # Unique endpoint id per scaled replica (env_file has a fixed CONTAINER_NAME).
+    command:
+      - sh
+      - -c
+      - export CONTAINER_NAME=sidecar-$${HOSTNAME:-$$(cat /etc/hostname)}; exec python -m sidecar.main
+
+    depends_on:
+      router:
+        condition: service_healthy
+      mock-vllm:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    expose:
+      - "9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/health')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+
+  gateway-lb:
+    volumes:
+      - ./gateway-lb/nginx.router.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - router
+      - sidecar
