@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# Build + push kv-router-go / kv-sidecar-go.
+#
+#   ./build.sh                              # auto-detect direct vs proxy
+#   PROXY_URL='http://user:pass@proxy:8080' ./build.sh
+#                                           # force HTTP(S) proxy for the build
+#   PROXY_URL='' ./build.sh                 # force no proxy
+#   TAG=dev ./build.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,9 +16,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Shared, cluster-agnostic registry + proxy resolution (bz/yz/...).
-# Override with REGISTRY=... / PROXY_URL=... / TAG=... if needed. The resolved
-# proxy is reused for the router image's Python (pip) layer.
+# Shared, cluster-agnostic registry + proxy resolution.
+# The resolved proxy is reused for the router image's Python (pip) layer.
 source "$SCRIPT_DIR/../build-common.sh"
 
 # -------------------------------------------------------
@@ -93,19 +99,20 @@ CGO_ENABLED=0 GOOS=linux "$GO" build -buildvcs=false -o sidecar ./cmd/sidecar
 # -------------------------------------------------------
 
 echo "[4/4] Building Docker images..."
-docker build -f Dockerfile.router \
-  "${PROXY_BUILD_ARGS[@]}" \
+# Router image build context is the services/ parent so the Dockerfile can copy
+# the canonical router package (hash backends) without staging drift.
+docker_build -f Dockerfile.router \
   "${HASHER_BUILD_ARGS[@]}" \
   -t "$PUSH_REGISTRY/kv-router-go:$TAG" ..
-docker build -f Dockerfile.sidecar -t "$PUSH_REGISTRY/kv-sidecar-go:$TAG" .
+docker_build -f Dockerfile.sidecar -t "$PUSH_REGISTRY/kv-sidecar-go:$TAG" .
 
 # -------------------------------------------------------
 # Step 3: Push to registry (PUSH_REGISTRY=localhost:32000 is insecure-allowed)
 # -------------------------------------------------------
 
 echo "[5/5] Pushing to $PUSH_REGISTRY..."
-docker push "$PUSH_REGISTRY/kv-router-go:$TAG"
-docker push "$PUSH_REGISTRY/kv-sidecar-go:$TAG"
+docker_push_noproxy "$PUSH_REGISTRY/kv-router-go:$TAG"
+docker_push_noproxy "$PUSH_REGISTRY/kv-sidecar-go:$TAG"
 
 echo
 echo "=== Done (cluster pulls these as $REGISTRY/...) ==="
