@@ -321,3 +321,71 @@ func TestNumericClamps(t *testing.T) {
 		t.Errorf("TraceSamplingRate = %v, want reset to 1.0", cfg.TraceSamplingRate)
 	}
 }
+
+func TestSGLangConfigAndContract(t *testing.T) {
+	t.Setenv("INFERENCE_ENGINE", " SGLANG ")
+	t.Setenv("KV_HASH_BACKEND", "SGLANG")
+	t.Setenv("SGLANG_CONTRACT_VERSION", "0.5.15")
+	t.Setenv("KV_HASH_SOURCE", "inline")
+	t.Setenv("KV_BLOCK_SIZE", "16")
+	cfg := LoadConfig()
+	if cfg.InferenceEngine != "sglang" || cfg.KVHashBackend != "sglang" {
+		t.Fatalf("engine/backend = %q/%q, want sglang/sglang", cfg.InferenceEngine, cfg.KVHashBackend)
+	}
+	if got := cfg.SGLangHashContractError(); got != "" {
+		t.Fatalf("valid SGLang contract rejected: %s", got)
+	}
+}
+
+func TestInvalidEngineAndBackendFallBackToVLLM(t *testing.T) {
+	t.Setenv("INFERENCE_ENGINE", "unknown")
+	t.Setenv("KV_HASH_BACKEND", "unknown")
+	cfg := LoadConfig()
+	if cfg.InferenceEngine != "vllm" || cfg.KVHashBackend != "vllm" {
+		t.Fatalf("engine/backend = %q/%q, want vllm/vllm", cfg.InferenceEngine, cfg.KVHashBackend)
+	}
+}
+
+func TestSGLangContractFailures(t *testing.T) {
+	base := Config{
+		InferenceEngine:       "sglang",
+		KVHashBackend:         "sglang",
+		KVHashSource:          "inline",
+		KVBlockSize:           16,
+		SGLangContractVersion: sglangHashContractVersion,
+	}
+	tests := []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{"engine", func(c *Config) { c.InferenceEngine = "vllm" }, "inference_engine_must_be_sglang"},
+		{"backend", func(c *Config) { c.KVHashBackend = "vllm" }, "kv_hash_backend_must_be_sglang"},
+		{"external", func(c *Config) { c.KVHashSource = "external" }, "kv_hash_source_must_be_inline"},
+		{"page size", func(c *Config) { c.KVBlockSize = 0 }, "sglang_page_size_must_be_positive"},
+		{"version", func(c *Config) { c.SGLangContractVersion = "0.5.16" }, "sglang_contract_version_mismatch:expected=0.5.15,actual=0.5.16"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := base
+			test.edit(&cfg)
+			if got := cfg.SGLangHashContractError(); got != test.want {
+				t.Fatalf("contract error = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSGLangInvalidPageSizeIsNotClamped(t *testing.T) {
+	t.Setenv("INFERENCE_ENGINE", "sglang")
+	t.Setenv("KV_HASH_BACKEND", "sglang")
+	t.Setenv("SGLANG_CONTRACT_VERSION", "0.5.15")
+	t.Setenv("KV_BLOCK_SIZE", "0")
+	cfg := LoadConfig()
+	if cfg.KVBlockSize != 0 {
+		t.Fatalf("SGLang KVBlockSize = %d, want invalid value preserved", cfg.KVBlockSize)
+	}
+	if got := cfg.SGLangHashContractError(); got != "sglang_page_size_must_be_positive" {
+		t.Fatalf("contract error = %q", got)
+	}
+}
