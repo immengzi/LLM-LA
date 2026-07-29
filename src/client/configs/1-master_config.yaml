@@ -22,6 +22,10 @@
 # YZ primary + its shadow-pool equivalent:
 # prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
+# YZ primary with one lmcache_controller per DP pair (co-located on each leader;
+# partitions who-has / no cross-pair P2P). Sibling of the shared-controller config:
+prod-yz-boom-minmax-lmcache-p2p-hoststaging-affinity-per-pair:
+  - pull
 # prod-yz-shadow-boom-minmax-lmcache-p2p-hoststaging-affinity:
 #   - pull
 
@@ -93,32 +97,33 @@
 #   - pull
 # benchmark-bz-us-boom-claude-affinity-hard-u64:   # mine: affinity hard -> 140
 #   - pull
-benchmark-bz-us-boom-claude-affinity-soft-u64:   # mine: affinity soft -> 141 (restart)
-  - pull
-benchmark-bz-us-boom-claude-prefix-u64:          # mine: prefix
-  - pull
-benchmark-bz-boom-rr-claude-u64:                 # boom: round_robin
-  - round_robin
-benchmark-bz-boom-only-claude-u64:               # boom: key_affinity
-  - key_affinity
-benchmark-bz-boom-kvc-claude-u64:                # boom: kvc_aware
-  - kvc_aware
+# Parked while YZ per-pair lmcache_controller deploy is active above.
+# benchmark-bz-us-boom-claude-affinity-soft-u64:   # mine: affinity soft -> 141 (restart)
+#   - pull
+# benchmark-bz-us-boom-claude-prefix-u64:          # mine: prefix
+#   - pull
+# benchmark-bz-boom-rr-claude-u64:                 # boom: round_robin
+#   - round_robin
+# benchmark-bz-boom-only-claude-u64:               # boom: key_affinity
+#   - key_affinity
+# benchmark-bz-boom-kvc-claude-u64:                # boom: kvc_aware
+#   - kvc_aware
 
 # --- HIGH: 128 users ---
-benchmark-bz-us-boom-claude-u128:                # mine: both (kv+len+affinity)
-  - pull
-benchmark-bz-us-boom-claude-affinity-hard-u128:  # mine: affinity hard
-  - pull
-benchmark-bz-us-boom-claude-affinity-soft-u128:  # mine: affinity soft
-  - pull
-benchmark-bz-us-boom-claude-prefix-u128:         # mine: prefix
-  - pull
-benchmark-bz-boom-rr-claude-u128:                # boom: round_robin
-  - round_robin
-benchmark-bz-boom-only-claude-u128:              # boom: key_affinity
-  - key_affinity
-benchmark-bz-boom-kvc-claude-u128:               # boom: kvc_aware
-  - kvc_aware
+# benchmark-bz-us-boom-claude-u128:                # mine: both (kv+len+affinity)
+#   - pull
+# benchmark-bz-us-boom-claude-affinity-hard-u128:  # mine: affinity hard
+#   - pull
+# benchmark-bz-us-boom-claude-affinity-soft-u128:  # mine: affinity soft
+#   - pull
+# benchmark-bz-us-boom-claude-prefix-u128:         # mine: prefix
+#   - pull
+# benchmark-bz-boom-rr-claude-u128:                # boom: round_robin
+#   - round_robin
+# benchmark-bz-boom-only-claude-u128:              # boom: key_affinity
+#   - key_affinity
+# benchmark-bz-boom-kvc-claude-u128:               # boom: kvc_aware
+#   - kvc_aware
 
 # ===================== LONG SWEEP =====================
 # --- mine (us + LLM-LA router), ~5h each ---

@@ -1,29 +1,67 @@
 {{- if and .Values.lmcache.enabled (eq .Values.lmcache.mode "p2p") .Values.deploy.lmcacheController }}
 {{/* LMCache P2P controller — lightweight lookup directory (holds no KV data).
      Replaces the Mooncake master as the coordinator for lmcache.mode="p2p".
-     hostNetwork so engines can dial it at <nodeIP>:pullPort/replyPort via
-     lmcache.p2p.controllerPullUrl/controllerReplyUrl. */}}
+     hostNetwork so engines can dial it at <nodeIP>:pullPort/replyPort.
+
+     Placement:
+       - shared (default): one Deployment, pinned via nodeName (or unpinned).
+       - per-leader: one Deployment per entry in nodeNames / nodeNamesCsv,
+         each pinned to that leader hostname. Engines dial via
+         __CONTROLLER_HOST__ (see 13-lmcache-config + 40-vllm-unified). */}}
+{{- $names := list }}
+{{- if .Values.lmcacheController.nodeNames }}
+  {{- if kindIs "string" .Values.lmcacheController.nodeNames }}
+    {{- range $n := splitList "," .Values.lmcacheController.nodeNames }}
+      {{- $t := trim $n }}{{- if $t }}{{- $names = append $names $t }}{{- end }}
+    {{- end }}
+  {{- else }}
+    {{- range $n := .Values.lmcacheController.nodeNames }}
+      {{- $t := trim (toString $n) }}{{- if $t }}{{- $names = append $names $t }}{{- end }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- if and (eq (len $names) 0) .Values.lmcacheController.nodeNamesCsv }}
+  {{- range $n := splitList "," .Values.lmcacheController.nodeNamesCsv }}
+    {{- $t := trim $n }}{{- if $t }}{{- $names = append $names $t }}{{- end }}
+  {{- end }}
+{{- end }}
+{{- if and (eq (len $names) 0) .Values.lmcacheController.nodeName }}
+  {{- $names = list .Values.lmcacheController.nodeName }}
+{{- end }}
+{{- /* Shared mode with no pin: still deploy one unpinned controller. */}}
+{{- if eq (len $names) 0 }}
+  {{- $names = list "" }}
+{{- end }}
+{{- range $i, $node := $names }}
+{{- $depName := "lmcache-controller" }}
+{{- if gt (len $names) 1 }}
+  {{- $depName = printf "lmcache-controller-%s" $node }}
+{{- end }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: lmcache-controller
-  namespace: {{ .Release.Namespace }}
+  name: {{ $depName }}
+  namespace: {{ $.Release.Namespace }}
   labels:
     app: lmcache-controller
+    lmcache-controller-index: {{ $i | quote }}
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: lmcache-controller
+      lmcache-controller-index: {{ $i | quote }}
   template:
     metadata:
       labels:
         app: lmcache-controller
+        lmcache-controller-index: {{ $i | quote }}
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       restartPolicy: Always
-      {{- if .Values.lmcacheController.nodeName }}
+      {{- if $node }}
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -32,15 +70,15 @@ spec:
                   - key: "kubernetes.io/hostname"
                     operator: In
                     values:
-                      - {{ .Values.lmcacheController.nodeName | quote }}
+                      - {{ $node | quote }}
       {{- end }}
-      {{- if .Values.lmcacheController.tolerations }}
+      {{- if $.Values.lmcacheController.tolerations }}
       tolerations:
-{{- toYaml .Values.lmcacheController.tolerations | nindent 8 }}
+{{- toYaml $.Values.lmcacheController.tolerations | nindent 8 }}
       {{- end }}
       containers:
         - name: lmcache-controller
-          image: {{ .Values.lmcacheController.image }}
+          image: {{ $.Values.lmcacheController.image }}
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -50,30 +88,31 @@ spec:
               export PYTHONHASHSEED=123
               exec lmcache_controller \
                 --host 0.0.0.0 \
-                --port {{ .Values.lmcacheController.port }} \
-                --monitor-ports '{"pull": {{ .Values.lmcacheController.pullPort }}, "reply": {{ .Values.lmcacheController.replyPort }}}'
+                --port {{ $.Values.lmcacheController.port }} \
+                --monitor-ports '{"pull": {{ $.Values.lmcacheController.pullPort }}, "reply": {{ $.Values.lmcacheController.replyPort }}}'
           ports:
             - name: ctl
-              containerPort: {{ .Values.lmcacheController.port }}
+              containerPort: {{ $.Values.lmcacheController.port }}
               protocol: TCP
             - name: pull
-              containerPort: {{ .Values.lmcacheController.pullPort }}
+              containerPort: {{ $.Values.lmcacheController.pullPort }}
               protocol: TCP
             - name: reply
-              containerPort: {{ .Values.lmcacheController.replyPort }}
+              containerPort: {{ $.Values.lmcacheController.replyPort }}
               protocol: TCP
           livenessProbe:
             tcpSocket:
-              port: {{ .Values.lmcacheController.port }}
+              port: {{ $.Values.lmcacheController.port }}
             initialDelaySeconds: 15
             periodSeconds: 30
             failureThreshold: 3
           readinessProbe:
             tcpSocket:
-              port: {{ .Values.lmcacheController.port }}
+              port: {{ $.Values.lmcacheController.port }}
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 5
           resources:
-{{ toYaml .Values.lmcacheController.resources | indent 12 }}
+{{ toYaml $.Values.lmcacheController.resources | indent 12 }}
+{{- end }}
 {{- end }}
