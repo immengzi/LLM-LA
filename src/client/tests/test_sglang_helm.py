@@ -44,7 +44,7 @@ def test_default_render_remains_vllm():
 
 
 def test_sglang_render_uses_pinned_nvidia_profile():
-    result = _render('--set', 'hardware=nvidia', 
+    result = _render('--set', 'hardware=nvidia',
         "--set",
         "global.imageRegistry=",
         "--set",
@@ -79,7 +79,7 @@ def test_sglang_render_uses_pinned_nvidia_profile():
     assert 'prometheus.io/port: "8200"' in manifest
 
 def test_sglang_models_list_uses_component_engine_selector():
-    result = _render('--set', 'hardware=nvidia', 
+    result = _render('--set', 'hardware=nvidia',
         "--set",
         "engine.type=sglang",
         "--set-json",
@@ -103,7 +103,7 @@ def test_sglang_models_list_uses_component_engine_selector():
 
 
 def test_sglang_helper_fallback_uses_compatible_cuda_image():
-    result = _render('--set', 'hardware=nvidia', 
+    result = _render('--set', 'hardware=nvidia',
         "--set",
         "global.imageRegistry=",
         "--set",
@@ -116,7 +116,7 @@ def test_sglang_helper_fallback_uses_compatible_cuda_image():
 
 
 def test_sglang_go_render_uses_go_images_env_probes_and_resources():
-    result = _render('--set', 'hardware=nvidia', 
+    result = _render('--set', 'hardware=nvidia',
         "--set",
         "global.imageRegistry=",
         "--set",
@@ -198,7 +198,7 @@ def test_sglang_go_render_uses_go_images_env_probes_and_resources():
 
 
 def test_sglang_health_generate_is_readiness_only_and_keda_is_engine_aware():
-    result = _render('--set', 'hardware=nvidia', 
+    result = _render('--set', 'hardware=nvidia',
         "--set",
         "global.imageRegistry=",
         "--set",
@@ -222,7 +222,7 @@ def test_sglang_health_generate_is_readiness_only_and_keda_is_engine_aware():
 
 
 def test_sglang_is_a_first_class_keda_signal():
-    result = _render('--set', 'hardware=nvidia', 
+    result = _render('--set', 'hardware=nvidia',
         "--namespace",
         "tenant-a",
         "--set",
@@ -265,7 +265,7 @@ def test_sglang_keda_keeps_router_queue_and_custom_query_paths():
         'model="served-model"}'
     ) in queue.stdout
 
-    custom = _render('--set', 'hardware=nvidia', 
+    custom = _render('--set', 'hardware=nvidia',
         "--set",
         "engine.type=sglang",
         "--set",
@@ -281,7 +281,7 @@ def test_sglang_keda_keeps_router_queue_and_custom_query_paths():
 
 
 def test_sglang_engine_liveness_restarts_quickly_after_long_startup():
-    result = _render('--set', 'hardware=nvidia', 
+    result = _render('--set', 'hardware=nvidia',
         "--set",
         "engine.type=sglang",
         "--set",
@@ -481,7 +481,7 @@ def test_helm_allows_multi_model_sglang_when_prefix_hashing_is_disabled():
         {"name": "a", "engine": "sglang", "modelSubPath": "a"},
         {"name": "b", "engine": "sglang", "modelSubPath": "b"},
     ]
-    result = _render('--set', 'hardware=nvidia', 
+    result = _render('--set', 'hardware=nvidia',
         "--set",
         "engine.type=sglang",
         "--set",
@@ -497,7 +497,7 @@ def test_helm_allows_multi_model_sglang_when_router_is_not_deployed():
         {"name": "a", "engine": "sglang", "modelSubPath": "a"},
         {"name": "b", "engine": "sglang", "modelSubPath": "b"},
     ]
-    result = _render('--set', 'hardware=nvidia', 
+    result = _render('--set', 'hardware=nvidia',
         "--set",
         "engine.type=sglang",
         "--set",
@@ -513,7 +513,7 @@ def test_helm_measurement_reenables_single_sglang_model_boundary():
         {"name": "a", "engine": "sglang", "modelSubPath": "a"},
         {"name": "b", "engine": "sglang", "modelSubPath": "b"},
     ]
-    result = _render('--set', 'hardware=nvidia', 
+    result = _render('--set', 'hardware=nvidia',
         "--set",
         "engine.type=sglang",
         "--set",

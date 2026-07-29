@@ -1,14 +1,14 @@
 # tests/test_upstream_error_capture.py
 # -*- coding: utf-8 -*-
-"""Sidecar-side tests for vLLM non-2xx capture (decisive first hop).
+"""Sidecar-side tests for inference-engine non-2xx capture (decisive first hop).
 
-The sidecar is where the original vLLM status + body would otherwise be dropped
-and replaced with the generic "[vLLM error N]" string. These tests drive one
-VLLMWorker iteration against a fake vLLM response and assert what the worker
+The sidecar is where the original engine status + body would otherwise be dropped
+and replaced with the generic "[inference error N]" string. These tests drive one
+VLLMWorker iteration against a fake engine response and assert what the worker
 submits back to the router:
 
   * upstream 4xx  -> result["upstream_error"] carries status + body + content_type
-  * upstream 5xx  -> legacy "[vLLM error N]" marker preserved (out of scope)
+  * upstream 5xx  -> legacy "[inference error N]" marker preserved (out of scope)
 """
 import time
 
@@ -105,6 +105,7 @@ def test_sidecar_captures_upstream_4xx(monkeypatch):
     assert "196609" in ue["body"]
     # The generic marker must NOT leak into the output text.
     assert result.get("output") == ""
+    assert "inference error" not in str(result.get("output"))
     assert "vLLM error" not in str(result.get("output"))
 
 
@@ -114,4 +115,4 @@ def test_sidecar_5xx_keeps_legacy_marker(monkeypatch):
 
     # 5xx is intentionally out of scope: no passthrough marker, legacy string kept.
     assert "upstream_error" not in result
-    assert result.get("output") == "[vLLM error 503]"
+    assert result.get("output") == "[inference error 503]"
