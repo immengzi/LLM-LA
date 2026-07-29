@@ -8,10 +8,13 @@ FROM vllm-arm64:vllm
 # (e.g. bz), set to the cluster proxy where required (e.g. yz).
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
+ARG NO_PROXY
 ENV http_proxy=${HTTP_PROXY} \
     https_proxy=${HTTPS_PROXY} \
     HTTP_PROXY=${HTTP_PROXY} \
-    HTTPS_PROXY=${HTTPS_PROXY}
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    NO_PROXY=${NO_PROXY} \
+    no_proxy=${NO_PROXY}
 # -------------------------------------------------------------
 
 # Workdir where we'll place the service code
@@ -33,7 +36,9 @@ RUN pip install --no-cache-dir \
 ENV http_proxy="" \
     https_proxy="" \
     HTTP_PROXY="" \
-    HTTPS_PROXY=""
+    HTTPS_PROXY="" \
+    NO_PROXY="" \
+    no_proxy=""
 # ---------------------------------------------
 
 # Environment defaults (override via k8s if needed)
