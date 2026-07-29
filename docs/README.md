@@ -45,6 +45,7 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 
 | Doc | Description |
 |-----|-------------|
+| [sglang.md](deployment/sglang.md) | Deploy SGLang via `engine.type` (composes with the `hardware` switch) |
 | [multi-model.md](deployment/multi-model.md) | Serving multiple models from one cluster |
 | [gpu.md](deployment/gpu.md) | Deploy on NVIDIA GPUs: device plugin, RuntimeClass, and the `hardware` switch |
 | [data-parallel-lws.md](deployment/data-parallel-lws.md) | Data parallel + EP via LeaderWorkerSet |

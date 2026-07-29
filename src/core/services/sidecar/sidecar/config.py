@@ -13,6 +13,15 @@ class SidecarConfig:
     # Where the router-service lives
     ROUTER_URL: str = "http://router-service:8080"
 
+    # Generic inference endpoint fields. The VLLM_* aliases below are retained
+    # for existing sidecar code and deployments.
+    INFERENCE_ENGINE: str = "vllm"
+    INFERENCE_URL: str = "http://127.0.0.1:8000"
+    INFERENCE_HOST: str = "127.0.0.1"
+    INFERENCE_HEALTH_PATH: str = "/health"
+    INFERENCE_READINESS_PATH: str = ""
+    INFERENCE_HEALTH_TIMEOUT_S: float = 2.0
+
     # Where vLLM OpenAI-compatible API lives (inside the same pod)
     VLLM_URL: str = "http://127.0.0.1:8000"
 
@@ -32,6 +41,14 @@ class SidecarConfig:
 
     VLLM_HOST: str = "127.0.0.1"
     VLLM_SUB_PORT: int = 5557
+    KV_EVENT_PORT: int = 5557
+    KV_EVENT_REPLAY_PORT: int = 5558
+    KV_EVENT_TOPIC: str = "kv@"
+    KV_EVENT_DISCOVERY_ENABLED: bool = True
+    KV_EVENT_DISCOVERY_TIMEOUT_S: float = 2.0
+    KV_EVENT_EXPECTED_PAGE_SIZE: int = 16
+    KV_EVENT_REDIS_PING_INTERVAL_S: float = 5.0
+    KV_EVENT_REDIS_PING_TIMEOUT_S: float = 1.0
 
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
@@ -50,6 +67,7 @@ class SidecarConfig:
     # ------------------------------------------------
 
     ROUTER_PULL_TIMEOUT_S: float = 1.0
+    INFERENCE_TIMEOUT_S: float = 30.0
     VLLM_TIMEOUT_S: float = 30.0
 
     # ------------------------------------------------
@@ -197,7 +215,24 @@ def get_config() -> SidecarConfig:
     # Endpoints
     # ------------------------------------------------
     cfg.ROUTER_URL = os.getenv("ROUTER_URL", cfg.ROUTER_URL)
-    cfg.VLLM_URL = os.getenv("VLLM_URL", cfg.VLLM_URL)
+    cfg.INFERENCE_ENGINE = os.getenv(
+        "INFERENCE_ENGINE", os.getenv("VLLM_ENGINE", cfg.INFERENCE_ENGINE)
+    ).strip().lower()
+    cfg.INFERENCE_URL = os.getenv(
+        "INFERENCE_URL", os.getenv("VLLM_URL", cfg.INFERENCE_URL)
+    )
+    # Keep the legacy alias synchronized because existing request code reads it.
+    cfg.VLLM_URL = cfg.INFERENCE_URL
+    cfg.INFERENCE_HEALTH_PATH = os.getenv(
+        "INFERENCE_HEALTH_PATH",
+        os.getenv("VLLM_HEALTH_PATH", cfg.INFERENCE_HEALTH_PATH),
+    )
+    cfg.INFERENCE_READINESS_PATH = os.getenv(
+        "INFERENCE_READINESS_PATH", cfg.INFERENCE_READINESS_PATH
+    )
+    cfg.INFERENCE_HEALTH_TIMEOUT_S = float(
+        os.getenv("INFERENCE_HEALTH_TIMEOUT_S", cfg.INFERENCE_HEALTH_TIMEOUT_S)
+    )
     cfg.MODEL_NAME = os.getenv("MODEL_NAME", cfg.MODEL_NAME)
 
     # ------------------------------------------------
@@ -210,8 +245,54 @@ def get_config() -> SidecarConfig:
     # ------------------------------------------------
     # KV sync
     # ------------------------------------------------
-    cfg.VLLM_HOST = os.getenv("VLLM_HOST", cfg.VLLM_HOST)
-    cfg.VLLM_SUB_PORT = int(os.getenv("VLLM_SUB_PORT", cfg.VLLM_SUB_PORT))
+    cfg.INFERENCE_HOST = os.getenv(
+        "INFERENCE_HOST", os.getenv("VLLM_HOST", cfg.INFERENCE_HOST)
+    )
+    cfg.VLLM_HOST = cfg.INFERENCE_HOST
+    cfg.KV_EVENT_PORT = int(
+        os.getenv("KV_EVENT_PORT", os.getenv("VLLM_SUB_PORT", cfg.KV_EVENT_PORT))
+    )
+    cfg.VLLM_SUB_PORT = cfg.KV_EVENT_PORT
+    cfg.KV_EVENT_REPLAY_PORT = int(
+        os.getenv(
+            "KV_EVENT_REPLAY_PORT",
+            os.getenv("VLLM_REPLAY_PORT", cfg.KV_EVENT_REPLAY_PORT),
+        )
+    )
+    cfg.KV_EVENT_TOPIC = os.getenv(
+        "KV_EVENT_TOPIC", os.getenv("VLLM_EVENT_TOPIC", cfg.KV_EVENT_TOPIC)
+    )
+    cfg.KV_EVENT_DISCOVERY_ENABLED = (
+        os.getenv(
+            "KV_EVENT_DISCOVERY_ENABLED",
+            str(cfg.KV_EVENT_DISCOVERY_ENABLED),
+        ).lower()
+        == "true"
+    )
+    cfg.KV_EVENT_DISCOVERY_TIMEOUT_S = float(
+        os.getenv(
+            "KV_EVENT_DISCOVERY_TIMEOUT_S",
+            cfg.KV_EVENT_DISCOVERY_TIMEOUT_S,
+        )
+    )
+    cfg.KV_EVENT_EXPECTED_PAGE_SIZE = int(
+        os.getenv(
+            "KV_EVENT_EXPECTED_PAGE_SIZE",
+            cfg.KV_EVENT_EXPECTED_PAGE_SIZE,
+        )
+    )
+    cfg.KV_EVENT_REDIS_PING_INTERVAL_S = float(
+        os.getenv(
+            "KV_EVENT_REDIS_PING_INTERVAL_S",
+            cfg.KV_EVENT_REDIS_PING_INTERVAL_S,
+        )
+    )
+    cfg.KV_EVENT_REDIS_PING_TIMEOUT_S = float(
+        os.getenv(
+            "KV_EVENT_REDIS_PING_TIMEOUT_S",
+            cfg.KV_EVENT_REDIS_PING_TIMEOUT_S,
+        )
+    )
     cfg.REDIS_HOST = os.getenv("REDIS_HOST", cfg.REDIS_HOST)
     cfg.REDIS_PORT = int(os.getenv("REDIS_PORT", cfg.REDIS_PORT))
     cfg.CONTAINER_NAME = os.getenv("CONTAINER_NAME", cfg.CONTAINER_NAME)
@@ -227,7 +308,13 @@ def get_config() -> SidecarConfig:
     # Timeouts
     # ------------------------------------------------
     cfg.ROUTER_PULL_TIMEOUT_S = float(os.getenv("ROUTER_PULL_TIMEOUT_S", cfg.ROUTER_PULL_TIMEOUT_S))
-    cfg.VLLM_TIMEOUT_S = float(os.getenv("VLLM_TIMEOUT_S", cfg.VLLM_TIMEOUT_S))
+    cfg.INFERENCE_TIMEOUT_S = float(
+        os.getenv(
+            "INFERENCE_TIMEOUT_S",
+            os.getenv("VLLM_TIMEOUT_S", cfg.INFERENCE_TIMEOUT_S),
+        )
+    )
+    cfg.VLLM_TIMEOUT_S = cfg.INFERENCE_TIMEOUT_S
     cfg.ROUTER_RESULT_TIMEOUT_S = float(os.getenv("ROUTER_RESULT_TIMEOUT_S", cfg.ROUTER_RESULT_TIMEOUT_S))
 
     # ------------------------------------------------

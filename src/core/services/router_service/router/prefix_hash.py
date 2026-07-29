@@ -26,6 +26,8 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import cbor2
 
+from .hash_backends import sglang_v0_5_15
+
 logger = logging.getLogger("router.prefix_hash")
 
 # A JSON/CBOR-serialisable value as handled by the router hash path.
@@ -145,6 +147,21 @@ def compute_block_hashes_int(token_ids: List[int], block_size: int) -> List[int]
         parent = digest
         start += block_size
     return out
+
+
+def compute_block_hashes_int_for_backend(
+    token_ids: List[int],
+    block_size: int,
+    *,
+    backend: str = "vllm",
+) -> List[int]:
+    """Dispatch token hashing while keeping vLLM as the public default."""
+    normalized_backend = str(backend or "vllm").strip().lower()
+    if normalized_backend == "vllm":
+        return compute_block_hashes_int(token_ids, block_size)
+    if normalized_backend == "sglang":
+        return sglang_v0_5_15.compute_page_hashes_int(token_ids, block_size)
+    raise ValueError(f"unsupported KV hash backend: {backend!r}")
 
 
 _TOKENIZER = None
@@ -274,12 +291,13 @@ def compute_request_block_hashes_with_len(
     prompt: Optional[str] = None,
     tools: Optional[list] = None,
     block_size: int,
+    backend: str = "vllm",
 ) -> Tuple[List[int], int]:
     """Tokenize messages/prompt once and return (full-block hashes, token count).
 
     The token count is the exact rendered input length (ISL), needed for
     token/KV-block-budgeted pull sizing. Returns ([], 0) when there is nothing
-    to tokenize.
+    to tokenize. ``backend`` selects the engine hash contract (vllm|sglang).
     """
     canon_tools = canonicalise_tools_for_boom(tools) if tools and canonicalise_tools_enabled() else tools
 
@@ -298,7 +316,14 @@ def compute_request_block_hashes_with_len(
     else:
         return [], 0
 
-    return compute_block_hashes_int(token_ids, block_size), len(token_ids)
+    return (
+        compute_block_hashes_int_for_backend(
+            token_ids,
+            block_size,
+            backend=backend,
+        ),
+        len(token_ids),
+    )
 
 
 def compute_request_block_hashes_int(
@@ -307,12 +332,14 @@ def compute_request_block_hashes_int(
     prompt: Optional[str] = None,
     tools: Optional[list] = None,
     block_size: int,
+    backend: str = "vllm",
 ) -> List[int]:
-    """Tokenize messages/prompt and return vLLM-compatible full-block hashes."""
+    """Tokenize messages/prompt and return engine-compatible full-block hashes."""
     hashes, _ = compute_request_block_hashes_with_len(
         messages=messages,
         prompt=prompt,
         tools=tools,
         block_size=block_size,
+        backend=backend,
     )
     return hashes

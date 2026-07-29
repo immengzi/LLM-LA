@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -22,13 +21,17 @@ import (
 
 func main() {
 	cfg := sidecar.LoadConfig()
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("[main] invalid configuration: %v", err)
+	}
 	endpointID := cfg.ContainerName
 
 	log.Printf("=== Go Sidecar ===")
 	log.Printf("  mode            = %s", cfg.SidecarMode)
 	log.Printf("  endpoint_id     = %s", endpointID)
 	log.Printf("  router_url      = %s", cfg.RouterURL)
-	log.Printf("  vllm_url        = %s", cfg.VLLMURL)
+	log.Printf("  engine          = %s", cfg.InferenceEngine)
+	log.Printf("  inference_url   = %s", cfg.InferenceURL)
 	log.Printf("  model_name      = %s", cfg.ModelName)
 	log.Printf("  batch_size      = %d", cfg.BatchSize)
 	log.Printf("  sidecar_port    = %d", cfg.SidecarPort)
@@ -77,7 +80,7 @@ func main() {
 	sidecar.WorkersTotal.WithLabelValues(endpointID).Set(float64(totalWorkers))
 
 	for i := 0; i < totalWorkers; i++ {
-		w := sidecar.NewVLLMWorker(i, cfg, queue, poster, puller, endpointID, &busyCount)
+		w := sidecar.NewInferenceWorker(i, cfg, queue, poster, puller, endpointID, &busyCount)
 		w.Start()
 	}
 
@@ -96,63 +99,24 @@ func main() {
 		cfg.ForceIgnoreEos, cfg.StreamingMode, cfg.SidecarPort, endpointID)
 
 	r := chi.NewRouter()
-
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		st := queue.State()
-		vllmOK := puller == nil || puller.VLLMHealthy()
-		status := "ok"
-		httpCode := http.StatusOK
-		if !vllmOK {
-			status = "vllm_unhealthy"
-			httpCode = http.StatusServiceUnavailable
+	prober := sidecar.NewEngineProber(cfg)
+	healthHandler := func(readiness bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			body, code := sidecar.HealthResponse(r.Context(), cfg, queue, puller, kvSub, prober, readiness)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
+			json.NewEncoder(w).Encode(body)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(httpCode)
-		payload := map[string]interface{}{
-			"status":       status,
-			"vllm_healthy": vllmOK,
-			"queue_len":    st.Pending,
-			"inflight":     st.Inflight,
-			"logical":      st.Pending + st.Inflight,
-		}
-		if kv, ok := sidecar.GetCachedKvUsage(); ok {
-			payload["kv_usage"] = kv
-		}
-		json.NewEncoder(w).Encode(payload)
-	})
+	}
+	r.Get("/health", healthHandler(false))
+	r.Get("/ready", healthHandler(true))
 	r.Handle("/metrics", promhttp.Handler())
 
-	// Cached vLLM readiness probe for the push gate. Uses the pull worker's
-	// signal when present (pull mode); otherwise a cached off-path probe
-	// (push / central-push, where there is no RouterPullWorker).
-	var (
-		vllmProbeMu      sync.Mutex
-		vllmLastProbe    time.Time
-		vllmHealthyCache = true
-	)
-	vllmHealthyCached := func() bool {
+	engineHealthyCached := func(r *http.Request) bool {
 		if puller != nil {
-			return puller.VLLMHealthy()
+			return puller.EngineHealthy()
 		}
-		vllmProbeMu.Lock()
-		if time.Since(vllmLastProbe) < time.Second {
-			cached := vllmHealthyCache
-			vllmProbeMu.Unlock()
-			return cached
-		}
-		vllmLastProbe = time.Now() // set before probing to avoid a stampede
-		vllmProbeMu.Unlock()
-
-		c := &http.Client{Timeout: 2 * time.Second}
-		ok := false
-		if resp, err := c.Get(cfg.VLLMURL + "/health"); err == nil {
-			ok = resp.StatusCode == 200
-			resp.Body.Close()
-		}
-		vllmProbeMu.Lock()
-		vllmHealthyCache = ok
-		vllmProbeMu.Unlock()
-		return ok
+		return prober.Probe(r.Context(), true)
 	}
 
 	r.Post("/push", func(w http.ResponseWriter, r *http.Request) {
@@ -171,10 +135,14 @@ func main() {
 
 		// Readiness + backpressure gate (central-push / push): give the router a
 		// signal to requeue instead of overrunning a warming/full pod.
-		if !vllmHealthyCached() {
+		if !engineHealthyCached(r) {
+			reason := "engine_unhealthy"
+			if cfg.InferenceEngine == "vllm" {
+				reason = "vllm_unhealthy"
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			json.NewEncoder(w).Encode(map[string]any{"status": "unavailable", "reason": "vllm_unhealthy"})
+			json.NewEncoder(w).Encode(map[string]any{"status": "unavailable", "reason": reason})
 			return
 		}
 		if cap := cfg.PullCap(); cap > 0 && logicalBefore >= cap {

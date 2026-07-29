@@ -9,10 +9,10 @@ import uvicorn
 from .config import get_config
 from .local_queue import LocalQueue
 from .router_client import RouterPullWorker
-from .vllm_client import VLLMWorker
+from .vllm_client import InferenceWorker
 from .result_poster import ResultPoster
 from .zmq_subscriber import KVSubscriber
-from .api import bind_local_queue, bind_pull_worker
+from .api import bind_kv_subscriber, bind_local_queue, bind_pull_worker
 from .slo_backpressure import SloBackpressureMonitor
 from .kv_usage import KvUsageMonitor, bind_kv_usage_monitor
 from .metrics import (
@@ -116,7 +116,7 @@ def main():
     result_poster.start()
 
     # ------------------------------------------------------------
-    # vLLM workers
+    # Inference workers
     #
     # Total workers = BATCH_SIZE + PREFETCH.  BATCH_SIZE workers
     # will be actively running inside vLLM; the PREFETCH extras
@@ -124,20 +124,21 @@ def main():
     # stalls waiting for the sidecar to pull + dispatch.
     # ------------------------------------------------------------
     total_workers = _cfg.BATCH_SIZE + _cfg.PREFETCH
-    vllm_workers = []
+    inference_workers = []
     for _ in range(total_workers):
-        w = VLLMWorker(
+        worker = InferenceWorker(
             local_q,
             pull_worker=pull_worker,
             result_poster=result_poster,
         )
-        w.start()
-        vllm_workers.append(w)
+        worker.start()
+        inference_workers.append(worker)
 
     # Expose configured worker capacity
     set_sidecar_workers_total(endpoint_id, total_workers)
 
     kv_sub = KVSubscriber()
+    bind_kv_subscriber(kv_sub)
 
     stop_evt = threading.Event()
 
@@ -191,8 +192,8 @@ def main():
         if pull_worker:
             pull_worker.stop()
 
-        for w in vllm_workers:
-            w.stop()
+        for worker in inference_workers:
+            worker.stop()
 
         result_poster.stop()
 

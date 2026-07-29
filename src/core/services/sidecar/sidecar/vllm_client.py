@@ -4,6 +4,7 @@ _VLLM_CLIENT_VERSION = "2026-05-13-streaming-endpoint-id"
 
 import time
 import threading
+from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
 
 import requests
@@ -15,7 +16,44 @@ from .result_poster import ResultPoster
 from .metrics import inc_completed, set_sidecar_workers_busy
 
 _cfg = get_config()
-print(f"[sidecar] vllm_client.py version={_VLLM_CLIENT_VERSION}")
+print(f"[sidecar] inference client version={_VLLM_CLIENT_VERSION}")
+
+
+@dataclass(frozen=True)
+class InferenceEngineProfile:
+    """Engine-specific request policy for the shared OpenAI chat API."""
+
+    name: str
+    unsupported_fields: frozenset[str] = frozenset()
+
+    def adapt_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.unsupported_fields:
+            return payload
+        return {
+            key: value
+            for key, value in payload.items()
+            if key not in self.unsupported_fields
+        }
+
+
+_ENGINE_PROFILES = {
+    # No filtering: this keeps the legacy vLLM payload exactly unchanged.
+    "vllm": InferenceEngineProfile(name="vllm"),
+    # SGLang v0.5.15 accepts the OpenAI chat fields used by the sidecar,
+    # including its documented min_tokens extension.
+    "sglang": InferenceEngineProfile(name="sglang"),
+}
+
+
+def get_engine_profile(engine: str) -> InferenceEngineProfile:
+    normalized = str(engine).strip().lower()
+    try:
+        return _ENGINE_PROFILES[normalized]
+    except KeyError as exc:
+        supported = ", ".join(sorted(_ENGINE_PROFILES))
+        raise ValueError(
+            f"Unsupported inference engine {engine!r}; expected one of: {supported}"
+        ) from exc
 
 # ------------------------------------------------------------
 # process-wide busy counter for sidecar workers
@@ -46,7 +84,7 @@ def _merge_tool_call_delta(
 
     The sidecar forwards per-chunk deltas unchanged to the router for streaming
     clients, but it also needs a complete tool_calls list for non-streaming
-    clients when STREAMING_MODE=true and vLLM is always queried via SSE.
+    clients when STREAMING_MODE=true and the engine is always queried via SSE.
     """
     if not isinstance(tool_calls, list):
         return
@@ -106,11 +144,11 @@ def _complete_tool_calls(acc: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]
     return out
 
 
-class VLLMWorker:
+class InferenceWorker:
     """
     Worker loop:
       - Pop from local queue
-      - POST to vLLM /v1/chat/completions
+      - POST to the inference engine's /v1/chat/completions endpoint
       - Enqueue result for async posting back to router /result (ResultPoster)
 
     Trace fields added (if TRACE_ENABLED):
@@ -137,6 +175,7 @@ class VLLMWorker:
         self.local_q = local_q
         self._pull_worker = pull_worker
         self._result_poster = result_poster
+        self._profile = get_engine_profile(_cfg.INFERENCE_ENGINE)
 
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
@@ -149,20 +188,60 @@ class VLLMWorker:
         self._stop_evt.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        print("[sidecar] VLLMWorker started")
+        print("[sidecar] InferenceWorker started")
 
     def stop(self):
         self._stop_evt.set()
         if self._thread:
             self._thread.join(timeout=2.0)
             self._thread = None
-        print("[sidecar] VLLMWorker stopped")
+        print("[sidecar] InferenceWorker stopped")
+
+    def _build_payload(
+        self,
+        prompt: str,
+        meta: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build one OpenAI chat request, then apply engine policy."""
+        chat_req = meta.get("__chat_request__")
+        if chat_req and isinstance(chat_req, dict):
+            payload = dict(chat_req)
+            payload["model"] = _cfg.MODEL_NAME
+            payload["stream"] = False
+        else:
+            max_tokens = meta.get("max_tokens", 128)
+            temperature = meta.get("temperature", 0.0)
+
+            payload = {
+                "model": _cfg.MODEL_NAME,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            # Preserve the historical vLLM request exactly.  SGLang, however,
+            # must use its tokenizer's configured default unless the caller
+            # explicitly supplied an override; silently forcing False here can
+            # make engine tokenization diverge from the router's KV hash.
+            if self._profile.name == "vllm" or "enable_thinking" in meta:
+                payload["chat_template_kwargs"] = {
+                    "enable_thinking": bool(meta.get("enable_thinking", False)),
+                }
+            if "min_tokens" in meta:
+                payload["min_tokens"] = int(meta["min_tokens"])
+
+        if meta.get("ignore_eos"):
+            payload["ignore_eos"] = bool(meta["ignore_eos"])
+
+        if _cfg.FORCE_IGNORE_EOS:
+            payload["ignore_eos"] = True
+
+        return self._profile.adapt_payload(payload)
 
     # ------------------------------------------------------------
 
     def _loop(self):
         session = requests.Session()
-        vllm_url = f"{_cfg.VLLM_URL}/v1/chat/completions"
+        inference_url = f"{_cfg.INFERENCE_URL}/v1/chat/completions"
 
         # Keep router_result_url only for fallback mode (if poster not provided)
         router_result_url = f"{_cfg.ROUTER_URL}/result"
@@ -209,38 +288,12 @@ class VLLMWorker:
 
                 try:
                     # ----------------------------------------------------
-                    # Build vLLM request
+                    # Build inference request
                     # ----------------------------------------------------
-                    chat_req = meta.get("__chat_request__")
-                    if chat_req and isinstance(chat_req, dict):
-                        payload = dict(chat_req)
-                        payload["model"] = _cfg.MODEL_NAME
-                        payload["stream"] = False
-                    else:
-                        max_tokens = meta.get("max_tokens", 128)
-                        temperature = meta.get("temperature", 0.0)
-                        enable_thinking = bool(meta.get("enable_thinking", False))
-
-                        payload: Dict[str, Any] = {
-                            "model": _cfg.MODEL_NAME,
-                            "messages": [{"role": "user", "content": prompt}],
-                            "max_tokens": max_tokens,
-                            "temperature": temperature,
-                            "chat_template_kwargs": {
-                                "enable_thinking": enable_thinking,
-                            },
-                        }
-                        if "min_tokens" in meta:
-                            payload["min_tokens"] = int(meta["min_tokens"])
-
-                    if meta.get("ignore_eos"):
-                        payload["ignore_eos"] = bool(meta["ignore_eos"])
-
-                    if _cfg.FORCE_IGNORE_EOS:
-                        payload["ignore_eos"] = True
+                    payload = self._build_payload(prompt, meta)
 
                     # ----------------------------------------------------
-                    # Trace: vLLM send timestamp
+                    # Legacy trace key retained for compatibility.
                     # ----------------------------------------------------
                     if getattr(_cfg, "TRACE_ENABLED", False):
                         tr = dict(meta.get("__trace__") or {})
@@ -248,7 +301,7 @@ class VLLMWorker:
                         meta["__trace__"] = tr
 
                     # ----------------------------------------------------
-                    # Call vLLM
+                    # Call inference engine
                     # ----------------------------------------------------
                     use_stream = _cfg.STREAMING_MODE
                     if use_stream:
@@ -260,7 +313,7 @@ class VLLMWorker:
                         _mt = payload.get("min_tokens", "MISSING")
                         _mx = payload.get("max_tokens", "MISSING")
                         print(
-                            f"[sidecar] vLLM send req_id={req_id} model={_cfg.MODEL_NAME} "
+                            f"[sidecar] inference send req_id={req_id} model={_cfg.MODEL_NAME} "
                             f"ignore_eos={_eos} min_tokens={_mt} max_tokens={_mx} "
                             f"stream={use_stream}"
                         )
@@ -275,7 +328,7 @@ class VLLMWorker:
 
                     if use_stream:
                         # --------------------------------------------------
-                        # Streaming path: SSE from vLLM, accumulate locally
+                        # Streaming path: SSE from engine, accumulate locally
                         # and optionally forward chunks to router
                         # --------------------------------------------------
                         router_chunk_url = f"{_cfg.ROUTER_URL}/result_chunk"
@@ -283,17 +336,17 @@ class VLLMWorker:
 
                         t_vllm_send = time.time()
                         resp = session.post(
-                            vllm_url,
+                            inference_url,
                             json=payload,
-                            timeout=_cfg.VLLM_TIMEOUT_S,
+                            timeout=_cfg.INFERENCE_TIMEOUT_S,
                             stream=True,
                         )
 
                         if not resp.ok:
-                            print(f"[sidecar] vLLM stream error: {resp.status_code} {resp.text}")
+                            print(f"[sidecar] inference stream error: {resp.status_code} {resp.text}")
                             # Passthrough upstream 4xx (client-request errors, e.g.
                             # context-length overflow) verbatim so the gateway sees
-                            # vLLM's real status + body. 5xx keeps the legacy marker.
+                            # the engine's real status + body. 5xx keeps the legacy marker.
                             if 400 <= resp.status_code < 500:
                                 upstream_error = {
                                     "status": resp.status_code,
@@ -304,7 +357,7 @@ class VLLMWorker:
                                 }
                                 output_text = ""
                             else:
-                                output_text = f"[vLLM error {resp.status_code}]"
+                                output_text = f"[inference error {resp.status_code}]"
                             resp.close()
                         else:
                             import json as _json
@@ -399,7 +452,7 @@ class VLLMWorker:
                                         if is_final and usage:
                                             chunk_payload["usage"] = usage
                                         if is_final and not usage:
-                                            # Buffer: wait for the trailing usage chunk from vLLM
+                                            # Buffer for the trailing usage chunk.
                                             pending_final_payload = chunk_payload
                                         else:
                                             try:
@@ -459,9 +512,9 @@ class VLLMWorker:
                         # Non-streaming path (original)
                         # --------------------------------------------------
                         resp = session.post(
-                            vllm_url,
+                            inference_url,
                             json=payload,
-                            timeout=_cfg.VLLM_TIMEOUT_S,
+                            timeout=_cfg.INFERENCE_TIMEOUT_S,
                         )
 
                         try:
@@ -470,10 +523,10 @@ class VLLMWorker:
                             latency_s = None
 
                         if not resp.ok:
-                            print(f"[sidecar] vLLM error: {resp.status_code} {resp.text}")
+                            print(f"[sidecar] inference error: {resp.status_code} {resp.text}")
                             # Passthrough upstream 4xx (client-request errors, e.g.
                             # context-length overflow) verbatim so the gateway sees
-                            # vLLM's real status + body. 5xx keeps the legacy marker.
+                            # the engine's real status + body. 5xx keeps the legacy marker.
                             if 400 <= resp.status_code < 500:
                                 upstream_error = {
                                     "status": resp.status_code,
@@ -484,7 +537,7 @@ class VLLMWorker:
                                 }
                                 output_text = ""
                             else:
-                                output_text = f"[vLLM error {resp.status_code}]"
+                                output_text = f"[inference error {resp.status_code}]"
                         else:
                             try:
                                 data = resp.json()
@@ -506,13 +559,13 @@ class VLLMWorker:
                                     usage = data["usage"]
                             except Exception as e:
                                 print(f"[sidecar] parse error for req_id={req_id}: {e}")
-                                output_text = "[parse error in vLLM response]"
+                                output_text = "[parse error in inference response]"
                                 raw_vllm = None
                                 finish_reason = None
                                 usage = None
 
                     # ----------------------------------------------------
-                    # Trace: vLLM recv timestamp
+                    # Legacy trace key retained for compatibility.
                     # ----------------------------------------------------
                     if getattr(_cfg, "TRACE_ENABLED", False):
                         tr = dict(meta.get("__trace__") or {})
@@ -536,7 +589,7 @@ class VLLMWorker:
                         meta["__trace__"] = tr
 
                     # ----------------------------------------------------
-                    # Build result object (FULL vLLM info preserved)
+                    # Build result object (full engine response preserved)
                     # ----------------------------------------------------
                     result_obj: Dict[str, Any] = {
                         "output": output_text,
@@ -558,18 +611,18 @@ class VLLMWorker:
                         except Exception:
                             pass
 
-                    # HTTP-level latency as seen by sidecar -> vLLM
+                    # HTTP-level latency as seen by sidecar -> engine
                     if latency_s is not None:
                         result_obj["latency_s"] = latency_s
 
                     if ttft_s is not None:
                         result_obj["ttft_sidecar_s"] = ttft_s
 
-                    # Full raw OpenAI-compatible JSON from vLLM
+                    # Full raw OpenAI-compatible engine JSON
                     if raw_vllm is not None:
                         result_obj["raw"] = raw_vllm
 
-                    # Token usage from vLLM (prompt/completion/total)
+                    # Token usage from engine (prompt/completion/total)
                     if usage is not None:
                         result_obj["usage"] = usage
 
@@ -604,10 +657,14 @@ class VLLMWorker:
 
                     if _cfg.LOG_LEVEL == "debug":
                         _tok = usage.get("completion_tokens", "?") if usage else "?"
-                        print(f"[sidecar] vLLM done req_id={req_id} latency={latency_s:.2f}s tokens={_tok}")
+                        latency_log = f"{latency_s:.2f}s" if latency_s is not None else "unknown"
+                        print(
+                            f"[sidecar] inference done req_id={req_id} "
+                            f"latency={latency_log} tokens={_tok}"
+                        )
 
                     if self._result_poster is not None:
-                        # Non-blocking: avoids tying up vLLM workers on router backpressure / TCP resets
+                        # Non-blocking: avoids tying up workers on router backpressure.
                         self._result_poster.submit(result_payload)
                     else:
                         # Fallback: original synchronous behavior (kept for safety)
@@ -626,7 +683,7 @@ class VLLMWorker:
                             print(f"[sidecar] router /result failed for req_id={req_id}: {e}")
 
                 except Exception as e:
-                    print(f"[sidecar] vLLM request failed for req_id={req_id}: {e}")
+                    print(f"[sidecar] inference request failed for req_id={req_id}: {e}")
                     # Carry the top-level "endpoint" on the error path too — an
                     # errored request still occupied a slot, so the router must
                     # decrement its in-flight counter. Without this the counter
@@ -675,3 +732,7 @@ class VLLMWorker:
 
         finally:
             session.close()
+
+
+# Public compatibility alias for existing imports and callers.
+VLLMWorker = InferenceWorker

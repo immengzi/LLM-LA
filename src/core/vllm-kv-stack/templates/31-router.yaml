@@ -14,6 +14,7 @@ spec:
     metadata:
       labels:
         app: router-service
+        release: {{ .Release.Name | quote }}
     spec:
       serviceAccountName: kv-router-sa
 
@@ -60,11 +61,17 @@ spec:
               value: {{ .Release.Namespace | quote }}
             - name: LABEL_SELECTOR
             {{- if .Values.models }}
-              value: "component=vllm"
+              {{/* Neutral engine-workload label (was historically component=vllm). */}}
+              value: "component=engine"
             {{- else }}
-              value: "app=vllm-qwen"
+              {{- $legacyEngine := lower (.Values.engine.type | default "vllm") }}
+              value: {{ printf "app=%s-qwen" $legacyEngine | quote }}
             {{- end }}
             - name: VLLM_PORT
+              value: "8200"
+            - name: INFERENCE_ENGINE
+              value: {{ lower (.Values.engine.type | default "vllm") | quote }}
+            - name: INFERENCE_PORT
               value: "8200"
 
             - name: KV_WATCH_INTERVAL_S
@@ -77,6 +84,10 @@ spec:
             # ---- KV-block hash source (inline | external) ----
             - name: KV_HASH_SOURCE
               value: {{ quote (default "inline" .Values.router.hashSource) }}
+            - name: KV_HASH_BACKEND
+              value: {{ lower (.Values.router.hashBackend | default (.Values.engine.type | default "vllm")) | quote }}
+            - name: SGLANG_CONTRACT_VERSION
+              value: {{ .Values.sglang.contractVersion | default "0.5.15" | quote }}
             # ---- KV block-owner source for prefix/both routing (lookup | watcher) ----
             - name: KV_OWNER_SOURCE
               value: {{ quote (default "lookup" .Values.router.ownerSource) }}
@@ -91,7 +102,11 @@ spec:
             - name: KV_TOKENIZER_PATH
               value: "/model"
             - name: KV_BLOCK_SIZE
+              {{- if eq (lower (.Values.engine.type | default "vllm")) "sglang" }}
+              value: {{ quote (toString (.Values.sglang.pageSize | default 16)) }}
+              {{- else }}
               value: {{ quote (toString (.Values.router.kvBlockSize | default 128)) }}
+              {{- end }}
             - name: ROUTER_LOG_BLOCK_HASHES
               value: {{ ternary "true" "false" (.Values.router.logBlockHashes | default false) | quote }}
             - name: ROUTER_LOG_REQUEST_BODY
@@ -354,6 +369,8 @@ kind: Service
 metadata:
   name: router-service
   namespace: {{ .Release.Namespace }}
+  labels:
+    release: {{ .Release.Name | quote }}
 spec:
   type: NodePort
   selector:

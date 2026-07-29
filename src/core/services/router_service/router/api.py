@@ -22,7 +22,12 @@ from typing import Optional, Dict, Any, List, Tuple
 
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
-from .config import get_config, print_config, get_model_registry
+from .config import (
+    get_config,
+    print_config,
+    get_model_registry,
+    sglang_hash_contract_error,
+)
 from .models import (
     EnqueueRequest,  # required (used by /enqueue and /submit handler type)
     PullRequest,
@@ -167,13 +172,7 @@ class _ChatMessage(BaseModel):
         if isinstance(v, str):
             return v
         if isinstance(v, list):
-            parts = []
-            for block in v:
-                if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", ""))
-            return "\n".join(parts) if parts else ""
+            return v
         return str(v)
 
 class _ChatCompletionRequest(BaseModel):
@@ -629,6 +628,28 @@ async def _compute_block_hashes_external(
     return out
 
 
+def _record_kv_hash_skip(
+    meta: Dict[str, Any],
+    *,
+    req_id: str,
+    reason: str,
+    is_pull_mode: bool,
+) -> Dict[str, Any]:
+    """Record a fail-closed reason without rejecting or rerouting the request."""
+    meta["kv_hash_skip_reason"] = reason
+    if getattr(_cfg, "TRACE_ENABLED", False):
+        trace = dict(meta.get("__trace__") or {})
+        trace["router_block_hashes"] = None
+        trace["router_kv_hash_skip_reason"] = reason
+        meta["__trace__"] = trace
+    if is_pull_mode:
+        try:
+            router_state.update_meta(req_id, meta)
+        except Exception:
+            pass
+    return meta
+
+
 async def _maybe_register_kv_blocks(
     req_id: str,
     prompt: str,
@@ -685,6 +706,31 @@ async def _maybe_register_kv_blocks(
             if isinstance(maybe_tools, list):
                 tools = maybe_tools
 
+        if (
+            getattr(_cfg, "INFERENCE_ENGINE", "vllm") == "sglang"
+            or getattr(_cfg, "KV_HASH_BACKEND", "vllm") == "sglang"
+        ):
+            contract_error = sglang_hash_contract_error(_cfg)
+            if contract_error:
+                return _record_kv_hash_skip(
+                    m,
+                    req_id=req_id,
+                    reason=f"sglang_contract:{contract_error}",
+                    is_pull_mode=is_pull_mode,
+                )
+            chat_request = m.get("__chat_request__")
+            from .hash_backends import sglang_v0_5_15
+
+            eligibility_source = chat_request if isinstance(chat_request, dict) else m
+            ineligibility = sglang_v0_5_15.request_ineligibility(eligibility_source)
+            if ineligibility:
+                return _record_kv_hash_skip(
+                    m,
+                    req_id=req_id,
+                    reason=f"sglang_request_unsupported:{ineligibility}",
+                    is_pull_mode=is_pull_mode,
+                )
+
         if _cfg.KV_HASH_SOURCE == "external":
             block_hashes = await _compute_block_hashes_external(
                 prompt=prompt, messages=messages
@@ -701,6 +747,7 @@ async def _maybe_register_kv_blocks(
                 prompt=prompt if not messages else None,
                 tools=tools,
                 block_size=int(_cfg.KV_BLOCK_SIZE),
+                backend=getattr(_cfg, "KV_HASH_BACKEND", "vllm"),
             )
             _hash_src = "inline"
 
@@ -1985,7 +2032,18 @@ def _messages_to_prompt(messages: List[_ChatMessage]) -> str:
     parts = []
     for msg in messages:
         role = msg.role.strip().lower()
-        content = (msg.content or "").strip()
+        raw_content = msg.content or ""
+        if isinstance(raw_content, list):
+            content = "\n".join(
+                part
+                if isinstance(part, str)
+                else str(part.get("text", ""))
+                for part in raw_content
+                if isinstance(part, str)
+                or (isinstance(part, dict) and part.get("type") in ("text", "input_text"))
+            ).strip()
+        else:
+            content = str(raw_content).strip()
         if role == "system":
             parts.append(f"System: {content}")
         elif role == "user":
@@ -2248,6 +2306,161 @@ def _extract_tool_calls(result: Dict[str, Any]) -> Optional[List[Any]]:
     return None
 
 
+def _merge_emitted_tool_call_deltas(
+    acc: Dict[int, Dict[str, Any]],
+    tool_calls: Any,
+) -> None:
+    """Track exactly what tool-call fields have already reached the SSE client."""
+    if not isinstance(tool_calls, list):
+        return
+    for fallback_index, tool_call in enumerate(tool_calls):
+        if not isinstance(tool_call, dict):
+            continue
+        try:
+            index = int(tool_call.get("index", fallback_index))
+        except (TypeError, ValueError):
+            index = fallback_index
+        current = acc.setdefault(index, {"function": {"name": "", "arguments": ""}})
+        for field in ("id", "type"):
+            value = tool_call.get(field)
+            if isinstance(value, str) and value:
+                current[field] = value
+        function = tool_call.get("function")
+        if isinstance(function, dict):
+            current_function = current["function"]
+            for field in ("name", "arguments"):
+                value = function.get(field)
+                if isinstance(value, str):
+                    current_function[field] += value
+
+
+def _stream_error_sse(message: str, *, code: str = "stream_recovery_failed") -> str:
+    payload = {
+        "error": {
+            "message": message,
+            "type": "server_error",
+            "code": code,
+        }
+    }
+    return f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n"
+
+
+def _recover_sse_from_full_result(
+    *,
+    rid: str,
+    model: str,
+    created: int,
+    result: Dict[str, Any],
+    emitted_content: str,
+    emitted_tool_calls: Dict[int, Dict[str, Any]],
+    endpoint_id: Optional[str] = None,
+) -> str:
+    """Emit only deltas missing from an authoritative completed result."""
+    if result.get("error"):
+        return _stream_error_sse(
+            f"inference stream failed: {result['error']}",
+            code="inference_error",
+        )
+
+    output = result.get("output", "")
+    if not isinstance(output, str):
+        return _stream_error_sse("full result output is not text")
+    if not output.startswith(emitted_content):
+        return _stream_error_sse(
+            "full result content does not match the emitted stream prefix"
+        )
+
+    complete_tool_calls = _extract_tool_calls(result) or []
+    if emitted_tool_calls and not complete_tool_calls:
+        return _stream_error_sse(
+            "full result is missing tool calls already emitted by the stream"
+        )
+    if any(index < 0 or index >= len(complete_tool_calls) for index in emitted_tool_calls):
+        return _stream_error_sse(
+            "full result tool-call indexes do not match the emitted stream"
+        )
+
+    missing_tool_deltas: List[Dict[str, Any]] = []
+    for index, complete in enumerate(complete_tool_calls):
+        if not isinstance(complete, dict):
+            return _stream_error_sse("full result contains an invalid tool call")
+        emitted = emitted_tool_calls.get(
+            index, {"function": {"name": "", "arguments": ""}}
+        )
+        delta: Dict[str, Any] = {"index": index}
+        for field in ("id", "type"):
+            full_value = complete.get(field)
+            sent_value = emitted.get(field)
+            if sent_value is not None and sent_value != full_value:
+                return _stream_error_sse(
+                    f"full result tool call {index} has mismatched {field}"
+                )
+            if sent_value is None and isinstance(full_value, str) and full_value:
+                delta[field] = full_value
+
+        complete_function = complete.get("function")
+        if not isinstance(complete_function, dict):
+            return _stream_error_sse(
+                f"full result tool call {index} has no function"
+            )
+        emitted_function = emitted.get("function") or {}
+        function_delta: Dict[str, str] = {}
+        for field in ("name", "arguments"):
+            full_value = complete_function.get(field, "")
+            sent_value = emitted_function.get(field, "")
+            if not isinstance(full_value, str) or not isinstance(sent_value, str):
+                return _stream_error_sse(
+                    f"full result tool call {index} has invalid function {field}"
+                )
+            if not full_value.startswith(sent_value):
+                return _stream_error_sse(
+                    f"full result tool call {index} function {field} "
+                    "does not match the emitted stream prefix"
+                )
+            if len(full_value) > len(sent_value):
+                function_delta[field] = full_value[len(sent_value):]
+        if function_delta:
+            delta["function"] = function_delta
+        if len(delta) > 1:
+            missing_tool_deltas.append(delta)
+
+    chunk_id = f"chatcmpl-{rid}"
+    lines: List[str] = []
+
+    def _append_delta(delta: Dict[str, Any]) -> None:
+        chunk = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+        }
+        if endpoint_id:
+            chunk["system_fingerprint"] = str(endpoint_id)
+        lines.append(f"data: {json.dumps(chunk)}\n\n")
+
+    missing_content = output[len(emitted_content):]
+    if missing_content:
+        _append_delta({"content": missing_content})
+    for tool_delta in missing_tool_deltas:
+        _append_delta({"tool_calls": [tool_delta]})
+
+    finish_reason = result.get("finish_reason", "stop") or "stop"
+    final = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+        "usage": _passthrough_usage(result.get("usage") or {}),
+    }
+    if endpoint_id:
+        final["system_fingerprint"] = str(endpoint_id)
+    lines.append(f"data: {json.dumps(final)}\n\n")
+    lines.append("data: [DONE]\n\n")
+    return "".join(lines)
+
+
 def _build_sse_chunks_with_tool_calls(
     rid: str,
     model: str,
@@ -2447,6 +2660,8 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
             if the full result arrives before any chunks.
             """
             t_first_chunk: Optional[float] = None
+            emitted_content = ""
+            emitted_tool_calls: Dict[int, Dict[str, Any]] = {}
 
             def _emit_latency_metrics(u: Dict[str, Any], finish_reason: str = "stop") -> Dict[str, Any]:
                 t_end = time.time()
@@ -2481,12 +2696,29 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
             try:
                 first = preloaded_first
                 if first is None:
-                    yield "data: [DONE]\n\n"
+                    yield _stream_error_sse(
+                        "timed out waiting for the first inference stream event",
+                        code="stream_timeout",
+                    )
                     return
 
                 if first.get("__full_result__"):
                     result = first["__full_result__"]
+                    if not isinstance(result, dict):
+                        yield _stream_error_sse("full inference result is not an object")
+                        return
+                    if result.get("error"):
+                        yield _stream_error_sse(
+                            f"inference stream failed: {result['error']}",
+                            code="inference_error",
+                        )
+                        return
                     output_text = result.get("output", "")
+                    if not isinstance(output_text, str):
+                        yield _stream_error_sse(
+                            "full result output is not text"
+                        )
+                        return
                     finish_reason = result.get("finish_reason", "stop") or "stop"
                     u = result.get("usage") or {}
                     eid = result.get("endpoint_id")
@@ -2530,6 +2762,11 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
                 if isinstance(delta_tool_calls, list) and delta_tool_calls:
                     delta_payload["tool_calls"] = delta_tool_calls
                 if delta_payload:
+                    if delta_content:
+                        emitted_content += delta_content
+                    _merge_emitted_tool_call_deltas(
+                        emitted_tool_calls, delta_tool_calls
+                    )
                     c = {
                         "id": chunk_id, "object": "chat.completion.chunk",
                         "created": created, "model": req.model,
@@ -2559,11 +2796,34 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
                     try:
                         chunk = await asyncio.wait_for(chunk_q.get(), timeout=_cfg.RESULT_TIMEOUT_S)
                     except asyncio.TimeoutError:
-                        yield "data: [DONE]\n\n"
+                        yield _stream_error_sse(
+                            "timed out waiting for inference stream completion",
+                            code="stream_timeout",
+                        )
                         return
 
                     if chunk.get("__full_result__"):
-                        yield "data: [DONE]\n\n"
+                        result = chunk["__full_result__"]
+                        if not isinstance(result, dict):
+                            yield _stream_error_sse(
+                                "full inference result is not an object"
+                            )
+                            return
+                        eid = result.get("endpoint_id")
+                        if eid and not stream_endpoint_id:
+                            stream_endpoint_id = str(eid)
+                        fr = result.get("finish_reason", "stop") or "stop"
+                        u = result.get("usage") or {}
+                        _emit_latency_metrics(u, finish_reason=fr)
+                        yield _recover_sse_from_full_result(
+                            rid=rid,
+                            model=req.model,
+                            created=created,
+                            result=result,
+                            emitted_content=emitted_content,
+                            emitted_tool_calls=emitted_tool_calls,
+                            endpoint_id=stream_endpoint_id,
+                        )
                         return
 
                     eid = chunk.get("endpoint_id")
@@ -2578,6 +2838,11 @@ async def openai_chat_completions(req: _ChatCompletionRequest, request: Request)
                     if isinstance(delta_tool_calls, list) and delta_tool_calls:
                         delta_payload["tool_calls"] = delta_tool_calls
                     if delta_payload:
+                        if delta_content:
+                            emitted_content += delta_content
+                        _merge_emitted_tool_call_deltas(
+                            emitted_tool_calls, delta_tool_calls
+                        )
                         c = {
                             "id": chunk_id, "object": "chat.completion.chunk",
                             "created": created, "model": req.model,

@@ -133,3 +133,41 @@ clusters:
         cpuHash.ascendDriverMounts: false
         # No node pinning by default; GPU pods land on any GPU-labelled node.
         pin.enabled: false
+
+  # SGLang on NVIDIA GPUs. Same stack as `gpu`, plus the engine switch
+  # (helm.values.engine.type / helm.engine_type: sglang). Hardware stays nvidia
+  # so the chart requests nvidia.com/gpu and applies the nvidia RuntimeClass.
+  # Override images.sglang for a mirrored/pinned digest. See docs/deployment/sglang.md.
+  sglang-gpu:
+    router_url: "http://127.0.0.1:30080"
+    experiments_root: "/data/experiments"
+
+    hf_lmsys:
+      dataset_name: "/data/datasets/lmsys_chat_1m"
+      tokenizer_name: "/data/models/qwen3-8b"
+
+    metrics:
+      prometheus_base_url: "http://127.0.0.1:31190"
+
+    transport:
+      results_zmq: "tcp://127.0.0.1:30559"
+
+    boom:
+      base_url: "http://127.0.0.1:30401"
+
+    helm:
+      engine_type: sglang
+      model_host_path: "/data/models"
+      values:
+        hardware: nvidia
+        engine.type: sglang
+        global.imageRegistry: ""
+        images.sglang: "lmsysorg/sglang:v0.5.15-cu129"
+        images.router: "reg.local:32000/kv-router:latest"
+        images.sidecar: "reg.local:32000/kv-sidecar:latest"
+        images.cpuHash: "reg.local:32000/vllm-cpu-hash:latest"
+        images.redis: "redis:7-alpine"
+        router.imagePullPolicy: "Always"
+        sidecar.imagePullPolicy: "Always"
+        cpuHash.ascendDriverMounts: false
+        pin.enabled: false

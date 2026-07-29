@@ -21,6 +21,11 @@ needed and Go/Python hashes match. The legacy standalone `vllm-cpu-hash` service
 remains available as an opt-in (`KV_HASH_SOURCE=external`) and is auto-deployed
 only in that mode. See [prefix-hash.md](prefix-hash.md).
 
+The Go router and sidecar support both chart engines: vLLM and the pinned
+SGLang v0.5.15 profile. For SGLang, the image stages the complete shared hashing
+package (`prefix_hash.py` plus `hash_backends`), and the sidecar implements
+descriptor discovery, replay-aware KV projection, `/ready`, and `/health`.
+
 Switching between Python and Go is a single config line:
 
 ```yaml
@@ -109,6 +114,16 @@ PUSH_REGISTRY=myregistry.io:5000 ./build.sh   # push to a different registry
 REGISTRY=myregistry.io ./build.sh         # change the cluster-facing pull name
 ```
 
+Build and test without relying on the host Go installation:
+
+```bash
+docker run --rm \
+  -v "$PWD/src/core/services/go":/src \
+  -v llm-la-go-mod-cache:/go/pkg/mod \
+  -w /src golang:1.26.5 \
+  sh -c 'test -z "$(gofmt -l .)" && go vet ./... && go test ./...'
+```
+
 ## How the Toggle Works
 
 `sweep_methods.py` reads `helm.service_impl` from the experiment config and
@@ -162,6 +177,7 @@ helm upgrade --install vllm ./src/core/vllm-kv-stack \
 | Multi-model | `MODEL_CONFIG_PATH` registry, per-model queues + per-model KV watcher, 404 on unknown model |
 | Sidecar | PREFETCH, FORCE_IGNORE_EOS, STREAMING_MODE + `/result_chunk` forwarding, ZMQ→Redis KV subscriber (msgpack), SLO-driven dynamic pull backpressure (`SLO_DYNAMIC_PULL_ENABLED`), GPU KV-usage reporting on `/pull` + `/health` (`KV_USAGE_REPORT`) |
 | Token-aware pull | P0 in-flight token gauge (`router_endpoint_inflight_tokens` + `__isl_tokens__` on the request meta), P1 sidecar KV-memory pull gate (`KV_PULL_GATE_ENABLED/HIGH/LOW`, `sidecar_kv_pull_gate_*`), P2 router prefill-token budget (`PULL_BUDGET_ENABLED`/`PREFILL_TOKEN_BUDGET`, per-pull `want_prefill_tokens`, `router_pull_granted_prefill_tokens`, `router_pull_budget_bound_total`) — same env vars, metric names, and algorithm. See [router.md](router.md) §5e, [sidecar.md](sidecar.md#kv-memory-pull-gate), and the [compatibility matrix](router.md#routing-compatibility-matrix) |
+| SGLang v0.5.15 | Shared Python hash backend in the Go router image; native Go descriptor discovery, live/replay KV events, fail-closed Redis projection, `/ready` requiring KV visibility, and `/health` liveness |
 | Tracing | identical `__trace__` field set end-to-end |
 
 ### Prometheus Metrics
@@ -198,4 +214,3 @@ defaults. See `internal/gateway/config.go` (router) and
 - **Block hashes as decimal strings**: vLLM KV block hashes can exceed
   `int64`. Both the sidecar subscriber and the router store/compare them as
   canonical decimal strings to preserve exact equality without overflow.
-```

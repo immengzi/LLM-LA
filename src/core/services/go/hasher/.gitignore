@@ -1,3 +1,5 @@
 # Staged at image-build time from
-# src/core/services/router_service/router/prefix_hash.py (single source of truth).
-prefix_hash.py
+# src/core/services/router_service/router (single source of truth).
+router/
+wheels/*
+!wheels/.gitkeep
