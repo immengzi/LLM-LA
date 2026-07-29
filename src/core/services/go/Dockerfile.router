@@ -14,10 +14,13 @@ WORKDIR /app
 # ---------- Proxy only for build (pip) ----------
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
+ARG NO_PROXY
 ENV http_proxy=${HTTP_PROXY} \
     https_proxy=${HTTPS_PROXY} \
     HTTP_PROXY=${HTTP_PROXY} \
-    HTTPS_PROXY=${HTTPS_PROXY}
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    NO_PROXY=${NO_PROXY} \
+    no_proxy=${NO_PROXY}
 
 # In-container hasher dependencies (used only in inline mode).
 COPY go/hasher/requirements.txt /app/requirements.txt
@@ -34,7 +37,9 @@ RUN if [ "$HASHER_OFFLINE_WHEELS" = "1" ]; then \
 ENV http_proxy="" \
     https_proxy="" \
     HTTP_PROXY="" \
-    HTTPS_PROXY=""
+    HTTPS_PROXY="" \
+    NO_PROXY="" \
+    no_proxy=""
 
 # Shared hashing package is copied directly from the canonical router source so
 # engine-specific backends cannot drift from the Python router implementation.
