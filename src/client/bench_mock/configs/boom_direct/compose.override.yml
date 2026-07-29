@@ -1,0 +1,29 @@
+# BooM direct → mock-vllm. Requires boom-gateway image (docs/gateways/boom/build.md).
+# Paths relative to bench_mock/. Scale: --scale boom=N
+services:
+  boom:
+    image: ${BOOM_IMAGE:-boom-gateway:v5}
+    environment:
+      BOOM_MASTER_KEY: "sk-1234"
+      RUST_LOG: "warn"
+      CONFIG_FILE: /app/config.yaml
+      PORT: "4000"
+    volumes:
+      - ./configs/boom_direct/boom.yaml:/app/config.yaml:ro
+    depends_on:
+      mock-vllm:
+        condition: service_healthy
+    expose:
+      - "4000"
+    healthcheck:
+      test: ["CMD-SHELL", "true"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 10s
+
+  gateway-lb:
+    volumes:
+      - ./gateway-lb/nginx.boom.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - boom

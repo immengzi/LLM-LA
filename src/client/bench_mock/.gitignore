@@ -1,0 +1,9 @@
+results/*
+!results/.gitkeep
+__pycache__/
+*.pyc
+.venv/
+locust/.venv/
+error.txt
+locust_*.csv
+*.log

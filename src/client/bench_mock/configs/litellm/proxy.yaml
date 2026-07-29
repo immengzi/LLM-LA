@@ -1,0 +1,15 @@
+# LiteLLM → shared fake OpenAI (mock-vllm). Mirror of LiteLLM docs fake-endpoint mode.
+model_list:
+  - model_name: fake-openai-endpoint
+    litellm_params:
+      model: openai/served-model
+      api_base: http://mock-vllm:8000/v1
+      api_key: "test"
+
+litellm_settings:
+  callbacks: []
+  num_retries: 0
+  request_timeout: 30
+
+general_settings:
+  master_key: "sk-1234"

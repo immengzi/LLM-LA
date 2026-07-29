@@ -1,0 +1,18 @@
+# Multi-stage Go sidecar image for bench_mock.
+# Build context: src/core/services/go
+ARG GOPROXY=https://proxy.golang.org,direct
+FROM golang:1.26-bookworm AS build
+ARG GOPROXY
+WORKDIR /src
+ENV CGO_ENABLED=0 GOOS=linux GOPROXY=${GOPROXY} GOTOOLCHAIN=auto
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -buildvcs=false -o /out/sidecar ./cmd/sidecar
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/sidecar /usr/bin/sidecar
+EXPOSE 9000
+ENTRYPOINT ["sidecar"]

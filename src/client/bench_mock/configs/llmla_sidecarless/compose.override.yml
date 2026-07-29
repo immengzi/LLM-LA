@@ -1,0 +1,29 @@
+# LLM-LA sidecarless: router external-push → mock-vllm (no sidecar).
+# Paths are relative to the project directory (bench_mock/), not this file.
+# Scale gateway instances with: --scale router=N
+services:
+  router:
+    build:
+      context: ../../core/services/router_service
+      # dockerfile path is relative to context
+      dockerfile: ../../tests/e2e/router.e2e.Dockerfile
+    env_file:
+      - configs/llmla_sidecarless/router.env
+    depends_on:
+      redis:
+        condition: service_healthy
+      mock-vllm:
+        condition: service_healthy
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health/router')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  gateway-lb:
+    volumes:
+      - ./gateway-lb/nginx.router.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - router
