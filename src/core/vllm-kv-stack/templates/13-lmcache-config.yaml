@@ -34,8 +34,15 @@ data:
     p2p_npu_buffer_size: {{ .Values.lmcache.p2p.npuBufferSize | int64 }}
     enable_controller: True
     lmcache_instance_id: "__LMCACHE_INSTANCE_ID__"
+{{- if eq (.Values.lmcache.p2p.controllerPlacement | default "shared") "per-leader" }}
+{{- /* One controller per DP leader: runtime sed replaces __CONTROLLER_HOST__
+       with NODE_IP (leader) or LEADER_IP (worker). See 40-vllm-unified.yaml. */}}
+    controller_pull_url: "__CONTROLLER_HOST__:{{ .Values.lmcacheController.pullPort }}"
+    controller_reply_url: "__CONTROLLER_HOST__:{{ .Values.lmcacheController.replyPort }}"
+{{- else }}
     controller_pull_url: {{ .Values.lmcache.p2p.controllerPullUrl | quote }}
     controller_reply_url: {{ .Values.lmcache.p2p.controllerReplyUrl | quote }}
+{{- end }}
     lmcache_worker_ports: [{{ range $i := until $tp }}{{ if $i }}, {{ end }}{{ add $workerBase $i }}{{ end }}]
     extra_config:
       lookup_backoff_time: {{ .Values.lmcache.p2p.lookupBackoffTime }}
