@@ -21,10 +21,11 @@ type Config struct {
 
 	APIKey string
 
-	RedisHost string
-	RedisPort int
-	ModelName string
-	Namespace string
+	RedisHost       string
+	RedisPort       int
+	ModelName       string
+	InferenceEngine string
+	Namespace       string
 
 	LabelSelector string
 	VLLMPort      int
@@ -41,11 +42,13 @@ type Config struct {
 	KVOwnerSource     string
 	KVLookupMaxBlocks int
 
-	KVHashSource         string
-	HashServiceURL       string
-	HashTimeoutS         float64
-	HashMaxKeepalive     int
-	HashKeepaliveExpiryS float64
+	KVHashSource          string
+	KVHashBackend         string
+	SGLangContractVersion string
+	HashServiceURL        string
+	HashTimeoutS          float64
+	HashMaxKeepalive      int
+	HashKeepaliveExpiryS  float64
 
 	KVBlockSize    int
 	MeasurePrefix  bool
@@ -206,10 +209,11 @@ func LoadConfig() *Config {
 
 		APIKey: common.EnvStr("API_KEY", ""),
 
-		RedisHost: common.EnvStr("REDIS_HOST", "redis"),
-		RedisPort: common.EnvInt("REDIS_PORT", 6379),
-		ModelName: common.EnvStr("MODEL_NAME", "served-model"),
-		Namespace: common.EnvStr("NAMESPACE", "vllm"),
+		RedisHost:       common.EnvStr("REDIS_HOST", "redis"),
+		RedisPort:       common.EnvInt("REDIS_PORT", 6379),
+		ModelName:       common.EnvStr("MODEL_NAME", "served-model"),
+		InferenceEngine: common.EnvStr("INFERENCE_ENGINE", "vllm"),
+		Namespace:       common.EnvStr("NAMESPACE", "vllm"),
 
 		LabelSelector: common.EnvStr("LABEL_SELECTOR", "app=vllm-qwen"),
 		VLLMPort:      common.EnvInt("VLLM_PORT", 8200),
@@ -222,11 +226,13 @@ func LoadConfig() *Config {
 		KVOwnerSource:     common.EnvStr("KV_OWNER_SOURCE", "lookup"),
 		KVLookupMaxBlocks: common.EnvInt("KV_LOOKUP_MAX_BLOCKS", 512),
 
-		KVHashSource:         common.EnvStr("KV_HASH_SOURCE", "inline"),
-		HashServiceURL:       common.EnvStr("HASH_SERVICE_URL", "http://127.0.0.1:9095"),
-		HashTimeoutS:         common.EnvFloat("HASH_TIMEOUT_S", 2.0),
-		HashMaxKeepalive:     common.EnvInt("HASH_MAX_KEEPALIVE", 50),
-		HashKeepaliveExpiryS: common.EnvFloat("HASH_KEEPALIVE_EXPIRY_S", 30.0),
+		KVHashSource:          common.EnvStr("KV_HASH_SOURCE", "inline"),
+		KVHashBackend:         common.EnvStr("KV_HASH_BACKEND", "vllm"),
+		SGLangContractVersion: strings.TrimSpace(common.EnvStr("SGLANG_CONTRACT_VERSION", "")),
+		HashServiceURL:        common.EnvStr("HASH_SERVICE_URL", "http://127.0.0.1:9095"),
+		HashTimeoutS:          common.EnvFloat("HASH_TIMEOUT_S", 2.0),
+		HashMaxKeepalive:      common.EnvInt("HASH_MAX_KEEPALIVE", 50),
+		HashKeepaliveExpiryS:  common.EnvFloat("HASH_KEEPALIVE_EXPIRY_S", 30.0),
 
 		KVBlockSize:    common.EnvInt("KV_BLOCK_SIZE", 128),
 		MeasurePrefix:  common.EnvBool("ROUTER_MEASURE_PREFIX", false),
@@ -349,6 +355,15 @@ func LoadConfig() *Config {
 }
 
 func (c *Config) normalize() {
+	c.InferenceEngine = strings.TrimSpace(strings.ToLower(c.InferenceEngine))
+	if c.InferenceEngine != "vllm" && c.InferenceEngine != "sglang" {
+		c.InferenceEngine = "vllm"
+	}
+	c.KVHashBackend = strings.TrimSpace(strings.ToLower(c.KVHashBackend))
+	if c.KVHashBackend != "vllm" && c.KVHashBackend != "sglang" {
+		c.KVHashBackend = "vllm"
+	}
+
 	if c.SubmitPath != "" && !strings.HasPrefix(c.SubmitPath, "/") {
 		c.SubmitPath = "/" + c.SubmitPath
 	}
@@ -517,7 +532,7 @@ func (c *Config) normalize() {
 	c.QueueWaitModel = qwm
 
 	c.PoolFactor = math.Max(1.0, c.PoolFactor)
-	if c.KVBlockSize < 1 {
+	if c.InferenceEngine != "sglang" && c.KVBlockSize < 1 {
 		c.KVBlockSize = 1
 	}
 	if c.DefaultMaxTokens < 1 {
@@ -600,6 +615,40 @@ func (c *Config) normalize() {
 	c.ReqLogMode = logMode
 }
 
+const sglangHashContractVersion = "0.5.15"
+
+// SGLangHashContractError mirrors router/config.py:sglang_hash_contract_error.
+// An empty result means hashing is safe under the pinned contract.
+func (c *Config) SGLangHashContractError() string {
+	if c.InferenceEngine != "sglang" && c.KVHashBackend != "sglang" {
+		return ""
+	}
+	if c.InferenceEngine != "sglang" {
+		return "inference_engine_must_be_sglang"
+	}
+	if c.KVHashBackend != "sglang" {
+		return "kv_hash_backend_must_be_sglang"
+	}
+	if c.KVHashSource != "inline" {
+		return "kv_hash_source_must_be_inline"
+	}
+	if c.KVBlockSize <= 0 {
+		return "sglang_page_size_must_be_positive"
+	}
+	if c.SGLangContractVersion != sglangHashContractVersion {
+		actual := c.SGLangContractVersion
+		if actual == "" {
+			actual = "unset"
+		}
+		return fmt.Sprintf(
+			"sglang_contract_version_mismatch:expected=%s,actual=%s",
+			sglangHashContractVersion,
+			actual,
+		)
+	}
+	return ""
+}
+
 func (c *Config) IsPushMode() bool {
 	return strings.HasPrefix(c.RouterMode, "push-")
 }
@@ -671,6 +720,7 @@ func (c *Config) PrintBanner() {
 		"REDIS_HOST":                        c.RedisHost,
 		"REDIS_PORT":                        c.RedisPort,
 		"MODEL_NAME":                        c.ModelName,
+		"INFERENCE_ENGINE":                  c.InferenceEngine,
 		"NAMESPACE":                         c.Namespace,
 		"LABEL_SELECTOR":                    c.LabelSelector,
 		"VLLM_PORT":                         c.VLLMPort,
@@ -681,6 +731,8 @@ func (c *Config) PrintBanner() {
 		"KV_OWNER_SOURCE":                   c.KVOwnerSource,
 		"KV_LOOKUP_MAX_BLOCKS":              c.KVLookupMaxBlocks,
 		"KV_HASH_SOURCE":                    c.KVHashSource,
+		"KV_HASH_BACKEND":                   c.KVHashBackend,
+		"SGLANG_CONTRACT_VERSION":           c.SGLangContractVersion,
 		"HASH_SERVICE_URL":                  c.HashServiceURL,
 		"HASH_TIMEOUT_S":                    c.HashTimeoutS,
 		"KV_BLOCK_SIZE":                     c.KVBlockSize,

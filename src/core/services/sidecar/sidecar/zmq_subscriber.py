@@ -1,34 +1,24 @@
 #!/usr/bin/env python3
-# zmq_subscriber.py
-"""
-KV Cache Event Listener Sidecar for vLLM (per-pod)
+"""Mirror inference-engine KV-cache events into the existing Redis schema."""
 
-- Subscribes to vLLM KV events over ZMQ
-- Decodes msgpack KVEventBatch (same wire format as former centralized listener)
-- Stores KV block presence information in Redis
+from __future__ import annotations
 
-Redis schema (per MODEL_NAME_REDIS):
-  - {MODEL}:kvblock:{block_hash}        (HASH)  block -> { pod_name: timestamp }
-  - {MODEL}:podblocks:{pod_name}        (SET)   pod   -> { block_hashes }
-  - {MODEL}:kvblocks                    (HASH)  index of all block_hashes
-"""
-
+import hashlib
 import socket
-import time
 import threading
-from typing import Any, Optional, Union, NewType
+import time
+from dataclasses import dataclass
+from typing import Any, NewType, Optional, Union
 
-import zmq
 import msgspec
 import redis
+import requests
+import zmq
 
 from .config import get_config
+from .kv_redis import clear_pod_ownership, redis_key_prefix
 
 _cfg = get_config()
-
-# ------------------------------
-# Type definitions (match old listener)
-# ------------------------------
 
 BlockHash = NewType("BlockHash", int)
 
@@ -36,10 +26,10 @@ BlockHash = NewType("BlockHash", int)
 class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True, gc=False):
     ts: float
     events: list[Any]
+    attn_dp_rank: Optional[int] = None
 
 
 class KVCacheEvent(msgspec.Struct, array_like=True, omit_defaults=True, gc=False, tag=True):
-    """Base class for KV cache events."""
     pass
 
 
@@ -49,10 +39,12 @@ class BlockStored(KVCacheEvent):
     token_ids: list[int]
     block_size: int
     lora_id: Optional[int]
+    medium: Optional[str] = None
 
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[BlockHash]
+    medium: Optional[str] = None
 
 
 class AllBlocksCleared(KVCacheEvent):
@@ -63,9 +55,29 @@ class KVEventBatch(EventBatch):
     events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
 
 
-# ------------------------------
-# Helpers
-# ------------------------------
+@dataclass(frozen=True)
+class PublisherEndpoint:
+    rank: int
+    event_url: str
+    replay_url: str
+
+
+@dataclass(frozen=True)
+class SubscriberStatus:
+    ready: bool
+    healthy: bool
+    fail_closed: bool
+    phase: str
+    detail: str = ""
+    cache_visibility: str = "none"
+
+
+@dataclass(frozen=True)
+class ReplayResult:
+    available: bool
+    complete: bool
+    last_sequence: int | None
+
 
 def _resolve_zmq_endpoints(
     leader_name: str,
@@ -75,234 +87,708 @@ def _resolve_zmq_endpoints(
     dp_size_local: int,
     namespace: str = "vllm",
 ) -> tuple[list[str], list[tuple[int, str, int]]]:
-    """Build ZMQ endpoints for leader-sidecar DP fan-in.
-
-    Rank 0 is local. Worker ranks are resolved through the LWS headless-service
-    DNS convention and retried later if they are not ready at startup.
-    """
+    """Build the legacy vLLM DP fan-in endpoints without changing its DNS rules."""
     resolved: list[str] = [f"tcp://{base_host}:{base_port}"]
     pending: list[tuple[int, str, int]] = []
-
     if dp_size <= 1:
         return resolved, pending
 
-    svc_name = leader_name.rsplit("-", 1)[0] if "-" in leader_name else leader_name
+    service_name = leader_name.rsplit("-", 1)[0] if "-" in leader_name else leader_name
     for rank in range(1, dp_size):
         worker_name = f"{leader_name}-{rank}"
-        fqdn = f"{worker_name}.{svc_name}.{namespace}.svc.cluster.local"
-        zmq_port = base_port + rank * dp_size_local
+        fqdn = f"{worker_name}.{service_name}.{namespace}.svc.cluster.local"
+        port = base_port + rank * dp_size_local
         try:
-            worker_ip = socket.gethostbyname(fqdn)
-            ep = f"tcp://{worker_ip}:{zmq_port}"
-            resolved.append(ep)
-            print(f"[KV-SUB] resolved worker rank {rank}: {fqdn} -> {ep}")
+            resolved.append(f"tcp://{socket.gethostbyname(fqdn)}:{port}")
         except socket.gaierror:
-            print(
-                f"[KV-SUB] WARNING: cannot resolve {fqdn} at startup — "
-                f"will retry in background (rank {rank}, port {zmq_port})"
-            )
-            pending.append((rank, fqdn, zmq_port))
-
+            pending.append((rank, fqdn, port))
     return resolved, pending
 
 
-# ------------------------------
-# Subscriber
-# ------------------------------
+def _resolve_topic(engine: str, configured: str, pod_name: str, model: str) -> str:
+    """Resolve an exact SGLang topic while retaining vLLM's legacy prefix."""
+    value = (configured or "").strip()
+    if engine != "sglang":
+        return value or "kv@"
+    if value and value != "kv@":
+        return value
+    return f"kv@{pod_name}@{model}"
+
+
+def _decode_sequence(raw: bytes) -> int:
+    if len(raw) != 8:
+        raise ValueError(f"sequence frame must be 8 bytes, got {len(raw)}")
+    return int.from_bytes(raw, "big", signed=False)
+
+
+class DiscoveryMismatch(RuntimeError):
+    pass
+
+
+class StreamResyncRequired(RuntimeError):
+    pass
+
 
 class KVSubscriber:
+    _RETRY_INTERVAL_S = 10.0
+    _RETRY_MAX = 90
+    _SGLANG_VERSION = "0.5.15"
+    _REPLAY_END = b"\xff" * 8
+    _BACKOFF_INITIAL_S = 0.25
+    _BACKOFF_MAX_S = 5.0
+
     def __init__(self):
-        self.vllm_host = _cfg.VLLM_HOST
-        self.vllm_port = _cfg.VLLM_SUB_PORT
+        self.engine = _cfg.INFERENCE_ENGINE
+        self.inference_url = _cfg.INFERENCE_URL.rstrip("/")
+        self.host = _cfg.INFERENCE_HOST
+        self.port = _cfg.KV_EVENT_PORT
+        self.replay_port = _cfg.KV_EVENT_REPLAY_PORT
         self.redis = redis.Redis(
             host=_cfg.REDIS_HOST,
             port=_cfg.REDIS_PORT,
             decode_responses=True,
+            socket_connect_timeout=_cfg.KV_EVENT_REDIS_PING_TIMEOUT_S,
+            socket_timeout=_cfg.KV_EVENT_REDIS_PING_TIMEOUT_S,
         )
         self.model = _cfg.MODEL_NAME_REDIS
         self.pod_name = _cfg.CONTAINER_NAME
         self.dp_size = _cfg.DP_SIZE
         self.dp_size_local = _cfg.DP_SIZE_LOCAL
+        self.topic = _resolve_topic(
+            self.engine,
+            _cfg.KV_EVENT_TOPIC,
+            self.pod_name,
+            self.model,
+        )
+        self.expected_page_size = _cfg.KV_EVENT_EXPECTED_PAGE_SIZE
+        self.discovery_enabled = _cfg.KV_EVENT_DISCOVERY_ENABLED
+        self.discovery_timeout = _cfg.KV_EVENT_DISCOVERY_TIMEOUT_S
+        self.redis_ping_interval = max(
+            0.1, _cfg.KV_EVENT_REDIS_PING_INTERVAL_S
+        )
 
+        self._decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
+        self._last_sequence: dict[str, int] = {}
+        self._last_payload_identity: dict[str, bytes] = {}
+        self._epoch_zero_identity: dict[str, bytes] = {}
+        self._bootstrap_watermarks: dict[str, int] = {}
+        self._publishers: dict[str, PublisherEndpoint] = {}
+        self._next_redis_ping = 0.0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._status_lock = threading.Lock()
+        self._status = SubscriberStatus(
+            ready=False,
+            healthy=False,
+            fail_closed=True,
+            phase="stopped",
+        )
 
-        # IMPORTANT: msgpack + KVEventBatch, not JSON
-        self._decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
+    @property
+    def status(self) -> SubscriberStatus:
+        with self._status_lock:
+            return self._status
 
-    # ------------- lifecycle -------------
+    @property
+    def ready(self) -> bool:
+        return self.status.ready
 
-    def start(self):
+    def _set_status(
+        self,
+        *,
+        ready: bool,
+        healthy: bool,
+        fail_closed: bool,
+        phase: str,
+        detail: str = "",
+        cache_visibility: str = "none",
+    ) -> None:
+        with self._status_lock:
+            self._status = SubscriberStatus(
+                ready=ready,
+                healthy=healthy,
+                fail_closed=fail_closed,
+                phase=phase,
+                detail=detail,
+                cache_visibility=cache_visibility,
+            )
+
+    def start(self) -> None:
         if self._thread is not None:
             return
         self._stop.clear()
+        self._set_status(
+            ready=False,
+            healthy=False,
+            fail_closed=True,
+            phase="starting",
+        )
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        print(
-            f"[KV-SUB] started (host={self.vllm_host}, port={self.vllm_port}, "
-            f"pod={self.pod_name}, model={self.model}, "
-            f"dp_size={self.dp_size}, dp_size_local={self.dp_size_local})"
-        )
 
-    def stop(self):
+    def stop(self) -> None:
         self._stop.set()
         if self._thread:
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=max(2.0, self.discovery_timeout + 1.0))
             self._thread = None
-        print("[KV-SUB] stopped")
+        try:
+            self._invalidate_ownership("subscriber shutdown")
+        except Exception as exc:
+            print(f"[KV-SUB] shutdown ownership clear failed: {exc}")
+        self._set_status(
+            ready=False,
+            healthy=False,
+            fail_closed=True,
+            phase="stopped",
+        )
 
-    # ------------- core loop -------------
+    def _invalidate_ownership(self, reason: str) -> None:
+        clear_pod_ownership(self.redis, self.model, self.pod_name)
+        self._last_sequence.clear()
+        self._last_payload_identity.clear()
+        self._epoch_zero_identity.clear()
+        self._bootstrap_watermarks.clear()
+        print(f"[KV-SUB] invalidated pod ownership: {reason}")
 
-    _RETRY_INTERVAL_S: float = 10.0
-    _RETRY_MAX: int = 90
+    def _wait_for_stop(self, delay: float) -> bool:
+        return self._stop.wait(delay)
 
-    def _loop(self):
-        ctx = zmq.Context()
-        sub = ctx.socket(zmq.SUB)
+    def _discover_sglang(self) -> list[PublisherEndpoint]:
+        response = requests.get(
+            f"{self.inference_url}/server_info",
+            timeout=self.discovery_timeout,
+        )
+        response.raise_for_status()
+        info = response.json()
+        descriptor = info.get("kv_events")
+        if not isinstance(descriptor, dict):
+            raise DiscoveryMismatch("server_info.kv_events is missing")
+
+        expected = {
+            "publisher": "zmq",
+            "block_size": self.expected_page_size,
+            "topic": self.topic,
+            "endpoint_port_base": self.port,
+            "dp_size": self.dp_size,
+        }
+        mismatches = [
+            f"{key}={descriptor.get(key)!r} (expected {value!r})"
+            for key, value in expected.items()
+            if descriptor.get(key) != value
+        ]
+        version = str(info.get("version", ""))
+        if version != self._SGLANG_VERSION:
+            mismatches.append(
+                f"version={version!r} (expected {self._SGLANG_VERSION!r})"
+            )
+        if mismatches:
+            raise DiscoveryMismatch("; ".join(mismatches))
+
+        return [
+            PublisherEndpoint(
+                rank=rank,
+                event_url=f"tcp://{self.host}:{self.port + rank}",
+                replay_url=f"tcp://{self.host}:{self.replay_port + rank}",
+            )
+            for rank in range(self.dp_size)
+        ]
+
+    def _initial_publishers(self) -> tuple[list[PublisherEndpoint], list[tuple[int, str, int]]]:
+        if self.engine == "sglang":
+            if self.discovery_enabled:
+                return self._discover_sglang(), []
+            return (
+                [
+                    PublisherEndpoint(
+                        rank=rank,
+                        event_url=f"tcp://{self.host}:{self.port + rank}",
+                        replay_url=f"tcp://{self.host}:{self.replay_port + rank}",
+                    )
+                    for rank in range(self.dp_size)
+                ],
+                [],
+            )
 
         resolved, pending = _resolve_zmq_endpoints(
-            leader_name=self.pod_name,
-            base_host=self.vllm_host,
-            base_port=self.vllm_port,
-            dp_size=self.dp_size,
-            dp_size_local=self.dp_size_local,
+            self.pod_name,
+            self.host,
+            self.port,
+            self.dp_size,
+            self.dp_size_local,
         )
+        publishers = [
+            PublisherEndpoint(
+                rank=rank,
+                event_url=url,
+                replay_url=f"tcp://{self.host}:{self.replay_port}",
+            )
+            for rank, url in enumerate(resolved)
+        ]
+        return publishers, pending
 
-        for ep in resolved:
-            sub.connect(ep)
-            print(f"[KV-SUB] connected to {ep}")
-
-        # Match old listener: subscribe only to KV topic prefix
-        sub.setsockopt_string(zmq.SUBSCRIBE, "kv@")
-
-        pending_note = f", {len(pending)} pending DNS retry" if pending else ""
-        print(
-            f"[KV-SUB] subscribed to {len(resolved)} endpoint(s) "
-            f"(topic prefix 'kv@'){pending_note}"
-        )
-
-        retry_pending = list(pending)
-        retry_attempt = 0
-        retry_last_t = time.monotonic()
-
-        try:
-            while not self._stop.is_set():
-                try:
-                    # Publisher: [topic, seq_bytes, payload]
-                    frames = sub.recv_multipart(flags=zmq.NOBLOCK)
-                except zmq.Again:
-                    if retry_pending and retry_attempt < self._RETRY_MAX:
-                        now = time.monotonic()
-                        if now - retry_last_t >= self._RETRY_INTERVAL_S:
-                            retry_last_t = now
-                            retry_attempt += 1
-                            still_pending: list[tuple[int, str, int]] = []
-                            for rank, fqdn, zmq_port in retry_pending:
-                                try:
-                                    worker_ip = socket.gethostbyname(fqdn)
-                                    ep = f"tcp://{worker_ip}:{zmq_port}"
-                                    sub.connect(ep)
-                                    print(
-                                        f"[KV-SUB] rank {rank} resolved after "
-                                        f"{retry_attempt} retries: {fqdn} -> {ep}, connected"
-                                    )
-                                except socket.gaierror:
-                                    still_pending.append((rank, fqdn, zmq_port))
-                            retry_pending = still_pending
-                            if not retry_pending:
-                                print("[KV-SUB] all pending worker endpoints resolved")
-                    elif retry_pending and retry_attempt >= self._RETRY_MAX:
-                        for rank, fqdn, _ in retry_pending:
-                            print(
-                                f"[KV-SUB] WARNING: gave up resolving rank {rank} "
-                                f"({fqdn}) after {self._RETRY_MAX} retries "
-                                f"(~{self._RETRY_MAX * self._RETRY_INTERVAL_S / 60:.0f} min) "
-                                f"— rank {rank} ZMQ events will be missed"
-                            )
-                        retry_pending = []
-                    time.sleep(0.01)
-                    continue
-                except Exception as e:
-                    print(f"[KV-SUB] ZMQ recv error: {e}")
-                    time.sleep(1.0)
-                    continue
-
-                if len(frames) != 3:
-                    print(f"[KV-SUB] unexpected frame count: {len(frames)} (expected 3)")
-                    continue
-
-                topic, seq_bytes, payload = frames
-                # seq = int.from_bytes(seq_bytes, "big")  # unused but available
-
-                try:
-                    batch = self._decoder.decode(payload)
-                except Exception as e:
-                    print(f"[KV-SUB] decode error (msgpack KVEventBatch): {e}")
-                    continue
-
-                try:
-                    self._handle_batch(batch)
-                except Exception as e:
-                    print(f"[KV-SUB] error handling KV batch: {e}")
-
-        finally:
+    def _retry_startup(
+        self,
+    ) -> tuple[list[PublisherEndpoint], list[tuple[int, str, int]]] | None:
+        delay = self._BACKOFF_INITIAL_S
+        while not self._stop.is_set():
+            self._set_status(
+                ready=False,
+                healthy=False,
+                fail_closed=True,
+                phase="invalidating",
+                detail="clearing prior Redis ownership",
+            )
             try:
-                sub.close(0)
-            except Exception:
-                pass
-            ctx.term()
+                self._invalidate_ownership("subscriber startup")
+                break
+            except Exception as exc:
+                self._set_status(
+                    ready=False,
+                    healthy=False,
+                    fail_closed=True,
+                    phase="invalidating",
+                    detail=f"Redis invalidation failed: {exc}",
+                )
+                if self._wait_for_stop(delay):
+                    return None
+                delay = min(delay * 2, self._BACKOFF_MAX_S)
+        else:
+            return None
 
-    # ------------- Redis update -------------
+        delay = self._BACKOFF_INITIAL_S
+        while not self._stop.is_set():
+            self._set_status(
+                ready=False,
+                healthy=False,
+                fail_closed=True,
+                phase="discovering",
+                detail="waiting for KV publisher discovery",
+            )
+            try:
+                return self._initial_publishers()
+            except Exception as exc:
+                self._set_status(
+                    ready=False,
+                    healthy=False,
+                    fail_closed=True,
+                    phase="discovering",
+                    detail=f"KV discovery failed: {exc}",
+                )
+                if self._wait_for_stop(delay):
+                    return None
+                delay = min(delay * 2, self._BACKOFF_MAX_S)
+        return None
 
-    def _handle_batch(self, event_batch: KVEventBatch) -> None:
-        """
-        Update Redis for KV cache events.
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            startup = self._retry_startup()
+            if startup is None:
+                break
+            publishers, pending = startup
+            context = zmq.Context()
+            sockets: list[Any] = []
+            socket_endpoints: dict[Any, str] = {}
+            poller = zmq.Poller()
+            session_failed = False
+            try:
+                self._publishers.clear()
+                self._set_status(
+                    ready=False,
+                    healthy=False,
+                    fail_closed=True,
+                    phase="connecting",
+                )
+                for publisher in publishers:
+                    sub = context.socket(zmq.SUB)
+                    sub.connect(publisher.event_url)
+                    sub.setsockopt_string(zmq.SUBSCRIBE, self.topic)
+                    poller.register(sub, zmq.POLLIN)
+                    sockets.append(sub)
+                    socket_endpoints[sub] = publisher.event_url
+                    self._publishers[publisher.event_url] = publisher
 
-        In DP mode, all ranks' blocks are registered under `self.pod_name`
-        (the leader sidecar identity), so the router sees one endpoint.
+                visibility = "full"
+                if self.engine == "sglang":
+                    self._set_status(
+                        ready=False,
+                        healthy=False,
+                        fail_closed=True,
+                        phase="bootstrapping",
+                    )
+                    for publisher in publishers:
+                        result = self._bootstrap_endpoint(publisher.event_url)
+                        if not result.available:
+                            visibility = "live_only"
+                        elif not result.complete and visibility == "full":
+                            visibility = "truncated"
 
-        Redis schema:
-          - {model}:kvblocks               -> HSET(block_hash -> "kvblock:{block_hash}")
-          - {model}:kvblock:{block_hash}   -> HSET(pod_name -> timestamp)
-          - {model}:podblocks:{pod_name}   -> SET(block_hashes held by pod)
-        """
-        key_prefix = f"{self.model}:" if self.model else ""
-        kvblocks_key = f"{key_prefix}kvblocks"
-        podblocks_key = f"{key_prefix}podblocks:{self.pod_name}"
+                # Redis may have disappeared while discovery/model loading was
+                # in progress. Do not advertise readiness without a final
+                # connectivity check after bootstrap.
+                self.redis.ping()
+                self._next_redis_ping = time.monotonic() + self.redis_ping_interval
+                self._set_status(
+                    ready=True,
+                    healthy=True,
+                    fail_closed=False,
+                    phase="ready",
+                    detail=(
+                        ""
+                        if visibility == "full"
+                        else "replay unavailable or truncated; visibility is conservative"
+                    ),
+                    cache_visibility=visibility,
+                )
 
-        pipe = self.redis.pipeline(transaction=False)
-        ts = int(time.time())
+                retry_attempt = 0
+                retry_last = time.monotonic()
+                while not self._stop.is_set():
+                    events = dict(poller.poll(10))
+                    for sub in list(events):
+                        if not events[sub] & zmq.POLLIN:
+                            continue
+                        endpoint = socket_endpoints[sub]
+                        if not self._consume_frames(endpoint, sub.recv_multipart()):
+                            session_failed = True
+                            break
+                    if session_failed:
+                        break
+                    if not self._redis_is_healthy(time.monotonic()):
+                        session_failed = True
+                        break
 
-        for ev in event_batch.events:
-            # BlockStored
-            if isinstance(ev, BlockStored):
-                for block_hash in ev.block_hashes:
-                    bh_str = str(block_hash)
-                    kvblock_key = f"{key_prefix}kvblock:{bh_str}"
+                    if (
+                        self.engine != "sglang"
+                        and pending
+                        and retry_attempt < self._RETRY_MAX
+                        and time.monotonic() - retry_last >= self._RETRY_INTERVAL_S
+                    ):
+                        retry_last = time.monotonic()
+                        retry_attempt += 1
+                        still_pending = []
+                        for rank, fqdn, port in pending:
+                            try:
+                                url = f"tcp://{socket.gethostbyname(fqdn)}:{port}"
+                                sub = context.socket(zmq.SUB)
+                                sub.connect(url)
+                                sub.setsockopt_string(zmq.SUBSCRIBE, self.topic)
+                                poller.register(sub, zmq.POLLIN)
+                                sockets.append(sub)
+                                socket_endpoints[sub] = url
+                                publisher = PublisherEndpoint(
+                                    rank=rank,
+                                    event_url=url,
+                                    replay_url=f"tcp://{self.host}:{self.replay_port}",
+                                )
+                                self._publishers[url] = publisher
+                            except socket.gaierror:
+                                still_pending.append((rank, fqdn, port))
+                        pending = still_pending
+            except Exception as exc:
+                session_failed = True
+                self._set_status(
+                    ready=False,
+                    healthy=False,
+                    fail_closed=True,
+                    phase="failed",
+                    detail=f"KV subscriber session failed: {exc}",
+                )
+            finally:
+                for sub in sockets:
+                    try:
+                        sub.close(0)
+                    except Exception:
+                        pass
+                context.term()
 
-                    # block -> pod
-                    pipe.hset(kvblock_key, self.pod_name, ts)
-                    # pod -> block
-                    pipe.sadd(podblocks_key, bh_str)
-                    # index of all blocks
-                    pipe.hset(kvblocks_key, bh_str, kvblock_key)
+            if session_failed and not self._stop.is_set():
+                self._wait_for_stop(self._BACKOFF_INITIAL_S)
 
-            # BlockRemoved
-            elif isinstance(ev, BlockRemoved):
-                for block_hash in ev.block_hashes:
-                    bh_str = str(block_hash)
-                    kvblock_key = f"{key_prefix}kvblock:{bh_str}"
-                    pipe.hdel(kvblock_key, self.pod_name)
-                    pipe.srem(podblocks_key, bh_str)
+        self._set_status(
+            ready=False,
+            healthy=False,
+            fail_closed=True,
+            phase="stopped",
+        )
 
-            # AllBlocksCleared
-            elif isinstance(ev, AllBlocksCleared):
-                for bh_str in self.redis.sscan_iter(podblocks_key):
-                    kvblock_key = f"{key_prefix}kvblock:{bh_str}"
-                    pipe.hdel(kvblock_key, self.pod_name)
-                pipe.delete(podblocks_key)
-
+    def _redis_is_healthy(self, now: float) -> bool:
+        """Periodically verify Redis while the event stream is idle."""
+        if now < self._next_redis_ping:
+            return True
         try:
-            pipe.execute()
-        except Exception as e:
-            print(f"[KV-SUB] redis error: {e}")
+            self.redis.ping()
+        except Exception as exc:
+            self._set_status(
+                ready=False,
+                healthy=False,
+                fail_closed=True,
+                phase="failed",
+                detail=f"Redis health check failed: {exc}",
+            )
+            return False
+        self._next_redis_ping = now + self.redis_ping_interval
+        return True
+
+    def _consume_frames(self, endpoint: str, frames: list[bytes]) -> bool:
+        """Process one live message, invalidating ownership on any corruption."""
+        try:
+            self._process_frames(endpoint, frames)
+            return True
+        except Exception as exc:
+            self._set_status(
+                ready=False,
+                healthy=False,
+                fail_closed=True,
+                phase="invalidating",
+                detail=f"event stream error: {exc}",
+            )
+            if isinstance(exc, StreamResyncRequired):
+                return False
+            try:
+                self._invalidate_ownership(f"event stream error: {exc}")
+                return False
+            except Exception as redis_exc:
+                self._set_status(
+                    ready=False,
+                    healthy=False,
+                    fail_closed=True,
+                    phase="invalidating",
+                    detail=f"Redis invalidation failed: {redis_exc}",
+                )
+                print(f"[KV-SUB] cannot fail closed in Redis: {redis_exc}")
+                return False
+
+    def _process_frames(self, endpoint: str, frames: list[bytes]) -> None:
+        if len(frames) != 3:
+            raise ValueError(f"unexpected frame count: {len(frames)}")
+        topic_raw, sequence_raw, payload = frames
+        try:
+            topic = topic_raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("topic is not UTF-8") from exc
+        if self.engine == "sglang":
+            topic_matches = topic == self.topic
+        else:
+            topic_matches = topic.startswith(self.topic)
+        if not topic_matches:
+            raise ValueError(f"unexpected topic {topic!r}")
+
+        sequence = _decode_sequence(sequence_raw)
+        batch = self._decode_batch(payload)
+        payload_identity = self._batch_identity(batch)
+        previous = self._last_sequence.get(endpoint)
+        bootstrap_watermark = self._bootstrap_watermarks.get(endpoint)
+        if bootstrap_watermark is not None:
+            if sequence <= bootstrap_watermark:
+                known_identity = (
+                    self._epoch_zero_identity.get(endpoint)
+                    if sequence == 0
+                    else (
+                        self._last_payload_identity.get(endpoint)
+                        if sequence == previous
+                        else None
+                    )
+                )
+                if known_identity is not None and payload_identity != known_identity:
+                    self._publisher_epoch_changed(endpoint, sequence)
+                return
+            self._bootstrap_watermarks.pop(endpoint, None)
+        if previous is None:
+            self._apply_batch(batch)
+            self._last_sequence[endpoint] = sequence
+            self._remember_payload(endpoint, sequence, payload_identity)
+            return
+        if sequence == previous + 1:
+            self._apply_batch(batch)
+            self._last_sequence[endpoint] = sequence
+            self._remember_payload(endpoint, sequence, payload_identity)
+            return
+        if sequence == previous:
+            if payload_identity != self._last_payload_identity.get(endpoint):
+                self._publisher_epoch_changed(endpoint, sequence)
+            return
+        if sequence < previous:
+            self._invalidate_ownership(
+                f"publisher restart at {endpoint}: {previous} -> {sequence}"
+            )
+            raise StreamResyncRequired(
+                f"publisher restart at {endpoint}: {previous} -> {sequence}"
+            )
+
+        if self._replay_gap(endpoint, previous + 1, sequence):
+            current = self._last_sequence.get(endpoint)
+            if current is not None and current >= sequence:
+                return
+            if current == sequence - 1:
+                self._apply_batch(batch)
+                self._last_sequence[endpoint] = sequence
+                self._remember_payload(endpoint, sequence, payload_identity)
+                return
+
+        self._invalidate_ownership(
+            f"unrecoverable sequence gap at {endpoint}: {previous} -> {sequence}"
+        )
+        raise StreamResyncRequired(
+            f"unrecoverable sequence gap at {endpoint}: {previous} -> {sequence}"
+        )
+
+    def _remember_payload(
+        self, endpoint: str, sequence: int, payload_identity: bytes
+    ) -> None:
+        self._last_payload_identity[endpoint] = payload_identity
+        if sequence == 0:
+            self._epoch_zero_identity[endpoint] = payload_identity
+
+    @staticmethod
+    def _batch_identity(batch: KVEventBatch) -> bytes:
+        return hashlib.sha256(msgspec.msgpack.encode(batch)).digest()
+
+    def _publisher_epoch_changed(self, endpoint: str, sequence: int) -> None:
+        """Fail closed when a sequence number is reused for different content.
+
+        ZMQ SUB does not expose a publisher process identity. Payload identity
+        therefore provides a conservative epoch signal: exact retransmissions
+        remain idempotent, while changed content at a reused sequence forces a
+        full ownership clear and replay bootstrap.
+        """
+        previous = self._last_sequence.get(endpoint)
+        self._invalidate_ownership(
+            f"publisher epoch changed at {endpoint}: sequence {sequence} "
+            f"(previous {previous})"
+        )
+        raise StreamResyncRequired(
+            f"publisher epoch changed at {endpoint}: sequence {sequence}"
+        )
+
+    def _decode_batch(self, payload: bytes) -> KVEventBatch:
+        try:
+            batch = self._decoder.decode(payload)
+        except Exception as exc:
+            raise ValueError(f"malformed msgpack KVEventBatch: {exc}") from exc
+        if batch.attn_dp_rank is not None and not (0 <= batch.attn_dp_rank < self.dp_size):
+            raise ValueError(f"invalid attn_dp_rank {batch.attn_dp_rank}")
+        return batch
+
+    def _collect_replay(
+        self, endpoint: str, start: int
+    ) -> tuple[bool, list[tuple[int, KVEventBatch]]]:
+        publisher = self._publishers.get(endpoint)
+        if publisher is None or not publisher.replay_url:
+            return False, []
+        context = zmq.Context.instance()
+        dealer = context.socket(zmq.DEALER)
+        dealer.setsockopt(zmq.LINGER, 0)
+        dealer.setsockopt(zmq.RCVTIMEO, max(1, int(self.discovery_timeout * 1000)))
+        batches: list[tuple[int, KVEventBatch]] = []
+        try:
+            dealer.connect(publisher.replay_url)
+            dealer.send_multipart([b"", start.to_bytes(8, "big")])
+            while True:
+                reply = dealer.recv_multipart()
+                if len(reply) == 3 and reply[0] == b"":
+                    _, sequence_raw, payload = reply
+                elif len(reply) == 2:
+                    sequence_raw, payload = reply
+                else:
+                    raise ValueError(f"invalid replay frame count: {len(reply)}")
+                if sequence_raw == self._REPLAY_END:
+                    return True, batches
+                sequence = _decode_sequence(sequence_raw)
+                batches.append((sequence, self._decode_batch(payload)))
+        except zmq.Again:
+            return False, []
+        finally:
+            dealer.close(0)
+
+    def _bootstrap_endpoint(self, endpoint: str) -> ReplayResult:
+        """Replay from sequence zero before live events become authoritative.
+
+        A replay buffer beginning above zero is truncated. Its batches are not
+        applied because earlier removes/clears may be absent; only its final
+        sequence is retained so subsequent live events can be consumed safely.
+        """
+        available, batches = self._collect_replay(endpoint, 0)
+        if not available:
+            return ReplayResult(False, False, None)
+        if not batches:
+            return ReplayResult(True, True, None)
+
+        sequences = [sequence for sequence, _batch in batches]
+        contiguous = all(
+            current == previous + 1
+            for previous, current in zip(sequences, sequences[1:])
+        )
+        complete = sequences[0] == 0 and contiguous
+        if complete:
+            for sequence, event_batch in batches:
+                self._apply_batch(event_batch)
+                self._last_sequence[endpoint] = sequence
+                identity = self._batch_identity(event_batch)
+                self._remember_payload(endpoint, sequence, identity)
+        else:
+            # Ownership was already cleared. Do not apply an incomplete history.
+            self._last_sequence[endpoint] = sequences[-1]
+            self._last_payload_identity.pop(endpoint, None)
+        self._bootstrap_watermarks[endpoint] = sequences[-1]
+        return ReplayResult(True, complete, sequences[-1])
+
+    def _replay_gap(self, endpoint: str, start: int, live_sequence: int) -> bool:
+        try:
+            available, batches = self._collect_replay(endpoint, start)
+            if not available:
+                return False
+            expected = start
+            for sequence, event_batch in batches:
+                if sequence != expected:
+                    return False
+                self._apply_batch(event_batch)
+                self._last_sequence[endpoint] = sequence
+                identity = self._batch_identity(event_batch)
+                self._remember_payload(endpoint, sequence, identity)
+                expected += 1
+            return expected > live_sequence - 1
+        except Exception:
+            return False
+
+    def _apply_batch(self, event_batch: KVEventBatch) -> None:
+        prefix = redis_key_prefix(self.model)
+        kvblocks_key = f"{prefix}kvblocks"
+        podblocks_key = f"{prefix}podblocks:{self.pod_name}"
+        pipe = self.redis.pipeline(transaction=True)
+        timestamp = int(time.time())
+
+        for event in event_batch.events:
+            if isinstance(event, BlockStored):
+                if self.engine == "sglang" and event.medium not in (None, "GPU"):
+                    continue
+                if (
+                    self.engine == "sglang"
+                    and event.block_size != self.expected_page_size
+                ):
+                    raise ValueError(
+                        f"event block_size={event.block_size}, "
+                        f"expected {self.expected_page_size}"
+                    )
+                for block_hash in event.block_hashes:
+                    value = str(block_hash)
+                    block_key = f"{prefix}kvblock:{value}"
+                    pipe.hset(block_key, self.pod_name, timestamp)
+                    pipe.sadd(podblocks_key, value)
+                    pipe.hset(kvblocks_key, value, block_key)
+            elif isinstance(event, BlockRemoved):
+                if self.engine == "sglang" and event.medium not in (None, "GPU"):
+                    continue
+                for block_hash in event.block_hashes:
+                    value = str(block_hash)
+                    pipe.hdel(f"{prefix}kvblock:{value}", self.pod_name)
+                    pipe.srem(podblocks_key, value)
+            elif isinstance(event, AllBlocksCleared):
+                # A clear is an ordering barrier. Flush prior stores/removes so
+                # the ownership scan observes them, clear synchronously, then
+                # continue subsequent events in a fresh pipeline.
+                pipe.execute()
+                clear_pod_ownership(self.redis, self.model, self.pod_name)
+                pipe = self.redis.pipeline(transaction=True)
+            else:
+                raise ValueError(f"unsupported KV event {type(event).__name__}")
+        pipe.execute()

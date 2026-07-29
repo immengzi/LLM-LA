@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const vllmHealthProbeInterval = 5 * time.Second
+const inferenceHealthProbeInterval = 5 * time.Second
 
 type RouterPullWorker struct {
 	cfg        *Config
@@ -29,11 +29,11 @@ type RouterPullWorker struct {
 	// behavior (zero-change path when the feature is disabled).
 	capProvider func() int
 
-	// vLLM health gate
-	healthMu            sync.Mutex
-	vllmHealthy         atomic.Bool
-	vllmLastProbe       time.Time
-	vllmUnhealthyLogged bool
+	// Inference-engine readiness gate.
+	healthMu              sync.Mutex
+	engineHealthy         atomic.Bool
+	engineLastProbe       time.Time
+	engineUnhealthyLogged bool
 }
 
 func NewRouterPullWorker(cfg *Config, queue *LocalQueue, endpointID string) *RouterPullWorker {
@@ -125,10 +125,11 @@ func (w *RouterPullWorker) applyKvPullGate(want int) int {
 	return gated
 }
 
-// probeVLLM issues a GET to vLLM /health with a short timeout.
-func (w *RouterPullWorker) probeVLLM() bool {
-	c := &http.Client{Timeout: 2 * time.Second}
-	resp, err := c.Get(w.cfg.VLLMURL + "/health")
+// probeEngine issues the configured readiness probe.
+func (w *RouterPullWorker) probeEngine() bool {
+	profile := NewEngineHealthProfile(w.cfg)
+	c := &http.Client{Timeout: time.Duration(w.cfg.InferenceHealthTimeoutS * float64(time.Second))}
+	resp, err := c.Get(w.cfg.InferenceURL + profile.ReadinessPath)
 	if err != nil {
 		return false
 	}
@@ -137,37 +138,39 @@ func (w *RouterPullWorker) probeVLLM() bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// CheckVLLMHealth returns the cached health status, re-probing at most every
-// vllmHealthProbeInterval.
-func (w *RouterPullWorker) CheckVLLMHealth() bool {
+// CheckEngineHealth returns cached readiness, re-probing at most every five seconds.
+func (w *RouterPullWorker) CheckEngineHealth() bool {
 	w.healthMu.Lock()
 	defer w.healthMu.Unlock()
 
 	now := time.Now()
-	if now.Sub(w.vllmLastProbe) < vllmHealthProbeInterval {
-		return w.vllmHealthy.Load()
+	if now.Sub(w.engineLastProbe) < inferenceHealthProbeInterval {
+		return w.engineHealthy.Load()
 	}
 
-	healthy := w.probeVLLM()
-	w.vllmLastProbe = now
+	healthy := w.probeEngine()
+	w.engineLastProbe = now
 
-	wasHealthy := w.vllmHealthy.Load()
-	w.vllmHealthy.Store(healthy)
+	wasHealthy := w.engineHealthy.Load()
+	w.engineHealthy.Store(healthy)
 
 	if healthy && !wasHealthy {
-		log.Println("[sidecar] vLLM is healthy again — resuming pulls")
-		w.vllmUnhealthyLogged = false
-	} else if !healthy && !w.vllmUnhealthyLogged {
-		log.Println("[sidecar] vLLM health check FAILED — pausing pulls until recovery")
-		w.vllmUnhealthyLogged = true
+		log.Println("[sidecar] inference engine is healthy again — resuming pulls")
+		w.engineUnhealthyLogged = false
+	} else if !healthy && !w.engineUnhealthyLogged {
+		log.Println("[sidecar] inference health check FAILED — pausing pulls until recovery")
+		w.engineUnhealthyLogged = true
 	}
 	return healthy
 }
 
-// VLLMHealthy returns the last known vLLM health status (lock-free).
-func (w *RouterPullWorker) VLLMHealthy() bool {
-	return w.vllmHealthy.Load()
+func (w *RouterPullWorker) EngineHealthy() bool {
+	return w.engineHealthy.Load()
 }
+
+// Backward-compatible vLLM names.
+func (w *RouterPullWorker) CheckVLLMHealth() bool { return w.CheckEngineHealth() }
+func (w *RouterPullWorker) VLLMHealthy() bool     { return w.EngineHealthy() }
 
 func (w *RouterPullWorker) Stop() {
 	close(w.stopCh)
@@ -191,7 +194,7 @@ func (w *RouterPullWorker) pollLoop() {
 		// ready (no warmup pull / relaxed gate) without re-evaluating the
 		// affinity readiness predicate. See
 		// docs/internal/persistent-affinity-map.md (invariant).
-		if w.CheckVLLMHealth() {
+		if w.CheckEngineHealth() {
 			w.PullIfCapacity()
 		}
 		select {
@@ -223,7 +226,7 @@ func (w *RouterPullWorker) PullIfCapacity() {
 	// LOAD-BEARING health gate (see pollLoop + the affinity readiness invariant
 	// in docs/internal/persistent-affinity-map.md): never pull before vLLM is
 	// ready, or the router's per-pod READY anchor breaks.
-	if !w.vllmHealthy.Load() {
+	if !w.engineHealthy.Load() {
 		return
 	}
 	if !w.pulling.CompareAndSwap(false, true) {

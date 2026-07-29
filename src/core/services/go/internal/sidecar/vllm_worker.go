@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-type VLLMWorker struct {
+type InferenceWorker struct {
 	id          int
 	cfg         *Config
 	queue       *LocalQueue
@@ -25,7 +25,7 @@ type VLLMWorker struct {
 	busyCount   *atomic.Int64
 }
 
-func NewVLLMWorker(
+func NewInferenceWorker(
 	id int,
 	cfg *Config,
 	queue *LocalQueue,
@@ -33,8 +33,8 @@ func NewVLLMWorker(
 	puller *RouterPullWorker,
 	endpointID string,
 	busyCount *atomic.Int64,
-) *VLLMWorker {
-	return &VLLMWorker{
+) *InferenceWorker {
+	return &InferenceWorker{
 		id:         id,
 		cfg:        cfg,
 		queue:      queue,
@@ -43,7 +43,7 @@ func NewVLLMWorker(
 		endpointID: endpointID,
 		busyCount:  busyCount,
 		client: &http.Client{
-			Timeout: time.Duration(cfg.VLLMTimeoutS * float64(time.Second)),
+			Timeout: time.Duration(cfg.InferenceTimeoutS * float64(time.Second)),
 		},
 		chunkClient: &http.Client{
 			Timeout: 5 * time.Second,
@@ -51,11 +51,18 @@ func NewVLLMWorker(
 	}
 }
 
-func (w *VLLMWorker) Start() {
+// VLLMWorker is retained as a source-compatible alias.
+type VLLMWorker = InferenceWorker
+
+func NewVLLMWorker(id int, cfg *Config, queue *LocalQueue, poster *ResultPoster, puller *RouterPullWorker, endpointID string, busyCount *atomic.Int64) *VLLMWorker {
+	return NewInferenceWorker(id, cfg, queue, poster, puller, endpointID, busyCount)
+}
+
+func (w *InferenceWorker) Start() {
 	go w.loop()
 }
 
-func (w *VLLMWorker) loop() {
+func (w *InferenceWorker) loop() {
 	const idleSleep = 5 * time.Millisecond
 	for {
 		item, ok := w.queue.GetNoWait()
@@ -96,7 +103,7 @@ type vllmResult struct {
 	hasTtft      bool
 }
 
-func (w *VLLMWorker) process(item QueueItem) {
+func (w *InferenceWorker) process(item QueueItem) {
 	reqID := item.ReqID
 	prompt := item.Prompt
 	meta := item.Meta
@@ -135,7 +142,7 @@ func (w *VLLMWorker) process(item QueueItem) {
 	}
 
 	if err != nil {
-		log.Printf("[sidecar] vLLM request failed for req_id=%s: %v", reqID, err)
+		log.Printf("[sidecar] inference request failed for req_id=%s: %v", reqID, err)
 		w.submitError(reqID, err)
 		return
 	}
@@ -197,7 +204,7 @@ func (w *VLLMWorker) process(item QueueItem) {
 
 // buildPayload constructs the vLLM request body and reports whether the
 // originating client requested a streamed response (forward_stream).
-func (w *VLLMWorker) buildPayload(prompt string, meta map[string]any) (map[string]any, bool) {
+func (w *InferenceWorker) buildPayload(prompt string, meta map[string]any) (map[string]any, bool) {
 	payload := map[string]any{}
 	forwardStream := false
 
@@ -215,8 +222,17 @@ func (w *VLLMWorker) buildPayload(prompt string, meta map[string]any) (map[strin
 		payload["messages"] = []map[string]any{{"role": "user", "content": prompt}}
 		payload["max_tokens"] = metaInt(meta, "max_tokens", 128)
 		payload["temperature"] = metaFloat(meta, "temperature", 0.0)
-		payload["chat_template_kwargs"] = map[string]any{
-			"enable_thinking": metaBool(meta, "enable_thinking", false),
+		// Preserve the historical vLLM payload exactly. SGLang must use its
+		// tokenizer default unless the caller explicitly supplies an override;
+		// forcing false can make inference tokenization diverge from KV hashing.
+		if w.cfg.InferenceEngine != "sglang" {
+			payload["chat_template_kwargs"] = map[string]any{
+				"enable_thinking": metaBool(meta, "enable_thinking", false),
+			}
+		} else if _, ok := meta["enable_thinking"]; ok {
+			payload["chat_template_kwargs"] = map[string]any{
+				"enable_thinking": metaBool(meta, "enable_thinking", false),
+			}
 		}
 		if _, ok := meta["min_tokens"]; ok {
 			payload["min_tokens"] = metaInt(meta, "min_tokens", 0)
@@ -233,7 +249,7 @@ func (w *VLLMWorker) buildPayload(prompt string, meta map[string]any) (map[strin
 	return payload, forwardStream
 }
 
-func (w *VLLMWorker) callNonStreaming(reqID string, payload map[string]any) (vllmResult, error) {
+func (w *InferenceWorker) callNonStreaming(reqID string, payload map[string]any) (vllmResult, error) {
 	var res vllmResult
 
 	body, err := json.Marshal(payload)
@@ -241,7 +257,7 @@ func (w *VLLMWorker) callNonStreaming(reqID string, payload map[string]any) (vll
 		return res, err
 	}
 
-	url := fmt.Sprintf("%s/v1/chat/completions", w.cfg.VLLMURL)
+	url := fmt.Sprintf("%s/v1/chat/completions", w.cfg.InferenceURL)
 	tSend := time.Now()
 	resp, err := w.client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -254,14 +270,14 @@ func (w *VLLMWorker) callNonStreaming(reqID string, payload map[string]any) (vll
 
 	dec := json.NewDecoder(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		res.outputText = fmt.Sprintf("[vLLM error %d]", resp.StatusCode)
+		res.outputText = fmt.Sprintf("[%s error %d]", w.engineLabel(), resp.StatusCode)
 		return res, nil
 	}
 
 	var data map[string]any
 	if err := dec.Decode(&data); err != nil {
 		log.Printf("[sidecar] parse error for req_id=%s: %v", reqID, err)
-		res.outputText = "[parse error in vLLM response]"
+		res.outputText = fmt.Sprintf("[parse error in %s response]", w.engineLabel())
 		return res, nil
 	}
 	res.rawVllm = data
@@ -295,7 +311,7 @@ func (w *VLLMWorker) callNonStreaming(reqID string, payload map[string]any) (vll
 	return res, nil
 }
 
-func (w *VLLMWorker) callStreaming(reqID string, payload map[string]any, forwardStream bool) (vllmResult, error) {
+func (w *InferenceWorker) callStreaming(reqID string, payload map[string]any, forwardStream bool) (vllmResult, error) {
 	var res vllmResult
 
 	body, err := json.Marshal(payload)
@@ -303,7 +319,7 @@ func (w *VLLMWorker) callStreaming(reqID string, payload map[string]any, forward
 		return res, err
 	}
 
-	url := fmt.Sprintf("%s/v1/chat/completions", w.cfg.VLLMURL)
+	url := fmt.Sprintf("%s/v1/chat/completions", w.cfg.InferenceURL)
 	routerChunkURL := fmt.Sprintf("%s/result_chunk", w.cfg.RouterURL)
 
 	tSend := time.Now()
@@ -314,8 +330,8 @@ func (w *VLLMWorker) callStreaming(reqID string, payload map[string]any, forward
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("[sidecar] vLLM stream error: %d", resp.StatusCode)
-		res.outputText = fmt.Sprintf("[vLLM error %d]", resp.StatusCode)
+		log.Printf("[sidecar] inference stream error: %d", resp.StatusCode)
+		res.outputText = fmt.Sprintf("[%s error %d]", w.engineLabel(), resp.StatusCode)
 		return res, nil
 	}
 
@@ -494,7 +510,7 @@ func (w *VLLMWorker) callStreaming(reqID string, payload map[string]any, forward
 	return res, nil
 }
 
-func (w *VLLMWorker) forwardChunk(url string, payload map[string]any) {
+func (w *InferenceWorker) forwardChunk(url string, payload map[string]any) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return
@@ -509,7 +525,7 @@ func (w *VLLMWorker) forwardChunk(url string, payload map[string]any) {
 	resp.Body.Close()
 }
 
-func (w *VLLMWorker) submitError(reqID string, err error) {
+func (w *InferenceWorker) submitError(reqID string, err error) {
 	// An errored request still consumed a slot, so carry the top-level
 	// "endpoint" here too or the gateway's in-flight counter leaks on failure.
 	w.poster.Submit(map[string]any{
@@ -521,6 +537,13 @@ func (w *VLLMWorker) submitError(reqID string, err error) {
 			"error":         err.Error(),
 		},
 	})
+}
+
+func (w *InferenceWorker) engineLabel() string {
+	if w.cfg.InferenceEngine == "vllm" || w.cfg.InferenceEngine == "" {
+		return "vLLM"
+	}
+	return "inference"
 }
 
 // extractToolCalls pulls choices[0].message.tool_calls from a raw vLLM response.

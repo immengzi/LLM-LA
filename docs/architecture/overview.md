@@ -10,8 +10,8 @@ flowchart TB
   Router["Router :8080 / :30080<br/>(KV-block hashing inline)"]
   Redis[("Redis :6379")]
 
-  subgraph pod [vLLM pod]
-    Sidecar["Sidecar :9000"] --> vLLM["vLLM :8200"]
+  subgraph pod [inference pod]
+    Sidecar["Sidecar :9000"] --> Engine["vLLM or SGLang :8200"]
   end
 
   Client -->|"/enqueue or /submit"| Router
@@ -22,7 +22,12 @@ flowchart TB
   Router -->|result| Client
 ```
 
-LA-Boom places a custom **router** and per-pod **sidecars** around stock vLLM, plus **Redis** for KV-aware placement. KV-block hashing runs **inside the router by default** (in-process for the Python router; in a tiny in-container hasher for the Go gateway). The standalone **prefix-hash** service is an optional legacy mode (`KV_HASH_SOURCE=external`) and is the dashed box above — see [prefix-hash.md](prefix-hash.md).
+LA-Boom places a custom **router** and per-pod **sidecars** around stock vLLM or
+the pinned SGLang v0.5.15 profile, plus **Redis** for KV-aware placement.
+KV-block hashing runs **inside the router by default** (in-process for the Python
+router; in a tiny in-container hasher for the Go gateway). The standalone
+**prefix-hash** service is an optional legacy mode
+(`KV_HASH_SOURCE=external`) for vLLM — see [prefix-hash.md](prefix-hash.md).
 
 ## Components
 
@@ -30,7 +35,7 @@ LA-Boom places a custom **router** and per-pod **sidecars** around stock vLLM, p
 |-----------|------|------------------------------|-----------|
 | Router | Central queue, pull/push dispatch, KV/length/SLO scheduling, OpenAI shim, **inline KV-block hashing** | 8080 / 30080 (ZMQ results 5559 / 30559) | [router.md](router.md) |
 | Sidecar | Per-pod local queue, vLLM forwarding, KV event reporting | 9000 (in-pod) | [sidecar.md](sidecar.md) |
-| vLLM | Model inference (OpenAI-compatible API) | 8200 / 30034 (+offset) | — |
+| vLLM / SGLang | Model inference (OpenAI-compatible API); SGLang is pinned to v0.5.15 | 8200 / 30034 (+offset) | [SGLang contract](sglang-contract-v0.5.15.md) |
 | Redis | KV block ownership (`{MODEL}:kvblock:*`) | 6379 / 30079 | [kv-cache-flow.md](kv-cache-flow.md) |
 | Prefix-Hash *(legacy, external mode only)* | Standalone vLLM-compatible KV block hasher; deployed only when `KV_HASH_SOURCE=external` | 9095 / 30095 | [prefix-hash.md](prefix-hash.md) |
 
@@ -53,7 +58,12 @@ Each sidecar subscribes to vLLM's ZMQ KV-cache events and writes block ownership
 
 ## Implementations
 
-The router and sidecar exist in both **Python** (FastAPI) and **Go** (chi), selectable via the Helm value `serviceImpl`. They are near-identical ports sharing the same APIs, Redis schema, ZMQ formats, and metric names. KV-block hashing uses the same `prefix_hash.py` in both (in-process for Python; in-container for Go) by default. See [go-services.md](go-services.md).
+The router and sidecar exist in both **Python** (FastAPI) and **Go** (chi),
+selectable via the Helm value `serviceImpl`. Both implementations support vLLM
+and the pinned SGLang profile while sharing APIs, Redis schema, ZMQ formats,
+probes, and metric names. KV-block hashing uses the same `prefix_hash.py` in
+both (in-process for Python; in-container for Go) by default. See
+[go-services.md](go-services.md).
 
 ## Transports
 

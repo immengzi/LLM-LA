@@ -8,15 +8,33 @@ import requests
 from requests.adapters import HTTPAdapter
 
 from .config import get_config
+from .engine_profile import get_engine_health_profile
 from .local_queue import LocalQueue
 from .metrics import inc_received, init_kv_pull_gate_metrics, set_kv_pull_gate_state
 
 _cfg = get_config()
 
-# vLLM health probe interval — avoids hammering localhost:8200/health on
+# Inference health probe interval — avoids hammering the local engine on
 # every 50ms pull tick.  The cached result is shared across poll-loop and
 # reactive pulls.
-_VLLM_HEALTH_PROBE_INTERVAL_S = 5.0
+_INFERENCE_HEALTH_PROBE_INTERVAL_S = 5.0
+# Compatibility name for code that imported the old module constant.
+_VLLM_HEALTH_PROBE_INTERVAL_S = _INFERENCE_HEALTH_PROBE_INTERVAL_S
+
+
+def _engine_profile():
+    return get_engine_health_profile(
+        _cfg.INFERENCE_ENGINE,
+        health_path=_cfg.INFERENCE_HEALTH_PATH,
+        readiness_path=getattr(_cfg, "INFERENCE_READINESS_PATH", ""),
+    )
+
+
+def _inference_health_url() -> str:
+    return (
+        f"{_cfg.INFERENCE_URL.rstrip('/')}/"
+        f"{_engine_profile().readiness_path.lstrip('/')}"
+    )
 
 
 def _make_pooled_session(pool_connections: int, pool_maxsize: int) -> requests.Session:
@@ -38,7 +56,7 @@ def _make_pooled_session(pool_connections: int, pool_maxsize: int) -> requests.S
 
 class RouterPullWorker:
     """
-    Pull helper for a single vLLM pod.
+    Pull helper for a single inference pod.
 
     Responsibilities:
       - Compute capacity from local_q.state() and pull_cap (BATCH_SIZE + PREFETCH).
@@ -72,10 +90,10 @@ class RouterPullWorker:
         self._first_success: bool = False
         self._printed_wait_msg: bool = False
 
-        # vLLM health-gate state
-        self._vllm_healthy: bool = False
-        self._vllm_last_probe: float = 0.0
-        self._vllm_unhealthy_logged: bool = False
+        # Inference-engine health-gate state
+        self._engine_healthy: bool = False
+        self._engine_last_probe: float = 0.0
+        self._engine_unhealthy_logged: bool = False
 
     # ---------------- pull-cap resolution ----------------
 
@@ -175,43 +193,55 @@ class RouterPullWorker:
                 pass
         print("[sidecar] RouterPullWorker stopped")
 
-    # ---------------- vLLM health gate ----------------
+    # ---------------- inference health gate ----------------
 
-    def _probe_vllm(self) -> bool:
-        """GET vLLM /health with a short timeout.  Returns True if 200."""
+    def _probe_engine(self) -> bool:
+        """Probe configured inference health URL. Returns True if 200."""
         try:
             r = requests.get(
-                f"{_cfg.VLLM_URL}/health", timeout=2.0,
+                _inference_health_url(),
+                timeout=float(getattr(_cfg, "INFERENCE_HEALTH_TIMEOUT_S", 2.0)),
             )
-            return r.status_code == 200
+            return _engine_profile().accepts(r)
         except Exception:
             return False
 
-    def check_vllm_health(self) -> bool:
+    def check_engine_health(self) -> bool:
         """
-        Cached probe: re-checks vLLM at most every
-        _VLLM_HEALTH_PROBE_INTERVAL_S seconds.  Thread-safe.
+        Cached probe: re-checks the inference engine at most every
+        _INFERENCE_HEALTH_PROBE_INTERVAL_S seconds.
         """
         now = time.monotonic()
-        if now - self._vllm_last_probe < _VLLM_HEALTH_PROBE_INTERVAL_S:
-            return self._vllm_healthy
+        if now - self._engine_last_probe < _INFERENCE_HEALTH_PROBE_INTERVAL_S:
+            return self._engine_healthy
 
-        healthy = self._probe_vllm()
-        self._vllm_last_probe = now
+        healthy = self._probe_engine()
+        self._engine_last_probe = now
 
-        if healthy and not self._vllm_healthy:
-            print("[sidecar] vLLM is healthy again — resuming pulls")
-            self._vllm_unhealthy_logged = False
-        elif not healthy and not self._vllm_unhealthy_logged:
-            print("[sidecar] vLLM health check FAILED — pausing pulls until recovery")
-            self._vllm_unhealthy_logged = True
+        if healthy and not self._engine_healthy:
+            print("[sidecar] inference engine is healthy again — resuming pulls")
+            self._engine_unhealthy_logged = False
+        elif not healthy and not self._engine_unhealthy_logged:
+            print(
+                "[sidecar] inference health check FAILED — "
+                "pausing pulls until recovery"
+            )
+            self._engine_unhealthy_logged = True
 
-        self._vllm_healthy = healthy
+        self._engine_healthy = healthy
         return healthy
 
     @property
+    def engine_healthy(self) -> bool:
+        return self._engine_healthy
+
+    # Backward-compatible API used by older sidecar integrations.
+    def check_vllm_health(self) -> bool:
+        return self.check_engine_health()
+
+    @property
     def vllm_healthy(self) -> bool:
-        return self._vllm_healthy
+        return self.engine_healthy
 
     # ---------------- background poller ----------------
 
@@ -219,19 +249,19 @@ class RouterPullWorker:
         """
         Continuously check capacity and pull from router.
         Ensures the local queue stays warm even when all workers are
-        blocked on long vLLM calls and no busy-path pulls fire.
-        Skips pulling when vLLM is unreachable (health gate).
+        blocked on long inference calls and no busy-path pulls fire.
+        Skips pulling when the engine is unreachable (health gate).
         """
         interval = max(0.01, float(_cfg.PULL_INTERVAL_S))
         while not self._stop_evt.is_set():
             try:
-                # LOAD-BEARING health gate: pulls happen only when vLLM /health
+                # LOAD-BEARING health gate: pulls happen only when engine health
                 # is 200. The router's persistent-affinity readiness anchor
                 # relies on "a pull ⟹ this pod was ready ≤5s ago". Do NOT pull
-                # before vLLM is ready (no warmup pull / relaxed gate) without
+                # before the engine is ready (no warmup pull / relaxed gate) without
                 # re-evaluating the affinity readiness predicate.
                 # See docs/internal/persistent-affinity-map.md (invariant).
-                if self.check_vllm_health():
+                if self.check_engine_health():
                     self.pull_if_capacity()
             except Exception as e:
                 if self._first_success:
@@ -259,8 +289,8 @@ class RouterPullWorker:
 
         # LOAD-BEARING health gate (see _poll_loop + the affinity readiness
         # invariant in docs/internal/persistent-affinity-map.md): never pull
-        # before vLLM is ready, or the router's per-pod READY anchor breaks.
-        if not self._vllm_healthy:
+        # before the engine is ready, or the router's per-pod READY anchor breaks.
+        if not self._engine_healthy:
             return
 
         with self._lock:

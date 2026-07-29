@@ -44,6 +44,7 @@ data:
     {{- range .Values.models }}
     {{- $mName := .name }}
     {{- $served := .servedModelName | default .name }}
+    {{- $resourceName := include "vllmkv.modelResourceName" (dict "root" $ "model" .) | trim }}
     {{- $dp := .dataParallel | default dict }}
     {{- $isDP := $dp.enabled | default false }}
     {{- $replicas := .replicas | default 1 | int }}
@@ -61,7 +62,7 @@ data:
           id: {{ if $kvc }}{{ printf "vllm-%s-%d" $mName $i | quote }}{{ else }}{{ printf "%s-%d" $mName $i | quote }}{{ end }}
         litellm_params:
           model: {{ printf "openai/%s" $served | quote }}
-          api_base: {{ printf "http://vllm-%s-%d.vllm-%s:8200/v1" $mName $i $mName | quote }}
+          api_base: {{ printf "http://%s-%d.%s:8200/v1" $resourceName $i $resourceName | quote }}
           api_key: "dummy"
           timeout: {{ $boomTimeout }}
     {{- if gt (int ($.Values.boom.maxInflight | default 0)) 0 }}
@@ -76,7 +77,7 @@ data:
           id: {{ printf "%s-0" $mName | quote }}
         litellm_params:
           model: {{ printf "openai/%s" $served | quote }}
-          api_base: {{ printf "http://vllm-%s:8200/v1" .name | quote }}
+          api_base: {{ printf "http://%s:8200/v1" $resourceName | quote }}
           api_key: "dummy"
           timeout: {{ $boomTimeout }}
     {{- if gt (int ($.Values.boom.maxInflight | default 0)) 0 }}
@@ -86,12 +87,13 @@ data:
     {{- end }}
     {{- end }}
     {{- else }}
+      {{- $legacyEngine := lower (.Values.engine.type | default "vllm") }}
       - model_name: served-model
         model_info:
           id: "vllm-qwen-0"
         litellm_params:
           model: openai/served-model
-          api_base: http://vllm-qwen:8200/v1
+          api_base: {{ printf "http://%s-qwen:8200/v1" $legacyEngine }}
           api_key: "dummy"
           timeout: {{ $boomTimeout }}
     {{- if gt (int (.Values.boom.maxInflight | default 0)) 0 }}

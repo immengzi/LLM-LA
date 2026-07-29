@@ -7,7 +7,9 @@ Reference for the `vllm-kv-stack` Helm chart (`src/core/vllm-kv-stack/values.yam
 There are three ways values reach the chart:
 
 1. **Sweep runner** — `sweep_methods.py` translates the `helm:` section of a client config into `--set` flags plus a temporary `models[]` overlay. This is the primary path. See [experiment configs](experiment-configs.md).
-2. **`deploy_vllm.py`** — deploys only vLLM (`deploy.vllm=true`, router/redis/cpuHash off) from the same client config.
+2. **`deploy_engine.py`** (backed by the legacy `deploy_vllm.py`
+   implementation) — deploys only the selected engine (`deploy.vllm=true`,
+   router/redis/cpuHash off) from the same client config.
 3. **Direct `helm upgrade --install ... --set ...`** — for manual/one-off deploys.
 
 ## Top-level
@@ -15,8 +17,9 @@ There are three ways values reach the chart:
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `backend` | `router` | Selects the infra stack flavor. Note: gateways are **not** turned on by this — LiteLLM/BooM render only when `litellm.enabled`/`boom.enabled` are set. `litellm`/`boom` render the same router+redis+cpuHash stack as `router`. |
-| `serviceImpl` | `python` | Router/sidecar implementation: `python` or `go` (swaps images only) |
-| `hardware` | `ascend` | Accelerator backend for vLLM pods: `ascend` (Huawei NPU) or `nvidia` (GPU). `nvidia` requests `nvidia.com/gpu`, applies `vllm.runtimeClassName`, and drops Ascend driver mounts/toolkit. Set per cluster via `helm.values.hardware` ([GPU deployment](../deployment/gpu.md)) |
+| `engine.type` | `vllm` | Inference engine: `vllm` or pinned `sglang`. Workload names are `<engine>-<modelName>` (for example `vllm-qwen` / `sglang-qwen`); discovery uses `component=engine`. |
+| `serviceImpl` | `python` | Router/sidecar implementation: `python` or `go`; valid for both engines and rejected otherwise |
+| `hardware` | `ascend` | Accelerator backend for engine pods: `ascend` (Huawei NPU) or `nvidia` (GPU). `nvidia` requests `nvidia.com/gpu`, applies `vllm.runtimeClassName`, and drops Ascend driver mounts/toolkit. Set per cluster via `helm.values.hardware` ([GPU deployment](../deployment/gpu.md)) |
 | `portOffset` | `0` | Added to the NodePorts of **redis, router, cpu-hash, and vLLM only** (not LiteLLM/BooM). For shadow deployments. |
 | `replicas.router` | `1` | Router replica count |
 | `replicas.vllm` | `16` | Legacy fallback replica count when `models[]` is empty |
@@ -31,11 +34,27 @@ There are three ways values reach the chart:
 | `images.router` / `images.sidecar` | `kv-router:latest` / `kv-sidecar:latest` | Python services |
 | `images.routerGo` / `images.sidecarGo` | `kv-router-go:latest` / `kv-sidecar-go:latest` | Used when `serviceImpl=go` |
 | `images.vllm` | `docker.io/library/vllm-ascend:v0.18.0` | vLLM engine image |
+| `images.sglang` | `lmsysorg/sglang:v0.5.15-cu129` | Complete official SGLang v0.5.15 image with CUDA 12.9 |
 | `images.cpuHash` | `vllm-cpu-hash:latest` | Legacy external prefix-hash service (used only when `router.hashSource=external`) |
 | `images.redis` | `redis:7-alpine` | Redis |
 | `images.mooncakeMaster` | `docker.io/library/vllm-ascend:v0.18.0` | Mooncake master |
 
 A fully-qualified per-model `image` bypasses the registry rewrite.
+
+The explicit CUDA tag avoids the unqualified v0.5.15 image's CUDA 13 runtime,
+which is incompatible with NVIDIA 570-series drivers. The complete `-cu129`
+image preserves the SGLang v0.5.15 API and KV contract through CUDA
+minor-version compatibility. Override `images.sglang` or a per-model `image`
+when the cluster driver requires another official image.
+
+For SGLang, `serviceImpl` selects only the router and sidecar images. The chart
+keeps one shared deployment profile and emits the same engine-neutral
+`INFERENCE_*` and `KV_EVENT_*` contract for both implementations. The Go
+sidecar's SGLang readiness endpoint is `/ready`; liveness is `/health`.
+
+SGLang pods default to `sglang.runtimeClassName: nvidia` so the NVIDIA container
+runtime injects CUDA devices. Override only when the cluster provides GPU
+visibility another way.
 
 ## Sidecar (`sidecar.*`)
 
@@ -289,21 +308,25 @@ exactly as before, so existing releases are unaffected. See the full runbook in
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `enabled` | `false` | Master switch. When false nothing is rendered (replicas stay static) |
-| `signal` | `queue` | `queue` → per-model router central queue; `vllm` → vLLM KV-cache pressure (router-less topologies) |
+| `signal` | `queue` | `queue` → per-model router central queue; `vllm` → vLLM KV-cache pressure; `sglang` → namespace/model-scoped fractional token usage |
 | `prometheusServerAddress` | `http://kube-prometheus-stack-prometheus.monitoring.svc:9090` | Prometheus endpoint KEDA queries (matches the `monitoring` role) |
 | `minReplicaCount` | `null` | Min replicas; `null` → each model's own replica count (DP: `dataParallel.groups`) |
 | `maxReplicaCount` | `16` | Max replicas |
 | `threshold` | `"16"` | Target central-queue depth per model (queue signal) |
 | `vllmThreshold` | `"0.8"` | Target KV-cache utilisation 0..1 (vllm signal) |
+| `sglangThreshold` | `"0.8"` | Target SGLang token usage 0..1 |
 | `pollingInterval` | `10` | KEDA poll interval (seconds) |
 | `cooldownPeriod` | `300` | KEDA scale-to-min cooldown (seconds) |
-| `vllmQuery` / `prometheusQuery` | `""` | Optional full-query overrides applied to every model |
+| `vllmQuery` / `sglangQuery` / `prometheusQuery` | `""` | Optional full-query overrides applied to every model |
 | `perModel` | `{}` | Per-model overrides keyed by `models[].name` (`enabled`, `minReplicaCount`, `maxReplicaCount`, `threshold`, `signal`, `query`) |
 
 One `ScaledObject` is rendered per autoscaled model, targeting `Deployment`
 (dense/multi-model) or `LeaderWorkerSet` (data-parallel) automatically. The
 `queue` signal uses the additive `router_central_queue_length_by_model{model="<servedModelName>"}`
 metric, so the legacy global `router_central_queue_length` gauge is unchanged.
+The default `sglang` query uses only `sglang:token_usage` (or its underscore
+alias), filtered by Helm release namespace and served `model_name`; it never
+combines fractional utilisation with request-count metrics.
 KEDA must be installed first (`make keda` — see the runbook).
 
 ## Cache warm (`cacheWarm.*`)

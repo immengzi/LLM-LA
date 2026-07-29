@@ -10,6 +10,7 @@ import sys
 
 # Global singleton to avoid recomputing config multiple times
 _CONFIG = None
+SGLANG_HASH_CONTRACT_VERSION = "0.5.15"
 
 
 # -----------------------------------------------------------------------
@@ -80,11 +81,14 @@ class RouterConfig:
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
     MODEL_NAME: str = "served-model"
+    INFERENCE_ENGINE: str = "vllm"
 
     # Inline KV-block hash computation.
     # The tokenizer path must point at the same model directory vLLM uses.
     KV_TOKENIZER_PATH: str = "/model"
     KV_BLOCK_SIZE: int = 128
+    KV_HASH_BACKEND: str = "vllm"
+    SGLANG_CONTRACT_VERSION: str = ""
 
     # KV-block hash source:
     #   "inline"   -> compute in-process via prefix_hash.py (default).
@@ -496,6 +500,27 @@ def _parse_static_endpoints(raw: str) -> List[Dict[str, Any]]:
     return out
 
 
+def sglang_hash_contract_error(cfg: RouterConfig) -> Optional[str]:
+    """Explain why SGLang inline hashing must fail closed, if applicable."""
+    if cfg.INFERENCE_ENGINE != "sglang" and cfg.KV_HASH_BACKEND != "sglang":
+        return None
+    if cfg.INFERENCE_ENGINE != "sglang":
+        return "inference_engine_must_be_sglang"
+    if cfg.KV_HASH_BACKEND != "sglang":
+        return "kv_hash_backend_must_be_sglang"
+    if cfg.KV_HASH_SOURCE != "inline":
+        return "kv_hash_source_must_be_inline"
+    if cfg.KV_BLOCK_SIZE <= 0:
+        return "sglang_page_size_must_be_positive"
+    if cfg.SGLANG_CONTRACT_VERSION != SGLANG_HASH_CONTRACT_VERSION:
+        return (
+            "sglang_contract_version_mismatch:"
+            f"expected={SGLANG_HASH_CONTRACT_VERSION},"
+            f"actual={cfg.SGLANG_CONTRACT_VERSION or 'unset'}"
+        )
+    return None
+
+
 def get_config() -> RouterConfig:
     """
     Return a singleton RouterConfig with env overrides applied.
@@ -515,6 +540,11 @@ def get_config() -> RouterConfig:
     cfg.REDIS_HOST = os.getenv("REDIS_HOST", cfg.REDIS_HOST)
     cfg.REDIS_PORT = int(os.getenv("REDIS_PORT", cfg.REDIS_PORT))
     cfg.MODEL_NAME = os.getenv("MODEL_NAME", cfg.MODEL_NAME)
+    cfg.INFERENCE_ENGINE = _norm_mode(
+        os.getenv("INFERENCE_ENGINE", cfg.INFERENCE_ENGINE)
+    )
+    if cfg.INFERENCE_ENGINE not in ("vllm", "sglang"):
+        cfg.INFERENCE_ENGINE = "vllm"
     cfg.NAMESPACE = os.getenv("NAMESPACE", cfg.NAMESPACE)
     cfg.LABEL_SELECTOR = os.getenv("LABEL_SELECTOR", cfg.LABEL_SELECTOR)
     cfg.VLLM_PORT = int(os.getenv("VLLM_PORT", cfg.VLLM_PORT))
@@ -578,6 +608,14 @@ def get_config() -> RouterConfig:
     # Inline KV-block hash computation
     cfg.KV_TOKENIZER_PATH = os.getenv("KV_TOKENIZER_PATH", cfg.KV_TOKENIZER_PATH)
     cfg.KV_BLOCK_SIZE = int(os.getenv("KV_BLOCK_SIZE", cfg.KV_BLOCK_SIZE))
+    cfg.KV_HASH_BACKEND = _norm_mode(
+        os.getenv("KV_HASH_BACKEND", cfg.KV_HASH_BACKEND)
+    )
+    if cfg.KV_HASH_BACKEND not in ("vllm", "sglang"):
+        cfg.KV_HASH_BACKEND = "vllm"
+    cfg.SGLANG_CONTRACT_VERSION = os.getenv(
+        "SGLANG_CONTRACT_VERSION", cfg.SGLANG_CONTRACT_VERSION
+    ).strip()
     cfg.KV_HASH_SOURCE = os.getenv("KV_HASH_SOURCE", cfg.KV_HASH_SOURCE).strip().lower()
     if cfg.KV_HASH_SOURCE not in ("inline", "external"):
         cfg.KV_HASH_SOURCE = "inline"
@@ -794,7 +832,10 @@ def get_config() -> RouterConfig:
     cfg.PUSH_MAX_KEEPALIVE = max(1, int(cfg.PUSH_MAX_KEEPALIVE))
     cfg.PUSH_KEEPALIVE_EXPIRY_S = max(0.0, float(cfg.PUSH_KEEPALIVE_EXPIRY_S))
 
-    cfg.KV_BLOCK_SIZE = max(1, int(cfg.KV_BLOCK_SIZE))
+    if cfg.INFERENCE_ENGINE == "sglang":
+        cfg.KV_BLOCK_SIZE = int(cfg.KV_BLOCK_SIZE)
+    else:
+        cfg.KV_BLOCK_SIZE = max(1, int(cfg.KV_BLOCK_SIZE))
 
     cfg.PUSH_DISPATCH_QUEUE_MAX = max(1, int(cfg.PUSH_DISPATCH_QUEUE_MAX))
     cfg.PUSH_DISPATCH_WORKERS = max(1, int(cfg.PUSH_DISPATCH_WORKERS))
