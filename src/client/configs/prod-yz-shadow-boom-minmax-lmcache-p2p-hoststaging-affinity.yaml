@@ -9,7 +9,7 @@
 # Node layout (single DP2 group, replicas: 1):
 #   node3: prod infra (unchanged) + shadow vLLM (one DP2 pod)
 #   node4: shadow infra (router, redis, BooM) + shadow vLLM (one DP2 pod)
-#   node3 also hosts the lmcache_controller (pinned there, co-located w/ the DP leader)
+#          + lmcache_controller (pinned here — NOT node3)
 #
 # Pre-requisites:
 #   kubectl label node node3 avoid=vllm --overwrite
@@ -19,10 +19,14 @@
 #     ctr -n k8s.io images pull reg.local:32000/lmcache-ascend:hccl-p2p
 #   sysctl -w vm.swappiness=0 && sysctl -w kernel.numa_balancing=0   (on node3/4)
 #
-# Controller placement: pinned to node3 (host IP 10.50.156.65 on this cluster);
-# engines dial it over the node host network. controller_pull_url/reply_url below
-# must match node3's host IP. To re-check a node's IP:
-#     kubectl get node node3 -o jsonpath='{.status.addresses}'
+# Controller placement: pinned to node4 (InternalIP 10.50.156.106), NOT node3.
+# Prod's shared lmcache_controller already binds hostNetwork :9000/:9800/:9900 on
+# node3 (10.50.156.65); co-locating shadow there leaves the controller Pending
+# ("didn't have free ports"). Engines dial the node4 host IP below.
+# Admin port is 9010 (not 9000) so a co-located engine's kv-sidecar :9000 does
+# not clash. Pre-pull the P2P image on node4 or the controller sits in
+# ImagePullBackOff while still reserving those host ports.
+#     kubectl get node node4 -o jsonpath='{.status.addresses}'
 
 switch_cluster: yz
 backend: "boom"
@@ -226,9 +230,9 @@ helm:
   lmcache_use_host_staging: true
   lmcache_os_staging_bytes: 8589934592   # 8 GiB
 
-  # Controller pinned to node3 (host IP 10.50.156.65 on this cluster).
-  lmcache_p2p_controller_pull_url: "10.50.156.65:9800"
-  lmcache_p2p_controller_reply_url: "10.50.156.65:9900"
+  # Controller on node4 (10.50.156.106) — avoids prod's controller on node3:9800/9900.
+  lmcache_p2p_controller_pull_url: "10.50.156.106:9800"
+  lmcache_p2p_controller_reply_url: "10.50.156.106:9900"
   deploy_lmcache_controller: true
   lmcache_controller_image: "reg.local:32000/lmcache-ascend:hccl-p2p-metrics-fix"
 
@@ -247,9 +251,12 @@ helm:
 
   vllm_image: "reg.local:32000/lmcache-ascend:hccl-p2p-metrics-fix"
 
-  # Pin the controller to node3 (co-located with the DP leader; host IP 10.50.156.65).
+  # Pin the controller to node4 (same host as pin_node_name / shadow infra).
   values:
-    lmcacheController.nodeName: "node3"
+    lmcacheController.nodeName: "node4"
+    # Avoid hostNetwork clash with kv-sidecar :9000 when an engine also lands on
+    # node4. P2P engines dial pull/reply (9800/9900) only; this is the admin port.
+    lmcacheController.port: 9010
     # Reserve CPU + host RAM for the vLLM engine container so LMCache's host-RAM
     # "local_cpu" tier is not CPU-starved / OOM-killed at peak load (the engine
     # otherwise requests ONLY the Ascend NPU + ephemeral-storage). Requests only,
@@ -260,13 +267,12 @@ helm:
     # it can still burst to all 192 under load. Drop memory if the node is smaller.
     vllm.engineResources.requests.cpu: "96"
     vllm.engineResources.requests.memory: "900Gi"
-    # lmcache_controller runs on its own node (node3), off the engine nodes, so
-    # give it a generous reservation (vs the 2/4Gi chart default) to handle P2P
-    # block-owner lookups at peak without becoming the bottleneck.
-    lmcacheController.resources.requests.cpu: "16"
-    lmcacheController.resources.requests.memory: "32Gi"
-    lmcacheController.resources.limits.cpu: "64"
-    lmcacheController.resources.limits.memory: "64Gi"
+    # Controller shares node4 with shadow infra (+ possibly one engine). Keep the
+    # reservation modest so it can't starve the engine's host-staging arena.
+    lmcacheController.resources.requests.cpu: "2"
+    lmcacheController.resources.requests.memory: "4Gi"
+    lmcacheController.resources.limits.cpu: "4"
+    lmcacheController.resources.limits.memory: "8Gi"
 
   models:
     - name: minimax-m2
