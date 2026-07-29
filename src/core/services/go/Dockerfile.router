@@ -14,10 +14,13 @@ WORKDIR /app
 # ---------- Proxy only for build (pip) ----------
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
+ARG NO_PROXY
 ENV http_proxy=${HTTP_PROXY} \
     https_proxy=${HTTPS_PROXY} \
     HTTP_PROXY=${HTTP_PROXY} \
-    HTTPS_PROXY=${HTTPS_PROXY}
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    NO_PROXY=${NO_PROXY} \
+    no_proxy=${NO_PROXY}
 
 # In-container hasher dependencies (used only in inline mode).
 COPY hasher/requirements.txt /app/requirements.txt
@@ -27,7 +30,9 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 ENV http_proxy="" \
     https_proxy="" \
     HTTP_PROXY="" \
-    HTTPS_PROXY=""
+    HTTPS_PROXY="" \
+    NO_PROXY="" \
+    no_proxy=""
 
 # Shared hashing code. prefix_hash.py is staged into hasher/ by build.sh from
 # src/core/services/router_service/router/prefix_hash.py (single source of truth).

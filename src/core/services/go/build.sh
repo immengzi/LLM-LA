@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
+# Build + push kv-router-go / kv-sidecar-go.
+#
+#   ./build.sh                              # auto-detect direct vs proxy
+#   PROXY_URL='http://user:pass@proxy:8080' ./build.sh
+#                                           # force HTTP(S) proxy for the build
+#   PROXY_URL='' ./build.sh                 # force no proxy
+#   TAG=dev ./build.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Shared, cluster-agnostic registry + proxy resolution (bz/yz/...).
-# Override with REGISTRY=... / PROXY_URL=... / TAG=... if needed. The resolved
-# proxy is reused for the router image's Python (pip) layer.
+# Shared, cluster-agnostic registry + proxy resolution.
+# The resolved proxy is reused for the router image's Python (pip) layer.
 source "$SCRIPT_DIR/../build-common.sh"
 
 # -------------------------------------------------------
@@ -78,10 +84,8 @@ echo "[4/4] Building Docker images..."
 # hasher runs the exact same code (single source of truth; not committed).
 mkdir -p hasher
 cp ../router_service/router/prefix_hash.py hasher/prefix_hash.py
-docker build -f Dockerfile.router \
-  "${PROXY_BUILD_ARGS[@]}" \
-  -t "$PUSH_REGISTRY/kv-router-go:$TAG" .
-docker build -f Dockerfile.sidecar -t "$PUSH_REGISTRY/kv-sidecar-go:$TAG" .
+docker_build -f Dockerfile.router -t "$PUSH_REGISTRY/kv-router-go:$TAG" .
+docker_build -f Dockerfile.sidecar -t "$PUSH_REGISTRY/kv-sidecar-go:$TAG" .
 
 # Cleanup binaries + staged source
 rm -f gateway sidecar hasher/prefix_hash.py
@@ -91,8 +95,8 @@ rm -f gateway sidecar hasher/prefix_hash.py
 # -------------------------------------------------------
 
 echo "[5/5] Pushing to $PUSH_REGISTRY..."
-docker push "$PUSH_REGISTRY/kv-router-go:$TAG"
-docker push "$PUSH_REGISTRY/kv-sidecar-go:$TAG"
+docker_push_noproxy "$PUSH_REGISTRY/kv-router-go:$TAG"
+docker_push_noproxy "$PUSH_REGISTRY/kv-sidecar-go:$TAG"
 
 echo
 echo "=== Done (cluster pulls these as $REGISTRY/...) ==="
