@@ -692,6 +692,16 @@ class HelmConfig:
     # lmcache_controller deployment (p2p mode). Image defaults to the chart's.
     deploy_lmcache_controller: bool = True
     lmcache_controller_image: Optional[str] = None
+    # Controller placement (p2p):
+    #   "shared"     — one controller; dial lmcache_p2p_controller_*_url (default).
+    #   "per-leader" — one controller co-located on each DP leader in
+    #                  lmcache_controller_node_names; engines dial that leader's
+    #                  host IP (ConfigMap __CONTROLLER_HOST__). Isolates the
+    #                  who-has directory per DP pair (no cross-pair P2P lookup).
+    lmcache_p2p_controller_placement: str = "shared"
+    # Leader hostnames for per-leader placement (e.g. ["node7", "node1"]).
+    # Ignored when placement is "shared" (use values.lmcacheController.nodeName).
+    lmcache_controller_node_names: Optional[List[str]] = None
     # --------------------------------------------------------------------
 
     # ---- NDS (NVMe Direct Storage — P2P DMA for KV cache) ----

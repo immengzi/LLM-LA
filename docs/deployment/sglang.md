@@ -57,13 +57,19 @@ Deploy with the existing entry points (`deploy_vllm.py` or the thin alias
 
 ## Workload naming
 
-| Engine | Deployment / Service / `app` label | Container |
-|--------|--------------------------------------|-----------|
-| vLLM | `vllm-<modelName>` | `vllm` |
-| SGLang | `sglang-<modelName>` | `sglang` |
+| Engine | Deployment / Service / `app` label | `component` label | Container |
+|--------|--------------------------------------|-------------------|-----------|
+| vLLM (default) | `vllm-<modelName>` | `vllm` | `vllm` |
+| SGLang | `sglang-<modelName>` | `sglang` | `sglang` |
 
-Shared discovery label: `component=engine`. The KV sidecar remains `kv-sidecar`.
-ServiceMonitor/PodMonitor selectors use `component=engine`.
+Default deploys keep the historical `component=vllm` discovery label and
+`ServiceMonitor` name `vllm`. SGLang uses `component=sglang` / monitor name
+`sglang`. The KV sidecar remains `kv-sidecar`.
+
+## Defaults (no variables set)
+
+Leaving `engine.type` / `helm.engine_type` and `hardware` unset keeps today's
+production path: **vLLM on Ascend NPUs**. SGLang and NVIDIA are opt-in only.
 
 ## Render and test locally
 
@@ -87,8 +93,17 @@ pytest src/core/tests/helm -q
 
 ## Limitations
 
-- SGLang page size / contract version are pinned (see the architecture contract).
-- `trustRemoteCode` is rejected for the v0.5.15 profile.
-- Data-parallel LeaderWorkerSet + Mooncake/LMCache combinations that the
-  client validator rejects for SGLang remain unsupported until explicitly enabled.
-- Prefer `router_hash_source: inline` with the pinned SGLang hash backend.
+### Deploy-time rejects (Helm / client validation fails)
+
+SGLang cannot be deployed with the external CPU hash service, data-parallel
+LeaderWorkerSet, Mooncake, or LMCache. `trustRemoteCode` is rejected for the
+pinned v0.5.15 profile. Prefer `router_hash_source: inline` with the pinned
+SGLang hash backend.
+
+### Request-time skips (request still served)
+
+When a request uses features the router cannot hash the same way as the engine
+(cache salts / extra keys, LoRA/adapters, non-text multimodal parts,
+speculative/draft/bigram inputs, or request-level tokenizer/chat-template
+overrides), the router skips KV-aware scoring for that request only. It does not
+reject the request.

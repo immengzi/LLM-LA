@@ -1,10 +1,10 @@
 <div align="center">
 
-# 💥 LA-Boom
+# 💥 LLM-LA
 
-**KV-aware load balancing and benchmarking for vLLM — at cluster scale.**
+**KV-aware load balancing for LLMs — at cluster scale.**
 
-*Route for cache reuse, not round-robin. Then prove it with reproducible sweeps.*
+*Balance the load based on the current load, not historical load.*
 
 ![License: TBD](https://img.shields.io/badge/license-TBD-lightgrey)
 ![Kubernetes](https://img.shields.io/badge/Kubernetes-1.28%2B-326ce5)
@@ -19,18 +19,17 @@
 
 ---
 
-**LA-Boom is a distributed serving platform for vLLM on Kubernetes** — a KV-, length-, and SLO-aware router with per-pod sidecars wrapped around unmodified vLLM, deployed by a single Helm chart. Route for cache reuse, autoscale per model, and front it with a gateway for auth and spend.
+**LLM-LA is a distributed serving platform for LLMs on Kubernetes** — a KV-, length-, and SLO-aware router with per-pod sidecars wrapped around unmodified serving engines (vLLM and SGLang). Route based on real-time current load for cache reuse; reduce serving bubbles; support per model autoscaling; and reduce the overall E2E latency of your model serving.
 
-It ships with a reproducible **benchmark harness** — an open-loop load generator plus an automated Helm sweep runner — so you can prove which routing strategy wins, apples-to-apples. See [docs/benchmarking/harness.md](docs/benchmarking/harness.md).
+## 🤔 Why LLM-LA
 
-## 🤔 Why LA-Boom
+> **The one-liner:** Traditional load-balancing results in sub-optimal results. Join-Idle-Queue, the technique underlying LLM-LA, can be proven better!
 
-> **The one-liner:** vLLM's prefix cache makes *where* a request lands matter enormously. Round-robin throws that away. LA-Boom doesn't.
-
-- **Most routers are cache-blind.** LA-Boom scores every queued request against each replica's *live* KV-block ownership and places it for maximum prefix reuse — higher hit rates, lower TTFT.
+- **Most routers are cache-blind.** LLM-LA scores every queued request against each replica's *live* KV-block ownership and places it for maximum prefix reuse — higher hit rates, lower TTFT.
+- **Accelerator sharing for LLMs.** Many serving deployments are severely underutilized due to the low request rate. Traditional model-switching adds large overheads. LLM-LA uses pipelining to enable faster model-switching resulting in high-efficiency accelerator sharing.
 - **Length and deadlines are first-class.** Routing is length-aware (short-first / long-first batching) and SLO-aware (slack-based deadline scheduling), not an afterthought.
-- **Kubernetes-native, one chart.** Router, sidecars, Redis, vLLM, gateways, and per-model KEDA autoscaling all deploy from the [`vllm-kv-stack`](src/core/vllm-kv-stack) Helm chart — no engine fork.
-- **Claims need receipts.** The bundled [benchmark harness](docs/benchmarking/harness.md) deploys each strategy via Helm, drives *identical* open-loop traffic, and archives per-request logs, Prometheus metrics, and rendered manifests — apples-to-apples, every time.
+- **Kubernetes-native, one chart.** Router, sidecars, Redis, serving engine, gateways, and per-model KEDA autoscaling all deploy from the [`vllm-kv-stack`](src/core/vllm-kv-stack) Helm chart — no engine fork.
+
 
 ## 🏗️ Architecture
 

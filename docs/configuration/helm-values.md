@@ -17,7 +17,7 @@ There are three ways values reach the chart:
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `backend` | `router` | Selects the infra stack flavor. Note: gateways are **not** turned on by this — LiteLLM/BooM render only when `litellm.enabled`/`boom.enabled` are set. `litellm`/`boom` render the same router+redis+cpuHash stack as `router`. |
-| `engine.type` | `vllm` | Inference engine: `vllm` or pinned `sglang`. Workload names are `<engine>-<modelName>` (for example `vllm-qwen` / `sglang-qwen`); discovery uses `component=engine`. |
+| `engine.type` | `vllm` | Inference engine: `vllm` or pinned `sglang`. Workload names are `<engine>-<modelName>` (for example `vllm-qwen` / `sglang-qwen`); discovery uses `component=<engine>` (default remains `component=vllm`). |
 | `serviceImpl` | `python` | Router/sidecar implementation: `python` or `go`; valid for both engines and rejected otherwise |
 | `hardware` | `ascend` | Accelerator backend for engine pods: `ascend` (Huawei NPU) or `nvidia` (GPU). `nvidia` requests `nvidia.com/gpu`, applies `vllm.runtimeClassName`, and drops Ascend driver mounts/toolkit. Set per cluster via `helm.values.hardware` ([GPU deployment](../deployment/gpu.md)) |
 | `portOffset` | `0` | Added to the NodePorts of **redis, router, cpu-hash, and vLLM only** (not LiteLLM/BooM). For shadow deployments. |

@@ -39,7 +39,7 @@ def test_default_render_remains_vllm():
     assert "sglang_token_usage" not in result.stdout
     assert "prometheus.io/scrape" not in result.stdout
     assert "name: vllm-qwen" in result.stdout
-    assert "component: engine" in result.stdout
+    assert "component: vllm" in result.stdout
     assert "app=vllm-qwen" in result.stdout
 
 
@@ -56,7 +56,7 @@ def test_sglang_render_uses_pinned_nvidia_profile():
     manifest = result.stdout
     assert "name: sglang-qwen" in manifest
     assert "name: vllm-qwen" not in manifest
-    assert "component: engine" in manifest
+    assert "component: sglang" in manifest
     assert "image: lmsysorg/sglang:v0.5.15-cu129" in manifest
     assert "exec python -m sglang.launch_server" in manifest
     assert "--tool-call-parser qwen" in manifest
@@ -96,10 +96,10 @@ def test_sglang_models_list_uses_component_engine_selector():
     )
     assert result.returncode == 0, result.stderr
     assert "name: sglang-qwen" in result.stdout
-    assert "component=engine" in result.stdout
-    assert "component: engine" in result.stdout
+    assert "component=sglang" in result.stdout
+    assert "component: sglang" in result.stdout
     assert "kind: ServiceMonitor" in result.stdout
-    assert "name: engine" in result.stdout
+    assert "name: sglang" in result.stdout
 
 
 def test_sglang_helper_fallback_uses_compatible_cuda_image():
@@ -544,4 +544,4 @@ def test_helm_preserves_multi_model_vllm_prefix_render():
     assert "sglang.launch_server" not in result.stdout
     assert "name: vllm-a" in result.stdout
     assert "name: vllm-b" in result.stdout
-    assert "component: engine" in result.stdout
+    assert "component: vllm" in result.stdout

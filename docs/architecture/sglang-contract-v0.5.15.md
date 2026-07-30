@@ -183,29 +183,48 @@ sets offline Hugging Face/Transformers flags, exposes HTTP `8200`, publisher
 
 ## Unsupported boundaries
 
-The chart supports both Python and Go services and rejects an implementation
-value other than `python` or `go`. It rejects SGLang with the external hash
-service, data-parallel/LWS, Mooncake, or LMCache. KV-aware scoring is skipped for
-request features whose engine cache identity is not safely reproduced: cache
-salts or extra keys, LoRA/adapters, non-text multimodal parts, and
-speculative/draft/bigram keys. Request-level chat-template, tokenizer,
-special-token, alternate prompt/token-ID, and custom processor overrides are
-also skipped. Tool schemas remain supported because the router includes tools
-in chat-template hashing. Non-GPU storage tiers are not mirrored.
+Two different fail-closed behaviors apply. Do not conflate them:
+
+### Deploy-time rejects (install fails)
+
+SGLang cannot be combined with:
+
+- the external CPU hash service (`router.hashSource=external`)
+- data-parallel LeaderWorkerSet
+- Mooncake
+- LMCache
+
+The chart also rejects `serviceImpl` values other than `python` or `go`, and
+rejects `trustRemoteCode` for the entire v0.5.15 profile (router tokenizer
+initialization cannot mirror engine-side remote tokenizer code). When router
+prefix hashing or measurement is enabled, SGLang is limited to one model, the
+global page size, and the router-mounted model tokenizer. Mixed engines and
+model/tokenizer overrides are rejected; multi-model SGLang is allowed only while
+router hashing and prefix measurement are both disabled.
+
+### Request-time skips (traffic still accepted)
+
+If a request uses features whose engine cache identity the router cannot safely
+reproduce, the router **does not apply KV-aware scoring** for that request. The
+request is still served; the router simply avoids guessing cache identity.
+
+Skipped features include:
+
+- cache salts or extra cache keys
+- LoRA / adapters
+- non-text multimodal message parts
+- speculative / draft / bigram keys
+- request-level chat-template, tokenizer, special-token, alternate prompt /
+  token-ID, or custom processor overrides
+
+Tool schemas remain supported because the router includes tools in chat-template
+hashing. Non-GPU storage tiers are not mirrored into the affinity map.
 
 The Go parity boundary intentionally does not port Hugging Face tokenization to
 Go. Its router image runs the shared Python hash package on loopback and the Go
 gateway calls it. The Go sidecar implements SGLang descriptor discovery,
 publisher/replay consumption, fail-closed Redis projection, and `/ready`
 semantics natively. Liveness `/health` does not require KV readiness.
-
-`trustRemoteCode` is rejected for the entire v0.5.15 profile, even when prefix
-routing is disabled, because router tokenizer initialization cannot mirror
-engine-side remote tokenizer code. When router prefix hashing or measurement is
-enabled, SGLang is limited to one model, the global page size, and the
-router-mounted model tokenizer. Mixed engines and model/tokenizer overrides are
-rejected; multi-model SGLang is permitted only while router hashing and prefix
-measurement are both disabled.
 
 The supported NVIDIA deployment is Kubernetes plus GPU nodes with model weights
 already available through a host path or PVC. Ascend NPUs are supported through

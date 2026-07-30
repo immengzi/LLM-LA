@@ -739,8 +739,18 @@ lmcache:
     lookupBackoffTime: 0.001
     # host:port of the lmcache_controller the engines dial. Empty => must be set
     # by the config (points at the pinned controller node, e.g. 10.50.156.65).
+    # Ignored when controllerPlacement is "per-leader" (see below).
     controllerPullUrl: ""
     controllerReplyUrl: ""
+    # Controller placement for p2p mode:
+    #   "shared"     — one controller; engines dial controllerPullUrl/ReplyUrl
+    #                  (default; existing configs).
+    #   "per-leader" — one controller co-located on EACH DP leader node
+    #                  (lmcacheController.nodeNames). ConfigMap emits
+    #                  __CONTROLLER_HOST__:pullPort/replyPort; leaders sed
+    #                  NODE_IP, workers sed LEADER_IP. Isolates the who-has
+    #                  directory per DP pair (no cross-pair P2P lookup).
+    controllerPlacement: "shared"
   # NDS (NVMe Direct Storage) — P2P DMA from NVMe SSD to NPU memory.
   # Requires p2p_dev.ko kernel module loaded on the host and /dev/p2p_device present.
   nds:
@@ -762,19 +772,38 @@ lmcache:
 # controllerReplyUrl (raw node IP:port; hostNetwork, so no Service needed).
 lmcacheController:
   image: "127.0.0.1:32000/lmcache-ascend:hccl-p2p"
-  port: 9000
+  # Control/admin port (probes + lmcache_controller --port). NOT the P2P
+  # pull/reply ports. Must NOT be 9000 when co-located with a vLLM leader:
+  # kv-sidecar already binds hostNetwork :9000, and the scheduler rejects the
+  # leader with "didn't have free ports". Engines dial pull/reply only.
+  port: 9010
   pullPort: 9800
   replyPort: 9900
   # Pin the controller to a fixed node so its host IP is stable and matches
   # lmcache.p2p.controllerPullUrl/replyUrl. Empty = let the scheduler place it
   # (only safe if you don't hardcode the controller IP).
+  # Used when nodeNames / nodeNamesCsv are empty (shared single-controller).
   nodeName: ""
-  tolerations: []
+  # Per-leader placement: one controller Deployment per entry, each pinned to
+  # that hostname. Prefer a YAML list (helm -f overlay) or the CSV form below
+  # (works with --set). When non-empty, overrides nodeName.
+  # Example: nodeNames: [node7, node1]  or  nodeNamesCsv: "node7,node1"
+  nodeNames: []
+  nodeNamesCsv: ""
+  # Same control-plane / master tolerations as vLLM engines — required when a
+  # per-leader controller is pinned to a control-plane node (e.g. BZ k8s-master).
+  tolerations:
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+    - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
 
   # Resource requests/limits for the standalone lmcache_controller pod (the P2P
-  # lookup directory). It runs on its own node, off the engine nodes, so it can
-  # take a generous reservation without competing with the vLLM engines. Override
-  # per deployment via helm.values (lmcacheController.resources.*).
+  # lookup directory). Shared mode often runs it on its own node; per-leader
+  # co-locates it with a vLLM engine — keep these small so it can't starve the
+  # engine. Override per deployment via helm.values (lmcacheController.resources.*).
   resources:
     requests:
       cpu: "2"

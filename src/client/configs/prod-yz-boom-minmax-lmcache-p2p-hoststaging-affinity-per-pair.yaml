@@ -268,6 +268,9 @@ helm:
     lmcacheController.resources.requests.memory: "4Gi"
     lmcacheController.resources.limits.cpu: "4"
     lmcacheController.resources.limits.memory: "8Gi"
+    # Avoid hostNetwork clash with kv-sidecar :9000 on the same leader node.
+    # P2P engines dial pull/reply (9800/9900) only; this is the controller admin port.
+    lmcacheController.port: 9010
 
   models:
     - name: minimax-m2
