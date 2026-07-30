@@ -13,7 +13,7 @@
 #   NodePort service `vllm-pp-<pod>`: it selects on the built-in
 #   `statefulset.kubernetes.io/pod-name` label (controller-managed), so it
 #   re-attaches on its own — the script only verifies the endpoint came back.
-#     - PodMonitor scraping (keys off the template label component=engine)
+#     - PodMonitor scraping (keys off the template label component=vllm|sglang)
 #     - router / boom / prometheus / litellm / mooncake-master Services (stable)
 #     - NDS mounts, xds paths, nodeSelectors, sidecar, env (in the pod template)
 #     - node labels (vllm-role=*) and inotify sysctls (node-scoped)

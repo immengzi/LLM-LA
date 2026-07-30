@@ -61,8 +61,8 @@ spec:
               value: {{ .Release.Namespace | quote }}
             - name: LABEL_SELECTOR
             {{- if .Values.models }}
-              {{/* Neutral engine-workload label (was historically component=vllm). */}}
-              value: "component=engine"
+              {{- $engineType := lower (.Values.engine.type | default "vllm") }}
+              value: {{ printf "component=%s" $engineType | quote }}
             {{- else }}
               {{- $legacyEngine := lower (.Values.engine.type | default "vllm") }}
               value: {{ printf "app=%s-qwen" $legacyEngine | quote }}

@@ -1,14 +1,15 @@
+{{- $engineType := lower (.Values.engine.type | default "vllm") }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: engine
+  name: {{ $engineType }}
   namespace: {{ .Release.Namespace }}
   labels:
     release: kube-prometheus-stack
 spec:
   selector:
     matchLabels:
-      component: engine
+      component: {{ $engineType }}
   namespaceSelector:
     matchNames:
       - {{ .Release.Namespace }}
@@ -62,7 +63,7 @@ metadata:
 spec:
   selector:
     matchLabels:
-      component: engine
+      component: {{ $engineType }}
   podTargetLabels:
     - release
   podMetricsEndpoints:

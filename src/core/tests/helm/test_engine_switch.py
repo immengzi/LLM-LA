@@ -98,7 +98,65 @@ def test_default_render_remains_vllm_on_ascend():
     assert "huawei.com/Ascend" in manifest
     assert "nvidia.com/gpu" not in manifest
     assert "runtimeClassName: nvidia" not in manifest
-    assert "component: engine" in manifest
+    assert "component: vllm" in manifest
+    # ServiceMonitor keeps the historical name for the default engine.
+    assert any(
+        d.get("kind") == "ServiceMonitor"
+        and d.get("metadata", {}).get("name") == "vllm"
+        for d in _docs(manifest)
+    )
+    assert 'value: "vllm"' in manifest
+
+
+# ---------------------------------------------------------------------------
+# Opt-in composition: one switch alone must not flip the other
+# ---------------------------------------------------------------------------
+
+def test_hardware_nvidia_alone_keeps_vllm_engine():
+    """hardware=nvidia must not select SGLang when engine.type is unset."""
+    manifest = _render("--set", "hardware=nvidia")
+    assert "vllm.entrypoints.openai.api_server" in manifest
+    assert "sglang.launch_server" not in manifest
+    assert "name: vllm-qwen" in manifest
+    assert "name: sglang-qwen" not in manifest
+    assert "component: vllm" in manifest
+    assert "nvidia.com/gpu" in manifest
+    assert "runtimeClassName: nvidia" in manifest
+
+
+def test_engine_sglang_alone_keeps_ascend_hardware():
+    """engine.type=sglang must keep Ascend NPUs when hardware is unset."""
+    manifest = _render(
+        "--set", "engine.type=sglang",
+        "--set", "images.sglang=reg.local/sglang-ascend:latest",
+    )
+    assert "name: sglang-qwen" in manifest
+    assert "exec python -m sglang.launch_server" in manifest
+    assert "component: sglang" in manifest
+    assert "huawei.com/Ascend" in manifest
+    assert "nvidia.com/gpu" not in manifest
+    assert "runtimeClassName: nvidia" not in manifest
+    assert "dcmi-volume" in manifest
+
+
+def test_sglang_rejects_data_parallel_at_chart():
+    """SGLang + dataParallel must fail closed at helm template time."""
+    _require_helm()
+    result = subprocess.run(
+        [
+            "helm", "template", "test", str(CHART),
+            "--set", "global.imageRegistry=",
+            "--set", "modelVolume.modelSubPath=placeholder",
+            "--set", "engine.type=sglang",
+            "--set", "dataParallel.enabled=true",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    err = (result.stderr or "") + (result.stdout or "")
+    assert "does not support dataParallel" in err
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +184,7 @@ def test_sglang_nvidia_uses_pinned_cuda_image_and_gpu_resource():
     assert 'value: "sglang"' in manifest
     assert "KV_HASH_BACKEND" in manifest
     assert "SGLANG_CONTRACT_VERSION" in manifest
-    assert "component: engine" in manifest
+    assert "component: sglang" in manifest
 
 
 # ---------------------------------------------------------------------------
@@ -177,8 +235,8 @@ def test_sglang_models_list_uses_engine_aware_names_and_selector():
         "--set-json", f"models={models}",
     )
     assert "name: sglang-qwen" in manifest
-    assert "component=engine" in manifest
-    assert "component: engine" in manifest
+    assert "component=sglang" in manifest
+    assert "component: sglang" in manifest
     assert "kind: ServiceMonitor" in manifest
 
 

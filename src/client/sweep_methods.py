@@ -585,11 +585,11 @@ def _wait_ready(namespace: str, timeout_s: float = 36000, label_selector: Option
 # ---------------------------
 
 def _vllm_pods_exist(namespace: str) -> bool:
-    """Return True if any inference-engine pods exist (component=engine)."""
+    """Return True if any inference-engine pods exist (component=vllm|sglang)."""
     try:
         out = _kubectl(
             ["get", "pods", "-n", namespace,
-             "-l", "component=engine",
+             "-l", "component in (vllm,sglang)",
              "-o", "name"],
             check=False, capture=True,
         ).stdout or ""
@@ -607,7 +607,7 @@ def _detect_current_route_mode(namespace: str) -> str:
     try:
         out = _kubectl(
             ["get", "pods", "-n", namespace,
-             "-l", "component=engine",
+             "-l", "component in (vllm,sglang)",
              "-o", "jsonpath={.items[0].spec.containers[*].name}"],
             check=False, capture=True,
         ).stdout or ""
@@ -917,7 +917,7 @@ def _create_per_pod_services(
     try:
         raw = subprocess.run(
             ["kubectl", "get", "pods", "-n", namespace,
-             "-l", "component=engine",
+             "-l", "component in (vllm,sglang)",
              "--field-selector=status.phase=Running",
              "-o", "json"],
             capture_output=True, text=True, timeout=30,
@@ -1092,7 +1092,7 @@ def _print_boom_config(
         try:
             pod_count = subprocess.run(
                 ["kubectl", "get", "pods", "-n", namespace,
-                 "-l", "component=engine",
+                 "-l", "component in (vllm,sglang)",
                  "--field-selector=status.phase=Running",
                  "-o", "jsonpath={range .items[*]}x{end}"],
                 capture_output=True, text=True, timeout=10,
@@ -1534,6 +1534,15 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 _osb = getattr(h, "lmcache_os_staging_bytes", None)
                 if _osb is not None:
                     set_values["lmcache.p2p.osStagingBytes"] = int(_osb)
+                _placement = str(
+                    getattr(h, "lmcache_p2p_controller_placement", "shared") or "shared"
+                ).strip().lower()
+                if _placement not in ("shared", "per-leader"):
+                    raise click.ClickException(
+                        f"lmcache_p2p_controller_placement must be 'shared' or "
+                        f"'per-leader', got {_placement!r}"
+                    )
+                set_values["lmcache.p2p.controllerPlacement"] = _placement
                 _cpu = str(getattr(h, "lmcache_p2p_controller_pull_url", "") or "").strip()
                 if _cpu:
                     set_values["lmcache.p2p.controllerPullUrl"] = _cpu
@@ -1548,17 +1557,38 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                     set_values["lmcacheController.image"] = _ci
                 # p2p mode never uses the Mooncake master (no remote store).
                 set_values["deploy.mooncakeMaster"] = False
-                if not _cpu or not _cru:
+                _ctl_names = getattr(h, "lmcache_controller_node_names", None) or []
+                if isinstance(_ctl_names, str):
+                    _ctl_names = [n.strip() for n in _ctl_names.split(",") if n.strip()]
+                else:
+                    _ctl_names = [str(n).strip() for n in _ctl_names if str(n).strip()]
+                if _placement == "per-leader":
+                    if not _ctl_names:
+                        raise click.ClickException(
+                            "lmcache_p2p_controller_placement=per-leader requires "
+                            "lmcache_controller_node_names (one hostname per DP leader)."
+                        )
+                    # List via -f overlay (commas in --set are ambiguous to helm).
+                    # Stash on the helm config object; the overlay is written later
+                    # alongside the models[] values file.
+                    setattr(h, "_lmcache_controller_node_names_overlay", _ctl_names)
                     click.echo(
-                        "[sweep] WARNING: lmcache.mode=p2p but controller pull/reply URL "
-                        "unset — engines won't find the lmcache_controller. Set "
-                        "lmcache_p2p_controller_pull_url / _reply_url in the config."
+                        f"[sweep] lmcache.mode=p2p per-leader: controllers on "
+                        f"{_ctl_names} (engines dial NODE_IP/LEADER_IP; "
+                        f"who-has directory is partitioned per DP pair)"
                     )
-                click.echo(
-                    f"[sweep] lmcache.mode=p2p (142 host-staging): mooncake master OFF, "
-                    f"controller deploy={set_values['deploy.lmcacheController']} "
-                    f"pull={_cpu or '(UNSET)'} reply={_cru or '(UNSET)'}"
-                )
+                else:
+                    if not _cpu or not _cru:
+                        click.echo(
+                            "[sweep] WARNING: lmcache.mode=p2p but controller pull/reply URL "
+                            "unset — engines won't find the lmcache_controller. Set "
+                            "lmcache_p2p_controller_pull_url / _reply_url in the config."
+                        )
+                    click.echo(
+                        f"[sweep] lmcache.mode=p2p (142 host-staging): mooncake master OFF, "
+                        f"controller deploy={set_values['deploy.lmcacheController']} "
+                        f"pull={_cpu or '(UNSET)'} reply={_cru or '(UNSET)'}"
+                    )
 
         # ---- NDS (NVMe Direct Storage — P2P DMA for KV cache) ----
         nds_enabled = bool(getattr(h, "lmcache_nds_enabled", False))
@@ -1711,6 +1741,28 @@ def cli(master_config: str, skip_vllm: bool) -> None:
         _models_tmp.close()
         _models_values_file: Optional[Path] = Path(_models_tmp.name)
 
+        # Optional per-leader lmcache controller nodeNames overlay (list-safe).
+        _ctl_overlay_file: Optional[Path] = None
+        _ctl_overlay_names = getattr(h, "_lmcache_controller_node_names_overlay", None)
+        if _ctl_overlay_names:
+            _ctl_tmp = tempfile.NamedTemporaryFile(
+                mode="w", prefix="sweep_lmcache_ctl_", suffix=".yaml",
+                delete=False, encoding="utf-8",
+            )
+            yaml.safe_dump(
+                {"lmcacheController": {"nodeNames": list(_ctl_overlay_names)}},
+                _ctl_tmp,
+                sort_keys=False,
+            )
+            _ctl_tmp.close()
+            _ctl_overlay_file = Path(_ctl_tmp.name)
+
+        _extra_values_files: List[Path] = []
+        if _models_values_file is not None:
+            _extra_values_files.append(_models_values_file)
+        if _ctl_overlay_file is not None:
+            _extra_values_files.append(_ctl_overlay_file)
+
         # ---- Model volume defaults (from nfs_path / first model) ----
         nfs_path = str(getattr(h, "nfs_path", "")).strip()
         model_sub_path = first_model.get("modelSubPath", "")
@@ -1806,6 +1858,7 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                         namespace=namespace,
                         values_file=values_file if values_file.is_file() else None,
                         set_values=set_values,
+                        extra_values_files=_extra_values_files or None,
                     )
                     with open("/tmp/helm_debug.yaml", "w") as f:
                         f.write(rendered)
@@ -1823,7 +1876,7 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                     namespace=namespace,
                     values_file=values_file if values_file.is_file() else None,
                     set_values=set_values,
-                    extra_values_files=[_models_values_file] if _models_values_file else None,
+                    extra_values_files=_extra_values_files or None,
                 )
                 # Give Kubernetes time to schedule and create new pods before kubectl wait
                 # runs. Without this sleep, pods are still terminating/pending when wait
@@ -1895,6 +1948,7 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 namespace=namespace,
                 values_file=values_file if values_file.is_file() else None,
                 set_values=set_values,
+                extra_values_files=_extra_values_files or None,
             )
         except Exception as e:
             click.echo(f"[sweep] WARN: helm template for vllm-k8s.yaml failed: {e}")
@@ -1962,6 +2016,11 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             if _models_values_file is not None:
                 try:
                     _models_values_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            if _ctl_overlay_file is not None:
+                try:
+                    _ctl_overlay_file.unlink(missing_ok=True)
                 except Exception:
                     pass
 
