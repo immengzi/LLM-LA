@@ -3,13 +3,15 @@
 > For a high-level overview of the routing strategies, see
 > [router-strategies.md](router-strategies.md).
 
-KV-aware routing needs a **stable, vLLM-compatible identifier for every block of
+KV-aware routing needs a **stable, engine-compatible identifier for every block of
 a prompt's prefix**. With those identifiers the router can ask "which pod already
 has the KV blocks for this request's prefix cached?" and bias the request toward
 that pod, turning a cold prefill into a cache hit.
 
 This document describes how those block identifiers are produced and how they
-drive routing.
+drive routing. The default backend mirrors vLLM's chained block hashing; the
+pinned SGLang v0.5.15 backend is documented in
+[sglang-contract-v0.5.15.md](sglang-contract-v0.5.15.md).
 
 The identifiers are produced from a single source of truth, `router/prefix_hash.py`,
 selected by the `KV_HASH_SOURCE` knob (`inline` by default):

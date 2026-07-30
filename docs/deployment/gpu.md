@@ -5,7 +5,8 @@ sidecar, and KV-aware logic are accelerator-agnostic. This page covers the
 **only** things that differ when running on NVIDIA GPUs: the node-level device
 plugin / runtime, and the single chart switch that selects the accelerator.
 Everything else — routing, autoscaling, gateways, benchmarking — is identical to
-the Ascend path.
+the Ascend path. The `hardware` switch composes with `engine.type` (vLLM default
+or pinned SGLang); see [sglang.md](sglang.md).
 
 ## What changes on GPU
 
@@ -15,7 +16,8 @@ the Ascend path.
 | Device visibility | Ascend driver host mounts + `ASCEND_RT_VISIBLE_DEVICES` | injected by the NVIDIA device plugin |
 | Container runtime | default | `RuntimeClass: nvidia` |
 | Toolkit setup | sources the Ascend CANN toolkit | none |
-| vLLM image | `vllm-ascend` | `vllm/vllm-openai` |
+| vLLM image | `vllm-ascend` | `vllm/vllm-openai` (or your mirror) |
+| SGLang image | Ascend-capable build (operator-provided) | `lmsysorg/sglang:v0.5.15-cu129` |
 
 All of this is driven by one value: `hardware: nvidia`.
 

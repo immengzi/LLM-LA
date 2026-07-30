@@ -98,7 +98,8 @@ pytest src/core/tests/helm -q
 SGLang cannot be deployed with the external CPU hash service, data-parallel
 LeaderWorkerSet, Mooncake, or LMCache. `trustRemoteCode` is rejected for the
 pinned v0.5.15 profile. Prefer `router_hash_source: inline` with the pinned
-SGLang hash backend.
+SGLang hash backend. Extending SGLang to those advanced topologies is tracked
+in [#67](https://github.com/LA-Boom/llm-la/issues/67).
 
 ### Request-time skips (request still served)
 
