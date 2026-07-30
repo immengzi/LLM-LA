@@ -5,7 +5,7 @@ What you need before deploying LA-Boom and running experiments. For full cluster
 ## Kubernetes cluster
 
 - A working Kubernetes cluster (1.28+) with `kubectl` access and cluster-admin permissions. The Helm chart creates a namespace, Deployments/LeaderWorkerSets, Services, ConfigMaps, and RBAC resources.
-- Accelerators available on worker nodes (the default images target Ascend NPUs; the chart and routing logic are accelerator-agnostic).
+- Accelerators available on worker nodes (default images target Ascend NPUs; set `hardware: nvidia` for GPUs — see [gpu.md](../deployment/gpu.md). The chart and routing logic are accelerator-agnostic).
 - [Prometheus](https://prometheus.io/) in the cluster if you want metrics collection or autoscaling. The chart ships `ServiceMonitor`/`PodMonitor` resources.
 - [KEDA](https://keda.sh/) if you want autoscaling (`autoscaling.enabled=true`). Install via `cd infra && make keda`. See [operations/autoscaling.md](../operations/autoscaling.md).
 - For data-parallel / expert-parallel deployments: the [LeaderWorkerSet](https://github.com/kubernetes-sigs/lws) operator CRD installed, and RoCE/HCCL networking configured. See [data parallel with LWS](../deployment/data-parallel-lws.md).
@@ -30,7 +30,7 @@ Details: [Helm values reference](../configuration/helm-values.md) (`modelVolume.
 
 ## Container registry
 
-LA-Boom images (router, sidecar, prefix-hash, vLLM, and optionally BooM/LiteLLM) are served from a private registry referenced by `global.imageRegistry`. You need:
+LA-Boom images (router, sidecar, prefix-hash, inference engine, and optionally BooM/LiteLLM) are served from a private registry referenced by `global.imageRegistry`. You need:
 
 - The registry reachable from all nodes (and configured as an insecure mirror in containerd if it serves plain HTTP).
 - The LA-Boom images built and pushed. See [operations/registry.md](../operations/registry.md) and, for the gateway, [gateways/boom/build.md](../gateways/boom/build.md).

@@ -8,7 +8,7 @@ Deploy the LA-Boom stack on Kubernetes and run your first load experiment. This 
 
 - A Kubernetes cluster with `kubectl` access and Helm 3.12+
 - Model weights reachable from worker nodes (NFS or local path)
-- A private image registry holding the LA-Boom images (router, sidecar, prefix-hash, vLLM, gateways)
+- A private image registry holding the LA-Boom images (router, sidecar, prefix-hash, engine, gateways)
 - Python 3.10+ with `pyyaml`, `requests`, `click` (`pip install -r requirements.txt`)
 
 Full details: [prerequisites.md](prerequisites.md).
@@ -23,9 +23,10 @@ helm upgrade --install vllm ./src/core/vllm-kv-stack -n vllm --create-namespace 
   --set modelVolume.modelSubPath=placeholder
 ```
 
-## 2. Deploy vLLM
+## 2. Deploy the engine
 
-Deploy only the vLLM pods (router, Redis, and prefix-hash are not deployed here) from a client config YAML:
+Deploy only the engine pods (router, Redis, and prefix-hash are not deployed here) from a client config YAML.
+`deploy_vllm.py` remains the entry point; set `helm.engine_type: sglang` (and usually `hardware: nvidia`) for the pinned SGLang profile — see [sglang.md](../deployment/sglang.md).
 
 ```bash
 python src/client/deploy_vllm.py --config configs/router-tp8-glm.yaml

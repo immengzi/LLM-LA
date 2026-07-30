@@ -1,17 +1,18 @@
 # Sidecar Service
 
-The sidecar runs next to each vLLM pod and turns that pod into a well-behaved
+The sidecar runs next to each inference-engine pod (vLLM by default, or the
+pinned SGLang profile) and turns that pod into a well-behaved
 worker in the cluster. It handles local queuing, talks to the router-service
-and vLLM, and keeps track of the pod’s KV-cache blocks.
+and the local engine, and keeps track of the pod’s KV-cache blocks.
 
 ---
 
 ## Role in the System
 
-- Receives work from the router and feeds it to the pod’s vLLM endpoint.
+- Receives work from the router and feeds it to the pod’s engine endpoint.
 - Limits how many requests run on the pod at once.
 - Reports completions back to the router so client calls can finish.
-- Listens to KV events from vLLM and records which KV blocks live on this pod.
+- Listens to KV events from the engine and records which KV blocks live on this pod.
 
 This lets the router focus on global decisions while each sidecar manages its
 own pod.

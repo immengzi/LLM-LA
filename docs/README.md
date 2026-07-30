@@ -1,6 +1,6 @@
 # LA-Boom Documentation
 
-The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New here? Start with [Getting Started → Quickstart](getting-started/quickstart.md).
+The serving platform and benchmark harness for KV-aware LLM serving on Kubernetes (vLLM by default; SGLang opt-in). New here? Start with [Getting Started → Quickstart](getting-started/quickstart.md).
 
 ## Quick paths by role
 
@@ -24,10 +24,11 @@ The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New 
 | [overview.md](architecture/overview.md) | How the serving platform fits together (start here) |
 | [router-strategies.md](architecture/router-strategies.md) | Routing strategies overview with figures (`none/prefix/affinity/both`) |
 | [router.md](architecture/router.md) | Central queue, pull/push dispatch (`push-rr` … `push-least-busy`, `central-push`, `external-push`), [compatibility matrix](architecture/router.md#routing-compatibility-matrix), HTTP/ZMQ APIs |
-| [sidecar.md](architecture/sidecar.md) | Local queue, vLLM forwarding, KV event reporting |
+| [sidecar.md](architecture/sidecar.md) | Local queue, engine forwarding, KV event reporting |
 | [kv-cache-flow.md](architecture/kv-cache-flow.md) | KV-aware routing deep dive (Redis schema, scoring) |
 | [key-affinity.md](architecture/key-affinity.md) | Conversation stickiness (same chat → same pod) |
-| [prefix-hash.md](architecture/prefix-hash.md) | vLLM-compatible block hashing service |
+| [prefix-hash.md](architecture/prefix-hash.md) | Engine-compatible block hashing (vLLM default; SGLang pinned backend) |
+| [sglang-contract-v0.5.15.md](architecture/sglang-contract-v0.5.15.md) | Pinned SGLang v0.5.15 hash / KV-event contract |
 | [slo-aware-routing.md](architecture/slo-aware-routing.md) | Slack-based deadline scheduling |
 | [trace.md](architecture/trace.md) | Per-request distributed tracing |
 | [go-services.md](architecture/go-services.md) | Go router/sidecar port and parity with Python |
