@@ -21,8 +21,6 @@
 
 **LLM-LA is a distributed serving platform for LLMs on Kubernetes** — a KV-, length-, and SLO-aware router with per-pod sidecars wrapped around unmodified serving engines (vLLM and SGLang). Route based on real-time current load for cache reuse; reduce serving bubbles; support per model autoscaling; and reduce the overall E2E latency of your model serving.
 
-[//]: <> (It ships with a reproducible **benchmark harness** — an open-loop load generator plus an automated Helm sweep runner — so you can prove which routing strategy wins, apples-to-apples. See [docs/benchmarking/harness.md](docs/benchmarking/harness.md).)
-
 ## 🤔 Why LLM-LA
 
 > **The one-liner:** Traditional load-balancing results in sub-optimal results. Join-Idle-Queue, the technique underlying LLM-LA, can be proven better!
@@ -31,7 +29,7 @@
 - **Accelerator sharing for LLMs.** Many serving deployments are severely underutilized due to the low request rate. Traditional model-switching adds large overheads. LLM-LA uses pipelining to enable faster model-switching resulting in high-efficiency accelerator sharing.
 - **Length and deadlines are first-class.** Routing is length-aware (short-first / long-first batching) and SLO-aware (slack-based deadline scheduling), not an afterthought.
 - **Kubernetes-native, one chart.** Router, sidecars, Redis, serving engine, gateways, and per-model KEDA autoscaling all deploy from the [`vllm-kv-stack`](src/core/vllm-kv-stack) Helm chart — no engine fork.
-[//]: <> (- **Claims need receipts.** The bundled [benchmark harness](docs/benchmarking/harness.md) deploys each strategy via Helm, drives *identical* open-loop traffic, and archives per-request logs, Prometheus metrics, and rendered manifests — apples-to-apples, every time.)
+
 
 ## 🏗️ Architecture
 
