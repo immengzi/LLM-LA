@@ -1,4 +1,4 @@
-# LA-Boom Documentation
+# LLM-LA Documentation
 
 The serving platform and benchmark harness for KV-aware vLLM on Kubernetes. New here? Start with [Getting Started → Quickstart](getting-started/quickstart.md).
 
