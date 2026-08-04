@@ -1,3 +1,22 @@
+# tests/test_sglang_helm.py
+# -*- coding: utf-8 -*-
+"""Helm-template contract tests for ``engine.type=sglang`` on vllm-kv-stack.
+
+Exercises the chart via ``helm template`` (no cluster required). Covers:
+
+  - default render remains vLLM + Ascend
+  - pinned NVIDIA SGLang profile (image, launch flags, RuntimeClass, env)
+  - Go ``serviceImpl`` wiring and readiness/liveness probes
+  - KEDA ``sglang`` signal / query paths
+  - fail-closed validation (external hash, DP/LWS, Mooncake, LMCache,
+    trustRemoteCode, mixed engines, unsafe router contracts)
+
+Complementary suite: ``src/core/tests/helm/test_engine_switch.py`` (wired into
+core-ci). Deploy / contract docs: ``docs/deployment/sglang.md``,
+``docs/architecture/sglang-contract-v0.5.15.md``.
+"""
+from __future__ import annotations
+
 import json
 import shutil
 import subprocess
@@ -12,6 +31,7 @@ CHART = REPO_ROOT / "src" / "core" / "vllm-kv-stack"
 
 
 def _render(*extra: str) -> subprocess.CompletedProcess[str]:
+    """Render the chart; skips the module when helm is not installed."""
     if shutil.which("helm") is None:
         pytest.skip("helm is not installed")
     return subprocess.run(
@@ -31,6 +51,7 @@ def _render(*extra: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_default_render_remains_vllm():
+    """No engine/hardware overrides → historical vLLM + Ascend defaults."""
     result = _render()
     assert result.returncode == 0, result.stderr
     assert "vllm.entrypoints.openai.api_server" in result.stdout
@@ -44,6 +65,7 @@ def test_default_render_remains_vllm():
 
 
 def test_sglang_render_uses_pinned_nvidia_profile():
+    """engine.type=sglang + hardware=nvidia → pinned cu129 image and GPU schedule."""
     result = _render('--set', 'hardware=nvidia',
         "--set",
         "global.imageRegistry=",
@@ -79,6 +101,7 @@ def test_sglang_render_uses_pinned_nvidia_profile():
     assert 'prometheus.io/port: "8200"' in manifest
 
 def test_sglang_models_list_uses_component_engine_selector():
+    """models[].engine=sglang must label workloads/discovery as component=sglang."""
     result = _render('--set', 'hardware=nvidia',
         "--set",
         "engine.type=sglang",
@@ -116,6 +139,7 @@ def test_sglang_helper_fallback_uses_compatible_cuda_image():
 
 
 def test_sglang_go_render_uses_go_images_env_probes_and_resources():
+    """serviceImpl=go must wire Go images, SGLang env, probes, and KV ports."""
     result = _render('--set', 'hardware=nvidia',
         "--set",
         "global.imageRegistry=",
@@ -222,6 +246,7 @@ def test_sglang_health_generate_is_readiness_only_and_keda_is_engine_aware():
 
 
 def test_sglang_is_a_first_class_keda_signal():
+    """autoscaling.signal=sglang must emit the namespace/model token_usage query."""
     result = _render('--set', 'hardware=nvidia',
         "--namespace",
         "tenant-a",
@@ -315,6 +340,7 @@ def test_sglang_engine_liveness_restarts_quickly_after_long_startup():
     ],
 )
 def test_sglang_rejects_unsupported_chart_combinations(arguments, expected):
+    """Chart must refuse SGLang + external hash / DP / Mooncake / LMCache."""
     result = _render('--set', 'hardware=nvidia', "--set", "engine.type=sglang", *arguments)
     assert result.returncode != 0
     assert expected in result.stderr

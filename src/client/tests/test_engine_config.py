@@ -1,3 +1,18 @@
+# tests/test_engine_config.py
+# -*- coding: utf-8 -*-
+"""Client-side unit tests for the ``helm.engine_type`` switch (vllm ↔ sglang).
+
+Covers config load / legacy model migration, SGLang model injection into
+``models[]``, and fail-closed validation for unsupported SGLang combinations
+(external hash, DP/LWS, Mooncake, LMCache, trustRemoteCode, mixed engines).
+
+See also:
+  - docs/deployment/sglang.md
+  - docs/architecture/sglang-contract-v0.5.15.md
+  - src/client/config.py (``HelmConfig`` SGLang fields)
+"""
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 
@@ -14,6 +29,7 @@ from sweep_methods import _inject_sglang_models, _validate_engine_config
 
 
 def test_default_migration_preserves_vllm_model_shape():
+    """Unset engine_type must keep the historical vLLM-only models[] shape."""
     helm = HelmConfig()
 
     migrate_legacy_helm_to_models(helm)
@@ -26,6 +42,7 @@ def test_default_migration_preserves_vllm_model_shape():
 
 
 def test_load_and_migrate_sglang_config(tmp_path):
+    """engine_type=sglang migrates HelmConfig knobs into models[].sglang."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -64,6 +81,7 @@ def test_load_and_migrate_sglang_config(tmp_path):
 
 
 def test_sglang_validation_rejects_unsupported_combinations():
+    """SGLang must fail closed on topologies outside the pinned contract."""
     helm = HelmConfig(
         engine_type="sglang",
         service_impl="go",
@@ -116,6 +134,7 @@ def test_engine_validation_rejects_unknown_engine():
 
 
 def test_sglang_model_injection_preserves_per_model_overrides():
+    """Per-model sglang.* keys must win over HelmConfig defaults."""
     helm = HelmConfig(engine_type="sglang", sglang_page_size=16)
     models = [{"name": "qwen", "sglang": {"pageSize": 64}}]
 

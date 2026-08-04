@@ -8,6 +8,12 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
+// kv_events.go decodes KV cache event batches from the inference engine.
+//
+// Events are MessagePack-framed (stored / removed / cleared) and projected
+// into the Redis-backed block index used by prefix-aware routing. Shared by
+// the live ZMQ subscriber and the replay path.
+
 type kvEventKind uint8
 
 const (

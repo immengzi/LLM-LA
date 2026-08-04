@@ -545,7 +545,11 @@ func isFinal(chunk map[string]interface{}) bool {
 }
 
 // ---------------- SSE builders ----------------
+// Helpers that turn router results into OpenAI-compatible SSE for
+// /v1/chat/completions streaming (content tokens and/or tool-call deltas).
 
+// mergeEmittedToolCallDeltas folds incremental tool_calls deltas into acc by
+// index, concatenating function name/arguments fragments across chunks.
 func mergeEmittedToolCallDeltas(acc map[int]map[string]interface{}, toolCalls []interface{}) {
 	for fallbackIndex, raw := range toolCalls {
 		toolCall, ok := raw.(map[string]interface{})
@@ -580,6 +584,7 @@ func mergeEmittedToolCallDeltas(acc map[int]map[string]interface{}, toolCalls []
 	}
 }
 
+// streamErrorSSE emits a single SSE error payload followed by [DONE].
 func streamErrorSSE(message, code string) string {
 	payload := map[string]interface{}{"error": map[string]interface{}{
 		"message": message, "type": "server_error", "code": code,
@@ -590,6 +595,10 @@ func streamErrorSSE(message, code string) string {
 	return sb.String()
 }
 
+// recoverSSEFromFullResult rebuilds the remaining SSE tail when a stream ends
+// early but a complete result is available. It verifies that the full result
+// is a consistent continuation of already-emitted content/tool-call deltas,
+// then emits the missing suffix (or an error SSE on mismatch).
 func recoverSSEFromFullResult(
 	rid, model string,
 	created int64,
@@ -721,6 +730,8 @@ func recoverSSEFromFullResult(
 	return sb.String()
 }
 
+// buildSSEChunks synthesizes a full content stream (role preamble, word-split
+// content deltas, finish chunk with usage, [DONE]) from a complete text result.
 func buildSSEChunks(rid, model string, created int64, outputText, finishReason string, usage map[string]interface{}, endpointID interface{}) string {
 	chunkID := "chatcmpl-" + rid
 	var sb strings.Builder
@@ -759,6 +770,9 @@ func buildSSEChunks(rid, model string, created int64, outputText, finishReason s
 	return sb.String()
 }
 
+// buildSSEChunksWithToolCalls synthesizes a full tool-call stream (role
+// preamble, tool_calls deltas, finish chunk with usage, [DONE]) from a
+// complete tool-call result with no text content.
 func buildSSEChunksWithToolCalls(rid, model string, created int64, toolCalls []interface{}, finishReason string, usage map[string]interface{}, endpointID interface{}) string {
 	chunkID := "chatcmpl-" + rid
 	var sb strings.Builder
