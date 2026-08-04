@@ -268,7 +268,18 @@ def _validate_engine_config(
 
 
 def _inject_sglang_models(h, models_list: list) -> None:
-    """Add the selected SGLang runtime contract to every model definition."""
+    """Add the selected SGLang runtime contract to every model definition.
+
+    Copies HelmConfig ``sglang_*`` knobs into each ``models[].sglang`` mapping
+    (per-model keys win). Field meanings and defaults:
+
+      - Chart values: ``src/core/vllm-kv-stack/values.yaml`` (``sglang:`` block)
+      - Client schema: ``src/client/config.py`` (``HelmConfig.sglang_*``)
+      - Deploy guide: ``docs/deployment/sglang.md``
+      - Pinned contract: ``docs/architecture/sglang-contract-v0.5.15.md``
+      - Helm reference: ``docs/configuration/helm-values.md`` (``engine.type``,
+        ``images.sglang``, autoscaling ``sglang`` signal)
+    """
     defaults = {
         "pageSize": int(getattr(h, "sglang_page_size", 16)),
         "memFractionStatic": float(getattr(h, "sglang_mem_fraction_static", 0.9)),

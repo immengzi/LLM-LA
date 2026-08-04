@@ -10,6 +10,12 @@ import (
 	"github.com/go-zeromq/zmq4"
 )
 
+// kv_replay.go catches up missed KV events via the engine replay endpoint.
+//
+// After (re)subscribe, the sidecar requests batches from a sequence watermark
+// over ZMQ DEALER until the publisher signals end-of-replay, then applies
+// those batches through the same Redis projection as live events.
+
 var replayEnd = bytes.Repeat([]byte{0xff}, 8)
 
 type replayBatch struct {

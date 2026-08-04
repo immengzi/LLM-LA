@@ -9,6 +9,12 @@ import (
 	"github.com/go-redis/redis/v8"
 )
 
+// kv_redis.go projects decoded KV events into Redis.
+//
+// Maintains the pod↔block index (HSET/SADD style keys) via a Lua apply script
+// so stored/removed/cleared batches stay consistent under concurrent
+// subscriber updates. Used by both live event intake and replay catch-up.
+
 var applyKVProjectionScript = redis.NewScript(`
 local function key_type(key)
   local result = redis.call("TYPE", key)

@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+// kv_discovery.go resolves SGLang KV-event publisher endpoints.
+//
+// For engine=sglang it queries the engine /server_info descriptor, validates
+// the pinned v0.5.15 publisher contract, and returns per-rank ZMQ event/replay
+// URLs (with pending ranks when discovery is still catching up). See
+// docs/architecture/sglang-contract-v0.5.15.md.
+
 const sglangKVVersion = "0.5.15"
 
 type publisherEndpoint struct {
