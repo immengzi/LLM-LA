@@ -315,6 +315,15 @@ CPU_ONLY_METRICS_CATALOG: List[Dict[str, str]] = [
     {"name": "vllm:spec_decode_num_emitted_tokens_total", "kind": "counter_rate", "field": "spec_tokens_emitted_per_sec"},
 ]
 
+# SGLang v0.5.15 names after Prometheus exposition sanitization. Fields remain
+# identical to the vLLM catalog so experiment output consumers do not change.
+SGLANG_METRICS_CATALOG: List[Dict[str, str]] = [
+    {"name": "sglang_num_running_reqs", "kind": "gauge", "field": "requests_running"},
+    {"name": "sglang_num_queue_reqs", "kind": "gauge", "field": "requests_waiting"},
+    {"name": "sglang_token_usage", "kind": "gauge", "field": "kv_cache_usage_perc"},
+    {"name": "sglang_gen_throughput", "kind": "gauge", "field": "gen_tokens_per_sec"},
+]
+
 # Router + Sidecar + vLLM thread metrics
 ROUTER_SIDECAR_METRICS_CATALOG: List[Dict[str, str]] = [
     # Router (labeled by instance=:8080)
@@ -490,6 +499,7 @@ class _MetricsSampler(threading.Thread):
         max_instances: Optional[int] = None,
         only_filter_to_endpoints: bool = False,
         extra_instances: Optional[List[str]] = None,
+        engine_type: str = "vllm",
     ):
         super().__init__(daemon=True)
         self.run_dir = Path(run_dir)
@@ -498,6 +508,7 @@ class _MetricsSampler(threading.Thread):
         self.interval_s = max(0.2, float(interval_s))
         self.rate_window = str(rate_window or "10s")
         self.model_name = (model_name or "").strip() or None
+        self.engine_type = str(engine_type or "vllm").strip().lower()
         self.max_instances = int(max_instances) if max_instances is not None else None
 
         # If true: router/sidecar metrics are filtered to discovered endpoints too.
@@ -638,7 +649,11 @@ class _MetricsSampler(threading.Thread):
         for name, vec in raw.items():
             if not isinstance(name, str):
                 continue
-            if not name.startswith("vllm:"):
+            if not (
+                name.startswith("vllm:")
+                or name.startswith("sglang_")
+                or name.startswith("sglang:")
+            ):
                 continue
             for it in vec or []:
                 labels = it.get("metric", {}) or {}
@@ -691,7 +706,11 @@ class _MetricsSampler(threading.Thread):
         for name, vec in raw.items():
             if not isinstance(name, str):
                 continue
-            if not name.startswith("vllm:"):
+            if not (
+                name.startswith("vllm:")
+                or name.startswith("sglang_")
+                or name.startswith("sglang:")
+            ):
                 continue
             for it in vec or []:
                 labels = it.get("metric", {}) or {}
@@ -712,9 +731,9 @@ class _MetricsSampler(threading.Thread):
         """
         if self.only_filter_to_endpoints:
             return vllm_allowed
-        # vLLM + LMCache series are both exposed on the vLLM /metrics endpoint and
-        # keyed by the same instance label, so isolate both to discovered pods.
-        if metric_name.startswith("vllm:") or metric_name.startswith("lmcache:"):
+        # Engine + LMCache series are exposed on the inference /metrics endpoint and
+        # keyed by the same instance label, so isolate them to discovered pods.
+        if metric_name.startswith(("vllm:", "lmcache:", "sglang_", "sglang:")):
             return vllm_allowed
         return None
 
@@ -799,7 +818,12 @@ class _MetricsSampler(threading.Thread):
         If endpoint discovery isn't ready, discover vLLM instances directly from Prometheus.
         """
         try:
-            vec = self._prom.instant("vllm:num_requests_running")
+            metric = (
+                "sglang_num_running_reqs"
+                if self.engine_type == "sglang"
+                else "vllm:num_requests_running"
+            )
+            vec = self._prom.instant(metric)
         except Exception:
             vec = []
         insts: List[str] = []
@@ -1430,16 +1454,25 @@ def start_metrics_collection(*, run_dir: str | Path, cfg: Any) -> None:
         model_name = getattr(cfg, "model_name", None)
 
         # Catalog selection (full parity with prod_latency_collector /
-        # prod_external_metrics_scraper): core vLLM + router/sidecar + the v0 KV
+        # prod_external_metrics_scraper): engine core + router/sidecar + the v0 KV
         # gauge fallback + the LMCache P2P host-staging tier. Cumulative counters
         # and router latency histograms are collected inside _collect_one_tick.
-        catalog = list(CPU_ONLY_METRICS_CATALOG) + list(VLLM_EXTRA_GAUGE_CATALOG) + list(ROUTER_SIDECAR_METRICS_CATALOG)
-
-        if bool(getattr(cfg, "include_lmcache_metrics", True)):
-            catalog += list(LMCACHE_METRICS_CATALOG)
+        engine_type = str(getattr(cfg, "engine_type", "vllm") or "vllm").lower()
+        if engine_type == "sglang":
+            catalog = list(SGLANG_METRICS_CATALOG) + list(ROUTER_SIDECAR_METRICS_CATALOG)
+        else:
+            catalog = (
+                list(CPU_ONLY_METRICS_CATALOG)
+                + list(VLLM_EXTRA_GAUGE_CATALOG)
+                + list(ROUTER_SIDECAR_METRICS_CATALOG)
+            )
+            if bool(getattr(cfg, "include_lmcache_metrics", True)):
+                catalog += list(LMCACHE_METRICS_CATALOG)
 
         # keep existing debug option (still optional)
-        if bool(getattr(cfg, "include_debug_metrics", False)):
+        if engine_type == "vllm" and bool(
+            getattr(cfg, "include_debug_metrics", False)
+        ):
             catalog += [
                 {"name": "vllm:request_total", "kind": "counter_rate", "field": "request_total_per_sec"},
                 {"name": "vllm:request_timeout_total", "kind": "counter_rate", "field": "request_timeout_per_sec"},
@@ -1463,6 +1496,7 @@ def start_metrics_collection(*, run_dir: str | Path, cfg: Any) -> None:
             max_instances=getattr(cfg, "max_instances", None),
             only_filter_to_endpoints=only_filter_to_endpoints,
             extra_instances=extra_instances,
+            engine_type=engine_type,
         )
         _sampler.start()
         print(f"[metrics] started -> {Path(run_dir) / 'metrics.jsonl'}")

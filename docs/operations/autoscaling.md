@@ -1,6 +1,6 @@
 # Autoscaling (KEDA)
 
-LA-Boom autoscales vLLM **per model** across every deployment topology:
+LA-Boom autoscales inference engines **per model** across every deployment topology:
 
 - **Single dense model** (legacy/back-compat) — scales a `Deployment`
 - **Multi-model** — one `Deployment` per `models[]` entry, scaled independently
@@ -18,6 +18,7 @@ changes until you opt in.
 |--------|--------|----------|
 | `queue` (default) | `router_central_queue_length_by_model{model="<servedModelName>"}` | A router-style backend is in front (`backend: router\|boom\|litellm`). Scales on central-queue backlog per model. |
 | `vllm` | `vllm:gpu_cache_usage_perc{model_name="<servedModelName>"}` | Router-less / direct topologies. Scales on vLLM KV-cache pressure (0..1). |
+| `sglang` | SGLang token-usage for the served model / namespace | When `engine.type=sglang` and the engine signal is selected. |
 
 The `queue` signal relies on the additive `router_central_queue_length_by_model`
 gauge emitted by both the Python and Go routers. The legacy global
@@ -27,7 +28,7 @@ alerts keep working.
 ## Prerequisites
 
 1. **Prometheus** in the cluster. The `monitoring` Ansible role deploys
-   kube-prometheus-stack; the router/vLLM `PodMonitor`s ship with the chart.
+   kube-prometheus-stack; the router/engine `PodMonitor`s / `ServiceMonitor`s ship with the chart.
 2. **KEDA** installed. Use the bundled Ansible role:
 
    ```bash

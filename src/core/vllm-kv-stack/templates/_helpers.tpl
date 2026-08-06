@@ -91,7 +91,7 @@ vllmkv.modelMaxReplicas — per-model override → global maxReplicaCount.
 {{- end -}}
 
 {{/*
-vllmkv.modelSignal — effective scaling signal ("queue" | "vllm") for a model.
+vllmkv.modelSignal — effective scaling signal ("queue" | "vllm" | "sglang") for a model.
 */}}
 {{- define "vllmkv.modelSignal" -}}
 {{- $root := .root -}}
@@ -116,8 +116,11 @@ vllmkv.kedaThreshold — KEDA trigger threshold for a model (signal-aware).
 {{- $pm := get ($as.perModel | default dict) ($m.name | toString) -}}
 {{- if not (kindIs "map" $pm) }}{{- $pm = dict -}}{{- end -}}
 {{- $sig := include "vllmkv.modelSignal" (dict "root" $root "model" $m) -}}
+{{- $engine := include "vllmkv.engineType" (dict "root" $root "model" $m) | trim -}}
 {{- if $pm.threshold -}}
 {{- $pm.threshold -}}
+{{- else if or (eq $sig "sglang") (and (eq $sig "vllm") (eq $engine "sglang")) -}}
+{{- $as.sglangThreshold | default $as.vllmThreshold | default "0.8" -}}
 {{- else if eq $sig "vllm" -}}
 {{- $as.vllmThreshold | default "0.8" -}}
 {{- else -}}
@@ -129,7 +132,8 @@ vllmkv.kedaThreshold — KEDA trigger threshold for a model (signal-aware).
 vllmkv.kedaQuery — PromQL query for a model's ScaledObject trigger.
 Precedence: per-model query → signal-derived query.
   queue → additive per-model router gauge (router_central_queue_length_by_model)
-  vllm  → vLLM engine load (gpu KV-cache usage), router-independent
+  vllm   → vLLM engine load (gpu KV-cache usage), router-independent
+  sglang → SGLang token usage, router-independent
 */}}
 {{- define "vllmkv.kedaQuery" -}}
 {{- $root := .root -}}
@@ -140,8 +144,15 @@ Precedence: per-model query → signal-derived query.
 {{- $ns := $root.Release.Namespace -}}
 {{- $served := $m.servedModelName | default $m.name -}}
 {{- $sig := include "vllmkv.modelSignal" (dict "root" $root "model" $m) -}}
+{{- $engine := include "vllmkv.engineType" (dict "root" $root "model" $m) | trim -}}
 {{- if $pm.query -}}
 {{- $pm.query -}}
+{{- else if or (eq $sig "sglang") (and (eq $sig "vllm") (eq $engine "sglang")) -}}
+{{- if $as.sglangQuery -}}
+{{- $as.sglangQuery -}}
+{{- else -}}
+{{- printf "max({__name__=~\"sglang(:|_)token_usage\",namespace=%q,model_name=%q}) or vector(0)" $ns $served -}}
+{{- end -}}
 {{- else if eq $sig "vllm" -}}
 {{- if $as.vllmQuery -}}
 {{- $as.vllmQuery -}}
@@ -192,6 +203,145 @@ Force all images to use .Values.global.imageRegistry if set, even if image alrea
 {{- else -}}
 {{- $img -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+Resolve the inference engine for a model. Per-model selection wins over the
+global selector; the historical default remains vllm.
+Context: dict with keys "root" and "model".
+*/}}
+{{- define "vllmkv.engineType" -}}
+{{- lower (default (default "vllm" .root.Values.engine.type) .model.engine) -}}
+{{- end -}}
+
+{{/*
+vllmkv.modelResourceName — Deployment/Service/app identity for a model.
+
+Historically every engine workload was named vllm-<model>. That leaked the
+vLLM product name into SGLang pods (vllm-qwen while running SGLang). Resource
+names are now <engine>-<model> (vllm-qwen / sglang-qwen) so kubectl, Services,
+KEDA targets, and Redis-facing pod names match the serving engine.
+Context: dict with keys "root" and "model" (model.name required).
+*/}}
+{{- define "vllmkv.modelResourceName" -}}
+{{- $engine := include "vllmkv.engineType" . | trim -}}
+{{- printf "%s-%s" $engine (.model.name | toString) -}}
+{{- end -}}
+
+{{/* Resolve health and metrics contracts without changing vLLM defaults. */}}
+{{- define "vllmkv.engineHealthPath" -}}
+{{- $profile := get (.root.Values.engineProfiles | default dict) .engine | default dict -}}
+{{- $engineValues := get .root.Values .engine | default dict -}}
+{{- $modelValues := get .model .engine | default dict -}}
+{{- $path := $modelValues.healthPath | default $engineValues.healthPath | default $profile.healthPath | default "/health" -}}
+{{- if eq (trimSuffix "/" $path) "/health_generate" -}}/health{{- else -}}{{ $path }}{{- end -}}
+{{- end -}}
+
+{{- define "vllmkv.engineReadinessPath" -}}
+{{- $profile := get (.root.Values.engineProfiles | default dict) .engine | default dict -}}
+{{- $engineValues := get .root.Values .engine | default dict -}}
+{{- $modelValues := get .model .engine | default dict -}}
+{{- $ready := $modelValues.readinessPath | default $engineValues.readinessPath | default $profile.readinessPath -}}
+{{- if $ready -}}{{ $ready }}{{- else -}}{{ include "vllmkv.engineHealthPath" . }}{{- end -}}
+{{- end -}}
+
+{{- define "vllmkv.engineMetricsPath" -}}
+{{- $profile := get (.root.Values.engineProfiles | default dict) .engine | default dict -}}
+{{- $engineValues := get .root.Values .engine | default dict -}}
+{{- $modelValues := get .model .engine | default dict -}}
+{{- $modelValues.metricsPath | default $engineValues.metricsPath | default $profile.metricsPath | default "/metrics" -}}
+{{- end -}}
+
+{{- define "vllmkv.engineMetricsPort" -}}
+{{- $profile := get (.root.Values.engineProfiles | default dict) .engine | default dict -}}
+{{- $engineValues := get .root.Values .engine | default dict -}}
+{{- $modelValues := get .model .engine | default dict -}}
+{{- $modelValues.metricsPort | default $engineValues.metricsPort | default $profile.metricsPort | default 8200 -}}
+{{- end -}}
+
+{{/*
+Select the engine image while retaining the per-model override.
+Context: dict with keys "root", "model", and "engine".
+*/}}
+{{- define "vllmkv.engineImage" -}}
+{{- if .model.image -}}
+{{- .model.image -}}
+{{- else if eq .engine "sglang" -}}
+{{- include "vllmkv.image" (list .root (default "lmsysorg/sglang:v0.5.15-cu129" .root.Values.images.sglang)) -}}
+{{- else -}}
+{{- include "vllmkv.image" (list .root .root.Values.images.vllm) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+SGLang launch command for the supported non-DP Deployment profile.
+Context: dict with keys root, model, servedModelName, tp.
+*/}}
+{{- define "vllmkv.sglangLaunchCommand" -}}
+{{- $sv := .model.sglang | default dict -}}
+{{- $gv := .root.Values.sglang | default dict -}}
+{{- $kv := $gv.kvEvents | default dict -}}
+exec python -m sglang.launch_server \
+  --model-path /model \
+  --served-model-name {{ .servedModelName }} \
+  --host 0.0.0.0 \
+  --port 8200 \
+  --tp-size {{ .tp }} \
+  --page-size {{ $sv.pageSize | default $gv.pageSize | default 16 }} \
+  --mem-fraction-static {{ $sv.memFractionStatic | default $gv.memFractionStatic | default 0.9 }} \
+  --enable-metrics \
+{{- if or $sv.trustRemoteCode $gv.trustRemoteCode }}
+  --trust-remote-code \
+{{- end }}
+{{- $tcp := $sv.toolCallParser | default $gv.toolCallParser -}}
+{{- if $tcp }}
+  --tool-call-parser {{ $tcp }} \
+{{- end }}
+{{- $rp := $sv.reasoningParser | default $gv.reasoningParser -}}
+{{- if $rp }}
+  --reasoning-parser {{ $rp }} \
+{{- end }}
+  --kv-events-config '{"publisher":"zmq","endpoint":"tcp://*:{{ $kv.port | default 5557 }}","replay_endpoint":"tcp://*:{{ $kv.replayPort | default 5558 }}","topic":"{{ $kv.topic | default "kv@" }}'"${POD_NAME}"'@{{ .servedModelName }}"}' \
+{{- range ($sv.extraArgs | default $gv.extraArgs | default list) }}
+  {{ . }} \
+{{- end }}
+  --log-level {{ $sv.logLevel | default $gv.logLevel | default "info" }}
+{{- end -}}
+
+{{/*
+Engine-neutral sidecar aliases. VLLM_* variables remain alongside these for
+backward compatibility with existing images.
+Context: dict with keys engine and servedModelName.
+*/}}
+{{- define "vllmkv.inferenceSidecarEnv" -}}
+- name: INFERENCE_ENGINE
+  value: {{ .engine | quote }}
+- name: INFERENCE_URL
+  value: "http://127.0.0.1:8200"
+- name: INFERENCE_HOST
+  value: "127.0.0.1"
+- name: INFERENCE_HEALTH_PATH
+  value: {{ .healthPath | default "/health" | quote }}
+{{- if and .readinessPath (ne .readinessPath .healthPath) }}
+- name: INFERENCE_READINESS_PATH
+  value: {{ .readinessPath | quote }}
+{{- end }}
+- name: INFERENCE_TIMEOUT_S
+  value: "7200.0"
+- name: KV_EVENT_PORT
+  value: {{ .kvEventPort | default 5557 | quote }}
+- name: KV_EVENT_REPLAY_PORT
+  value: {{ .kvEventReplayPort | default 5558 | quote }}
+- name: KV_EVENT_TOPIC
+  value: {{ .kvEventTopic | default "kv@" | quote }}
+{{- if eq .engine "sglang" }}
+- name: KV_EVENT_EXPECTED_PAGE_SIZE
+  value: {{ .expectedPageSize | default 16 | quote }}
+- name: KV_EVENT_DISCOVERY_ENABLED
+  value: "true"
+- name: KV_EVENT_DISCOVERY_TIMEOUT_S
+  value: {{ .kvEventDiscoveryTimeoutS | default 2.0 | quote }}
+{{- end }}
 {{- end -}}
 
 {{/*
@@ -441,6 +591,24 @@ Context: dict with keys "tp" (tensor parallel size), "root" (the root $ context)
   value: "false"
 {{- end }}
 {{- end }}
+{{- end -}}
+
+{{/* Minimal engine environment for SGLang; intentionally excludes vLLM/Ascend knobs. */}}
+{{- define "vllmkv.sglangBaseEnv" -}}
+- name: HF_HUB_OFFLINE
+  value: "1"
+- name: TRANSFORMERS_OFFLINE
+  value: "1"
+- name: HF_HUB_DISABLE_TELEMETRY
+  value: "1"
+- name: PYTHONHASHSEED
+  value: "0"
+- name: TOKENIZERS_PARALLELISM
+  value: "false"
+- name: POD_NAME
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.name
 {{- end -}}
 
 {{/*

@@ -87,6 +87,10 @@ GAUGES = [
     # whichever is present.
     "vllm:gpu_cache_usage_perc",
     "vllm:kv_cache_usage_perc",
+    "sglang:num_running_reqs",
+    "sglang:num_queue_reqs",
+    "sglang:token_usage",
+    "sglang:gen_throughput",
 ]
 
 COUNTERS = [
@@ -192,6 +196,13 @@ _RPM_FIELDS = [
 
 _INF = float("inf")
 
+_METRIC_ALIASES = {
+    "sglang_num_running_reqs": "sglang:num_running_reqs",
+    "sglang_num_queue_reqs": "sglang:num_queue_reqs",
+    "sglang_token_usage": "sglang:token_usage",
+    "sglang_gen_throughput": "sglang:gen_throughput",
+}
+
 
 # ============================================================
 # Prometheus exposition-format parser
@@ -242,6 +253,9 @@ def parse_metrics(text: str) -> Dict[str, List[Tuple[Dict[str, str], float]]]:
             if len(parts) < 2:
                 continue
             name, labels, value = parts[0], {}, _parse_value(parts[1])
+        name = _METRIC_ALIASES.get(name, name)
+        if name.startswith("sglang:") and not labels.get("engine"):
+            labels["engine"] = "sglang"
         out.setdefault(name, []).append((labels, value))
     return out
 
@@ -458,10 +472,16 @@ def build_tick(
 
         # gauges
         rr = gauges["vllm:num_requests_running"].get(key)
+        if rr is None:
+            rr = gauges["sglang:num_running_reqs"].get(key)
         rw = gauges["vllm:num_requests_waiting"].get(key)
+        if rw is None:
+            rw = gauges["sglang:num_queue_reqs"].get(key)
         kv = gauges["vllm:kv_cache_usage_perc"].get(key)
         if kv is None:
             kv = gauges["vllm:gpu_cache_usage_perc"].get(key)
+        if kv is None:
+            kv = gauges["sglang:token_usage"].get(key)
         rec["requests_running"] = rr
         rec["requests_waiting"] = rw
         rec["kv_cache_usage_perc"] = kv
@@ -471,6 +491,8 @@ def build_tick(
             return _rate(counters[name].get(key), prev_counters.get(name, {}).get(key), dt)
 
         rec["gen_tokens_per_sec"] = crate("vllm:generation_tokens_total")
+        if rec["gen_tokens_per_sec"] is None:
+            rec["gen_tokens_per_sec"] = gauges["sglang:gen_throughput"].get(key)
         rec["prefill_tokens_per_sec"] = crate("vllm:prompt_tokens_total")
         # Cumulative (all-time) token counters, so incoming/outgoing token
         # throughput can be re-windowed retrospectively (not just the rate above).

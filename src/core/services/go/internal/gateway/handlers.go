@@ -281,6 +281,29 @@ func (s *Server) registerKVBlocks(rid, prompt string, meta map[string]interface{
 		}
 	}
 
+	if s.cfg.InferenceEngine == "sglang" || s.cfg.KVHashBackend == "sglang" {
+		if contractError := s.cfg.SGLangHashContractError(); contractError != "" {
+			return s.recordKVHashSkip(
+				rid,
+				m,
+				"sglang_contract:"+contractError,
+				isPullMode,
+			)
+		}
+		eligibilitySource := m
+		if chatRequest, ok := m["__chat_request__"].(map[string]interface{}); ok {
+			eligibilitySource = chatRequest
+		}
+		if reason := sglangRequestIneligibility(eligibilitySource); reason != "" {
+			return s.recordKVHashSkip(
+				rid,
+				m,
+				"sglang_request_unsupported:"+reason,
+				isPullMode,
+			)
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.cfg.HashTimeoutS*float64(time.Second)))
 	defer cancel()
 	hashes, err := s.hashClient.ComputeHashes(ctx, prompt, messages, tools)
@@ -327,6 +350,22 @@ func (s *Server) registerKVBlocks(rid, prompt string, meta map[string]interface{
 		}
 	}
 	return m
+}
+
+// recordKVHashSkip records a fail-closed reason without rejecting or otherwise
+// changing request delivery. It mirrors api.py:_record_kv_hash_skip.
+func (s *Server) recordKVHashSkip(rid string, meta map[string]interface{}, reason string, isPullMode bool) map[string]interface{} {
+	meta["kv_hash_skip_reason"] = reason
+	if s.cfg.TraceEnabled {
+		trace := traceOf(meta)
+		trace["router_block_hashes"] = nil
+		trace["router_kv_hash_skip_reason"] = reason
+		meta["__trace__"] = trace
+	}
+	if isPullMode {
+		s.queue.UpdateMeta(rid, meta)
+	}
+	return meta
 }
 
 // --- POST /enqueue ---

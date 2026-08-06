@@ -1,0 +1,95 @@
+{{/*
+Global router/tokenizer contract validation for the pinned SGLang v0.5.15
+profile. This template intentionally renders no resources.
+*/}}
+{{- $serviceImpl := lower (.Values.serviceImpl | default "python") -}}
+{{- if not (has $serviceImpl (list "python" "go")) -}}
+  {{- fail (printf "unsupported serviceImpl '%s' (expected python or go)" $serviceImpl) -}}
+{{- end -}}
+
+{{- $models := .Values.models | default (list) -}}
+{{- if not $models -}}
+  {{- $legacy := dict
+        "name" "qwen"
+        "engine" (.Values.engine.type | default "vllm")
+        "modelSubPath" .Values.modelVolume.modelSubPath
+        "sglang" .Values.sglang
+  -}}
+  {{- $models = list $legacy -}}
+{{- end -}}
+
+{{- $strategy := lower (.Values.router.strategy | default "") -}}
+{{- $kvAware := .Values.router.kvAware | default false -}}
+{{- if has $strategy (list "prefix" "both") -}}
+  {{- $kvAware = true -}}
+{{- else if has $strategy (list "none" "affinity") -}}
+  {{- $kvAware = false -}}
+{{- end -}}
+{{- $routerBackend := has (lower (.Values.backend | default "router")) (list "router" "litellm" "boom") -}}
+{{- $routerHashing := and
+      .Values.deploy.router
+      $routerBackend
+      (or
+        $kvAware
+        (.Values.router.measurePrefix | default false)
+        (.Values.router.logBlockHashes | default false))
+-}}
+{{- $globalEngine := lower (.Values.engine.type | default "vllm") -}}
+{{- $state := dict "firstEngine" "" "hasSglang" false -}}
+
+{{- range $model := $models -}}
+  {{- $engine := include "vllmkv.engineType" (dict "root" $ "model" $model) | trim -}}
+  {{- $sglangConfig := $model.sglang | default dict -}}
+
+  {{- if eq $engine "sglang" -}}
+    {{- $_ := set $state "hasSglang" true -}}
+    {{- if or
+          ($.Values.sglang.trustRemoteCode | default false)
+          ($sglangConfig.trustRemoteCode | default false)
+    -}}
+      {{- fail (printf "SGLang v0.5.15 does not support trustRemoteCode for model '%s': the router tokenizer cannot mirror remote tokenizer code" ($model.name | default "?")) -}}
+    {{- end -}}
+    {{- range $arg := ($sglangConfig.extraArgs | default $.Values.sglang.extraArgs | default (list)) -}}
+      {{- $normalizedArg := lower (toString $arg) -}}
+      {{- range $managed := list "--model-path" "--served-model-name" "--host" "--port" "--tp-size" "--page-size" "--mem-fraction-static" "--kv-events-config" "--tokenizer" "--enable-metrics" "--log-level" -}}
+        {{- if hasPrefix $managed $normalizedArg -}}
+          {{- fail (printf "SGLang model '%s' extraArg '%s' overrides chart-managed flag '%s'; configure the typed Helm value instead" ($model.name | default "?") $arg $managed) -}}
+        {{- end -}}
+      {{- end -}}
+    {{- end -}}
+  {{- end -}}
+
+  {{- if $routerHashing -}}
+    {{- if not ($state.firstEngine) -}}
+      {{- $_ := set $state "firstEngine" $engine -}}
+    {{- else if ne $state.firstEngine $engine -}}
+      {{- fail "router prefix hashing/measurement does not support mixed model engines; the router has one global hash backend and tokenizer" -}}
+    {{- end -}}
+    {{- if ne $engine $globalEngine -}}
+      {{- fail (printf "model engine '%s' must match global engine.type '%s' for router prefix hashing/measurement" $engine $globalEngine) -}}
+    {{- end -}}
+
+    {{- if eq $engine "sglang" -}}
+      {{- $pageSize := int ($sglangConfig.pageSize | default $.Values.sglang.pageSize | default 16) -}}
+      {{- $globalPageSize := int ($.Values.sglang.pageSize | default 16) -}}
+      {{- if ne $pageSize $globalPageSize -}}
+        {{- fail (printf "SGLang model '%s' pageSize %d must match global sglang.pageSize %d used by the router" ($model.name | default "?") $pageSize $globalPageSize) -}}
+      {{- end -}}
+      {{- range $key := list "modelPath" "model_path" "tokenizer" "tokenizerPath" "tokenizer_path" "tokenizerMode" "tokenizer_mode" "tokenizerKwargs" "tokenizer_kwargs" -}}
+        {{- if or (hasKey $model $key) (hasKey $sglangConfig $key) -}}
+          {{- fail (printf "SGLang model '%s' custom model/tokenizer override '%s' cannot match the router-mounted /model tokenizer" ($model.name | default "?") $key) -}}
+        {{- end -}}
+      {{- end -}}
+      {{- range $arg := ($sglangConfig.extraArgs | default $.Values.sglang.extraArgs | default (list)) -}}
+        {{- $normalizedArg := lower (toString $arg) -}}
+        {{- if or (hasPrefix "--model-path" $normalizedArg) (hasPrefix "--tokenizer" $normalizedArg) -}}
+          {{- fail (printf "SGLang model '%s' model/tokenizer extraArg '%s' cannot match the router-mounted /model tokenizer" ($model.name | default "?") $arg) -}}
+        {{- end -}}
+      {{- end -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+
+{{- if and $routerHashing $state.hasSglang (ne (len $models) 1) -}}
+  {{- fail "SGLang router prefix hashing/measurement requires exactly one model because the router mounts only the first model at /model" -}}
+{{- end -}}

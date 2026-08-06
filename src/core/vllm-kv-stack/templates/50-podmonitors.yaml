@@ -1,17 +1,22 @@
+{{- $engineType := lower (.Values.engine.type | default "vllm") }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: vllm
+  name: {{ $engineType }}
   namespace: {{ .Release.Namespace }}
   labels:
     release: kube-prometheus-stack
 spec:
   selector:
     matchLabels:
-      component: vllm
+      component: {{ $engineType }}
   namespaceSelector:
     matchNames:
       - {{ .Release.Namespace }}
+  targetLabels:
+    - model
+    - inference-engine
+    - release
   endpoints:
     # Was 1s with implicit timeout <= interval. Under LMCache P2P host-staging
     # saturation the vLLM process stalls on pin/transfer work and /metrics often
@@ -37,6 +42,8 @@ spec:
   selector:
     matchLabels:
       app: router-service
+  podTargetLabels:
+    - release
   podMetricsEndpoints:
     - path: /metrics
       port: http
@@ -56,7 +63,9 @@ metadata:
 spec:
   selector:
     matchLabels:
-      component: vllm
+      component: {{ $engineType }}
+  podTargetLabels:
+    - release
   podMetricsEndpoints:
     - path: /metrics
       port: sidecar-http
@@ -73,7 +82,7 @@ spec:
   Scrapes LiteLLM's built-in Prometheus metrics at /metrics/ on port 4000.
   enable_prometheus_system_metrics: true must be set in litellm_config.yaml
   (done in 70-litellm.yaml) for this endpoint to return data.
-  Interval is 5s (vs 1s for router/vllm) — litellm metrics are less time-critical.
+  Interval is 5s (vs 1s for router/engine) — litellm metrics are less time-critical.
 */}}
 {{- if .Values.litellm.enabled }}
 apiVersion: monitoring.coreos.com/v1
