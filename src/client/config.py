@@ -142,6 +142,8 @@ def generation_effective_ignore_eos(gen_cfg: GenerationConfig) -> bool:
 @dataclass
 class PrometheusMetricsConfig:
     enabled: bool = True
+    # Empty means inherit helm.engine_type at load time.
+    engine_type: str = ""
     prometheus_base_url: str = "http://10.50.156.65:31190"
     scrape_interval_s: float = 2.0
     window_s: float = 10.0
@@ -450,7 +452,26 @@ class HelmConfig:
     must explicitly set vllm_quantization and vllm_enable_expert_parallel in their
     client config YAML.
     """
-    # initial replicas for vLLM deployment (even when autoscaling is enabled)
+    # Inference engine. vLLM remains the backward-compatible default.
+    engine_type: str = "vllm"  # vllm | sglang
+
+    # SGLang v0.5.15 image/runtime settings. These are only emitted into
+    # models[] when engine_type=sglang.
+    sglang_image: str = "lmsysorg/sglang:v0.5.15-cu129"
+    sglang_page_size: int = 16
+    sglang_mem_fraction_static: float = 0.9
+    sglang_tool_call_parser: Optional[str] = None
+    sglang_reasoning_parser: Optional[str] = None
+    # Must remain false for the pinned v0.5.15 profile: the router tokenizer
+    # cannot execute/mirror engine-side remote tokenizer code.
+    sglang_trust_remote_code: bool = False
+    sglang_extra_args: List[str] = field(default_factory=list)
+    sglang_health_path: str = "/health"
+    sglang_readiness_path: str = ""
+    sglang_metrics_path: str = "/metrics"
+    sglang_metrics_port: int = 8200
+
+    # initial replicas for the inference deployment (even when autoscaling is enabled)
     replicas: int = 4
 
     # sidecar batch size
@@ -851,6 +872,29 @@ def migrate_legacy_helm_to_models(h: HelmConfig) -> None:
         "batchSize": h.batch_size,
     }
 
+    engine_type = str(h.engine_type or "vllm").strip().lower()
+    if engine_type == "sglang":
+        sglang: dict = {
+            "pageSize": h.sglang_page_size,
+            "memFractionStatic": h.sglang_mem_fraction_static,
+            "trustRemoteCode": bool(h.sglang_trust_remote_code),
+            "extraArgs": list(h.sglang_extra_args or []),
+            "healthPath": h.sglang_health_path,
+            "readinessPath": h.sglang_readiness_path,
+            "metricsPath": h.sglang_metrics_path,
+            "metricsPort": h.sglang_metrics_port,
+        }
+        if h.sglang_tool_call_parser is not None:
+            sglang["toolCallParser"] = h.sglang_tool_call_parser
+        if h.sglang_reasoning_parser is not None:
+            sglang["reasoningParser"] = h.sglang_reasoning_parser
+        model_entry["engine"] = "sglang"
+        model_entry["image"] = (
+            str(h.sglang_image or "").strip()
+            or "lmsysorg/sglang:v0.5.15-cu129"
+        )
+        model_entry["sglang"] = sglang
+
     nfs_path = str(h.nfs_path or "").strip()
     if nfs_path:
         model_entry["modelSubPath"] = PurePosixPath(nfs_path.rstrip("/")).name
@@ -1153,6 +1197,8 @@ def load_config(path: str) -> ClientConfig:
 
     # helm config
     helm = _merge_dataclass(HelmConfig, raw.get("helm", {}))
+    if not str(metrics.engine_type or "").strip():
+        metrics.engine_type = str(helm.engine_type or "vllm").strip().lower()
 
     output_log_mode = raw.get("output_log_mode", ClientConfig.output_log_mode)
     print_trace = raw.get("print_trace", ClientConfig.print_trace)

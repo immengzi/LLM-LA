@@ -40,11 +40,12 @@
 {{- if eq (include "vllmkv.modelAutoscaled" (dict "root" $ "model" $m) | trim) "true" }}
 {{- $isDP := (default dict $m.dataParallel).enabled | default false }}
 {{- $sig := include "vllmkv.modelSignal" (dict "root" $ "model" $m) }}
+{{- $resourceName := include "vllmkv.modelResourceName" (dict "root" $ "model" $m) | trim }}
 ---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: vllm-{{ $m.name }}-autoscale
+  name: {{ $resourceName }}-autoscale
   namespace: {{ $.Release.Namespace }}
   labels:
     component: autoscaling
@@ -58,7 +59,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     {{- end }}
-    name: vllm-{{ $m.name }}
+    name: {{ $resourceName }}
 
   minReplicaCount: {{ include "vllmkv.modelMinReplicas" (dict "root" $ "model" $m) }}
   maxReplicaCount: {{ include "vllmkv.modelMaxReplicas" (dict "root" $ "model" $m) }}

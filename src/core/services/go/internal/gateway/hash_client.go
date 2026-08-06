@@ -40,6 +40,7 @@ type hashRequest struct {
 	Prompt   string        `json:"prompt,omitempty"`
 	Messages []interface{} `json:"messages,omitempty"`
 	Tools    []interface{} `json:"tools,omitempty"`
+	Backend  string        `json:"backend,omitempty"`
 }
 
 type hashResponse struct {
@@ -59,9 +60,9 @@ func (h *HashClient) ComputeHashes(ctx context.Context, prompt string, messages,
 	if strings.ToLower(h.cfg.KVHashSource) == "external" {
 		reqBody = hashRequest{Prompt: prompt}
 	} else if len(messages) > 0 {
-		reqBody = hashRequest{Messages: messages, Tools: tools}
+		reqBody = hashRequest{Messages: messages, Tools: tools, Backend: h.cfg.KVHashBackend}
 	} else {
-		reqBody = hashRequest{Prompt: prompt, Tools: tools}
+		reqBody = hashRequest{Prompt: prompt, Tools: tools, Backend: h.cfg.KVHashBackend}
 	}
 
 	body, err := json.Marshal(reqBody)

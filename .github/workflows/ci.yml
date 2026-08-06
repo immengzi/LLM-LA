@@ -1,9 +1,9 @@
 name: core-ci
 
 # CI for the LA-Boom core services (src/core): Python unit/component tests,
-# Go unit tests (Go 1.26 container), docker image builds, Helm lint + hardware
-# switch unit tests, and a docker-compose end-to-end test (mock vLLM + real
-# Redis + router + sidecar).
+# Go unit tests (Go 1.26 container), docker image builds, Helm lint + hardware /
+# engine switch unit tests, and a docker-compose end-to-end test (mock vLLM +
+# real Redis + router + sidecar).
 
 on:
   push:
@@ -120,7 +120,7 @@ jobs:
           tags: laboom-sidecar:ci
 
   helm:
-    name: helm (lint + hardware switch)
+    name: helm (lint + hardware/engine switch)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -133,7 +133,7 @@ jobs:
         run: pip install pytest pyyaml
       - name: Lint chart
         run: helm lint src/core/vllm-kv-stack
-      - name: Hardware-switch unit tests
+      - name: Hardware and engine switch unit tests
         working-directory: src/core/tests/helm
         run: pytest
 

@@ -1,0 +1,5 @@
+# HELP sglang:num_running_reqs Running requests
+sglang:num_running_reqs{model_name="served-model"} 3
+sglang_num_queue_reqs{model_name="served-model"} 4
+sglang:token_usage{model_name="served-model"} 0.625
+sglang_gen_throughput{model_name="served-model"} 128.5

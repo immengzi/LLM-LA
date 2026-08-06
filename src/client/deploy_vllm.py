@@ -144,9 +144,16 @@ def _resolve_config_path(config: str) -> Path:
     return p.resolve()
 
 
-def _wait_vllm_ready(namespace: str, model_name: str = "qwen", timeout_s: float = 36000) -> None:
-    """Wait for vllm-{model_name} pods to be Ready."""
-    deploy_name = f"vllm-{model_name}"
+def _wait_vllm_ready(
+    namespace: str,
+    model_name: str = "qwen",
+    timeout_s: float = 36000,
+    *,
+    engine_type: str = "vllm",
+) -> None:
+    """Wait for <engine>-{model_name} pods to be Ready."""
+    engine = str(engine_type or "vllm").strip().lower() or "vllm"
+    deploy_name = f"{engine}-{model_name}"
     deadline = time.time() + float(timeout_s)
 
     remaining = max(1, int(deadline - time.time()))
@@ -237,6 +244,36 @@ def cli(client_config: str, reinstall: bool, timeout_s: int) -> None:
     h = getattr(cfg, "helm", None)
     if h is None:
         raise click.ClickException(f"Config has no 'helm' section: {cfg_path}")
+    engine_type = str(getattr(h, "engine_type", "vllm") or "vllm").strip().lower()
+    if engine_type not in ("vllm", "sglang"):
+        raise click.ClickException(
+            f"Invalid engine_type {engine_type!r}; expected 'vllm' or 'sglang'"
+        )
+    service_impl = str(
+        getattr(h, "service_impl", "python") or "python"
+    ).strip().lower()
+    if service_impl not in ("python", "go"):
+        raise click.ClickException(
+            f"Invalid service_impl {service_impl!r}; expected 'python' or 'go'"
+        )
+    if engine_type == "sglang":
+        unsupported = []
+        if bool(getattr(h, "sglang_trust_remote_code", False)):
+            unsupported.append("sglang_trust_remote_code")
+        for model in list(getattr(h, "models", None) or []):
+            if bool((model.get("sglang") or {}).get("trustRemoteCode", False)):
+                unsupported.append("models[].sglang.trustRemoteCode")
+                break
+        if bool(getattr(h, "data_parallel_enabled", False)):
+            unsupported.append("data_parallel/LWS")
+        if bool(getattr(h, "mooncake_enabled", False)):
+            unsupported.append("Mooncake")
+        if bool(getattr(h, "lmcache_enabled", False)):
+            unsupported.append("LMCache")
+        if unsupported:
+            raise click.ClickException(
+                "Unsupported SGLang engine-only deployment: " + ", ".join(unsupported)
+            )
 
     backend = str(getattr(cfg, "backend", "router") or "router").strip().lower()
 
@@ -256,10 +293,12 @@ def cli(client_config: str, reinstall: bool, timeout_s: int) -> None:
         raise click.ClickException(f"No models defined in {cfg_path}")
 
     first_model = models_list[0]
-    model_name = first_model.get("name", "qwen")
+    model_names = [str(model.get("name", "qwen")) for model in models_list]
 
     set_values: Dict[str, object] = {
         "backend": backend,
+        "engine.type": engine_type,
+        "serviceImpl": service_impl,
         "replicas.vllm": int(first_model.get("replicas", h.replicas)),
         "batchSize": int(first_model.get("batchSize", h.batch_size)),
         "tensorParallelSize": int(first_model.get("tensorParallelSize", h.tensor_parallel_size)),
@@ -322,11 +361,20 @@ def cli(client_config: str, reinstall: bool, timeout_s: int) -> None:
     except Exception:
         pass
 
-    click.echo(f"[deploy-vllm] waiting for vllm-{model_name} pods Ready (timeout={timeout_s}s)...")
     try:
-        _wait_vllm_ready(NAMESPACE, model_name=model_name, timeout_s=float(timeout_s))
-        click.echo("[deploy-vllm] vLLM is Ready.")
-        click.echo("[deploy-vllm] You can now run sweeps without restarting vLLM:")
+        for model_name in model_names:
+            click.echo(
+                f"[deploy-vllm] waiting for {engine_type}-{model_name} pods Ready "
+                f"(timeout={timeout_s}s)..."
+            )
+            _wait_vllm_ready(
+                NAMESPACE,
+                model_name=model_name,
+                timeout_s=float(timeout_s),
+                engine_type=engine_type,
+            )
+        click.echo(f"[deploy-vllm] {engine_type} is Ready.")
+        click.echo("[deploy-vllm] You can now run sweeps without restarting the engine:")
         click.echo("[deploy-vllm]   python src/client/sweep_methods.py --config master_config.yaml --skip-vllm")
     except subprocess.CalledProcessError as e:
         click.echo(f"[deploy-vllm] ERROR: wait failed: {e}")

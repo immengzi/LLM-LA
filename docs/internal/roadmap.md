@@ -40,7 +40,7 @@
 
 Serving large generative models means balancing user-facing latency (time-to-first-token, time-between-tokens) against system goals (throughput, accelerator utilization, cost). Traditional serving scales whole replicas on generic signals (CPU / accelerator utilization), which fits LLM workloads poorly: requests vary enormously in prompt length, decode length, KV-cache footprint, and service time. Continuous batching strongly couples throughput and latency; KV-cache reuse can eliminate most prefill cost but creates placement and memory-management problems; and modern clusters are increasingly heterogeneous (GPUs **and** NPUs) with different memory and compute profiles.
 
-**LA-Boom is a Kubernetes-native serving platform that puts KV-cache reality at the center of routing, scheduling, autoscaling, and memory management, wrapped around unmodified inference engines (vLLM today).** It aims to be both a production-ready serving platform *and* a reproducible research framework for scheduling and memory strategies — every routing claim is backed by the bundled benchmark harness.
+**LA-Boom is a Kubernetes-native serving platform that puts KV-cache reality at the center of routing, scheduling, autoscaling, and memory management, wrapped around unmodified inference engines (vLLM by default; SGLang opt-in on a pinned profile).** It aims to be both a production-ready serving platform *and* a reproducible research framework for scheduling and memory strategies — every routing claim is backed by the bundled benchmark harness.
 
 The design pillars:
 
@@ -66,21 +66,22 @@ These capabilities exist in the codebase now (see the [architecture docs](../arc
 - Token-aware pull sizing (prefill-token budget + sidecar KV pull gate; inflight token gauge always on).
 
 **KV-cache-aware routing**
-- Inline, vLLM-compatible chained block hashing in the router (Python in-process; Go in-container hasher), with an optional external prefix-hash service.
-- Sidecars publish block ownership to Redis from vLLM ZMQ KV events; router builds a live `block-hash → replica` map via targeted per-request lookup (default) or a background watcher.
+- Inline, engine-compatible chained block hashing in the router (Python in-process; Go in-container hasher), with an optional external prefix-hash service (vLLM path).
+- Sidecars publish block ownership to Redis from engine ZMQ KV events; router builds a live `block-hash → replica` map via targeted per-request lookup (default) or a background watcher.
 - Contiguous-prefix scoring and KV-hit tiering; `router_strategy = none | prefix | affinity | both`.
 - Conversation affinity (soft/hard) with a stable per-conversation key and an optional Redis-backed **persistent affinity map** that survives router restarts.
-- **Soft KV divert** — trims cold work away from GPU-pressured pods while preserving affinity pins and warm requests (Python + Go).
+- **Soft KV divert** — trims cold work away from accelerator-pressured pods while preserving affinity pins and warm requests (Python + Go).
 
 **Serving topologies & KV transfer**
-- Multi-model serving from one cluster; dense TP; data-parallel + expert-parallel for MoE via LeaderWorkerSet.
-- Cross-node KV transfer through **Mooncake** and **LMCache** (P2P + host-staging), toggled by `lmcache.mode`.
+- Multi-model serving from one cluster; dense TP; data-parallel + expert-parallel for MoE via LeaderWorkerSet (**vLLM**).
+- Cross-node KV transfer through **Mooncake** and **LMCache** (P2P + host-staging), toggled by `lmcache.mode` (**vLLM** topologies).
 
 **Autoscaling**
-- Per-model **KEDA** autoscaling on router-queue depth or vLLM KV-cache-usage signals, across dense / multi-model / DP-LWS topologies (opt-in, backward compatible).
+- Per-model **KEDA** autoscaling on router-queue depth or engine KV-/token-usage signals, across dense / multi-model / DP-LWS topologies (opt-in, backward compatible).
 
-**Accelerators, gateways, observability**
-- Runs on Ascend **NPU** clusters; sidecar scrapes and normalizes vLLM KV-cache usage; SLO-driven dynamic pull backpressure (opt-in).
+**Accelerators, engines, gateways, observability**
+- Runs on Ascend **NPU** (default) and NVIDIA **GPU** clusters via the `hardware` switch; sidecar scrapes and normalizes engine KV-cache usage; SLO-driven dynamic pull backpressure (opt-in).
+- Inference engines: **vLLM** (default) and pinned **SGLang v0.5.15** (opt-in via `engine.type`), sharing the same router/sidecar stack on the supported SGLang profile — see [sglang.md](../deployment/sglang.md).
 - **BooM** (Rust) and **LiteLLM** gateways for auth, virtual keys, rate limiting, and spend tracking; Claude Code support.
 - Prometheus metrics, per-request tracing, Grafana dashboards, async ZMQ pub/sub result transport.
 - Two functionally-parallel implementations (Python FastAPI and Go chi) selectable via `serviceImpl`.
@@ -102,7 +103,7 @@ A 2026 scan of the frameworks LA-Boom is most often compared to. This is the bas
 | **Mooncake** | KVCache-centric disaggregated serving platform (Moonshot/Kimi) | **Conductor** global KV-centric scheduler; **prediction-based early rejection** under overload; **Transfer Engine** (multi-NIC bandwidth aggregation, topology/NUMA-aware paths, RDMA/TCP/NVMe-oF/CXL, failover); **Mooncake Store** multi-producer/multi-consumer cluster KV pool with tiering |
 | **Gateway API Inference Extension (GAIE)** | Kubernetes SIG standard for inference routing | `InferencePool` (GA) + **EPP** over Envoy `ext-proc`; **Body-Based Router** (model-name-aware); prefix-cache-aware LB with remote-cache interfaces; **LoRA-aware** routing + rollout; **fairness/priority** within a criticality band; HPA on LB-derived metrics; disaggregated pools; heterogeneous accelerators |
 
-**Takeaway.** LA-Boom is already competitive — arguably ahead — on **precise KV-aware pull scheduling**, **conversation affinity with durable pins**, **SLO slack scheduling**, and **NPU support**. The clearest gaps versus the field are: **prefill/decode disaggregation orchestration**, a **standard gateway integration (Gateway API / EPP `ext-proc`)**, a **native tiered KV-offload store and cross-engine KV pool with a prefix-location index**, **LoRA-aware routing**, **multi-engine backends**, and **heterogeneity-aware, cost/SLO-driven autoscaling**.
+**Takeaway.** LA-Boom is already competitive — arguably ahead — on **precise KV-aware pull scheduling**, **conversation affinity with durable pins**, **SLO slack scheduling**, and **heterogeneous accelerators (NPU + GPU)**. The clearest gaps versus the field are: **prefill/decode disaggregation orchestration**, a **standard gateway integration (Gateway API / EPP `ext-proc`)**, a **native tiered KV-offload store and cross-engine KV pool with a prefix-location index**, **LoRA-aware routing**, **additional engine backends beyond vLLM/SGLang**, and **heterogeneity-aware, cost/SLO-driven autoscaling**.
 
 ---
 
@@ -182,10 +183,12 @@ The master table. "Seen in" lists frameworks from §4 that ship a comparable cap
 
 | Feature | LA-Boom status | Seen in | Priority | Milestone |
 |---------|----------------|---------|----------|-----------|
-| Multiple accelerator types (GPU + NPU) | ✅ Shipped (Ascend NPU) | AIBrix, GAIE | — | Done |
+| Multiple accelerator types (GPU + NPU) | ✅ Shipped (Ascend NPU + NVIDIA GPU) | AIBrix, GAIE | — | Done |
+| SGLang inference engine support | ✅ Shipped (pinned v0.5.15 core stack) | Dynamo, llm-d, SGLang | — | Done |
+| SGLang advanced topologies (DP/LWS, Mooncake, LMCache) | 🔵 Planned (internship / follow-up; [#67](https://github.com/LA-Boom/llm-la/issues/67)) | Dynamo, llm-d, Mooncake | P2 | future |
 | GPU/NPU metrics integration + normalization | 🟡 Partial (KV-usage scrape) | AIBrix, Dynamo | P1 | v0.1 |
 | Envoy / Gateway API (EPP `ext-proc`) integration | 🟣 Proposed | llm-d, AIBrix, GAIE | P0 | v0.2 |
-| Multi-backend engines (SGLang, TRT-LLM, …) | 🔵 Planned | Dynamo, llm-d, SGLang | P1 | v1.0 |
+| Multi-backend engines (SGLang, TRT-LLM, …) | 🟡 Partial (SGLang shipped; TRT-LLM planned) | Dynamo, llm-d, SGLang | P1 | v1.0 |
 | Heterogeneous hardware scheduling (capacity model per class) | 🔵 Planned | AIBrix, Dynamo | P1 | v0.3 |
 | GPU/NPU time-sharing / partitioning | 🔵 Planned | — | P2 | v1.0 |
 | Kubernetes operator + CRD (`ModelDeployment`) | 🔵 Planned | Dynamo, KServe, AIBrix | P1 | v0.1/v1.0 |
@@ -272,10 +275,11 @@ One paragraph per feature, grouped by area, so the table above is self-contained
 
 ### 6.6 Backend & infrastructure abstraction
 
-- **Multiple accelerator types (GPU + NPU)** ✅ — runs on Ascend NPU today.
+- **Multiple accelerator types (GPU + NPU)** ✅ — Ascend NPU remains the default (`hardware: ascend`); NVIDIA GPU is first-class via `hardware: nvidia` (device plugin, RuntimeClass, accelerator resources). See [gpu.md](../deployment/gpu.md).
+- **SGLang inference engine support** ✅ — opt-in `engine.type=sglang` (default remains vLLM) ships the pinned v0.5.15 core stack: engine Deployment, router/sidecar (Python + Go), inline SGLang hash backend, and KV-event ownership for normal chat. Deploy guide: [sglang.md](../deployment/sglang.md); wire contract: [sglang-contract-v0.5.15.md](../architecture/sglang-contract-v0.5.15.md). **Still to do (internship / follow-up):** SGLang equivalents of data-parallel LeaderWorkerSet, Mooncake, and LMCache — those remain **vLLM-only** topologies today because they depend on vLLM-specific connectors and multi-rank ownership paths not yet certified for SGLang ([#67](https://github.com/LA-Boom/llm-la/issues/67)).
 - **GPU/NPU metrics normalization** 🟡 — extend the sidecar's KV-usage scrape into a normalized accelerator-telemetry schema (util, memory used/total, type) behind one collector interface (planned in the v0.1 spec).
 - **Envoy / Gateway API (EPP `ext-proc`) integration** 🟣 — expose LA-Boom's scoring as a Gateway API Inference Extension **Endpoint Picker** so it can front a standard Inference Gateway (Envoy/Istio) instead of relying on a NodePort router. This is how llm-d, AIBrix, and the K8s SIG standard integrate; it makes LA-Boom drop-in for teams already on Gateway API.
-- **Multi-backend engines** 🔵 — a backend adapter layer so the scheduler is engine-agnostic (SGLang, TRT-LLM), as in Dynamo/llm-d.
+- **Multi-backend engines** 🟡 — SGLang is the first non-vLLM backend adapter (pinned profile above); TRT-LLM and further engines remain planned, as in Dynamo/llm-d.
 - **Heterogeneous hardware scheduling** 🔵 — capacity/compatibility model per accelerator class; match requests to classes at admission.
 - **GPU/NPU time-sharing / partitioning** 🔵 — share or partition accelerators across workloads.
 - **Kubernetes operator + CRD** 🔵 — a `ModelDeployment` CRD + controller managing deployment shape and sidecar injection (deployment-shape only, never in the request hot path); see [§8](#8-v01-implementation-go-runtime).
@@ -309,7 +313,7 @@ Adaptive batch sizing, multi-queue / token-level capacity scheduling, prediction
 Native tiered KV-offload store; router-orchestrated cross-node transfer; **cross-engine/distributed KV pool + prefix-location index**; **speculative KV indexing**; CacheBlend; scan-resistant eviction. **Prefill/decode disaggregation orchestration**. Heterogeneity-aware scheduling **and** cost/SLO-driven autoscaling; KV-aware scale-down; GPU failure detection. Energy-aware routing (bet).
 
 ### v1.0 — Production platform
-Operator-level & joint autoscaling; multi-backend engines; speculative decoding; accelerator partitioning; security/multi-tenancy/model-lifecycle; fast startup / layered loading; broader northbound API surface; multi-cloud.
+Operator-level & joint autoscaling; remaining multi-backend engines (TRT-LLM and beyond; SGLang core already shipped); speculative decoding; accelerator partitioning; security/multi-tenancy/model-lifecycle; fast startup / layered loading; broader northbound API surface; multi-cloud.
 
 ---
 
@@ -323,7 +327,7 @@ Operator-level & joint autoscaling; multi-backend engines; speculative decoding;
 - Language Go 1.22+ · HTTP `net/http` + chi · Metrics Prometheus `client_golang` · Tracing OpenTelemetry (OTLP) · Logging zap · Config env (+ optional Viper).
 - Kubernetes client-go + controller-runtime/Kubebuilder · Packaging OCI images + Helm.
 - Accelerator telemetry behind one interface: NVML (GPU) and an Ascend/NPU collector.
-- Primary backend vLLM (OpenAI-compatible); optional future internal transport gRPC.
+- Primary backends: vLLM (default) and pinned SGLang; optional future internal transport gRPC.
 
 ### Target repository layout
 ```
@@ -350,7 +354,7 @@ deploy/{crds,helm,manifests}
 - **Pull scheduler** — worker eligibility (healthy, not saturated, under memory threshold); selection = bounded-scan prefix hit → FIFO fallback → no_work; explicit `SchedulerReason`; starvation guard so locality never starves old requests. Experiment-only strategies stay out of the production path.
 - **Worker registry** — in-memory, heartbeat-updated, TTL staleness; aggregates ready workers / running requests / mean batch / util for autoscaling; runtime truth independent of K8s watch latency.
 - **Sidecar runtime** — stats loop (backend + accelerator + KV summary), pull loop (heartbeat + request work), completion/report loop; bounded local executor; `GET /metrics|/healthz|/readyz|/state`.
-- **Backend adapter** — hides engine transport; normalizes health, runtime stats, request submission, response parsing; an `Adapter` interface so non-vLLM backends drop in without touching the scheduler.
+- **Backend adapter** — hides engine transport; normalizes health, runtime stats, request submission, response parsing; an `Adapter` interface so non-vLLM backends (SGLang today; further engines later) drop in without touching the scheduler.
 - **Continuous-batching + prefix + KV awareness** — per-worker batch size / running / TPS; one canonical versioned PrefixHash; normalized KV usage + known-prefix summary feed scheduler locality and pressure; engine internals stay behind the sidecar/backend layer.
 - **KV offloading (initial)** — an `OffloadStore` interface (local FS / PVC) with soft/hard KV-pressure thresholds and offload metrics; distributed restore deferred.
 - **Accelerator metrics + heterogeneity** — one normalized collector (type, util, mem used/total) with freshness + error handling; compatibility filtering by model/backend/accelerator/memory class; hardware identity in traces/metrics.
@@ -421,5 +425,6 @@ Competitive scan performed 2026-07. Primary references:
 ## Related documents
 
 - [Architecture overview](../architecture/overview.md) — what is implemented today.
+- [Deploying SGLang](../deployment/sglang.md), [SGLang v0.5.15 contract](../architecture/sglang-contract-v0.5.15.md), [GPU deployment](../deployment/gpu.md) — engine and accelerator switches.
 - [Router strategies](../architecture/router-strategies.md), [KV cache flow](../architecture/kv-cache-flow.md), [SLO-aware routing](../architecture/slo-aware-routing.md), [key affinity](../architecture/key-affinity.md) — component deep-dives.
 - [persistent-affinity-map.md](persistent-affinity-map.md), [kv-cache-hit-rate-collapse.md](kv-cache-hit-rate-collapse.md) — design/investigation records referenced above.

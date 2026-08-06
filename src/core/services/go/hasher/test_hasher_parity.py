@@ -18,13 +18,15 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[3]  # .../src
 _ROUTER_DIR = _SRC / "services" / "router_service" / "router"
 _HASHER_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(_ROUTER_DIR))
+sys.path.insert(0, str(_ROUTER_DIR.parent))
 sys.path.insert(0, str(_HASHER_DIR))
 
-import prefix_hash as ph  # noqa: E402
+from router import prefix_hash as ph  # noqa: E402
 import hasher_app  # noqa: E402
 
 
@@ -33,7 +35,9 @@ class _FakeTokenizer:
 
     chat_template = "fake-template"
 
-    def apply_chat_template(self, messages, tools=None, tokenize=False, add_generation_prompt=True):
+    def apply_chat_template(
+        self, messages, tools=None, tokenize=False, add_generation_prompt=True
+    ):
         payload = {"messages": messages, "tools": tools, "gen": add_generation_prompt}
         return json.dumps(payload, sort_keys=True)
 
@@ -43,6 +47,7 @@ class _FakeTokenizer:
 
 def setup_function(_func):
     ph._TOKENIZER = _FakeTokenizer()
+    hasher_app._CONTRACT_VERSION = ""
 
 
 def test_wrapper_matches_inline_for_messages_and_tools():
@@ -50,7 +55,9 @@ def test_wrapper_matches_inline_for_messages_and_tools():
         {"role": "system", "content": "You are helpful."},
         {"role": "user", "content": "Hello world. " * 200},
     ]
-    tools = [{"type": "function", "function": {"name": "f", "parameters": {"b": 1, "a": 2}}}]
+    tools = [
+        {"type": "function", "function": {"name": "f", "parameters": {"b": 1, "a": 2}}}
+    ]
     block_size = 16
 
     expected = ph.compute_request_block_hashes_int(
@@ -86,3 +93,70 @@ def test_block_hash_chain_is_deterministic():
     assert len(out) == 2  # 40 tokens -> two full 16-blocks (trailing 8 dropped)
     assert all(isinstance(x, int) for x in out)
     assert ph.compute_block_hashes_int(token_ids, 16) == out
+
+
+def test_sglang_golden_vectors_through_hasher_boundary():
+    class _GoldenTokenizer:
+        chat_template = None
+
+        def encode(self, _text, add_special_tokens=False):
+            return [1, 2, 3, 4]
+
+    ph._TOKENIZER = _GoldenTokenizer()
+    hasher_app._CONTRACT_VERSION = "0.5.15"
+    response = hasher_app.compute_hashes(
+        hasher_app.HashRequest(
+            prompt="ignored",
+            block_size=2,
+            backend="sglang",
+        )
+    )
+    assert response.block_hashes == [
+        3817746824117602890,
+        -4216701448867210342,
+    ]
+
+
+def test_vllm_golden_vectors_remain_default():
+    class _GoldenTokenizer:
+        chat_template = None
+
+        def encode(self, _text, add_special_tokens=False):
+            return [1, 2, 3, 4]
+
+    ph._TOKENIZER = _GoldenTokenizer()
+    response = hasher_app.compute_hashes(
+        hasher_app.HashRequest(prompt="ignored", block_size=2)
+    )
+    assert response.block_hashes == [
+        12009346384364793183,
+        11890034342157281616,
+    ]
+
+
+def test_sglang_contract_mismatch_fails_closed():
+    with pytest.raises(Exception) as exc:
+        hasher_app.compute_hashes(
+            hasher_app.HashRequest(prompt="x", block_size=2, backend="sglang")
+        )
+    assert getattr(exc.value, "status_code", None) == 409
+    assert "actual=unset" in str(getattr(exc.value, "detail", ""))
+
+
+def test_request_backend_is_validated():
+    with pytest.raises(Exception) as exc:
+        hasher_app.compute_hashes(
+            hasher_app.HashRequest(prompt="x", block_size=2, backend="unknown")
+        )
+    assert getattr(exc.value, "status_code", None) == 400
+
+
+def test_health_exposes_backend_and_contract(monkeypatch):
+    monkeypatch.setattr(hasher_app, "_BACKEND", "sglang")
+    monkeypatch.setattr(hasher_app, "_CONTRACT_VERSION", "0.5.15")
+    assert hasher_app.health() == {
+        "status": "ok",
+        "backend": "sglang",
+        "sglang_contract_version": "0.5.15",
+        "sglang_expected_contract_version": "0.5.15",
+    }

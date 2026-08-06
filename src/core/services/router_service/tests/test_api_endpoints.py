@@ -8,6 +8,9 @@ does not run. Handlers that only touch in-process state (health, metrics, pull,
 result) are exercised directly; the full enqueue->result roundtrip is covered by
 the docker-compose e2e suite instead.
 """
+import asyncio
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -190,3 +193,187 @@ def test_latency_log_endpoint(client):
     r = client.get("/latency_log?last=10")
     assert r.status_code == 200
     assert isinstance(r.json(), list)
+
+
+def _stream_events(client, monkeypatch, chunks):
+    queue = asyncio.Queue()
+    for chunk in chunks:
+        queue.put_nowait(chunk)
+
+    monkeypatch.setattr(api_mod.router_state, "enqueue", lambda *args, **kwargs: "stream-1")
+    monkeypatch.setattr(
+        api_mod.router_state,
+        "register_chunk_queue",
+        lambda _rid: queue,
+    )
+    monkeypatch.setattr(api_mod.router_state, "remove_chunk_queue", lambda _rid: None)
+    monkeypatch.setattr(api_mod.router_state, "register_waiter", lambda _rid: None)
+
+    async def _no_fallback(_rid, _timeout):
+        return None
+
+    async def _no_hashes(
+        rid,
+        prompt,
+        *,
+        meta,
+        is_pull_mode,
+        messages=None,
+        tools=None,
+        model=None,
+    ):
+        return meta
+
+    monkeypatch.setattr(
+        api_mod.router_state, "wait_for_result_async", _no_fallback
+    )
+    monkeypatch.setattr(api_mod, "_maybe_register_kv_blocks", _no_hashes)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "served-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+        },
+    )
+    assert response.status_code == 200
+    events = []
+    for block in response.text.strip().split("\n\n"):
+        assert block.startswith("data: ")
+        payload = block[6:]
+        events.append(payload if payload == "[DONE]" else json.loads(payload))
+    return events
+
+
+def _choice_events(events):
+    return [event for event in events if isinstance(event, dict) and event.get("choices")]
+
+
+def test_stream_recovers_when_all_result_chunks_are_lost(client, monkeypatch):
+    events = _stream_events(client, monkeypatch, [{
+        "__full_result__": {
+            "output": "hello world",
+            "finish_reason": "stop",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+        }
+    }])
+
+    choices = _choice_events(events)
+    assert "".join(
+        event["choices"][0]["delta"].get("content", "") for event in choices
+    ) == "hello world"
+    assert choices[-1]["choices"][0]["finish_reason"] == "stop"
+    assert choices[-1]["usage"]["total_tokens"] == 3
+    assert events[-1] == "[DONE]"
+
+
+def test_stream_recovers_only_missing_text_delta(client, monkeypatch):
+    events = _stream_events(client, monkeypatch, [
+        {"delta": "hello", "is_final": False},
+        {
+            "__full_result__": {
+                "output": "hello world",
+                "finish_reason": "stop",
+                "usage": {"total_tokens": 2},
+            }
+        },
+    ])
+
+    contents = [
+        event["choices"][0]["delta"]["content"]
+        for event in _choice_events(events)
+        if "content" in event["choices"][0]["delta"]
+        and event["choices"][0]["delta"]["content"]
+    ]
+    assert contents == ["hello", " world"]
+    assert events[-1] == "[DONE]"
+
+
+def test_stream_recovers_only_missing_tool_call_delta(client, monkeypatch):
+    events = _stream_events(client, monkeypatch, [
+        {
+            "delta": "",
+            "tool_calls": [{
+                "index": 0,
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": '{"q":'},
+            }],
+            "is_final": False,
+        },
+        {
+            "__full_result__": {
+                "output": "",
+                "finish_reason": "tool_calls",
+                "usage": {"total_tokens": 3},
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": '{"q":"x"}'},
+                }],
+            }
+        },
+    ])
+
+    tool_deltas = [
+        tool_call
+        for event in _choice_events(events)
+        for tool_call in event["choices"][0]["delta"].get("tool_calls", [])
+    ]
+    assert tool_deltas == [
+        {
+            "index": 0,
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": '{"q":'},
+        },
+        {"index": 0, "function": {"arguments": '"x"}'}},
+    ]
+    assert _choice_events(events)[-1]["choices"][0]["finish_reason"] == "tool_calls"
+    assert events[-1] == "[DONE]"
+
+
+def test_stream_complete_chunks_do_not_use_recovery(client, monkeypatch):
+    events = _stream_events(client, monkeypatch, [
+        {"delta": "complete", "is_final": False},
+        {
+            "delta": "",
+            "is_final": True,
+            "finish_reason": "stop",
+            "usage": {"total_tokens": 1},
+        },
+    ])
+
+    choices = _choice_events(events)
+    assert [
+        event["choices"][0]["delta"].get("content")
+        for event in choices
+        if event["choices"][0]["delta"].get("content")
+    ] == ["complete"]
+    assert choices[-1]["choices"][0]["finish_reason"] == "stop"
+    assert events.count("[DONE]") == 1
+
+
+@pytest.mark.parametrize(
+    "chunks, expected_code",
+    [
+        ([{"__full_result__": {"error": "engine disconnected"}}], "inference_error"),
+        (
+            [
+                {"delta": "already sent", "is_final": False},
+                {"__full_result__": {"output": "different result"}},
+            ],
+            "stream_recovery_failed",
+        ),
+    ],
+)
+def test_stream_failure_results_are_explicit_errors(
+    client, monkeypatch, chunks, expected_code
+):
+    events = _stream_events(client, monkeypatch, chunks)
+
+    errors = [event["error"] for event in events if isinstance(event, dict) and "error" in event]
+    assert len(errors) == 1
+    assert errors[0]["code"] == expected_code
+    assert events[-1] == "[DONE]"

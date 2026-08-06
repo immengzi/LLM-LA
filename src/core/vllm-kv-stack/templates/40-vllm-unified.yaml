@@ -1,5 +1,6 @@
 {{/*
-  40-vllm-unified.yaml — Unified vLLM deployment template.
+  40-vllm-unified.yaml — Unified inference-engine deployment template
+  (vLLM or SGLang). Workload names are <engine>-<modelName>.
 
   Handles all three deployment modes through a single template:
     - Single model  (legacy fallback when models[] is empty)
@@ -34,9 +35,28 @@
 
 {{/* ---- Validate ---- */}}
 {{- range $models }}
+  {{- $engine := include "vllmkv.engineType" (dict "root" $ "model" .) | trim }}
+  {{- if not (has $engine (list "vllm" "sglang")) }}
+    {{- fail (printf "unsupported engine '%s' for model '%s' (expected vllm or sglang)" $engine (.name | default "?")) }}
+  {{- end }}
   {{- $sub := .modelSubPath | default $.Values.modelVolume.modelSubPath }}
   {{- if not $sub }}
     {{- fail (printf "modelSubPath must be set for model '%s' (or set modelVolume.modelSubPath globally)" (.name | default "?")) }}
+  {{- end }}
+  {{- if eq $engine "sglang" }}
+    {{- $dpConfig := .dataParallel | default dict }}
+    {{- if ($dpConfig.enabled | default false) }}
+      {{- fail (printf "SGLang model '%s' does not support dataParallel" (.name | default "?")) }}
+    {{- end }}
+    {{- if $.Values.mooncake.enabled }}
+      {{- fail (printf "SGLang model '%s' does not support Mooncake" (.name | default "?")) }}
+    {{- end }}
+    {{- if $.Values.lmcache.enabled }}
+      {{- fail (printf "SGLang model '%s' does not support LMCache" (.name | default "?")) }}
+    {{- end }}
+    {{- if eq (lower (default "inline" $.Values.router.hashSource)) "external" }}
+      {{- fail (printf "SGLang model '%s' does not support external router hash source" (.name | default "?")) }}
+    {{- end }}
   {{- end }}
 {{- end }}
 
@@ -71,6 +91,8 @@
 {{/* Per-model variables */}}
 {{- $modelName := $m.name }}
 {{- $servedModelName := $m.servedModelName | default $modelName }}
+{{- $engine := include "vllmkv.engineType" (dict "root" $ "model" $m) | trim }}
+{{- $resourceName := include "vllmkv.modelResourceName" (dict "root" $ "model" $m) | trim }}
 {{- $replicas := $m.replicas | default 1 }}
 {{- $tp := $m.tensorParallelSize | default $.Values.tensorParallelSize | int }}
 {{- $batchSize := $m.batchSize | default $.Values.batchSize | int }}
@@ -79,6 +101,11 @@
 {{- $dp := $m.dataParallel | default dict }}
 {{- $isDP := $dp.enabled | default false }}
 {{- $flagCtx := dict "mv" $mv "gv" $.Values.vllm "batch" $batchSize }}
+{{- $engineCtx := dict "root" $ "model" $m "engine" $engine }}
+{{- $healthPath := include "vllmkv.engineHealthPath" $engineCtx | trim }}
+{{- $readinessPath := include "vllmkv.engineReadinessPath" $engineCtx | trim }}
+{{- $metricsPath := include "vllmkv.engineMetricsPath" $engineCtx | trim }}
+{{- $metricsPort := include "vllmkv.engineMetricsPort" $engineCtx | trim }}
 {{/* When this model is autoscaled, KEDA/HPA owns the replica count, so we omit
      the static replicas field to avoid helm upgrades fighting the autoscaler.
      Empty (back-compat) whenever autoscaling.enabled is false. */}}
@@ -96,8 +123,10 @@
 apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
 metadata:
-  name: vllm-{{ $modelName }}
+  name: {{ $resourceName }}
   namespace: {{ $.Release.Namespace }}
+  labels:
+    inference-engine: {{ $engine }}
 spec:
   {{- if not $autoscaled }}
   replicas: {{ $dp.groups | default $replicas }}
@@ -108,8 +137,8 @@ spec:
     leaderTemplate:
       metadata:
         labels:
-          app: vllm-{{ $modelName }}
-          component: vllm
+          app: {{ $resourceName }}
+          component: {{ $engine }}
           model: {{ $modelName }}
           role: leader
           {{- if $.Values.aibrix.enabled }}
@@ -155,7 +184,7 @@ spec:
                     - key: leaderworkerset.sigs.k8s.io/name
                       operator: In
                       values:
-                        - vllm-{{ $modelName }}
+                        - {{ $resourceName }}
                 matchLabelKeys:
                   - leaderworkerset.sigs.k8s.io/group-index
           {{- end }}
@@ -166,7 +195,7 @@ spec:
                     - key: leaderworkerset.sigs.k8s.io/name
                       operator: In
                       values:
-                        - vllm-{{ $modelName }}
+                        - {{ $resourceName }}
                 topologyKey: kubernetes.io/hostname
         {{- if $dp.pairTopologyKey }}
         topologySpreadConstraints:
@@ -175,10 +204,10 @@ spec:
             whenUnsatisfiable: DoNotSchedule
             labelSelector:
               matchLabels:
-                app: vllm-{{ $modelName }}
+                app: {{ $resourceName }}
         {{- end }}
         containers:
-          - name: vllm
+          - name: {{ $engine }}
             {{- if $m.image }}
             image: {{ $m.image }}
             {{- else }}
@@ -561,8 +590,8 @@ spec:
     workerTemplate:
       metadata:
         labels:
-          app: vllm-{{ $modelName }}-worker
-          component: vllm
+          app: {{ $resourceName }}-worker
+          component: {{ $engine }}
           model: {{ $modelName }}
           role: worker
       spec:
@@ -604,7 +633,7 @@ spec:
                     - key: leaderworkerset.sigs.k8s.io/name
                       operator: In
                       values:
-                        - vllm-{{ $modelName }}
+                        - {{ $resourceName }}
                 matchLabelKeys:
                   - leaderworkerset.sigs.k8s.io/group-index
           {{- end }}
@@ -615,7 +644,7 @@ spec:
                     - key: leaderworkerset.sigs.k8s.io/name
                       operator: In
                       values:
-                        - vllm-{{ $modelName }}
+                        - {{ $resourceName }}
                 topologyKey: kubernetes.io/hostname
         {{- if $dp.pairTopologyKey }}
         topologySpreadConstraints:
@@ -624,10 +653,10 @@ spec:
             whenUnsatisfiable: DoNotSchedule
             labelSelector:
               matchLabels:
-                app: vllm-{{ $modelName }}
+                app: {{ $resourceName }}
         {{- end }}
         containers:
-          - name: vllm
+          - name: {{ $engine }}
             {{- if $m.image }}
             image: {{ $m.image }}
             {{- else }}
@@ -868,31 +897,45 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vllm-{{ $modelName }}
+  name: {{ $resourceName }}
   namespace: {{ $.Release.Namespace }}
 spec:
+  progressDeadlineSeconds: {{ if eq $engine "sglang" }}{{ $.Values.sglang.progressDeadlineSeconds | default 7200 }}{{ else }}600{{ end }}
   {{- if not $autoscaled }}
   replicas: {{ $replicas }}
   {{- end }}
   selector:
     matchLabels:
-      app: vllm-{{ $modelName }}
+      app: {{ $resourceName }}
       model: {{ $modelName }}
   template:
     metadata:
       labels:
-        app: vllm-{{ $modelName }}
-        component: vllm
+        app: {{ $resourceName }}
+        component: {{ $engine }}
         model: {{ $modelName }}
+        release: {{ $.Release.Name | quote }}
+        inference-engine: {{ $engine }}
         {{- if $.Values.aibrix.enabled }}
         model.aibrix.ai/name: {{ $.Values.aibrix.modelName | quote }}
         model.aibrix.ai/port: {{ printf "%d" ($.Values.aibrix.port | int) | quote }}
+        {{- end }}
+      annotations:
+        inference.engine/type: {{ $engine | quote }}
+        {{- if eq $engine "sglang" }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: {{ $metricsPath | quote }}
+        prometheus.io/port: {{ $metricsPort | quote }}
         {{- end }}
     spec:
       restartPolicy: Always
       shareProcessNamespace: true
       {{- if include "vllmkv.isNvidia" $ }}
+      {{- if eq $engine "sglang" }}
+      runtimeClassName: {{ $.Values.sglang.runtimeClassName | default $.Values.vllm.runtimeClassName | default "nvidia" }}
+      {{- else }}
       runtimeClassName: {{ $.Values.vllm.runtimeClassName | default "nvidia" }}
+      {{- end }}
       {{- end }}
 
       {{- if and (or $.Values.mooncake.enabled $.Values.lmcache.enabled) $.Values.vllm.hostNetwork }}
@@ -908,7 +951,7 @@ spec:
           operator: "Exists"
           effect: "NoSchedule"
 
-      {{- $ns := $.Values.vllm.nodeSelector | default (dict) }}
+      {{- $ns := ternary ($.Values.sglang.nodeSelector | default (dict)) ($.Values.vllm.nodeSelector | default (dict)) (eq $engine "sglang") }}
       {{- $xds := $.Values.lmcache.nds.xdsPath }}
       {{- if $ns }}
       nodeSelector:
@@ -944,12 +987,8 @@ spec:
         {{- end }}
 
       containers:
-        - name: vllm
-          {{- if $m.image }}
-          image: {{ $m.image }}
-          {{- else }}
-          image: {{ include "vllmkv.image" (list $ $.Values.images.vllm) }}
-          {{- end }}
+        - name: {{ $engine }}
+          image: {{ include "vllmkv.engineImage" (dict "root" $ "model" $m "engine" $engine) }}
           imagePullPolicy: IfNotPresent
           {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
           securityContext:
@@ -962,6 +1001,9 @@ spec:
             - |
               set -eo pipefail
 
+              {{- if eq $engine "sglang" }}
+{{ include "vllmkv.sglangLaunchCommand" (dict "root" $ "model" $m "servedModelName" $servedModelName "tp" $tp) | trim | indent 14 }}
+              {{- else }}
               {{- if not (include "vllmkv.isNvidia" $) }}
               export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
               echo "--- ASCEND_TOOLKIT_HOME before sourcing: [$ASCEND_TOOLKIT_HOME]"
@@ -1030,7 +1072,11 @@ spec:
 {{ include "vllmkv.threadExporter" . | trim | indent 14 }}
 
               wait "$VLLM_PID"
+              {{- end }}
           env:
+            {{- if eq $engine "sglang" }}
+            {{- include "vllmkv.sglangBaseEnv" . | nindent 12 }}
+            {{- else }}
             {{- include "vllmkv.vllmBaseEnv" (dict "tp" $tp "root" $) | nindent 12 }}
             {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
             - name: NODE_IP
@@ -1042,23 +1088,31 @@ spec:
             - name: MOONCAKE_CONFIG_PATH
               value: "/etc/mooncake/mooncake.json"
             {{- end }}
+            {{- end }}
           ports:
             - containerPort: 8200
               name: http
               protocol: TCP
             {{- if $publishKvEvents }}
-            - containerPort: 5557
+            - containerPort: {{ if eq $engine "sglang" }}{{ $.Values.sglang.kvEvents.port | default 5557 }}{{ else }}5557{{ end }}
               name: kvpub
               protocol: TCP
+            {{- if eq $engine "sglang" }}
+            - containerPort: {{ $.Values.sglang.kvEvents.replayPort | default 5558 }}
+              name: kvreplay
+              protocol: TCP
+            {{- end }}
             {{- end }}
             {{- if or $.Values.mooncake.enabled $.Values.lmcache.enabled }}
             - containerPort: {{ $.Values.mooncake.lookupRpcPort }}
               name: kv-rpc
               protocol: TCP
             {{- end }}
+            {{- if eq $engine "vllm" }}
             - containerPort: 9101
               name: vllmthr
               protocol: TCP
+            {{- end }}
           volumeMounts:
             - name: fingerprint-mw
               mountPath: /etc/fingerprint-mw
@@ -1118,7 +1172,7 @@ spec:
 
           startupProbe:
             httpGet:
-              path: /health
+              path: {{ $healthPath }}
               port: 8200
             initialDelaySeconds: 60
             periodSeconds: 30
@@ -1127,7 +1181,7 @@ spec:
 
           readinessProbe:
             httpGet:
-              path: /health
+              path: {{ $readinessPath }}
               port: 8200
             initialDelaySeconds: 30
             periodSeconds: 10
@@ -1136,30 +1190,31 @@ spec:
 
           livenessProbe:
             httpGet:
-              path: /health
+              path: {{ $healthPath }}
               port: 8200
             initialDelaySeconds: 120
             periodSeconds: 30
-            failureThreshold: 720
+            failureThreshold: {{ if eq $engine "sglang" }}{{ $.Values.sglang.livenessFailureThreshold | default 5 }}{{ else }}720{{ end }}
             timeoutSeconds: 5
 
           resources:
             requests:
               {{ include "vllmkv.acceleratorResource" $ }}: {{ $tp }}
               ephemeral-storage: "2Gi"
-              {{- with $.Values.vllm.engineResources.requests.cpu }}
+              {{- $engineResources := ternary ($.Values.sglang.engineResources | default dict) ($.Values.vllm.engineResources | default dict) (eq $engine "sglang") }}
+              {{- with $engineResources.requests.cpu }}
               cpu: {{ . | quote }}
               {{- end }}
-              {{- with $.Values.vllm.engineResources.requests.memory }}
+              {{- with $engineResources.requests.memory }}
               memory: {{ . | quote }}
               {{- end }}
             limits:
               {{ include "vllmkv.acceleratorResource" $ }}: {{ $tp }}
               ephemeral-storage: "4Gi"
-              {{- with $.Values.vllm.engineResources.limits.cpu }}
+              {{- with $engineResources.limits.cpu }}
               cpu: {{ . | quote }}
               {{- end }}
-              {{- with $.Values.vllm.engineResources.limits.memory }}
+              {{- with $engineResources.limits.memory }}
               memory: {{ . | quote }}
               {{- end }}
 
@@ -1168,6 +1223,19 @@ spec:
           image: {{ include "vllmkv.sidecarImage" $ }}
           imagePullPolicy: {{ $.Values.sidecar.imagePullPolicy | default "IfNotPresent" }}
           env:
+            {{- $sglangConfig := $m.sglang | default dict }}
+            {{- $sglangKV := $.Values.sglang.kvEvents | default dict }}
+            {{- include "vllmkv.inferenceSidecarEnv" (dict
+                  "engine" $engine
+                  "servedModelName" $servedModelName
+                  "expectedPageSize" ($sglangConfig.pageSize | default $.Values.sglang.pageSize | default 16)
+                  "healthPath" $healthPath
+                  "readinessPath" $readinessPath
+                  "kvEventPort" ($sglangKV.port | default 5557)
+                  "kvEventReplayPort" ($sglangKV.replayPort | default 5558)
+                  "kvEventTopic" ($sglangKV.topic | default "kv@")
+                  "kvEventDiscoveryTimeoutS" ($sglangKV.discoveryTimeoutS | default 2.0)
+                ) | nindent 12 }}
             - name: ROUTER_URL
               value: "http://router-service:8080"
             - name: VLLM_URL
@@ -1258,7 +1326,7 @@ spec:
               protocol: TCP
           readinessProbe:
             httpGet:
-              path: /health
+              path: {{ if eq $engine "sglang" }}/ready{{ else }}/health{{ end }}
               port: 9000
             initialDelaySeconds: 10
             periodSeconds: 10
@@ -1371,16 +1439,27 @@ spec:
 ---
 {{/* ---- Service for this model ---- */}}
 {{/* For DP models the LWS controller creates a headless service named
-     vllm-<modelName>, so our NodePort service must use a DIFFERENT name
-     to avoid overwriting it (the headless service is required for pod DNS). */}}
+     <engine>-<modelName> (same as $resourceName), so our NodePort/ClusterIP
+     service must use a DIFFERENT name (<engine>-<modelName>-api) to avoid
+     overwriting it (the headless service is required for pod DNS). */}}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ if $isDP }}vllm-{{ $modelName }}-api{{ else }}vllm-{{ $modelName }}{{ end }}
+  name: {{ if $isDP }}{{ $resourceName }}-api{{ else }}{{ $resourceName }}{{ end }}
   namespace: {{ $.Release.Namespace }}
   labels:
-    component: vllm
+    component: {{ $engine }}
     model: {{ $modelName }}
+    release: {{ $.Release.Name | quote }}
+    {{- if eq $engine "sglang" }}
+    inference-engine: {{ $engine }}
+    {{- end }}
+  {{- if eq $engine "sglang" }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: {{ $metricsPath | quote }}
+    prometheus.io/port: {{ $metricsPort | quote }}
+  {{- end }}
 spec:
   {{- if or $isDP $isLegacy $m.nodePort }}
   type: NodePort
@@ -1388,7 +1467,7 @@ spec:
   type: ClusterIP
   {{- end }}
   selector:
-    app: vllm-{{ $modelName }}
+    app: {{ $resourceName }}
   ports:
     - name: http
       port: 8200

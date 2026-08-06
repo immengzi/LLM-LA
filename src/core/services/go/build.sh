@@ -11,6 +11,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+cleanup() {
+  rm -f gateway sidecar hasher/wheels/*.whl
+}
+trap cleanup EXIT
+
 # Shared, cluster-agnostic registry + proxy resolution.
 # The resolved proxy is reused for the router image's Python (pip) layer.
 source "$SCRIPT_DIR/../build-common.sh"
@@ -61,6 +66,20 @@ echo "  GOPROXY  = $GOPROXY"
 echo "  go       = $("$GO" version) [$GO]"
 echo
 
+HASHER_BUILD_ARGS=()
+if [ "${HASHER_OFFLINE_WHEELS:-0}" = "1" ]; then
+  echo "Preparing Python 3.11 manylinux wheelhouse for offline Docker build..."
+  python3 -m pip download \
+    --dest hasher/wheels \
+    --only-binary=:all: \
+    --platform manylinux2014_x86_64 \
+    --python-version 311 \
+    --implementation cp \
+    --abi cp311 \
+    -r hasher/requirements.txt
+  HASHER_BUILD_ARGS=(--build-arg HASHER_OFFLINE_WHEELS=1)
+fi
+
 # -------------------------------------------------------
 # Step 1: Compile on the host
 # -------------------------------------------------------
@@ -80,15 +99,12 @@ CGO_ENABLED=0 GOOS=linux "$GO" build -buildvcs=false -o sidecar ./cmd/sidecar
 # -------------------------------------------------------
 
 echo "[4/4] Building Docker images..."
-# Stage the router's prefix_hash.py into the build context so the in-container
-# hasher runs the exact same code (single source of truth; not committed).
-mkdir -p hasher
-cp ../router_service/router/prefix_hash.py hasher/prefix_hash.py
-docker_build -f Dockerfile.router -t "$PUSH_REGISTRY/kv-router-go:$TAG" .
+# Router image build context is the services/ parent so the Dockerfile can copy
+# the canonical router package (hash backends) without staging drift.
+docker_build -f Dockerfile.router \
+  "${HASHER_BUILD_ARGS[@]}" \
+  -t "$PUSH_REGISTRY/kv-router-go:$TAG" ..
 docker_build -f Dockerfile.sidecar -t "$PUSH_REGISTRY/kv-sidecar-go:$TAG" .
-
-# Cleanup binaries + staged source
-rm -f gateway sidecar hasher/prefix_hash.py
 
 # -------------------------------------------------------
 # Step 3: Push to registry (PUSH_REGISTRY=localhost:32000 is insecure-allowed)

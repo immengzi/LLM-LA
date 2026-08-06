@@ -1,10 +1,28 @@
 backend: router
 
+# Inference runtime selector. vLLM is the production-compatible default.
+engine:
+  type: vllm
+
+# Engine contracts consumed by probes, sidecars, ServiceMonitors and autoscaling.
+# Per-model vllm.healthPath / sglang.healthPath settings can override these.
+engineProfiles:
+  vllm:
+    healthPath: /health
+    readinessPath: ""
+    metricsPath: /metrics
+    metricsPort: 8200
+  sglang:
+    healthPath: /health
+    readinessPath: ""
+    metricsPath: /metrics
+    metricsPort: 8200
+
 # Implementation of the router + sidecar services: "python" (reference) or "go".
 # This is a single knob that swaps the router and sidecar container images for
-# their Go equivalents (images.routerGo / images.sidecarGo). Everything else
-# (env vars, endpoints, behavior) is identical, since the Go services are a
-# 100%-parity port of the Python ones.
+# their Go equivalents (images.routerGo / images.sidecarGo). Both implementations
+# support the standard vLLM and pinned SGLang profiles; env vars and endpoints
+# remain identical.
 serviceImpl: python
 
 # Accelerator backend for the vLLM engine pods:
@@ -60,6 +78,9 @@ images:
   # vllm: quay.io/ascend/vllm-ascend:latest
   # vllm: quay.io/ascend/vllm-ascend:glm5-openeuler
   vllm: docker.io/library/vllm-ascend:v0.18.0
+  # Pin the complete CUDA 12.9 image because the mutable v0.5.15 tag now resolves
+  # to CUDA 13, which is incompatible with NVIDIA 570-series drivers.
+  sglang: lmsysorg/sglang:v0.5.15-cu129
   cpuHash: vllm-cpu-hash:latest
   redis: redis:7-alpine
   # mooncakeMaster: quay.io/ascend/vllm-ascend:glm5-openeuler
@@ -126,6 +147,9 @@ router:
 
   # Router-side inline KV hash controls. The tokenizer path is mounted at /model.
   kvBlockSize: 128
+  # Empty selects engine.type. Explicitly set vllm|sglang only for validation
+  # or fail-closed rollout testing.
+  hashBackend: ""
   # Default OFF: current BooM gateway serialises tools in insertion order
   # (serde_json preserve_order), so the router must not sort tool parameters
   # keys -- doing so drifts from what vLLM tokenises. Set "1" only against a
@@ -289,8 +313,10 @@ autoscaling:
   # Scaling signal driving every model's ScaledObject (overridable per model):
   #   queue -> router_central_queue_length_by_model  (needs a router-style
   #            backend: router|boom|litellm; scales on central-queue depth)
-  #   vllm  -> vllm:gpu_cache_usage_perc             (router-independent; works
-  #            for direct/vllm-only topologies, scales on KV-cache pressure)
+  #   vllm   -> vllm:gpu_cache_usage_perc             (router-independent; works
+  #             for direct/vllm-only topologies, scales on KV-cache pressure)
+  #   sglang -> SGLang token usage for the served model and release namespace
+  #             (accepts both colon and underscore metric names)
   signal: queue
 
   # Prometheus endpoint KEDA queries. Defaults to the Service created by the
@@ -307,6 +333,8 @@ autoscaling:
   threshold: "16"
   # Threshold for the vllm signal (fraction of KV cache utilised, 0..1).
   vllmThreshold: "0.8"
+  # Threshold for the fractional SGLang token-usage signal (0..1).
+  sglangThreshold: "0.8"
 
   pollingInterval: 10
   cooldownPeriod: 300
@@ -317,6 +345,7 @@ autoscaling:
   #   prometheusQuery -> overrides the queue-signal query for every model
   #                      (back-compat with the pre-per-model single query)
   vllmQuery: ""
+  sglangQuery: ""
   prometheusQuery: ""
 
   # Per-model overrides, keyed by models[].name. Each entry may set:
@@ -422,13 +451,55 @@ vllm:
   speculativeConfig: {}            # set to {numSpeculativeTokens: 3, method: "deepseek_mtp"} to enable
   enablePrefixCaching: false       # true = enable prefix caching (uses KV cache memory)
   enablePromptTokensDetails: false # true = --enable-prompt-tokens-details (per-request cached-token counts for gateway hit-rate feedback)
-  toolCallParser: null             # e.g. "qwen3_coder", "glm47" — also enables --enable-auto-tool-choice
+  toolCallParser: null             # e.g. "qwen", "qwen3_coder", "glm47"
   reasoningParser: null            # e.g. "qwen3", "glm45"
   hostNetwork: false
   dtype: "auto"                      # "auto", "bfloat16", "float16" — passed to --dtype
   schedulerCls: ""                   # e.g. "lsched.lsched_vllm.LSchedVLLMAdapter" — passed to --scheduler-cls
   modelLoaderExtraConfig: ""         # JSON string, e.g. '{"enable_multithread_load":true,"num_threads":16}'
   ascendEnableFlashcomm1: false      # true = set VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+# SGLang v0.5.15 runtime and KV-event publisher defaults. These values are
+# inert while engine.type=vllm.
+sglang:
+  # Router hash contract pin; must match the supported engine image contract.
+  contractVersion: "0.5.15"
+  pageSize: 16
+  memFractionStatic: 0.9
+  logLevel: info
+  toolCallParser: null
+  reasoningParser: null
+  # Must remain false for v0.5.15: router tokenizer init cannot mirror remote code.
+  trustRemoteCode: false
+  extraArgs: []
+  healthPath: /health
+  # Explicitly set /health_generate only when generation-backed readiness is
+  # desired. Liveness always uses healthPath and never this value.
+  readinessPath: ""
+  metricsPath: /metrics
+  metricsPort: 8200
+  # Large CUDA images and model initialization can legitimately exceed the
+  # Kubernetes Deployment default of 600 seconds on a cold node.
+  progressDeadlineSeconds: 7200
+  # Once startup succeeds, five failed 30-second health checks restart a dead
+  # engine in about 2.5 minutes. Startup retains its separate 720-attempt budget.
+  livenessFailureThreshold: 5
+  # Required when hardware=nvidia (ignored on Ascend). Override if your cluster
+  # registers a different RuntimeClass; falls back to vllm.runtimeClassName.
+  runtimeClassName: nvidia
+  # Deprecated: accelerator requests come from the top-level hardware switch
+  # (vllmkv.acceleratorResource). Kept only so older overlays that set this
+  # key do not fail unknown-field checks; it is not read by the templates.
+  gpuResourceName: nvidia.com/gpu
+  nodeSelector: {}
+  engineResources:
+    requests: {}
+    limits: {}
+  kvEvents:
+    port: 5557
+    replayPort: 5558
+    topic: "kv@"
+    discoveryTimeoutS: 2.0
 
 # -----------------------------------------------------------------------
 # Unified model definitions.

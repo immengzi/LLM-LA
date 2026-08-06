@@ -353,6 +353,8 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, prompt, mode
 
 	var streamEndpointID interface{}
 	var tFirstChunk float64
+	emittedContent := ""
+	emittedToolCalls := map[int]map[string]interface{}{}
 
 	emitLatency := func(u map[string]interface{}, finReason string) {
 		tEnd := nowS()
@@ -392,12 +394,27 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, prompt, mode
 	// First chunk (or full result fallback).
 	first, ok := recvChunk(chunkQ, timeout)
 	if !ok {
-		emit("data: [DONE]\n\n")
+		emit(streamErrorSSE("timed out waiting for the first inference stream event", "stream_timeout"))
 		return
 	}
 
-	if full, ok := first["__full_result__"].(map[string]interface{}); ok {
+	if rawFull, exists := first["__full_result__"]; exists {
+		full, ok := rawFull.(map[string]interface{})
+		if !ok {
+			emit(streamErrorSSE("full inference result is not an object", "stream_recovery_failed"))
+			return
+		}
+		if errValue := full["error"]; errValue != nil && fmt.Sprintf("%v", errValue) != "" {
+			emit(streamErrorSSE("inference stream failed: "+fmt.Sprintf("%v", errValue), "inference_error"))
+			return
+		}
 		outputText, _ := full["output"].(string)
+		if rawOutput, exists := full["output"]; exists {
+			if _, ok := rawOutput.(string); !ok {
+				emit(streamErrorSSE("full result output is not text", "stream_recovery_failed"))
+				return
+			}
+		}
 		finishReason := "stop"
 		if fr, ok := full["finish_reason"].(string); ok && fr != "" {
 			finishReason = fr
@@ -431,9 +448,11 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, prompt, mode
 		delta := map[string]interface{}{}
 		if dc, ok := chunk["delta"].(string); ok && dc != "" {
 			delta["content"] = dc
+			emittedContent += dc
 		}
 		if tc, ok := chunk["tool_calls"].([]interface{}); ok && len(tc) > 0 {
 			delta["tool_calls"] = tc
+			mergeEmittedToolCallDeltas(emittedToolCalls, tc)
 		}
 		if len(delta) > 0 {
 			c := map[string]interface{}{
@@ -475,11 +494,27 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, prompt, mode
 	for {
 		chunk, ok := recvChunk(chunkQ, timeout)
 		if !ok {
-			emit("data: [DONE]\n\n")
+			emit(streamErrorSSE("timed out waiting for inference stream completion", "stream_timeout"))
 			return
 		}
-		if _, ok := chunk["__full_result__"]; ok {
-			emit("data: [DONE]\n\n")
+		if rawFull, ok := chunk["__full_result__"]; ok {
+			full, ok := rawFull.(map[string]interface{})
+			if !ok {
+				emit(streamErrorSSE("full inference result is not an object", "stream_recovery_failed"))
+				return
+			}
+			if eid := full["endpoint_id"]; eid != nil && streamEndpointID == nil {
+				streamEndpointID = eid
+			}
+			fr := "stop"
+			if value, ok := full["finish_reason"].(string); ok && value != "" {
+				fr = value
+			}
+			u := mapOf(full["usage"])
+			emitLatency(u, fr)
+			emit(recoverSSEFromFullResult(
+				rid, model, created, full, emittedContent, emittedToolCalls, streamEndpointID,
+			))
 			return
 		}
 		if eid := chunk["endpoint_id"]; eid != nil && streamEndpointID == nil {
@@ -510,7 +545,193 @@ func isFinal(chunk map[string]interface{}) bool {
 }
 
 // ---------------- SSE builders ----------------
+// Helpers that turn router results into OpenAI-compatible SSE for
+// /v1/chat/completions streaming (content tokens and/or tool-call deltas).
 
+// mergeEmittedToolCallDeltas folds incremental tool_calls deltas into acc by
+// index, concatenating function name/arguments fragments across chunks.
+func mergeEmittedToolCallDeltas(acc map[int]map[string]interface{}, toolCalls []interface{}) {
+	for fallbackIndex, raw := range toolCalls {
+		toolCall, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		index := fallbackIndex
+		if rawIndex, exists := toolCall["index"]; exists {
+			index = toInt(rawIndex)
+		}
+		current, exists := acc[index]
+		if !exists {
+			current = map[string]interface{}{"function": map[string]interface{}{"name": "", "arguments": ""}}
+			acc[index] = current
+		}
+		for _, field := range []string{"id", "type"} {
+			if value, ok := toolCall[field].(string); ok && value != "" {
+				current[field] = value
+			}
+		}
+		function, ok := toolCall["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		currentFunction := current["function"].(map[string]interface{})
+		for _, field := range []string{"name", "arguments"} {
+			if value, ok := function[field].(string); ok {
+				previous, _ := currentFunction[field].(string)
+				currentFunction[field] = previous + value
+			}
+		}
+	}
+}
+
+// streamErrorSSE emits a single SSE error payload followed by [DONE].
+func streamErrorSSE(message, code string) string {
+	payload := map[string]interface{}{"error": map[string]interface{}{
+		"message": message, "type": "server_error", "code": code,
+	}}
+	var sb strings.Builder
+	writeSSE(&sb, payload)
+	sb.WriteString("data: [DONE]\n\n")
+	return sb.String()
+}
+
+// recoverSSEFromFullResult rebuilds the remaining SSE tail when a stream ends
+// early but a complete result is available. It verifies that the full result
+// is a consistent continuation of already-emitted content/tool-call deltas,
+// then emits the missing suffix (or an error SSE on mismatch).
+func recoverSSEFromFullResult(
+	rid, model string,
+	created int64,
+	result map[string]interface{},
+	emittedContent string,
+	emittedToolCalls map[int]map[string]interface{},
+	endpointID interface{},
+) string {
+	if value := result["error"]; value != nil && fmt.Sprintf("%v", value) != "" {
+		return streamErrorSSE("inference stream failed: "+fmt.Sprintf("%v", value), "inference_error")
+	}
+	output, ok := result["output"].(string)
+	if !ok {
+		if _, exists := result["output"]; exists {
+			return streamErrorSSE("full result output is not text", "stream_recovery_failed")
+		}
+		output = ""
+	}
+	if !strings.HasPrefix(output, emittedContent) {
+		return streamErrorSSE("full result content does not match the emitted stream prefix", "stream_recovery_failed")
+	}
+
+	completeToolCalls := extractToolCalls(result)
+	if len(emittedToolCalls) > 0 && len(completeToolCalls) == 0 {
+		return streamErrorSSE("full result is missing tool calls already emitted by the stream", "stream_recovery_failed")
+	}
+	for index := range emittedToolCalls {
+		if index < 0 || index >= len(completeToolCalls) {
+			return streamErrorSSE("full result tool-call indexes do not match the emitted stream", "stream_recovery_failed")
+		}
+	}
+
+	missingToolDeltas := make([]map[string]interface{}, 0, len(completeToolCalls))
+	for index, raw := range completeToolCalls {
+		complete, ok := raw.(map[string]interface{})
+		if !ok {
+			return streamErrorSSE("full result contains an invalid tool call", "stream_recovery_failed")
+		}
+		emitted, exists := emittedToolCalls[index]
+		if !exists {
+			emitted = map[string]interface{}{"function": map[string]interface{}{"name": "", "arguments": ""}}
+		}
+		delta := map[string]interface{}{"index": index}
+		for _, field := range []string{"id", "type"} {
+			fullValue, _ := complete[field].(string)
+			sentValue, sent := emitted[field]
+			if sent && sentValue != fullValue {
+				return streamErrorSSE(fmt.Sprintf("full result tool call %d has mismatched %s", index, field), "stream_recovery_failed")
+			}
+			if !sent && fullValue != "" {
+				delta[field] = fullValue
+			}
+		}
+		completeFunction, ok := complete["function"].(map[string]interface{})
+		if !ok {
+			return streamErrorSSE(fmt.Sprintf("full result tool call %d has no function", index), "stream_recovery_failed")
+		}
+		emittedFunction, _ := emitted["function"].(map[string]interface{})
+		if emittedFunction == nil {
+			emittedFunction = map[string]interface{}{}
+		}
+		functionDelta := map[string]interface{}{}
+		for _, field := range []string{"name", "arguments"} {
+			fullValue, fullOK := completeFunction[field].(string)
+			if !fullOK {
+				if _, exists := completeFunction[field]; !exists {
+					fullValue = ""
+					fullOK = true
+				}
+			}
+			sentValue, sentOK := emittedFunction[field].(string)
+			if !sentOK {
+				if _, exists := emittedFunction[field]; !exists {
+					sentValue = ""
+					sentOK = true
+				}
+			}
+			if !fullOK || !sentOK {
+				return streamErrorSSE(fmt.Sprintf("full result tool call %d has invalid function %s", index, field), "stream_recovery_failed")
+			}
+			if !strings.HasPrefix(fullValue, sentValue) {
+				return streamErrorSSE(fmt.Sprintf("full result tool call %d function %s does not match the emitted stream prefix", index, field), "stream_recovery_failed")
+			}
+			if len(fullValue) > len(sentValue) {
+				functionDelta[field] = fullValue[len(sentValue):]
+			}
+		}
+		if len(functionDelta) > 0 {
+			delta["function"] = functionDelta
+		}
+		if len(delta) > 1 {
+			missingToolDeltas = append(missingToolDeltas, delta)
+		}
+	}
+
+	chunkID := "chatcmpl-" + rid
+	var sb strings.Builder
+	appendDelta := func(delta map[string]interface{}) {
+		chunk := map[string]interface{}{
+			"id": chunkID, "object": "chat.completion.chunk", "created": created, "model": model,
+			"choices": []map[string]interface{}{{"index": 0, "delta": delta, "finish_reason": nil}},
+		}
+		if endpointID != nil {
+			chunk["system_fingerprint"] = fmt.Sprintf("%v", endpointID)
+		}
+		writeSSE(&sb, chunk)
+	}
+	if missingContent := output[len(emittedContent):]; missingContent != "" {
+		appendDelta(map[string]interface{}{"content": missingContent})
+	}
+	for _, toolDelta := range missingToolDeltas {
+		appendDelta(map[string]interface{}{"tool_calls": []interface{}{toolDelta}})
+	}
+
+	finishReason := "stop"
+	if value, ok := result["finish_reason"].(string); ok && value != "" {
+		finishReason = value
+	}
+	final := map[string]interface{}{
+		"id": chunkID, "object": "chat.completion.chunk", "created": created, "model": model,
+		"choices": []map[string]interface{}{{"index": 0, "delta": map[string]interface{}{}, "finish_reason": finishReason}},
+		"usage":   passthroughUsage(mapOf(result["usage"])),
+	}
+	if endpointID != nil {
+		final["system_fingerprint"] = fmt.Sprintf("%v", endpointID)
+	}
+	writeSSE(&sb, final)
+	sb.WriteString("data: [DONE]\n\n")
+	return sb.String()
+}
+
+// buildSSEChunks synthesizes a full content stream (role preamble, word-split
+// content deltas, finish chunk with usage, [DONE]) from a complete text result.
 func buildSSEChunks(rid, model string, created int64, outputText, finishReason string, usage map[string]interface{}, endpointID interface{}) string {
 	chunkID := "chatcmpl-" + rid
 	var sb strings.Builder
@@ -549,6 +770,9 @@ func buildSSEChunks(rid, model string, created int64, outputText, finishReason s
 	return sb.String()
 }
 
+// buildSSEChunksWithToolCalls synthesizes a full tool-call stream (role
+// preamble, tool_calls deltas, finish chunk with usage, [DONE]) from a
+// complete tool-call result with no text content.
 func buildSSEChunksWithToolCalls(rid, model string, created int64, toolCalls []interface{}, finishReason string, usage map[string]interface{}, endpointID interface{}) string {
 	chunkID := "chatcmpl-" + rid
 	var sb strings.Builder

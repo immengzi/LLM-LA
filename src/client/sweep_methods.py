@@ -100,6 +100,222 @@ def _flatten_helm_values(prefix: str, value: ConfigValue) -> Dict[str, ConfigVal
     return flattened
 
 
+def _prefix_hashing_enabled(h) -> bool:
+    """Mirror router strategy precedence for validation."""
+    strategy = str(getattr(h, "router_strategy", "") or "").strip().lower()
+    if strategy in ("prefix", "both"):
+        kv_aware = True
+    elif strategy in ("none", "affinity"):
+        kv_aware = False
+    else:
+        kv_aware = bool(getattr(h, "router_kv_aware", True))
+    return (
+        kv_aware
+        or bool(getattr(h, "router_measure_prefix", False))
+        or bool(getattr(h, "router_log_block_hashes", False))
+    )
+
+
+def _has_model_or_tokenizer_override(sglang_config: dict, model: dict) -> bool:
+    override_keys = {
+        "modelPath",
+        "model_path",
+        "tokenizer",
+        "tokenizerPath",
+        "tokenizer_path",
+        "tokenizerMode",
+        "tokenizer_mode",
+        "tokenizerKwargs",
+        "tokenizer_kwargs",
+    }
+    if any(key in model for key in override_keys):
+        return True
+    if any(key in sglang_config for key in override_keys):
+        return True
+    return any(
+        str(arg).strip().lower().startswith(("--model-path", "--tokenizer"))
+        for arg in (sglang_config.get("extraArgs") or [])
+    )
+
+
+def _validate_engine_config(
+    h,
+    cfg_path: Union[str, Path] = "<config>",
+    *,
+    router_deployed: bool = True,
+) -> str:
+    """Validate engine combinations before any cluster mutation."""
+    engine_type = str(getattr(h, "engine_type", "vllm") or "vllm").strip().lower()
+    if engine_type not in ("vllm", "sglang"):
+        raise click.ClickException(
+            f"Invalid engine_type '{engine_type}' in {cfg_path} (expected 'vllm' or 'sglang')"
+        )
+    service_impl = str(
+        getattr(h, "service_impl", "python") or "python"
+    ).strip().lower()
+    if service_impl not in ("python", "go"):
+        raise click.ClickException(
+            f"Invalid service_impl '{service_impl}' in {cfg_path} "
+            "(expected 'python' or 'go')"
+        )
+    unsupported: List[str] = []
+    models = list(getattr(h, "models", None) or [])
+    model_engines = [
+        str(model.get("engine", engine_type) or engine_type).strip().lower()
+        for model in models
+    ]
+    has_sglang = engine_type == "sglang" or "sglang" in model_engines
+    prefix_hashing = router_deployed and _prefix_hashing_enabled(h)
+    managed_sglang_args = (
+        "--model-path",
+        "--served-model-name",
+        "--host",
+        "--port",
+        "--tp-size",
+        "--page-size",
+        "--mem-fraction-static",
+        "--kv-events-config",
+        "--tokenizer",
+        "--enable-metrics",
+        "--log-level",
+    )
+
+    if has_sglang and bool(getattr(h, "sglang_trust_remote_code", False)):
+        unsupported.append(
+            "sglang_trust_remote_code is unsupported by the router tokenizer contract"
+        )
+    if has_sglang and any(
+        str(arg).strip().lower().startswith(managed_sglang_args)
+        for arg in (getattr(h, "sglang_extra_args", []) or [])
+    ):
+        unsupported.append(
+            "sglang_extra_args cannot override chart-managed launch flags"
+        )
+    for model in models:
+        model_engine = str(model.get("engine", engine_type) or engine_type).strip().lower()
+        sglang_config = model.get("sglang") or {}
+        if model_engine == "sglang" and bool(sglang_config.get("trustRemoteCode", False)):
+            unsupported.append(
+                "models[].sglang.trustRemoteCode is unsupported by the router tokenizer contract"
+            )
+            break
+        if model_engine == "sglang" and any(
+            str(arg).strip().lower().startswith(managed_sglang_args)
+            for arg in (sglang_config.get("extraArgs") or [])
+        ):
+            unsupported.append(
+                "models[].sglang.extraArgs cannot override chart-managed launch flags"
+            )
+            break
+
+    if prefix_hashing and models:
+        distinct_engines = set(model_engines)
+        if len(distinct_engines) > 1:
+            unsupported.append(
+                "mixed model engines are unsafe with router prefix hashing/measurement"
+            )
+        if any(model_engine != engine_type for model_engine in model_engines):
+            unsupported.append(
+                "models[].engine must match helm.engine_type for router prefix hashing/measurement"
+            )
+        if "sglang" in distinct_engines:
+            if len(models) != 1:
+                unsupported.append(
+                    "SGLang router prefix hashing/measurement requires exactly one model"
+                )
+            global_page_size = int(getattr(h, "sglang_page_size", 16))
+            for model, model_engine in zip(models, model_engines):
+                if model_engine != "sglang":
+                    continue
+                sglang_config = model.get("sglang") or {}
+                page_size = int(sglang_config.get("pageSize", global_page_size))
+                if page_size != global_page_size:
+                    unsupported.append(
+                        "models[].sglang.pageSize must match helm.sglang_page_size"
+                    )
+                if _has_model_or_tokenizer_override(sglang_config, model):
+                    unsupported.append(
+                        "custom SGLang model/tokenizer overrides cannot match router /model"
+                    )
+
+    if engine_type == "vllm" and not unsupported:
+        return engine_type
+
+    if engine_type == "sglang" and str(
+        getattr(h, "router_hash_source", "inline") or "inline"
+    ).strip().lower() != "inline":
+        unsupported.append("router_hash_source must be inline")
+    if engine_type == "sglang" and bool(getattr(h, "data_parallel_enabled", False)):
+        unsupported.append("data_parallel/LWS is not supported")
+    for model in models if engine_type == "sglang" else []:
+        if (model.get("dataParallel") or {}).get("enabled"):
+            unsupported.append("models[].dataParallel/LWS is not supported")
+            break
+    if engine_type == "sglang" and bool(getattr(h, "mooncake_enabled", False)):
+        unsupported.append("Mooncake is not supported")
+    if engine_type == "sglang" and bool(getattr(h, "lmcache_enabled", False)):
+        unsupported.append("LMCache is not supported")
+    if engine_type == "sglang" and not isinstance(
+        getattr(h, "sglang_extra_args", []), list
+    ):
+        unsupported.append("sglang_extra_args must be a list")
+
+    if unsupported:
+        raise click.ClickException(
+            f"Unsupported SGLang configuration in {cfg_path}: " + "; ".join(unsupported)
+        )
+    return engine_type
+
+
+def _inject_sglang_models(h, models_list: list) -> None:
+    """Add the selected SGLang runtime contract to every model definition.
+
+    Copies HelmConfig ``sglang_*`` knobs into each ``models[].sglang`` mapping
+    (per-model keys win). Field meanings and defaults:
+
+      - Chart values: ``src/core/vllm-kv-stack/values.yaml`` (``sglang:`` block)
+      - Client schema: ``src/client/config.py`` (``HelmConfig.sglang_*``)
+      - Deploy guide: ``docs/deployment/sglang.md``
+      - Pinned contract: ``docs/architecture/sglang-contract-v0.5.15.md``
+      - Helm reference: ``docs/configuration/helm-values.md`` (``engine.type``,
+        ``images.sglang``, autoscaling ``sglang`` signal)
+    """
+    defaults = {
+        "pageSize": int(getattr(h, "sglang_page_size", 16)),
+        "memFractionStatic": float(getattr(h, "sglang_mem_fraction_static", 0.9)),
+        "trustRemoteCode": bool(getattr(h, "sglang_trust_remote_code", False)),
+        "extraArgs": list(getattr(h, "sglang_extra_args", []) or []),
+        "healthPath": str(getattr(h, "sglang_health_path", "/health")),
+        "readinessPath": str(getattr(h, "sglang_readiness_path", "")),
+        "metricsPath": str(getattr(h, "sglang_metrics_path", "/metrics")),
+        "metricsPort": int(getattr(h, "sglang_metrics_port", 8200)),
+    }
+    tool_parser = getattr(h, "sglang_tool_call_parser", None)
+    reasoning_parser = getattr(h, "sglang_reasoning_parser", None)
+    if tool_parser is not None:
+        defaults["toolCallParser"] = str(tool_parser)
+    if reasoning_parser is not None:
+        defaults["reasoningParser"] = str(reasoning_parser)
+
+    image = str(
+        getattr(h, "sglang_image", "lmsysorg/sglang:v0.5.15-cu129")
+        or "lmsysorg/sglang:v0.5.15-cu129"
+    ).strip()
+    for model in models_list:
+        configured_engine = str(model.get("engine", "sglang") or "sglang").strip().lower()
+        if configured_engine != "sglang":
+            raise click.ClickException(
+                f"SGLang deployment cannot contain model engine={configured_engine!r}"
+            )
+        model["engine"] = "sglang"
+        if not model.get("image"):
+            model["image"] = image
+        configured = model.get("sglang") or {}
+        if not isinstance(configured, dict):
+            raise click.ClickException("models[].sglang must be a mapping")
+        model["sglang"] = {**defaults, **configured}
+
+
 # ---------------------------
 # experiment dir detection
 # ---------------------------
@@ -246,7 +462,6 @@ def _helm_template(
     namespace: str,
     values_file: Optional[Path],
     set_values: Dict[str, ConfigValue],
-    extra_values_files: Optional[List[Path]] = None,
 ) -> str:
     cmd: List[str] = [
         "template",
@@ -257,10 +472,6 @@ def _helm_template(
     ]
     if values_file is not None and values_file.is_file():
         cmd.extend(["-f", str(values_file)])
-    if extra_values_files:
-        for vf in extra_values_files:
-            if vf is not None and vf.is_file():
-                cmd.extend(["-f", str(vf)])
 
     for k in sorted(set_values.keys()):
         vs = _coerce_set_value(set_values[k])
@@ -385,23 +596,15 @@ def _wait_ready(namespace: str, timeout_s: float = 36000, label_selector: Option
 # ---------------------------
 
 def _vllm_pods_exist(namespace: str) -> bool:
-    """Return True if any vllm-qwen, vllm-dp, or multi-model vllm pods exist (any phase)."""
+    """Return True if any inference-engine pods exist (component=vllm|sglang)."""
     try:
         out = _kubectl(
             ["get", "pods", "-n", namespace,
-             "-l", "app in (vllm-qwen,vllm-dp-worker)",
+             "-l", "component in (vllm,sglang)",
              "-o", "name"],
             check=False, capture=True,
         ).stdout or ""
-        if out.strip():
-            return True
-        out2 = _kubectl(
-            ["get", "pods", "-n", namespace,
-             "-l", "component=vllm",
-             "-o", "name"],
-            check=False, capture=True,
-        ).stdout or ""
-        return bool(out2.strip())
+        return bool(out.strip())
     except Exception:
         return False
 
@@ -409,13 +612,13 @@ def _vllm_pods_exist(namespace: str) -> bool:
 def _detect_current_route_mode(namespace: str) -> str:
     """Detect the routing mode of the live deployment.
 
-    Returns "direct" if no sidecar containers exist in vLLM pods,
+    Returns "direct" if no sidecar containers exist in engine pods,
     "router" if sidecars are present, or "unknown" if detection fails.
     """
     try:
         out = _kubectl(
             ["get", "pods", "-n", namespace,
-             "-l", "component=vllm",
+             "-l", "component in (vllm,sglang)",
              "-o", "jsonpath={.items[0].spec.containers[*].name}"],
             check=False, capture=True,
         ).stdout or ""
@@ -725,7 +928,7 @@ def _create_per_pod_services(
     try:
         raw = subprocess.run(
             ["kubectl", "get", "pods", "-n", namespace,
-             "-l", "component=vllm",
+             "-l", "component in (vllm,sglang)",
              "--field-selector=status.phase=Running",
              "-o", "json"],
             capture_output=True, text=True, timeout=30,
@@ -900,7 +1103,7 @@ def _print_boom_config(
         try:
             pod_count = subprocess.run(
                 ["kubectl", "get", "pods", "-n", namespace,
-                 "-l", "component=vllm",
+                 "-l", "component in (vllm,sglang)",
                  "--field-selector=status.phase=Running",
                  "-o", "jsonpath={range .items[*]}x{end}"],
                 capture_output=True, text=True, timeout=10,
@@ -1045,6 +1248,15 @@ def cli(master_config: str, skip_vllm: bool) -> None:
 
         if backend not in ("router", "aibrix", "litellm", "boom"):
             raise click.ClickException(f"Invalid backend '{backend}' in {cfg_path}")
+        router_deployed = backend in ("router", "litellm", "boom") and not (
+            backend == "boom"
+            and str(getattr(h, "boom_route_via", "router")).strip().lower() == "direct"
+        )
+        engine_type = _validate_engine_config(
+            h,
+            cfg_path,
+            router_deployed=router_deployed,
+        )
 
         deploy_mode = str(getattr(h, "deploy_mode", "helm")).strip().lower()
         cr_name = str(getattr(h, "operator_cr_name", "vllm")).strip() or release
@@ -1059,11 +1271,13 @@ def cli(master_config: str, skip_vllm: bool) -> None:
 
         set_values: Dict[str, ConfigValue] = {
             "backend": backend,
+            "engine.type": engine_type,
             "replicas.vllm": int(h.replicas),
             "batchSize": int(h.batch_size),
             "tensorParallelSize": int(getattr(h, "tensor_parallel_size", 1)),
             "router.strategy": str(getattr(h, "router_strategy", "")),
             "router.hashSource": str(getattr(h, "router_hash_source", "inline")).strip().lower(),
+            "router.hashBackend": engine_type,
             "router.ownerSource": str(getattr(h, "router_owner_source", "lookup")).strip().lower(),
             "router.lookupMaxBlocks": int(getattr(h, "router_lookup_max_blocks", 512)),
             "router.stripCch": str(getattr(h, "router_strip_cch", "0")).strip(),
@@ -1465,8 +1679,15 @@ def cli(master_config: str, skip_vllm: bool) -> None:
             q = str(h.autoscaling_prometheus_query or "").strip()
             q = " ".join(q.split())
             if q:
-                set_values["autoscaling.vllmQuery" if str(h.autoscaling_signal) == "vllm"
-                           else "autoscaling.prometheusQuery"] = q
+                if str(h.autoscaling_signal) == "vllm":
+                    query_key = (
+                        "autoscaling.sglangQuery"
+                        if engine_type == "sglang"
+                        else "autoscaling.vllmQuery"
+                    )
+                else:
+                    query_key = "autoscaling.prometheusQuery"
+                set_values[query_key] = q
 
         # ---- Unified models[] — auto-migrate legacy flat config if needed ----
         migrate_legacy_helm_to_models(h)
@@ -1477,9 +1698,17 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 f"Add helm.models[] or legacy flat vllm_*/data_parallel_* fields."
             )
 
+        if engine_type == "sglang":
+            _inject_sglang_models(h, models_list)
+            _validate_engine_config(
+                h,
+                cfg_path,
+                router_deployed=router_deployed,
+            )
+
         # Inject vllm_image into per-model image field (bypasses registry rewrite)
         _vllm_img = str(getattr(h, "vllm_image", "") or "").strip()
-        if _vllm_img:
+        if engine_type == "vllm" and _vllm_img:
             for mdef in models_list:
                 if not mdef.get("image"):
                     mdef["image"] = _vllm_img
@@ -1795,12 +2024,16 @@ def cli(master_config: str, skip_vllm: bool) -> None:
                 tmp_cfg_path.unlink(missing_ok=True)
             except Exception:
                 pass
-            for _vf in (_models_values_file, _ctl_overlay_file):
-                if _vf is not None:
-                    try:
-                        _vf.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+            if _models_values_file is not None:
+                try:
+                    _models_values_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            if _ctl_overlay_file is not None:
+                try:
+                    _ctl_overlay_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         if client_proc.returncode not in (0, None):
             raise click.ClickException(f"client run failed (exit={client_proc.returncode})")

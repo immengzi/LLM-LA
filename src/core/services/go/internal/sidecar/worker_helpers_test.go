@@ -1,6 +1,12 @@
 package sidecar
 
-import "testing"
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
 
 func TestBuildPayloadFlatPrompt(t *testing.T) {
 	w := &VLLMWorker{cfg: &Config{ModelName: "m"}}
@@ -16,6 +22,27 @@ func TestBuildPayloadFlatPrompt(t *testing.T) {
 	}
 	if _, ok := payload["messages"]; !ok {
 		t.Fatal("flat prompt payload missing messages")
+	}
+	kwargs, ok := payload["chat_template_kwargs"].(map[string]any)
+	if !ok || kwargs["enable_thinking"] != false {
+		t.Fatalf("legacy vLLM thinking override = %v, want false", payload["chat_template_kwargs"])
+	}
+}
+
+func TestBuildPayloadSGLangThinkingPolicy(t *testing.T) {
+	w := &InferenceWorker{cfg: &Config{InferenceEngine: "sglang", ModelName: "m"}}
+
+	payload, _ := w.buildPayload("hello", map[string]any{})
+	if _, ok := payload["chat_template_kwargs"]; ok {
+		t.Fatalf("flat SGLang payload implicitly overrides tokenizer default: %v", payload)
+	}
+
+	for _, value := range []bool{false, true} {
+		payload, _ = w.buildPayload("hello", map[string]any{"enable_thinking": value})
+		kwargs, ok := payload["chat_template_kwargs"].(map[string]any)
+		if !ok || kwargs["enable_thinking"] != value {
+			t.Fatalf("explicit SGLang enable_thinking=%t produced %v", value, payload)
+		}
 	}
 }
 
@@ -46,6 +73,65 @@ func TestBuildPayloadForceIgnoreEos(t *testing.T) {
 	payload, _ := w.buildPayload("hi", map[string]any{})
 	if payload["ignore_eos"] != true {
 		t.Fatalf("ForceIgnoreEos not applied: %v", payload["ignore_eos"])
+	}
+}
+
+func TestBuildPayloadPreservesMinTokens(t *testing.T) {
+	w := &InferenceWorker{cfg: &Config{ModelName: "m"}}
+	payload, _ := w.buildPayload("hi", map[string]any{"min_tokens": 7})
+	if payload["min_tokens"] != 7 {
+		t.Fatalf("min_tokens = %v, want 7", payload["min_tokens"])
+	}
+}
+
+func TestInferenceWorkerUsesGenericURL(t *testing.T) {
+	var received map[string]any
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer engine.Close()
+	w := &InferenceWorker{
+		cfg:    &Config{InferenceURL: engine.URL, ModelName: "m"},
+		client: &http.Client{Timeout: time.Second},
+	}
+	result, err := w.callNonStreaming("r1", map[string]any{"model": "m"})
+	if err != nil || result.outputText != "ok" || received["model"] != "m" {
+		t.Fatalf("result=%+v err=%v request=%v", result, err, received)
+	}
+}
+
+func TestStreamingToolCallsAreAccumulated(t *testing.T) {
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chat-1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"ci\"}}]},\"finish_reason\":null}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ty\\\":\\\"SF\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":{\"completion_tokens\":3}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer engine.Close()
+	w := &InferenceWorker{
+		cfg:    &Config{InferenceEngine: "sglang", InferenceURL: engine.URL, ModelName: "m"},
+		client: &http.Client{Timeout: time.Second}, chunkClient: &http.Client{Timeout: time.Second},
+	}
+	result, err := w.callStreaming("r1", map[string]any{"model": "m", "stream": true}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := extractToolCalls(result.rawVllm)
+	if len(calls) != 1 {
+		t.Fatalf("tool calls = %v", calls)
+	}
+	function := calls[0].(map[string]any)["function"].(map[string]any)
+	if function["name"] != "weather" || function["arguments"] != `{"city":"SF"}` ||
+		result.finishReason != "tool_calls" || result.usage["completion_tokens"] != float64(3) {
+		t.Fatalf("stream result = %+v", result)
 	}
 }
 
