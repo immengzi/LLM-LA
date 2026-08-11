@@ -652,6 +652,20 @@ prefillDecode:
     prefill: ""
     decode: ""
 
+# Optional quiescent P/D replica rebalancer. It owns only P/D-enabled models
+# that opt in through models[].prefillDecode.dynamicRebalance.enabled.
+pdRebalancer:
+  image: ""                    # empty -> images.vllm; must provide Python 3
+  port: 8081
+  pollIntervalSeconds: 2
+  readinessTimeoutSeconds: 900
+  dryRun: false                # true -> reconcile logs planned transitions without touching /scale
+  resources:
+    cpuRequest: "100m"
+    memoryRequest: "128Mi"
+    cpuLimit: "500m"
+    memoryLimit: "512Mi"
+
 # -----------------------------------------------------------------------
 # NFS page cache warm — pre-reads model shards before vLLM pods start.
 #

@@ -1,0 +1,183 @@
+{{/* Quiescent, fixed-budget P/D Deployment rebalancer. */}}
+{{- if .Values.deploy.vllm }}
+{{- $managedModels := list }}
+{{- range $m := .Values.models }}
+{{- if ($m.prefillDecode | default dict).enabled }}
+{{- $pd := merge (deepCopy ($m.prefillDecode | default dict)) ($.Values.prefillDecode | default dict) }}
+{{- $rebalancer := $pd.dynamicRebalance | default dict }}
+{{- if $rebalancer.enabled }}
+{{- $prefill := $pd.prefill | default dict }}
+{{- $decode := $pd.decode | default dict }}
+{{- $defaultTp := $m.tensorParallelSize | default $.Values.tensorParallelSize | int }}
+{{- $prefillTp := $prefill.tensorParallelSize | default $defaultTp | int }}
+{{- $decodeTp := $decode.tensorParallelSize | default $defaultTp | int }}
+{{- if ne $prefillTp $decodeTp }}
+{{- fail (printf "dynamicRebalance requires equal prefill/decode tensorParallelSize for model %q" $m.name) }}
+{{- end }}
+{{- $initialPrefill := $prefill.replicas | default 1 | int }}
+{{- $initialDecode := $decode.replicas | default 1 | int }}
+{{- $minPrefill := $rebalancer.minPrefillReplicas | default 1 | int }}
+{{- $minDecode := $rebalancer.minDecodeReplicas | default 1 | int }}
+{{- $maxTotal := $rebalancer.maxTotalReplicas | default 0 | int }}
+{{- if le $maxTotal 0 }}{{- $maxTotal = add $initialPrefill $initialDecode }}{{- end }}
+{{- if lt $maxTotal 2 }}
+{{- fail (printf "dynamicRebalance maxTotalReplicas must be at least 2 for model %q" $m.name) }}
+{{- end }}
+{{- if or (lt $initialPrefill $minPrefill) (lt $initialDecode $minDecode) }}
+{{- fail (printf "dynamicRebalance initial replicas must satisfy the configured role minimums for model %q" $m.name) }}
+{{- end }}
+{{- if lt $maxTotal (add $minPrefill $minDecode) }}
+{{- fail (printf "dynamicRebalance maxTotalReplicas cannot satisfy both role minimums for model %q" $m.name) }}
+{{- end }}
+{{- if lt $maxTotal (add $initialPrefill $initialDecode) }}
+{{- fail (printf "dynamicRebalance maxTotalReplicas cannot be below the initial P/D replicas for model %q" $m.name) }}
+{{- end }}
+{{- $managedModels = append $managedModels (dict
+      "name" $m.name
+      "prefillDeployment" (printf "vllm-%s-prefill" $m.name)
+      "decodeDeployment" (printf "vllm-%s-decode" $m.name)
+      "minPrefillReplicas" $minPrefill
+      "minDecodeReplicas" $minDecode
+      "maxTotalReplicas" $maxTotal) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if gt (len $managedModels) 0 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    resourceNames:
+      {{- range $model := $managedModels }}
+      - {{ $model.prefillDeployment }}
+      - {{ $model.decodeDeployment }}
+      {{- end }}
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["{{ .Release.Name }}-pd-rebalancer-state"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-pd-rebalancer
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-pd-rebalancer
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer-code
+  namespace: {{ .Release.Namespace }}
+data:
+  pd_rebalancer.py: |-
+{{ .Files.Get "files/pd_rebalancer.py" | nindent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer-state
+  namespace: {{ .Release.Namespace }}
+data:
+  targets.json: "{}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    component: pd-rebalancer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-pd-rebalancer
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-pd-rebalancer
+        component: pd-rebalancer
+    spec:
+      serviceAccountName: {{ .Release.Name }}-pd-rebalancer
+      containers:
+        - name: pd-rebalancer
+          image: {{ include "vllmkv.image" (list $ ($.Values.pdRebalancer.image | default $.Values.images.vllm)) }}
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/etc/pd-rebalancer/pd_rebalancer.py"]
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PD_REBALANCER_STATE_CONFIGMAP
+              value: {{ printf "%s-pd-rebalancer-state" .Release.Name | quote }}
+            - name: PD_REBALANCER_MODELS_JSON
+              value: {{ $managedModels | toJson | quote }}
+            - name: PD_REBALANCER_PORT
+              value: {{ $.Values.pdRebalancer.port | default 8081 | quote }}
+            - name: PD_REBALANCER_POLL_SECONDS
+              value: {{ $.Values.pdRebalancer.pollIntervalSeconds | default 2 | quote }}
+            - name: PD_REBALANCER_READY_TIMEOUT_SECONDS
+              value: {{ $.Values.pdRebalancer.readinessTimeoutSeconds | default 900 | quote }}
+            - name: PD_REBALANCER_DRY_RUN
+              value: {{ $.Values.pdRebalancer.dryRun | default false | quote }}
+          ports:
+            - name: http
+              containerPort: {{ $.Values.pdRebalancer.port | default 8081 }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: {{ $.Values.pdRebalancer.resources.cpuRequest | default "100m" | quote }}
+              memory: {{ $.Values.pdRebalancer.resources.memoryRequest | default "128Mi" | quote }}
+            limits:
+              cpu: {{ $.Values.pdRebalancer.resources.cpuLimit | default "500m" | quote }}
+              memory: {{ $.Values.pdRebalancer.resources.memoryLimit | default "512Mi" | quote }}
+          volumeMounts:
+            - name: code
+              mountPath: /etc/pd-rebalancer
+              readOnly: true
+      volumes:
+        - name: code
+          configMap:
+            name: {{ .Release.Name }}-pd-rebalancer-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}-pd-rebalancer
+  ports:
+    - name: http
+      port: {{ $.Values.pdRebalancer.port | default 8081 }}
+      targetPort: http
+{{- end }}
+{{- end }}

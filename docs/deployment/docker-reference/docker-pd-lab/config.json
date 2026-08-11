@@ -1,0 +1,25 @@
+{
+  "prefix": "lzm-dynpd",
+  "image": "quay.nju.edu.cn/ascend/vllm-ascend:v0.22.1rc1-a3",
+  "model_dir": "/mnt/sdb/models/Qwen3-0.6B",
+  "model_name": "Qwen3-0.6B",
+  "served_model_name": "qwen3-0.6b-pd-lab",
+  "tensor_parallel_size": 1,
+  "max_model_len": 4096,
+  "max_num_batched_tokens": 4096,
+  "max_num_seqs": 16,
+  "gpu_memory_utilization": 0.60,
+  "enforce_eager": true,
+  "local_ip": "192.168.0.223",
+  "nic": "enp23s0f3",
+  "proxy_port": 19090,
+  "allowed_npus": [0, 1, 2],
+  "slots": [
+    {"npu": 0, "prefill_http": 19100, "prefill_kv": 19300, "decode_http": 19200, "decode_kv": 19400},
+    {"npu": 1, "prefill_http": 19101, "prefill_kv": 19301, "decode_http": 19201, "decode_kv": 19401},
+    {"npu": 2, "prefill_http": 19102, "prefill_kv": 19302, "decode_http": 19202, "decode_kv": 19402}
+  ],
+  "min_prefill": 1,
+  "min_decode": 1,
+  "ready_timeout": 1800
+}
