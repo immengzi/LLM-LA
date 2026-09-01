@@ -25,8 +25,11 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[4]
 CHART = REPO_ROOT / "src" / "core" / "vllm-kv-stack"
 
+# Public-chart placeholder; real values are supplied by the deployment overlay.
+ACCELERATOR_RESOURCE = "accelerator.example.com/device"
+
 ASCEND_MARKERS = (
-    "huawei.com/Ascend",
+    ACCELERATOR_RESOURCE,
     "ASCEND_RT_VISIBLE_DEVICES",
     "ascend-toolkit/set_env.sh",
     "dcmi-volume",
@@ -160,7 +163,7 @@ def test_default_hardware_is_ascend():
     for pod in _engine_pod_specs(_docs(manifest)):
         assert pod.get("runtimeClassName") in (None, "")
         for c in _vllm_containers(pod):
-            assert _accelerator_count(c, "huawei.com/Ascend") == 8
+            assert _accelerator_count(c, ACCELERATOR_RESOURCE) == 8
             assert _accelerator_count(c, "nvidia.com/gpu") is None
             assert "ASCEND_RT_VISIBLE_DEVICES" in _env_names(c)
             assert "VLLM_USE_V1" in _env_names(c)
@@ -180,7 +183,7 @@ def test_nvidia_switch_drops_ascend_and_requests_gpu():
         assert pod.get("runtimeClassName") == "nvidia"
         for c in _vllm_containers(pod):
             assert _accelerator_count(c, "nvidia.com/gpu") == 8
-            assert _accelerator_count(c, "huawei.com/Ascend") is None
+            assert _accelerator_count(c, ACCELERATOR_RESOURCE) is None
             env = _env_names(c)
             assert "ASCEND_RT_VISIBLE_DEVICES" not in env
             assert "HCCL_OP_EXPANSION_MODE" not in env
@@ -211,7 +214,7 @@ def test_nvidia_runtime_class_override():
 
 def test_tensor_parallel_size_drives_accelerator_count():
     for hardware, resource in (
-        ("ascend", "huawei.com/Ascend"),
+        ("ascend", ACCELERATOR_RESOURCE),
         ("nvidia", "nvidia.com/gpu"),
     ):
         manifest = _render(
@@ -239,7 +242,7 @@ def test_explicit_ascend_matches_default():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("hardware,resource,want_runtime", [
-    ("ascend", "huawei.com/Ascend", None),
+    ("ascend", ACCELERATOR_RESOURCE, None),
     ("nvidia", "nvidia.com/gpu", "nvidia"),
 ])
 def test_data_parallel_hardware_switch(hardware, resource, want_runtime):
@@ -266,7 +269,7 @@ def test_data_parallel_hardware_switch(hardware, resource, want_runtime):
         assert pod.get("runtimeClassName") == want_runtime
         for c in _vllm_containers(pod):
             assert _accelerator_count(c, resource) == 4
-            other = "nvidia.com/gpu" if resource.startswith("huawei") else "huawei.com/Ascend"
+            other = "nvidia.com/gpu" if resource == ACCELERATOR_RESOURCE else ACCELERATOR_RESOURCE
             assert _accelerator_count(c, other) is None
 
 
@@ -313,7 +316,7 @@ def test_multi_model_list_honours_hardware_switch():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("hardware,resource,want_runtime", [
-    ("ascend", "huawei.com/Ascend", None),
+    ("ascend", ACCELERATOR_RESOURCE, None),
     ("nvidia", "nvidia.com/gpu", "nvidia"),
 ])
 def test_pd_disaggregation_hardware_switch(hardware, resource, want_runtime):
@@ -342,7 +345,7 @@ def test_pd_disaggregation_hardware_switch(hardware, resource, want_runtime):
     if hardware == "nvidia":
         for marker in ASCEND_MARKERS:
             assert marker not in manifest, f"P/D Ascend leak under nvidia: {marker}"
-        assert "huawei.com/Ascend" not in manifest
+        assert ACCELERATOR_RESOURCE not in manifest
     else:
         assert "ascend-toolkit/set_env.sh" in manifest
         assert "dcmi-volume" in manifest
@@ -354,7 +357,7 @@ def test_pd_disaggregation_hardware_switch(hardware, resource, want_runtime):
         assert pod.get("runtimeClassName") == want_runtime
         for c in _vllm_containers(pod):
             assert _accelerator_count(c, resource) == 2
-            other = "nvidia.com/gpu" if resource.startswith("huawei") else "huawei.com/Ascend"
+            other = "nvidia.com/gpu" if resource == ACCELERATOR_RESOURCE else ACCELERATOR_RESOURCE
             assert _accelerator_count(c, other) is None
             if hardware == "nvidia":
                 assert "hisi-hdc-volume" not in _mount_names(c)

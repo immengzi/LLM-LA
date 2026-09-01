@@ -107,6 +107,38 @@ curl http://<node-ip>:30036/v1/chat/completions \
        "max_tokens":100}'
 ```
 
+### Dynamic P/D rebalancer (optional)
+
+The chart can rebalance prefill/decode replica counts under a fixed card budget
+based on proxy prefill backlog and decode KV pressure. It is opt-in per model:
+
+```yaml
+models:
+  - name: r1-qwen
+    prefillDecode:
+      enabled: true
+      dynamicRebalance:
+        enabled: true          # opt this model into rebalancing
+        minPrefillReplicas: 1
+        minDecodeReplicas: 1
+        maxTotalReplicas: 3    # fixed P+D budget
+```
+
+The rebalancer is **advisory by default** — with the chart default
+`pdRebalancer.advisory: true` it only logs recommendations
+(`[planner:advisory] ... not applied`) and never changes `Deployment /scale`.
+To let the planner auto-apply the recommended targets, set:
+
+```yaml
+pdRebalancer:
+  advisory: false   # planner auto-proposes and commits; the executor applies them
+```
+
+`pdRebalancer.dryRun: true` can be kept on as a rehearsal layer: the executor
+logs planned transitions without changing `/scale`. See the
+[P/D metrics contract](../architecture/pd-metrics-contract.md) for the
+signals, decision rules, and transition protocol.
+
 ## Values schema
 
 Global defaults live under `prefillDecode:` in `values.yaml`; per-model settings
@@ -157,4 +189,6 @@ under `models[].prefillDecode` override them (deep-merged, model wins).
 - [Mooncake Helm integration](mooncake/helm-integration.md) — the shared KV store.
 - [Bare-Docker Mooncake P/D lab](docker-reference/mooncake-pd-test.md) — manual
   producer/consumer reference the connector defaults are modeled on.
+- [P/D metrics contract](../architecture/pd-metrics-contract.md) — dynamic
+  rebalancer signals, decision rules, and transition protocol.
 - [Data parallel + LWS](data-parallel-lws.md) — the other alternate topology.

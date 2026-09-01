@@ -95,7 +95,7 @@ def test_default_render_remains_vllm_on_ascend():
     assert "sglang.launch_server" not in manifest
     assert "name: vllm-qwen" in manifest
     assert "name: sglang-qwen" not in manifest
-    assert "huawei.com/Ascend" in manifest
+    assert "accelerator.example.com/device" in manifest
     assert "nvidia.com/gpu" not in manifest
     assert "runtimeClassName: nvidia" not in manifest
     assert "component: vllm" in manifest
@@ -133,7 +133,7 @@ def test_engine_sglang_alone_keeps_ascend_hardware():
     assert "name: sglang-qwen" in manifest
     assert "exec python -m sglang.launch_server" in manifest
     assert "component: sglang" in manifest
-    assert "huawei.com/Ascend" in manifest
+    assert "accelerator.example.com/device" in manifest
     assert "nvidia.com/gpu" not in manifest
     assert "runtimeClassName: nvidia" not in manifest
     assert "dcmi-volume" in manifest
@@ -177,7 +177,7 @@ def test_sglang_nvidia_uses_pinned_cuda_image_and_gpu_resource():
     assert "--page-size 16" in manifest
     assert "runtimeClassName: nvidia" in manifest
     assert "nvidia.com/gpu" in manifest
-    assert "huawei.com/Ascend" not in manifest
+    assert "accelerator.example.com/device" not in manifest
     for marker in ASCEND_DRIVER_MARKERS:
         assert marker not in manifest
     assert "ascend-toolkit/set_env.sh" not in manifest
@@ -200,7 +200,7 @@ def test_sglang_ascend_requests_npu_and_keeps_driver_mounts():
     )
     assert "name: sglang-qwen" in manifest
     assert "exec python -m sglang.launch_server" in manifest
-    assert "huawei.com/Ascend" in manifest
+    assert "accelerator.example.com/device" in manifest
     assert "nvidia.com/gpu" not in manifest
     assert "runtimeClassName: nvidia" not in manifest
     assert "dcmi-volume" in manifest
@@ -218,7 +218,7 @@ def test_vllm_nvidia_still_uses_gpu_resource():
     assert "sglang.launch_server" not in manifest
     assert "nvidia.com/gpu" in manifest
     assert "runtimeClassName: nvidia" in manifest
-    assert "huawei.com/Ascend" not in manifest
+    assert "accelerator.example.com/device" not in manifest
 
 
 # ---------------------------------------------------------------------------
