@@ -404,11 +404,13 @@ is safe to use directly in `if include "vllmkv.isNvidia" $`.
 
 {{/*
 Kubernetes extended-resource name for the active hardware backend:
-NVIDIA GPUs are requested as "nvidia.com/gpu", Ascend NPUs as
-"huawei.com/Ascend". Context: the root $ context.
+NVIDIA GPUs use the well-known "nvidia.com/gpu"; other backends request the
+resource named by accelerator.resourceName. The public chart default is a
+generic placeholder; real values are supplied by the deployment overlay.
+Context: the root $ context.
 */}}
 {{- define "vllmkv.acceleratorResource" -}}
-{{- if include "vllmkv.isNvidia" . -}}nvidia.com/gpu{{- else -}}huawei.com/Ascend{{- end -}}
+{{- if include "vllmkv.isNvidia" . -}}nvidia.com/gpu{{- else -}}{{ .Values.accelerator.resourceName | default "accelerator.example.com/device" }}{{- end -}}
 {{- end -}}
 
 {{/*
@@ -616,7 +618,7 @@ NIC auto-detection script for Mooncake / HCCL.
 Caller must have NODE_IP available as a shell variable.
 */}}
 {{- define "vllmkv.nicDetectScript" -}}
-local_ip="${NODE_IP}"
+local_ip="${POD_IP:-${NODE_IP}}"
 nic_name=$(python3 -c "
 import os, socket, struct, fcntl
 local_ip = '${local_ip}'
@@ -634,6 +636,10 @@ for iface in os.listdir('/sys/class/net/'):
             break
     except: pass
 ")
+if [ -z "$nic_name" ]; then
+  nic_name=eth0
+  echo "[nic-detect] no iface matched local_ip=${local_ip}, fallback to ${nic_name}"
+fi
 {{- end -}}
 
 {{/*
@@ -641,12 +647,21 @@ Inline Python Prometheus thread exporter for vLLM.
 Caller must set VLLM_PID and POD_NAME shell variables before including.
 */}}
 {{- define "vllmkv.threadExporter" -}}
+{{ include "vllmkv.threadExporterOn" (dict "port" 9101) }}
+{{- end -}}
+
+{{/*
+Inline Python Prometheus thread exporter on a caller-chosen port (per-card P/D
+pods run one exporter per engine container and must not collide).
+Context: dict "port". Caller must set VLLM_PID and POD_NAME shell variables.
+*/}}
+{{- define "vllmkv.threadExporterOn" -}}
 VLLM_PID="$VLLM_PID" POD_NAME="$POD_NAME" python - <<'PY' &
 import os, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 PID = int(os.environ["VLLM_PID"])
 POD = os.environ.get("POD_NAME", "unknown")
-PORT = 9101
+PORT = {{ .port | int }}
 def threads(pid):
     try: return len(os.listdir(f"/proc/{pid}/task"))
     except: return None
@@ -665,5 +680,220 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(body.encode())
     def log_message(self, *a): pass
 HTTPServer(("0.0.0.0", PORT), H).serve_forever()
+PY
+{{- end -}}
+
+{{/*
+Sleep-mode vLLM base env for per-card P/D warm standby.
+Same knobs as vllmkv.vllmBaseEnv, minus PYTORCH_NPU_ALLOC_CONF
+(CaMemAllocator rejects expandable_segments under sleep-mode, SIGABRT) plus the
+sleep-mode compatibility vars (VLLM_SERVER_DEV_MODE=1 to expose /sleep,
+VLLM_WORKER_MULTIPROC_METHOD=spawn, VLLM_ASCEND_ENABLE_NZ=0 because wake_up
+refuses FRACTAL_NZ). Context: dict "tp", "root" (the root $).
+*/}}
+{{- define "vllmkv.vllmSleepBaseEnv" -}}
+- name: HF_HUB_OFFLINE
+  value: "1"
+- name: TRANSFORMERS_OFFLINE
+  value: "1"
+- name: HF_HUB_DISABLE_TELEMETRY
+  value: "1"
+- name: PYTHONHASHSEED
+  value: "0"
+- name: TOKENIZERS_PARALLELISM
+  value: "false"
+- name: POD_NAME
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.name
+- name: VLLM_USE_V1
+  value: "1"
+{{- if not (include "vllmkv.isNvidia" .root) }}
+- name: ASCEND_RT_VISIBLE_DEVICES
+  value: {{ include "vllmkv.tpDevices" (dict "tp" .tp) | quote }}
+- name: HCCL_OP_EXPANSION_MODE
+  value: "AIV"
+- name: ASCEND_BUFFER_POOL
+  value: {{ .root.Values.vllm.ascendBufferPool | default "4:8" | quote }}
+- name: VLLM_SERVER_DEV_MODE
+  value: "1"
+- name: VLLM_WORKER_MULTIPROC_METHOD
+  value: "spawn"
+- name: VLLM_ASCEND_ENABLE_NZ
+  value: "0"
+{{- if or .root.Values.mooncake.enabled .root.Values.lmcache.enabled }}
+- name: OMP_PROC_BIND
+  value: "false"
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Device visibility for dual-engine P/D pods. The Ascend device plugin
+(presetVirtualDevice) renumbers the allocated physical cards to 0..N-1 inside
+the container, and ASCEND_RT_VISIBLE_DEVICES from the chart/plugin already
+matches that view. Overriding it with physical IDs from the device plugin's
+real-device annotation (accelerator.realDeviceAnnotation) is a second mapping
+that fails with aclInit 107001 (Invalid device ID) on any pod whose physical
+cards are not 0..N-1 (e.g. 5,4/3,2).
+*/}}
+{{- define "vllmkv.timeshareNpuDeviceScript" -}}
+# The device-plugin writes {{ .Values.accelerator.realDeviceAnnotation }} after
+# pod creation; the downwardAPI file can lag the container start. Wait for it
+# so the engine never falls back to the hardcoded card list.
+for ((_i=0; _i<120; _i++)); do
+  for _ann in /etc/pod-annotations/ascend-alloc /etc/pod-annotations/ascend-real; do
+    [ -s "${_ann}" ] && break 2
+  done
+  sleep 1
+done
+for _ann in /etc/pod-annotations/ascend-alloc /etc/pod-annotations/ascend-real; do
+  [ -s "${_ann}" ] || continue
+  ascend_real="$(cat "${_ann}" 2>/dev/null || true)"
+  [ -n "${ascend_real}" ] || continue
+  # MUST sort ascending: torch_npu aclInit fails with 107001 (Invalid device ID)
+  # when ASCEND_RT_VISIBLE_DEVICES is in descending order
+  # ("5,4"/"4,2" -> device_count()=0; "4,5"/"2,4" -> ok).
+  dev="$(printf '%s\n' "${ascend_real}" | grep -oE '{{ .Values.accelerator.devicePrefix }}-[0-9]+' | cut -d- -f2 | sort -n | paste -sd, - || true)"
+  if [ -z "${dev}" ]; then
+    dev="$(printf '%s\n' "${ascend_real}" | grep -oE '[0-9]+' | sort -n | paste -sd, - || true)"
+  fi
+  if [ -n "${dev}" ]; then
+    export ASCEND_RT_VISIBLE_DEVICES="${dev}"
+    echo "[device-env] ASCEND_RT_VISIBLE_DEVICES=${dev} (from ${_ann}, sorted)"
+    break
+  fi
+done
+unset _ann
+{{- end -}}
+
+{{/*
+Startup mutual-exclusion gate for either engine in a dual-engine P/D pod.
+Exactly one engine may own the cards at any time.
+
+- decode (`waitPeer=true`): boot order — never start before the prefill engine
+  has been healthy once; then sleep prefill and wait for `is_sleeping=true`.
+- prefill (`waitPeer=false`): restart safety — if decode is loading or awake,
+  wait for it to be healthy, sleep it, and only then start; if decode is not
+  running (port closed, initial boot or crashed container), start immediately.
+
+This covers container restarts: a restarted engine must never initialise while
+its peer is still loading or awake on the same cards (CaMem OOM -> native
+`corrupted size vs. prev_size` crash loop). Context: dict "port" (peer http
+port), "level" (sleep level), "waitPeer" (bool).
+*/}}
+{{- define "vllmkv.timeshareStartupGateScript" -}}
+python3 - <<'PY'
+import json
+import socket
+import time
+import urllib.request
+
+peer_port = {{ .port | int }}
+peer = "http://127.0.0.1:{}".format(peer_port)
+level = {{ .level | default 1 | int }}
+wait_peer = {{ ternary "True" "False" (.waitPeer | default false) }}
+
+
+def peer_open() -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(2)
+    try:
+        sock.connect(("127.0.0.1", peer_port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+# Phase 1: wait until the peer is healthy (we can sleep it).
+started = time.monotonic()
+while time.monotonic() - started < 600:
+    if peer_open():
+        try:
+            with urllib.request.urlopen(peer + "/health", timeout=5) as resp:
+                if resp.status == 200:
+                    print(f"[startup-gate] peer {peer} healthy, will sleep it")
+                    break
+        except Exception:
+            pass
+    elif not wait_peer:
+        # prefill: peer not running (initial boot or crashed container) — safe
+        # to start now; decode must keep waiting for prefill's /health.
+        print(f"[startup-gate] peer {peer} not running, safe to start")
+        break
+    time.sleep(5)
+else:
+    print(f"[startup-gate] WARN: peer {peer} never became healthy in 600s, "
+          "proceeding anyway")
+
+if peer_open():
+    request = urllib.request.Request(
+        peer + "/sleep",
+        data=json.dumps({"level": level}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=120) as resp:
+        resp.read()
+
+    for _ in range(120):
+        try:
+            with urllib.request.urlopen(peer + "/is_sleeping", timeout=5) as resp:
+                if json.loads(resp.read()).get("is_sleeping") is True:
+                    break
+        except Exception:
+            pass
+        time.sleep(2)
+else:
+    print(f"[startup-gate] peer {peer} not running, skipping sleep handshake")
+
+PY
+{{- end -}}
+
+{{/*
+Pre-warm pool bootstrap: sleep the caller's own engine after it becomes
+healthy, so the card joins the pool with BOTH engines asleep (poolBootSleep).
+The rebalancer's first reconcile is then a drain-free wake of exactly the
+target role engines. Context: dict "port" (own http port), "level" (sleep
+level).
+*/}}
+{{- define "vllmkv.poolBootSleepScript" -}}
+# poolBootSleep: sleep own engine so the card joins the pre-warm pool
+python3 - <<'PY'
+import json
+import time
+import urllib.request
+
+self_url = "http://127.0.0.1:{{ .port }}"
+level = {{ .level | default 1 | int }}
+
+for _ in range(600):
+    try:
+        with urllib.request.urlopen(self_url + "/health", timeout=5) as resp:
+            if resp.status == 200:
+                break
+    except Exception:
+        pass
+    time.sleep(5)
+
+request = urllib.request.Request(
+    self_url + "/sleep",
+    data=json.dumps({"level": level}).encode(),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=120) as resp:
+    resp.read()
+
+for _ in range(120):
+    try:
+        with urllib.request.urlopen(self_url + "/is_sleeping", timeout=5) as resp:
+            if json.loads(resp.read()).get("is_sleeping") is True:
+                break
+    except Exception:
+        pass
+    time.sleep(2)
 PY
 {{- end -}}

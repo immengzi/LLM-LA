@@ -22,6 +22,7 @@ The serving platform and benchmark harness for KV-aware LLM serving on Kubernete
 | Doc | Description |
 |-----|-------------|
 | [overview.md](architecture/overview.md) | How the serving platform fits together (start here) |
+| [pd-metrics-contract.md](architecture/pd-metrics-contract.md) | P/D advisory planner input signals and thresholds |
 | [router-strategies.md](architecture/router-strategies.md) | Routing strategies overview with figures (`none/prefix/affinity/both`) |
 | [router.md](architecture/router.md) | Central queue, pull/push dispatch (`push-rr` … `push-least-busy`, `central-push`, `external-push`), [compatibility matrix](architecture/router.md#routing-compatibility-matrix), HTTP/ZMQ APIs |
 | [sidecar.md](architecture/sidecar.md) | Local queue, engine forwarding, KV event reporting |

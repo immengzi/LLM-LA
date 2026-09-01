@@ -1,0 +1,297 @@
+{{/* Quiescent, fixed-budget P/D Deployment rebalancer. */}}
+{{- if .Values.deploy.vllm }}
+{{- $managedModels := list }}
+{{- range $m := .Values.models }}
+{{- if ($m.prefillDecode | default dict).enabled }}
+{{- $pd := merge (deepCopy ($m.prefillDecode | default dict)) ($.Values.prefillDecode | default dict) }}
+{{- $rebalancer := $pd.dynamicRebalance | default dict }}
+{{- if $rebalancer.enabled }}
+{{- $prefill := $pd.prefill | default dict }}
+{{- $decode := $pd.decode | default dict }}
+{{- $defaultTp := $m.tensorParallelSize | default $.Values.tensorParallelSize | int }}
+{{- $prefillTp := $prefill.tensorParallelSize | default $defaultTp | int }}
+{{- $decodeTp := $decode.tensorParallelSize | default $defaultTp | int }}
+{{- if ne $prefillTp $decodeTp }}
+{{- fail (printf "dynamicRebalance requires equal prefill/decode tensorParallelSize for model %q" $m.name) }}
+{{- end }}
+{{- $warmStandby := eq ($rebalancer.mode | default "scale") "warmstandby" }}
+{{- $minPrefill := $rebalancer.minPrefillReplicas | default 1 | int }}
+{{- $minDecode := $rebalancer.minDecodeReplicas | default 1 | int }}
+{{- $maxTotal := $rebalancer.maxTotalReplicas | default 0 | int }}
+{{- $initialPrefill := $prefill.replicas | default 1 | int }}
+{{- $initialDecode := $decode.replicas | default 1 | int }}
+{{- if le $maxTotal 0 }}{{- $maxTotal = add $initialPrefill $initialDecode }}{{- end }}
+{{- if lt $maxTotal 2 }}
+{{- fail (printf "dynamicRebalance maxTotalReplicas must be at least 2 for model %q" $m.name) }}
+{{- end }}
+{{- if and (not $warmStandby) (or (lt $initialPrefill $minPrefill) (lt $initialDecode $minDecode)) }}
+{{- fail (printf "dynamicRebalance initial replicas must satisfy the configured role minimums for model %q" $m.name) }}
+{{- end }}
+{{- if lt $maxTotal (add $minPrefill $minDecode) }}
+{{- fail (printf "dynamicRebalance maxTotalReplicas cannot satisfy both role minimums for model %q" $m.name) }}
+{{- end }}
+{{- if and (not $warmStandby) (lt $maxTotal (add $initialPrefill $initialDecode)) }}
+{{- fail (printf "dynamicRebalance maxTotalReplicas cannot be below the initial P/D replicas for model %q" $m.name) }}
+{{- end }}
+{{- if $warmStandby }}
+{{- $pdReplicas := $pd.replicas | default $maxTotal | int }}
+{{- if lt $pdReplicas $maxTotal }}
+{{- fail (printf "dynamicRebalance warmstandby replicas (%d cards) must be >= maxTotalReplicas %d for model %q" $pdReplicas $maxTotal $m.name) }}
+{{- end }}
+{{- $managedModels = append $managedModels (dict
+      "name" $m.name
+      "mode" "warmstandby"
+      "deployment" (printf "vllm-%s-pd" $m.name)
+      "prefillDeployment" (printf "vllm-%s-prefill" $m.name)
+      "decodeDeployment" (printf "vllm-%s-decode" $m.name)
+      "proxyService" (printf "vllm-%s" $m.name)
+      "minPrefillReplicas" $minPrefill
+      "minDecodeReplicas" $minDecode
+      "maxTotalReplicas" $maxTotal
+      "replicas" $pdReplicas
+      "prefillTp" $prefillTp
+      "decodeTp" $decodeTp
+      "prefillPort" ($prefill.port | default 8200 | int)
+      "decodePort" ($decode.port | default 8201 | int)
+      "sleepLevel" ($rebalancer.sleepLevel | default 1 | int)) }}
+{{- else }}
+{{- $managedModels = append $managedModels (dict
+      "name" $m.name
+      "mode" "scale"
+      "prefillDeployment" (printf "vllm-%s-prefill" $m.name)
+      "decodeDeployment" (printf "vllm-%s-decode" $m.name)
+      "proxyService" (printf "vllm-%s" $m.name)
+      "minPrefillReplicas" $minPrefill
+      "minDecodeReplicas" $minDecode
+      "maxTotalReplicas" $maxTotal
+      "prefillTp" $prefillTp
+      "decodeTp" $decodeTp
+      "prefillPort" 8200
+      "decodePort" 8200
+      "sleepLevel" 1) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if gt (len $managedModels) 0 }}
+{{- $capCfg := $.Values.pdRebalancer.capacityPreflight | default dict }}
+{{- $capEnabled := true }}
+{{- if hasKey $capCfg "enabled" }}
+{{- $capEnabled = $capCfg.enabled }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    resourceNames:
+      {{- range $model := $managedModels }}
+      {{- if $model.deployment }}
+      - {{ $model.deployment }}
+      {{- else }}
+      - {{ $model.prefillDeployment }}
+      - {{ $model.decodeDeployment }}
+      {{- end }}
+      {{- end }}
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    resourceNames:
+      {{- range $model := $managedModels }}
+      - {{ $model.prefillDeployment }}
+      - {{ $model.decodeDeployment }}
+      - {{ $model.proxyService }}
+      {{- end }}
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "patch"]
+    resourceNames: ["{{ .Release.Name }}-pd-rebalancer-state"]
+  # RBAC cannot name-scope `create`, so bootstrap is granted on ConfigMaps in
+  # this namespace only. The controller creates exactly the state ConfigMap
+  # above on first use (GET 404 -> POST); Helm never renders or owns it.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-pd-rebalancer
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-pd-rebalancer
+    namespace: {{ .Release.Namespace }}
+{{- if $capEnabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer-capacity
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer-capacity
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-pd-rebalancer-capacity
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-pd-rebalancer
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer-code
+  namespace: {{ .Release.Namespace }}
+data:
+  pd_rebalancer.py: |-
+{{ .Files.Get "files/pd_rebalancer.py" | nindent 4 }}
+  pd_planner.py: |-
+{{ .Files.Get "files/pd_planner.py" | nindent 4 }}
+{{/* The live state ConfigMap ({{ .Release.Name }}-pd-rebalancer-state) is
+     deliberately NOT rendered here: the rebalancer owns it at runtime and
+     creates it on first use (GET 404 -> POST), then merge-patches targets and
+     planner state into it. Helm never manages the object, so `helm template`
+     renders nothing for it, and `helm upgrade --force`/three-way merge cannot
+     stomp the committed topology. Fresh installs bootstrap to "{}" in the
+     controller; upgrades keep the existing object untouched. */}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    component: pd-rebalancer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-pd-rebalancer
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-pd-rebalancer
+        component: pd-rebalancer
+      annotations:
+        checksum/config: {{ printf "%s|%s" ($.Files.Get "files/pd_rebalancer.py") ($.Files.Get "files/pd_planner.py") | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-pd-rebalancer
+      containers:
+        - name: pd-rebalancer
+          image: {{ include "vllmkv.image" (list $ ($.Values.pdRebalancer.image | default $.Values.images.vllm)) }}
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/etc/pd-rebalancer/pd_rebalancer.py"]
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PD_REBALANCER_STATE_CONFIGMAP
+              value: {{ printf "%s-pd-rebalancer-state" .Release.Name | quote }}
+            - name: PD_REBALANCER_MODELS_JSON
+              value: {{ $managedModels | toJson | quote }}
+            - name: PD_REBALANCER_PORT
+              value: {{ $.Values.pdRebalancer.port | default 8081 | quote }}
+            - name: PD_REBALANCER_POLL_SECONDS
+              value: {{ $.Values.pdRebalancer.pollIntervalSeconds | default 2 | quote }}
+            - name: PD_REBALANCER_HEARTBEAT_TIMEOUT_SECONDS
+              value: {{ $.Values.pdRebalancer.heartbeatTimeoutSeconds | default 60 | quote }}
+            - name: PD_REBALANCER_READY_TIMEOUT_SECONDS
+              value: {{ $.Values.pdRebalancer.readinessTimeoutSeconds | default 900 | quote }}
+            - name: PD_REBALANCER_DRAIN_TIMEOUT_SECONDS
+              value: {{ $.Values.pdRebalancer.drainTimeoutSeconds | default 300 | quote }}
+            - name: PD_REBALANCER_SLEEP_RETRIES
+              value: {{ $.Values.pdRebalancer.sleepRetries | default 5 | quote }}
+            - name: PD_REBALANCER_SLEEP_BACKOFF_SECONDS
+              value: {{ $.Values.pdRebalancer.sleepBackoffSeconds | default 2 | quote }}
+            - name: PD_REBALANCER_CAPACITY_PREFLIGHT
+              value: {{ $capEnabled | quote }}
+            - name: PD_REBALANCER_CAPACITY_RESOURCE
+              value: {{ $.Values.pdRebalancer.capacityPreflight.resourceName | default (include "vllmkv.acceleratorResource" $) | quote }}
+            - name: PD_REBALANCER_DRY_RUN
+              value: {{ $.Values.pdRebalancer.dryRun | default false | quote }}
+            - name: PD_REBALANCER_ADVISORY
+              value: {{ $.Values.pdRebalancer.advisory | quote }}
+            - name: PD_REBALANCER_PLANNER_POLL_SECONDS
+              value: {{ $.Values.pdRebalancer.plannerPollIntervalSeconds | default 5 | quote }}
+            - name: PD_REBALANCER_PLANNER_SCRAPE_DEADLINE_SECONDS
+              value: {{ $.Values.pdRebalancer.plannerScrapeDeadlineSeconds | default 5 | quote }}
+            - name: PD_REBALANCER_METRICS_PORT
+              value: {{ $.Values.pdRebalancer.metricsPort | default 8200 | quote }}
+            - name: PD_REBALANCER_PROXY_METRICS_PORT
+              value: {{ $.Values.pdRebalancer.proxyMetricsPort | default 8200 | quote }}
+            - name: PD_REBALANCER_API_TOKEN
+              value: {{ $.Values.pdRebalancer.apiToken | default "" | quote }}
+            - name: PD_REBALANCER_PLANNER_CONFIG
+              value: {{ $.Values.pdRebalancer.plannerConfig | default dict | toJson | quote }}
+          ports:
+            - name: http
+              containerPort: {{ $.Values.pdRebalancer.port | default 8081 }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: {{ $.Values.pdRebalancer.resources.cpuRequest | default "100m" | quote }}
+              memory: {{ $.Values.pdRebalancer.resources.memoryRequest | default "128Mi" | quote }}
+            limits:
+              cpu: {{ $.Values.pdRebalancer.resources.cpuLimit | default "500m" | quote }}
+              memory: {{ $.Values.pdRebalancer.resources.memoryLimit | default "512Mi" | quote }}
+          volumeMounts:
+            - name: code
+              mountPath: /etc/pd-rebalancer
+              readOnly: true
+      volumes:
+        - name: code
+          configMap:
+            name: {{ .Release.Name }}-pd-rebalancer-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-pd-rebalancer
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}-pd-rebalancer
+  ports:
+    - name: http
+      port: {{ $.Values.pdRebalancer.port | default 8081 }}
+      targetPort: http
+{{- end }}
+{{- end }}

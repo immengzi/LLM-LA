@@ -26,9 +26,10 @@ engineProfiles:
 serviceImpl: python
 
 # Accelerator backend for the vLLM engine pods:
-#   ascend (default) - Huawei Ascend NPUs. Requests huawei.com/Ascend,
-#                      mounts the Ascend driver from the host, and sources the
-#                      Ascend toolkit. Historical behaviour, unchanged.
+#   ascend (default) - Huawei Ascend NPUs. Requests the accelerator resource
+#                      named by accelerator.resourceName (supplied by the
+#                      deployment overlay), mounts the Ascend driver from the
+#                      host, and sources the Ascend toolkit.
 #   nvidia           - NVIDIA GPUs. Requests nvidia.com/gpu (injected by the
 #                      NVIDIA device plugin), sets vllm.runtimeClassName, and
 #                      drops all Ascend driver mounts / toolkit setup.
@@ -36,6 +37,16 @@ serviceImpl: python
 # helm.values.hardware in src/client/configs/clusters.yaml rather than editing
 # the deploy scripts. See docs/deployment/gpu.md.
 hardware: ascend
+
+# Generic accelerator resource defaults for the public chart. The values below
+# are placeholders and are not schedulable by themselves; real values are
+# supplied per cluster by the deployment overlay
+# (helm.values.accelerator in src/client/configs/clusters.yaml) so vendor
+# hardware identifiers stay out of this repository.
+accelerator:
+  resourceName: "accelerator.example.com/device"   # extended-resource name to request/schedule
+  devicePrefix: "Device"                            # device-name prefix in allocation annotations ("<prefix>-<n>")
+  realDeviceAnnotation: "accelerator.example.com/real-device"  # optional; annotation written by the device plugin with physical device IDs
 
 # Offset added to every hardcoded NodePort (redis, router, cpu-hash, vLLM).
 # Default 0 keeps original ports; set e.g. 100 for a shadow deployment to
@@ -540,8 +551,13 @@ sglang:
 #     enabled: true       # serve this model via a prefill pool + decode pool +
 #                         # a proxy (see 41-vllm-pd-disagg.yaml and the global
 #                         # prefillDecode: block below for the full schema).
-#     prefill: { replicas: 1, tensorParallelSize: 1, batchSize: 32 }
-#     decode:  { replicas: 1, tensorParallelSize: 1, batchSize: 32 }
+#     dynamicRebalance:
+#       mode: warmstandby # scale (default, delete pod + cold start) | warmstandby
+#                         # (per-card dual engine: one awake, peer sleeping; flips in seconds)
+#       sleepLevel: 1     # warmstandby: vLLM sleep level (1=weights to CPU, drop KV)
+#     replicas: 3         # warmstandby: number of dual-engine pods (cards); null -> maxTotalReplicas
+#     prefill: { port: 8200, tensorParallelSize: 1, batchSize: 32 }
+#     decode:  { port: 8201, tensorParallelSize: 1, batchSize: 32 }
 #     proxy:   { nodePort: 30036 }
 #
 # Example — single model:
@@ -626,20 +642,47 @@ dataParallel:
 # per-model settings (models[].prefillDecode.*) win. Off unless a model opts in.
 # See docs/deployment/prefill-decode-disaggregation.md.
 prefillDecode:
+  terminationGracePeriodSeconds: 120   # engine pods get this long to finish in-flight work on scale-down
+  # warmstandby only: run the dual-engine pod on the host network. TP>1 needs
+  # hostNetwork on clusters whose HCCL must use the physical host NIC; with the
+  # default (false) the engines use the pod network and multiple TP>1 pods may
+  # share one node. hostNetwork=true enforces one pod per node.
+  hostNetwork: false
+  # warmstandby only: number of dual-engine pods (one card each). Each pod
+  # hosts BOTH a prefill and a decode engine; exactly one is awake per card.
+  # null -> dynamicRebalance.maxTotalReplicas.
+  replicas: null
+  # warmstandby only: boot both engines asleep so the card joins the pre-warm
+  # pool (true), or boot decode-awake and let the rebalancer converge (false,
+  # default). With true the first reconcile is a drain-free wake of exactly
+  # the target roles.
+  poolBootSleep: false
   prefill:
     replicas: 1
+    port: 8200                # engine http port (warmstandby: prefill container)
     tensorParallelSize: null   # null -> model.tensorParallelSize (or global)
     batchSize: null            # null -> model.batchSize (or global)
   decode:
     replicas: 1
+    port: 8201                # engine http port (warmstandby: decode container;
+                              # scale mode keeps 8200 unless overridden)
     tensorParallelSize: null
     batchSize: null
+  # Per-model opt-in only (models[].prefillDecode.dynamicRebalance). Defaults
+  # used by the rebalancer template when a model opts in:
+  #   enabled: true
+  #   mode: scale             # scale (cold pod recreation) | warmstandby (per-card sleep/wake)
+  #   minPrefillReplicas: 1
+  #   minDecodeReplicas: 1
+  #   maxTotalReplicas: 3     # awake budget (P+D); warmstandby also = default card count
+  #   sleepLevel: 1           # warmstandby: vLLM sleep level
   proxy:
     image: ""                  # "" -> images.vllm (guaranteed to ship aiohttp; CPU-only)
     replicas: 1
     port: 8200                 # proxy container listen port
     nodePort: 30036            # +portOffset; the model's external endpoint
     logLevel: info             # debug | info | warning | error
+    drainMaxWaitSeconds: 300   # max time a new P/D request waits during a rebalancer drain window
     resources:
       cpuRequest: "200m"
       memoryRequest: "512Mi"
@@ -651,6 +694,34 @@ prefillDecode:
   kvTransferConfig:
     prefill: ""
     decode: ""
+
+# Optional quiescent P/D replica rebalancer. It owns only P/D-enabled models
+# that opt in through models[].prefillDecode.dynamicRebalance.enabled.
+pdRebalancer:
+  image: ""                    # empty -> images.vllm; must provide Python 3
+  port: 8081
+  pollIntervalSeconds: 2
+  heartbeatTimeoutSeconds: 60   # /healthz fails when a worker loop has not stamped within this many seconds
+  readinessTimeoutSeconds: 900
+  drainTimeoutSeconds: 300     # rebalancer waits this long for the proxy to drain in-flight requests
+  sleepRetries: 5              # warmstandby: /sleep retry attempts (transient 500 while delayed KV connector frees drain)
+  sleepBackoffSeconds: 2       # warmstandby: linear backoff between /sleep retries (seconds)
+  capacityPreflight:           # reject targets that cannot fit the cluster's accelerator budget
+    enabled: true              # true -> renders a ClusterRole (nodes + all-namespace pods read)
+    resourceName: ""           # optional override; empty -> accelerator.resourceName via vllmkv.acceleratorResource
+  dryRun: false                # true -> reconcile logs planned transitions without touching /scale
+  advisory: true               # true -> planner logs recommendations only; false -> auto propose+commit
+  plannerPollIntervalSeconds: 5
+  plannerScrapeDeadlineSeconds: 5   # per-poll cap for the concurrent metrics scrape; keep <= plannerPollIntervalSeconds to hold cadence
+  metricsPort: 8200
+  proxyMetricsPort: 8200     # P/D proxy /metrics port (planner scrapes proxy on this)
+  apiToken: ""               # optional; when non-empty, /v1/targets/* requires an X-Auth-Token header (healthz excluded)
+  plannerConfig: {}            # JSON object overriding pd_planner.PlannerConfig defaults
+  resources:
+    cpuRequest: "100m"
+    memoryRequest: "128Mi"
+    cpuLimit: "500m"
+    memoryLimit: "512Mi"
 
 # -----------------------------------------------------------------------
 # NFS page cache warm — pre-reads model shards before vLLM pods start.
