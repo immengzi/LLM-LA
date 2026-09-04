@@ -115,6 +115,7 @@ def make_rebalancer(api: FakeKubernetesApi, dry_run: bool = False) -> object:
     rebalancer.lock = threading.Lock()
     rebalancer.models = {"qwen": config()}
     rebalancer.last_error = ""
+    rebalancer.needs_recreate: set[str] = set()
     rebalancer._first_pass = False
     rebalancer.heartbeat_timeout = 60.0
     rebalancer.heartbeats = {

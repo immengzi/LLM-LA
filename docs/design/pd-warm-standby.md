@@ -19,8 +19,11 @@ One card = one pod (vllm-<model>-pd)
 └──────────────────────────────────────────────┘
 ```
 
-- `replicas` = number of cards (defaults to `maxTotalReplicas`); tensor
-  parallelism must be 1 (one engine maps to one card).
+- `replicas` = number of dual-engine pods (defaults to `maxTotalReplicas`);
+  tensor parallelism 1 and 2 are both supported on a single node. With TP=1
+  each pod owns one card and one engine; with TP=2 each pod owns a two-card
+  pair and each engine inside the pod uses that pair (only one engine is
+  awake at a time).
 - Startup gate: the decode container waits for the prefill `/health`, puts the
   prefill to sleep, and only then starts its own engine, so each pod boots with
   a single awake engine. The rebalancer then converges to the target `(P,D)`.
@@ -51,13 +54,26 @@ One card = one pod (vllm-<model>-pd)
 - A target `(P,D)` keeps pods that already match a needed role and minimizes the
   number of flips.
 - Per-card flip sequence: drain the proxy -> `POST /sleep` on the currently
-  active engine -> wait for `is_sleeping=true` -> `POST /wake_up` on the
-  co-located peer -> wait for `/health` -> patch the labels.
+  active engine -> wait for `is_sleeping=true` -> patch labels to idle
+  (`pd-*-awake: "false"`) -> `POST /wake_up` on the co-located peer (retrying
+  transient HTTP errors) -> wait for `/health` -> patch labels to the new
+  role.
 - Mutual exclusion is a hard constraint: the current engine must be asleep
   (NPU released) before the peer is woken; waking the peer too early can
   OOM-kill EngineCore.
+- Labels are patched after every engine step, not only at the end, so the
+  Services always route to reality: once the old role is asleep the card is
+  reported idle, and only after the peer reports healthy is the new role
+  published.
+- If waking the peer fails, the card is left idle and recorded in the
+  rebalancer's `needs_recreate` set: the executor never wakes a peer on a
+  card whose engine may have crashed mid-wake (that is the crash-cascade
+  path), and rollback skips flagged cards. The only safe recovery is pod
+  recreation.
 - On failure or stale transition, per-card previous roles are recorded and
-  restored.
+  restored; wake failures additionally honor `PD_REBALANCER_WAKE_RETRIES`
+  (default 3) and `PD_REBALANCER_WAKE_BACKOFF_SECONDS` (default 5) before a
+  card is flagged.
 - `Deployment /scale` is never touched in warm-standby mode.
 
 ### 2.3 Pre-warm pool and SLO-driven scaling
@@ -124,7 +140,9 @@ prefillDecode:
 
 The rebalancer `/sleep` retry knobs are chart values too:
 `pdRebalancer.sleepRetries` (default 5) and
-`pdRebalancer.sleepBackoffSeconds` (default 2).
+`pdRebalancer.sleepBackoffSeconds` (default 2). Wake uses
+`pdRebalancer.wakeRetries` (default 3) and
+`pdRebalancer.wakeBackoffSeconds` (default 5).
 
 ### 2.6 Sleep-mode requirements
 
@@ -164,8 +182,13 @@ The chart injects these automatically in warm-standby mode.
 ## 5. Known boundaries
 
 - Prompts shorter than the KV connector block granularity are not published to
-  the shared store and therefore not reused (connector design, topology
-  independent).
+  the shared store and therefore not reused; prompts covering at least one
+  full block are published and pulled by the decode engine (connector design,
+  topology independent).
+- Single-node TP/DP combinations validated on the pd-sleepfix image: TP=1/DP=1,
+  TP=1/DP=2, and TP=2/DP=2 topologies with clean warm-standby flips
+  (P1,D2 <-> P2,D1 and P2,D2 round trips), 0 crashes and no decode-only
+  fallback when the prompt spans a full KV block.
 - `hostNetwork=true` is not supported in warm-standby mode (port and loopback
   semantics conflict with two engines per pod).
 - First cold start loads the model twice (prefill, then decode); steady-state

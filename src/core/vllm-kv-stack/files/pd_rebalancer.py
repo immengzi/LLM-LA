@@ -249,6 +249,12 @@ class Rebalancer:
         self.lock = threading.Lock()
         self.last_error = ""
         self.planner_error = ""
+        # Pods whose wake-up failed mid-flip (engine may have crashed). They
+        # are taken out of service (labels idle) and excluded from flip plans;
+        # the only safe recovery is pod recreation, because waking the peer on
+        # the same card while the failed engine may still hold NPU memory is
+        # what turns a wake failure into a crash cascade.
+        self.needs_recreate: set[str] = set()
         self.heartbeat_timeout = float(
             os.environ.get("PD_REBALANCER_HEARTBEAT_TIMEOUT_SECONDS", "60")
         )
@@ -437,7 +443,14 @@ class Rebalancer:
         )
 
     def _wake_engine(self, config: ModelConfig, pod: dict[str, Any], role: str) -> None:
-        """POST /wake_up and wait /health 200 (no label change)."""
+        """POST /wake_up (retrying transient HTTP errors) and wait /health 200.
+
+        Mirrors ``_sleep_engine``: a wake can transiently return HTTP 500 while
+        the engine drains background connector work after a long sleep, so a
+        single failure must not immediately tear the card down. Health is
+        re-checked between retries because a 500 may still have woken the
+        engine.
+        """
         base = self._engine_base(pod, self._role_port(config, role))
         name = (pod.get("metadata") or {}).get("name", "")
         # Idempotent: an engine that is already awake (label/runtime divergence
@@ -450,9 +463,32 @@ class Rebalancer:
         except Exception:  # noqa: BLE001
             pass
         if not already_awake:
-            self.stamp_heartbeat("rebalancer")
-            with urlopen(Request(f"{base}/wake_up", method="POST"), timeout=120) as response:
-                response.read()
+            wake_retries = int(os.environ.get("PD_REBALANCER_WAKE_RETRIES", "3"))
+            wake_backoff = float(
+                os.environ.get("PD_REBALANCER_WAKE_BACKOFF_SECONDS", "5")
+            )
+            last_error: Optional[Exception] = None
+            for attempt in range(wake_retries):
+                self.stamp_heartbeat("rebalancer")
+                try:
+                    with urlopen(
+                        Request(f"{base}/wake_up", method="POST"), timeout=120
+                    ) as response:
+                        response.read()
+                    break
+                except HTTPError as error:
+                    last_error = error
+                    print(
+                        f"[pd-rebalancer] {config.name}: {name} {role} wake returned "
+                        f"HTTP {error.code}, retry {attempt + 1}/{wake_retries}",
+                        flush=True,
+                    )
+                    time.sleep(wake_backoff * (attempt + 1))
+            else:
+                raise RuntimeError(
+                    f"{name} {role} wake_up failed after {wake_retries} attempts: "
+                    f"{last_error}"
+                )
         deadline = time.monotonic() + self.ready_timeout
         while time.monotonic() < deadline:
             self.stamp_heartbeat("rebalancer")
@@ -499,15 +535,32 @@ class Rebalancer:
         Mutual exclusion is a hard constraint on the shared card: the current
         engine must be sleeping (NPU released) before the peer is woken,
         otherwise CaMem OOM can kill EngineCore.
+
+        Labels are patched after every engine step (not only at the end) so
+        Services and ``awake()`` always reflect reality: once the old role is
+        asleep the card is reported idle, and only after the peer reports
+        healthy is the new role published. If waking the peer fails the card is
+        left idle and recorded in ``needs_recreate``; the peer must NOT be
+        woken on a card whose engine may have crashed mid-wake (that is the
+        crash-cascade path), so rollback skips such cards.
         """
         current = self._pod_active_role(pod)
         if current == to_role:
             return
         if current is not None:
             self._sleep_engine(config, pod, current)
+            self._patch_awake_labels(config, pod, None)
         if to_role is not None:
-            self._wake_engine(config, pod, to_role)
-        self._patch_awake_labels(config, pod, to_role)
+            try:
+                self._wake_engine(config, pod, to_role)
+            except Exception as error:  # noqa: BLE001
+                name = (pod.get("metadata") or {}).get("name", "")
+                self.needs_recreate.add(name)
+                raise RuntimeError(
+                    f"{name} wake to {to_role} failed ({error}); card left idle, "
+                    f"pod needs recreation"
+                ) from error
+            self._patch_awake_labels(config, pod, to_role)
         name = (pod.get("metadata") or {}).get("name", "")
         print(
             f"[pd-rebalancer] {config.name}: {name} role flip "
@@ -530,14 +583,22 @@ class Rebalancer:
             (
                 p
                 for p in self._card_pods(config)
-                if self._pod_ip(p) and self._pod_ready(p)
+                if self._pod_ip(p)
+                and self._pod_ready(p)
+                and (p.get("metadata") or {}).get("name") not in self.needs_recreate
             ),
             key=lambda p: (p.get("metadata") or {}).get("name", ""),
         )
         if len(pods) < target.prefill + target.decode:
+            flagged = sorted(self.needs_recreate)
             raise RuntimeError(
                 f"only {len(pods)} ready dual-engine pods, need "
                 f"{target.prefill + target.decode} for P{target.prefill},D{target.decode}"
+                + (
+                    f"; pods awaiting recreation after failed wake: {flagged}"
+                    if flagged
+                    else ""
+                )
             )
         prefill_pods = [p for p in pods if self._pod_active_role(p) == "prefill"]
         decode_pods = [p for p in pods if self._pod_active_role(p) == "decode"]
@@ -589,6 +650,11 @@ class Rebalancer:
             self.drain_proxy(config, False)
             for pod in self._card_pods(config):
                 name = (pod.get("metadata") or {}).get("name", "")
+                if name in self.needs_recreate:
+                    # Wake failed on this card and the engine may have crashed:
+                    # never re-wake the peer here. Leave it idle (already done
+                    # by _flip_pod) and require pod recreation.
+                    continue
                 want = previous_roles.get(name)
                 if self._pod_active_role(pod) != want:
                     self._flip_pod(config, pod, want)

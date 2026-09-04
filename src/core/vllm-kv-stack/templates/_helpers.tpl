@@ -754,7 +754,11 @@ for _ann in /etc/pod-annotations/ascend-alloc /etc/pod-annotations/ascend-real; 
   # MUST sort ascending: torch_npu aclInit fails with 107001 (Invalid device ID)
   # when ASCEND_RT_VISIBLE_DEVICES is in descending order
   # ("5,4"/"4,2" -> device_count()=0; "4,5"/"2,4" -> ok).
-  dev="$(printf '%s\n' "${ascend_real}" | grep -oE '{{ .Values.accelerator.devicePrefix }}-[0-9]+' | cut -d- -f2 | sort -n | paste -sd, - || true)"
+  # Prefer explicit "<vendor>-<n>" tokens (e.g. "Ascend910-4,Ascend910-7" or
+  # "Device-4,Device-7"). A plain all-digits fallback would also capture the
+  # vendor model number (the "910" in "Ascend910-4"), so only use it when the
+  # annotation has no "<vendor>-<n>" tokens at all.
+  dev="$(printf '%s\n' "${ascend_real}" | tr ',' '\n' | sed -nE 's/^.*-([0-9]+)$/\1/p' | sort -n | paste -sd, - || true)"
   if [ -z "${dev}" ]; then
     dev="$(printf '%s\n' "${ascend_real}" | grep -oE '[0-9]+' | sort -n | paste -sd, - || true)"
   fi

@@ -116,6 +116,7 @@ def make_rebalancer(pods: list[dict], api: FakeKubernetesApi | None = None) -> o
     rebalancer.engine_calls: list[tuple[str, str]] = []
     rebalancer.fail_wake_at_call: int | None = None
     rebalancer._wake_count = 0
+    rebalancer.needs_recreate: set[str] = set()
 
     def sleep_engine(config, pod, role) -> None:
         rebalancer.engine_calls.append(("sleep", role))
@@ -424,25 +425,49 @@ def test_pool_counts_only_cards_with_both_engines_asleep() -> None:
     assert rebalancer.pool(warm_config()) == 1
 
 
-def test_reconcile_awake_rolls_back_pods_and_state_on_failure() -> None:
+def test_reconcile_awake_flags_failed_wake_card_idle_and_rolls_back_others() -> None:
     pods = [card("a", "decode"), card("b", "decode"), card("c", "decode")]
     api = FakeKubernetesApi(pods)
     rebalancer = make_rebalancer(pods, api)
     config = warm_config()
-    # First flip (card-b) succeeds; second flip (card-c) fails at wake, so the
-    # rollback must flip card-b back to decode.
+    # First flip (card-b) succeeds; second flip (card-c) fails at wake. The
+    # failed card must be left idle and flagged for recreation (its engine may
+    # have crashed), never re-woken on the same card; card-b rolls back.
     rebalancer.fail_wake_at_call = 2
 
     assert rebalancer.reconcile_awake(config, MODULE.Replicas(2, 1)) is False
-    # every card is back to its previous role (decode)
-    assert active_roles(rebalancer, config) == {"a": "decode", "b": "decode", "c": "decode"}
+    assert active_roles(rebalancer, config) == {
+        "a": "decode",
+        "b": "decode",
+        "c": None,
+    }
+    assert rebalancer.needs_recreate == {"c"}
     entry = api.state["qwen"]
     assert entry["target"] == {"prefill": 0, "decode": 3}
     assert "transition" not in entry
     assert "awake transition failed" in rebalancer.last_error
-    # rollback flips the partially flipped cards back (sleep prefill, wake decode)
+    assert "needs recreation" in rebalancer.last_error
+    # rollback flips card-b back (sleep prefill, wake decode) but never touches c
     assert ("sleep", "prefill") in rebalancer.engine_calls
     assert ("wake", "decode") in rebalancer.engine_calls
+    # c stayed idle (out of service) after the failed wake; rollback must not
+    # wake its decode back on the same card.
+    labels_c = next(p["metadata"]["labels"] for p in api.pods_list if p["metadata"]["name"] == "c")
+    assert labels_c["pd-prefill-awake"] == "false"
+    assert labels_c["pd-decode-awake"] == "false"
+
+
+def test_flip_plan_excludes_cards_awaiting_recreation() -> None:
+    pods = [card("a", "decode"), card("b", "prefill"), card("c", None)]
+    rebalancer = make_rebalancer(pods)
+    rebalancer.needs_recreate = {"c"}
+    config = warm_config()
+
+    # A target satisfiable without the flagged card plans normally.
+    assert rebalancer._flip_plan(config, MODULE.Replicas(1, 1)) == []
+    # A target that needs the flagged card fails loudly instead of waking it.
+    with pytest.raises(RuntimeError, match="awaiting recreation"):
+        rebalancer._flip_plan(config, MODULE.Replicas(2, 1))
 
 
 def test_begin_transition_records_previous_roles_for_stale_rollback() -> None:
