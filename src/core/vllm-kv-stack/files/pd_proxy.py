@@ -40,6 +40,9 @@ DECODE = _urls("DECODE_BASE")
 PORT = int(os.environ.get("PROXY_PORT", "8200"))
 PD_PATHS = ("/v1/chat/completions", "/v1/completions")
 DRAIN_MAX_WAIT = float(os.environ.get("PROXY_DRAIN_MAX_WAIT_SECONDS", "300"))
+RETRY_DEADLINE_SECONDS = float(os.environ.get("PROXY_RETRY_DEADLINE_SECONDS", "60"))
+RETRY_SLEEP_SECONDS = float(os.environ.get("PROXY_RETRY_SLEEP_SECONDS", "1"))
+_INFLIGHT_TTL_SECONDS = float(os.environ.get("PROXY_INFLIGHT_TTL_SECONDS", "300"))
 # Response headers worth relaying back to the client. Kept as a small
 # allow-list on purpose: hop-by-hop headers (Content-Length, Content-Encoding,
 # Connection) must not be copied because aiohttp re-encodes the stream itself.
@@ -74,6 +77,14 @@ class _Metrics:
             "prefill_prompt_tokens_total": 0.0,
             "decode_inflight": 0.0,
             "decode_requests_total": 0.0,
+            "retry_total": 0.0,
+            "drain_wait_seconds": 0.0,
+            "drain_wait_count": 0.0,
+            "reject_503_total": 0.0,
+            "reject_502_total": 0.0,
+            "reject_409_total": 0.0,
+            "prefill_seconds_total": 0.0,
+            "decode_seconds_total": 0.0,
         }
         # Sliding window of prompt tokens from successful prefill responses.
         # The mean tracks recent workload instead of the lifetime average, so a
@@ -210,6 +221,30 @@ async def metrics(request):
         "# HELP pd_proxy_decode_requests_total Requests that completed the decode phase.",
         "# TYPE pd_proxy_decode_requests_total counter",
         f"pd_proxy_decode_requests_total {values['decode_requests_total']:.0f}",
+        "# HELP pd_proxy_retry_total Endpoint retries triggered by unplanned failures.",
+        "# TYPE pd_proxy_retry_total counter",
+        f"pd_proxy_retry_total {values['retry_total']:.0f}",
+        "# HELP pd_proxy_drain_wait_seconds_total Time requests spent queued on planned transitions.",
+        "# TYPE pd_proxy_drain_wait_seconds_total counter",
+        f"pd_proxy_drain_wait_seconds_total {values['drain_wait_seconds']:.3f}",
+        "# HELP pd_proxy_drain_wait_count Requests that queued on a planned transition.",
+        "# TYPE pd_proxy_drain_wait_count counter",
+        f"pd_proxy_drain_wait_count {values['drain_wait_count']:.0f}",
+        "# HELP pd_proxy_reject_503_total Transient unavailability responses (503 + Retry-After).",
+        "# TYPE pd_proxy_reject_503_total counter",
+        f"pd_proxy_reject_503_total {values['reject_503_total']:.0f}",
+        "# HELP pd_proxy_reject_502_total Protocol-error responses (502).",
+        "# TYPE pd_proxy_reject_502_total counter",
+        f"pd_proxy_reject_502_total {values['reject_502_total']:.0f}",
+        "# HELP pd_proxy_reject_409_total Duplicate in-flight X-Request-Id rejections.",
+        "# TYPE pd_proxy_reject_409_total counter",
+        f"pd_proxy_reject_409_total {values['reject_409_total']:.0f}",
+        "# HELP pd_proxy_prefill_seconds_total Cumulative prefill-phase duration.",
+        "# TYPE pd_proxy_prefill_seconds_total counter",
+        f"pd_proxy_prefill_seconds_total {values['prefill_seconds_total']:.3f}",
+        "# HELP pd_proxy_decode_seconds_total Cumulative decode-phase duration.",
+        "# TYPE pd_proxy_decode_seconds_total counter",
+        f"pd_proxy_decode_seconds_total {values['decode_seconds_total']:.3f}",
     ]
     return web.Response(
         text="\n".join(lines) + "\n",
@@ -230,6 +265,11 @@ async def status(request):
             "prefill_requests_total": values["prefill_requests_total"],
             "decode_requests_total": values["decode_requests_total"],
             "prefill_mean_prompt_tokens": values["prefill_mean_prompt_tokens"],
+            "retry_total": values["retry_total"],
+            "drain_wait_seconds": values["drain_wait_seconds"],
+            "reject_503_total": values["reject_503_total"],
+            "reject_502_total": values["reject_502_total"],
+            "reject_409_total": values["reject_409_total"],
         }
     )
 
@@ -259,7 +299,53 @@ async def _wait_for_drain():
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise DrainTimeout()
-            await asyncio.wait_for(_drain_cond.wait(), timeout=remaining)
+            try:
+                await asyncio.wait_for(_drain_cond.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                # Loop back to re-check the deadline and raise DrainTimeout so
+                # callers can map it to 503 + Retry-After instead of a 500.
+                continue
+
+
+async def _wait_for_drain_counted() -> None:
+    t0 = time.monotonic()
+    try:
+        await _wait_for_drain()
+    finally:
+        waited = time.monotonic() - t0
+        if waited > 0.05:
+            await _metrics.inc("drain_wait_seconds", waited)
+            await _metrics.inc("drain_wait_count", 1.0)
+
+
+async def _unavailable(message: str) -> web.Response:
+    """Transient unavailability (planned transition): 503 + Retry-After."""
+    await _metrics.inc("reject_503_total", 1.0)
+    return web.json_response(
+        {"error": message}, status=503, headers={"Retry-After": "1"}
+    )
+
+
+_inflight: dict[str, float] = {}
+_inflight_lock = asyncio.Lock()
+
+
+async def _register_inflight(req_id: str) -> bool:
+    """Reject a duplicate X-Request-Id that is still being processed."""
+    async with _inflight_lock:
+        now = time.monotonic()
+        for key, ts in list(_inflight.items()):
+            if now - ts >= _INFLIGHT_TTL_SECONDS:
+                del _inflight[key]
+        if req_id in _inflight:
+            return False
+        _inflight[req_id] = now
+        return True
+
+
+async def _clear_inflight(req_id: str) -> None:
+    async with _inflight_lock:
+        _inflight.pop(req_id, None)
 
 
 async def _relay(request, upstream):
@@ -295,6 +381,7 @@ async def _passthrough(request, base):
             request.method, url, data=data or None, headers=headers
         )
     except Exception as e:  # noqa: BLE001
+        await _metrics.inc("reject_502_total", 1.0)
         return web.json_response({"error": f"upstream error: {e}"}, status=502)
     return await _relay(request, upstream)
 
@@ -313,19 +400,33 @@ async def handle(request):
             request, await _pick(_decode_rr, DECODE, skip=failed)
         )
     try:
-        await _wait_for_drain()
+        await _wait_for_drain_counted()
     except DrainTimeout:
-        return web.json_response(
-            {"error": "pd-proxy is draining; retry later"}, status=503
-        )
+        return await _unavailable("pd-proxy is draining; retry later")
 
     req_id = request.headers.get("X-Request-Id") or f"pd-{uuid.uuid4().hex}"
-    failed = await _recent_failures()
-    prefill_base = await _pick(_prefill_rr, PREFILL, skip=failed)
-    decode_base = await _pick(_decode_rr, DECODE, skip=failed)
+    if not await _register_inflight(req_id):
+        await _metrics.inc("reject_409_total", 1.0)
+        return web.json_response(
+            {"error": f"duplicate in-flight X-Request-Id: {req_id}"},
+            status=409,
+        )
+    try:
+        return await _handle_pd(request, path, body, req_id)
+    finally:
+        await _clear_inflight(req_id)
+
+
+async def _handle_pd(request, path: str, body: dict, req_id: str):
+    """Two-phase P/D request.
+
+    Planned transitions queue here (drain) and only unplanned endpoint failures
+    fall back to the bounded retry loop; retries only happen before any byte is
+    relayed to the client, so a retried request is never a partially streamed
+    duplicate.
+    """
     session = await _get_session(request.app)
 
-    # --- Phase 1: prefill (max_tokens=1) ---
     prefill_body = dict(body)
     prefill_body["max_tokens"] = 1
     if "max_completion_tokens" in prefill_body:
@@ -336,7 +437,6 @@ async def handle(request):
     prefill_body["min_tokens"] = 0
     prefill_body["stream"] = False
     prefill_body.pop("stream_options", None)
-    kv_params = None
 
     async def _prefill_once(base):
         """Return (status, body) or (None, exception) so callers can retry."""
@@ -351,63 +451,14 @@ async def handle(request):
         except Exception as e:  # noqa: BLE001
             return None, e
 
-    async def _prefill_candidates():
-        """At most two distinct bases: the picked one, then one more on retry."""
-        yield prefill_base
-        async for base in _cycle_candidates(
-            _prefill_rr, PREFILL, skip=failed | {prefill_base}, limit=1
-        ):
-            yield base
+    async def _candidates(rr, bases, first, skip):
+        picked = [first]
+        async for base in _cycle_candidates(rr, bases, skip=skip | {first}):
+            if base not in picked:
+                picked.append(base)
+        return picked
 
-    await _metrics.inc("prefill_inflight", 1.0)
-    try:
-        # Retry prefill once on connection errors / 5xx so a terminating
-        # prefill pod does not silently degrade the request to decode-only.
-        # The retry picks a different base and skips recently-failed ones, so
-        # it does not just resend to the same pod that is draining. Client
-        # errors (4xx) are not retried.
-        prefill_status = None
-        prefill_text = ""
-        prefill_candidates = [b async for b in _prefill_candidates()]
-        for attempt, base in enumerate(prefill_candidates, start=1):
-            prefill_status, prefill_text = await _prefill_once(base)
-            if isinstance(prefill_status, int) and prefill_status // 100 == 2:
-                break
-            if isinstance(prefill_status, int) and 400 <= prefill_status < 500:
-                break
-            # Connection error or 5xx: the pod may be terminating, so remember
-            # it and let the retry (and later requests) avoid it.
-            await _remember_failure(base)
-            if attempt < len(prefill_candidates):
-                log.warning(
-                    "prefill attempt %s failed on %s id=%s status=%s; retrying once",
-                    attempt, base, req_id, prefill_status,
-                )
-                await asyncio.sleep(0.2)
-        if isinstance(prefill_status, int) and prefill_status // 100 == 2:
-            try:
-                data = json.loads(prefill_text)
-                kv_params = data.get("kv_transfer_params")
-                usage = data.get("usage") or {}
-                await _metrics.record_prefill(
-                    float(usage.get("prompt_tokens") or 0.0),
-                )
-            except Exception:  # noqa: BLE001
-                kv_params = None
-        else:
-            log.warning(
-                "prefill non-2xx status=%s id=%s body=%.200s (decode-only fallback)",
-                prefill_status, req_id, prefill_text,
-            )
-    finally:
-        await _metrics.inc("prefill_inflight", -1.0)
-
-    # --- Phase 2: decode (original request), streamed back ---
-    decode_body = dict(body)
-    if kv_params is not None:
-        decode_body["kv_transfer_params"] = kv_params
-
-    async def _post_decode(base: str):
+    async def _post_decode(base: str, decode_body: dict):
         try:
             upstream = await session.post(
                 f"{base}{path}",
@@ -421,44 +472,110 @@ async def handle(request):
             return None, RuntimeError(f"decode HTTP {upstream.status}")
         return upstream, None
 
-    async def _decode_candidates():
-        """The picked base first, then other distinct bases, skipping bad ones."""
-        yield decode_base
-        async for base in _cycle_candidates(
-            _decode_rr, DECODE, skip=failed | {decode_base}
-        ):
-            yield base
+    deadline = time.monotonic() + RETRY_DEADLINE_SECONDS
+    upstream = None
+    err = None
+    while upstream is None:
+        # Phase boundary: a planned flip may have started after entry, so
+        # queue here instead of racing the role switch.
+        try:
+            await _wait_for_drain_counted()
+        except DrainTimeout:
+            return await _unavailable("pd-proxy is draining; retry later")
 
-    # A decode pod can die mid-scale-down; retry on another instance so a
-    # request is not lost just because the first pod was being terminated.
-    # Each base is tried at most once and recently-failed bases are skipped,
-    # so if several decode pods are draining at once the retry still lands on
-    # a surviving instance instead of blindly hitting the next dying pod.
-    # (A worker-side drain does not cover an already established connection
-    # that gets cut, so the proxy retry is the safety net.)
-    await _metrics.inc("decode_inflight", 1.0)
-    try:
-        upstream = None
-        err = None
-        attempt = 0
-        async for base in _decode_candidates():
-            attempt += 1
-            upstream, err = await _post_decode(base)
-            if upstream is not None:
-                break
-            log.warning(
-                "decode attempt %s failed on %s id=%s err=%s",
-                attempt, base, req_id, err,
+        failed = await _recent_failures()
+        prefill_base = await _pick(_prefill_rr, PREFILL, skip=failed)
+        decode_base = await _pick(_decode_rr, DECODE, skip=failed)
+
+        # --- Phase 1: prefill (max_tokens=1) ---
+        phase_t0 = time.monotonic()
+        await _metrics.inc("prefill_inflight", 1.0)
+        kv_params = None
+        prefill_status = None
+        prefill_text = ""
+        try:
+            prefill_candidates = (
+                await _candidates(_prefill_rr, PREFILL, prefill_base, failed)
+            )[:2]
+            for attempt, base in enumerate(prefill_candidates, start=1):
+                prefill_status, prefill_text = await _prefill_once(base)
+                if isinstance(prefill_status, int) and prefill_status // 100 == 2:
+                    break
+                if isinstance(prefill_status, int) and 400 <= prefill_status < 500:
+                    break
+                await _remember_failure(base)
+                await _metrics.inc("retry_total", 1.0)
+                if attempt < len(prefill_candidates):
+                    log.warning(
+                        "prefill attempt %s failed on %s id=%s status=%s; retrying once",
+                        attempt, base, req_id, prefill_status,
+                    )
+                    await asyncio.sleep(0.2)
+            if isinstance(prefill_status, int) and prefill_status // 100 == 2:
+                try:
+                    data = json.loads(prefill_text)
+                    kv_params = data.get("kv_transfer_params")
+                    usage = data.get("usage") or {}
+                    await _metrics.record_prefill(
+                        float(usage.get("prompt_tokens") or 0.0),
+                    )
+                except Exception:  # noqa: BLE001
+                    kv_params = None
+            else:
+                log.warning(
+                    "prefill non-2xx status=%s id=%s body=%.200s (decode-only fallback)",
+                    prefill_status, req_id, prefill_text,
+                )
+        finally:
+            await _metrics.inc("prefill_inflight", -1.0)
+            await _metrics.inc("prefill_seconds_total", time.monotonic() - phase_t0)
+
+        # --- Phase 2: decode (original request), streamed back ---
+        decode_body = dict(body)
+        if kv_params is not None:
+            decode_body["kv_transfer_params"] = kv_params
+
+        try:
+            await _wait_for_drain_counted()
+        except DrainTimeout:
+            return await _unavailable("pd-proxy is draining; retry later")
+
+        phase_t0 = time.monotonic()
+        await _metrics.inc("decode_inflight", 1.0)
+        try:
+            attempt = 0
+            decode_candidates = await _candidates(
+                _decode_rr, DECODE, decode_base, failed
             )
-            await _remember_failure(base)
+            for base in decode_candidates:
+                attempt += 1
+                upstream, err = await _post_decode(base, decode_body)
+                if upstream is not None:
+                    break
+                log.warning(
+                    "decode attempt %s failed on %s id=%s err=%s",
+                    attempt, base, req_id, err,
+                )
+                await _remember_failure(base)
+                await _metrics.inc("retry_total", 1.0)
+        finally:
+            await _metrics.inc("decode_inflight", -1.0)
+            await _metrics.inc("decode_seconds_total", time.monotonic() - phase_t0)
+
         if upstream is None:
-            return web.json_response(
-                {"error": f"decode error after retry: {err}"}, status=502
-            )
-        await _metrics.record_decode()
-        return await _relay(request, upstream)
-    finally:
-        await _metrics.inc("decode_inflight", -1.0)
+            if time.monotonic() >= deadline:
+                return await _unavailable(f"decode unavailable after retries: {err}")
+            # Unplanned endpoint failure: wait out any drain window and retry
+            # the whole request (prefill KV must be republished).
+            try:
+                await _wait_for_drain_counted()
+            except DrainTimeout:
+                return await _unavailable("pd-proxy is draining; retry later")
+            await asyncio.sleep(RETRY_SLEEP_SECONDS)
+
+    await _metrics.record_decode()
+    return await _relay(request, upstream)
+
 
 async def _on_startup(app):
     app["session"] = ClientSession(timeout=ClientTimeout(total=None))

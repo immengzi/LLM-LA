@@ -258,7 +258,7 @@ spec:
               # BOOT_SLOT stagger is used. prefill takes the lock before
               # booting; decode takes it only after its startup gate has seen
               # prefill healthy, so the two never deadlock.
-              exec 9>/root/.cache/dynpd-engine-init-${POD_NAME}.lock
+              exec 9>/root/.cache/pd-engine-init-${POD_NAME}.lock
               flock 9
               echo "[boot] acquired per-pod engine init lock (${POD_NAME})"
 
@@ -346,6 +346,14 @@ spec:
             - name: dshm
               mountPath: /dev/shm
             {{- include "vllmkv.ascendDriverMounts" $ | nindent 12 }}
+            {{- if $.Values.vllm.sleepOverlay.enabled }}
+            - name: te-unreg-sc
+              mountPath: /vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/camem.py
+              subPath: camem.py
+            - name: te-unreg-sc
+              mountPath: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/utils/mooncake_transfer_engine.py
+              subPath: mooncake_transfer_engine.py
+            {{- end }}
             - name: cache-volume
               mountPath: /root/.cache
             {{- if not (include "vllmkv.isNvidia" $) }}
@@ -440,6 +448,11 @@ spec:
             medium: Memory
             sizeLimit: {{ mul $maxTp 16 }}Gi
         {{- include "vllmkv.ascendDriverVolumes" $ | nindent 8 }}
+        {{- if $.Values.vllm.sleepOverlay.enabled }}
+        - name: te-unreg-sc
+          configMap:
+            name: {{ $.Values.vllm.sleepOverlay.configMapName | default (printf "%s-te-unreg-sc" $.Release.Name) }}
+        {{- end }}
         - name: cache-volume
           hostPath:
             path: /root/.cache
@@ -711,6 +724,14 @@ spec:
             - name: dshm
               mountPath: /dev/shm
             {{- include "vllmkv.ascendDriverMounts" $ | nindent 12 }}
+            {{- if $.Values.vllm.sleepOverlay.enabled }}
+            - name: te-unreg-sc
+              mountPath: /vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/camem.py
+              subPath: camem.py
+            - name: te-unreg-sc
+              mountPath: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/utils/mooncake_transfer_engine.py
+              subPath: mooncake_transfer_engine.py
+            {{- end }}
             - name: cache-volume
               mountPath: /root/.cache
             {{- if not (include "vllmkv.isNvidia" $) }}
@@ -797,6 +818,11 @@ spec:
             medium: Memory
             sizeLimit: {{ mul $tp 16 }}Gi
         {{- include "vllmkv.ascendDriverVolumes" $ | nindent 8 }}
+        {{- if $.Values.vllm.sleepOverlay.enabled }}
+        - name: te-unreg-sc
+          configMap:
+            name: {{ $.Values.vllm.sleepOverlay.configMapName | default (printf "%s-te-unreg-sc" $.Release.Name) }}
+        {{- end }}
         - name: cache-volume
           hostPath:
             path: /root/.cache
@@ -883,6 +909,10 @@ spec:
         checksum/config: {{ $.Files.Get "files/pd_proxy.py" | sha256sum }}
     spec:
       restartPolicy: Always
+      {{- with $proxy.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       tolerations:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
@@ -914,6 +944,8 @@ spec:
               value: {{ $proxy.logLevel | default "info" | quote }}
             - name: PROXY_DRAIN_MAX_WAIT_SECONDS
               value: {{ $proxy.drainMaxWaitSeconds | default 300 | quote }}
+            - name: PROXY_RETRY_DEADLINE_SECONDS
+              value: {{ $proxy.retryDeadlineSeconds | default 60 | quote }}
           ports:
             - containerPort: {{ $proxyPort }}
               name: http

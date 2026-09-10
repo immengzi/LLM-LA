@@ -1,0 +1,19 @@
+{{- if .Values.vllm.sleepOverlay.enabled }}
+{{- if not (include "vllmkv.isNvidia" .) }}
+{{- if or (not (.Files.Get "files/camem.py")) (not (.Files.Get "files/mooncake_transfer_engine.py")) }}
+{{- fail "vllm.sleepOverlay.enabled requires files/camem.py and files/mooncake_transfer_engine.py; those files are delivered separately (drop them into the chart files/ directory) or set vllm.sleepOverlay.enabled=false" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.vllm.sleepOverlay.configMapName | default (printf "%s-te-unreg-sc" .Release.Name) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+data:
+  camem.py: |
+{{ .Files.Get "files/camem.py" | nindent 4 }}
+  mooncake_transfer_engine.py: |
+{{ .Files.Get "files/mooncake_transfer_engine.py" | nindent 4 }}
+{{- end }}
+{{- end }}

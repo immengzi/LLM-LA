@@ -10,17 +10,20 @@
 
 ```text
 One card = one pod (vllm-<model>-pd)
-┌──────────────────────────────────────────────┐
-│ vllm-prefill :8200 (KV producer)             │
-│   - owns the configured accelerator resource │
-│ vllm-decode  :8201 (KV consumer)             │
-│   - device-share + privileged + hostIPC      │
-│   - exactly one engine awake (mutual exclusion)│
-└──────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│ vllm-prefill :8200 (KV producer)                │
+│   - owns the configured accelerator resource    │
+│ vllm-decode  :8201 (KV consumer)                │
+│   - device-share + privileged + hostIPC         │
+│   - exactly one engine awake (mutual exclusion) │
+└─────────────────────────────────────────────────┘
 ```
 
-- `replicas` = number of cards (defaults to `maxTotalReplicas`); tensor
-  parallelism must be 1 (one engine maps to one card).
+- `replicas` = number of dual-engine pods (defaults to `maxTotalReplicas`);
+  tensor parallelism 1 and 2 are both supported on a single node. With TP=1
+  each pod owns one card and one engine; with TP=2 each pod owns a two-card
+  pair and each engine inside the pod uses that pair (only one engine is
+  awake at a time).
 - Startup gate: the decode container waits for the prefill `/health`, puts the
   prefill to sleep, and only then starts its own engine, so each pod boots with
   a single awake engine. The rebalancer then converges to the target `(P,D)`.
@@ -31,10 +34,19 @@ One card = one pod (vllm-<model>-pd)
     port 8200 -> targetPort 8200;
   - `vllm-<model>-decode`: selects pods with `pd-decode-awake=true`,
     port 8200 -> targetPort 8201.
-- The proxy is unchanged: `PREFILL_BASE`/`DECODE_BASE` point to the two Services
-  and requests are routed to any awake engine of the required role. The decode
-  phase pulls KV from the shared store (Mooncake/LMCache) by hash; it is never
-  routed to the co-located engine on the same card.
+- The proxy stays pool-level: `PREFILL_BASE`/`DECODE_BASE` point to the two
+  Services and requests are routed to any awake engine of the required role. The
+  decode phase pulls KV from the shared store (Mooncake/LMCache) by hash; it is
+  never routed to the co-located engine on the same card.
+- A planned flip is hidden from clients by the proxy: the rebalancer drains the
+  proxy first and the proxy queues new P/D requests at the request entry and
+  again at each phase boundary, so an in-flight request waits for the new
+  topology instead of racing the endpoint switch. Planned unavailability is
+  reported as `503` with `Retry-After`; `502` is reserved for real upstream
+  protocol errors. Requests that fail on an unplanned endpoint error are retried
+  as a whole (prefill + decode) for at most `PROXY_RETRY_DEADLINE_SECONDS`
+  (default 60s), always before any byte is relayed to the client, and
+  `X-Request-Id` is deduplicated while a request is in flight.
 
 ## 2. Key design points
 
@@ -51,13 +63,26 @@ One card = one pod (vllm-<model>-pd)
 - A target `(P,D)` keeps pods that already match a needed role and minimizes the
   number of flips.
 - Per-card flip sequence: drain the proxy -> `POST /sleep` on the currently
-  active engine -> wait for `is_sleeping=true` -> `POST /wake_up` on the
-  co-located peer -> wait for `/health` -> patch the labels.
+  active engine -> wait for `is_sleeping=true` -> patch labels to idle
+  (`pd-*-awake: "false"`) -> `POST /wake_up` on the co-located peer (retrying
+  transient HTTP errors) -> wait for `/health` -> patch labels to the new
+  role.
 - Mutual exclusion is a hard constraint: the current engine must be asleep
   (NPU released) before the peer is woken; waking the peer too early can
   OOM-kill EngineCore.
+- Labels are patched after every engine step, not only at the end, so the
+  Services always route to reality: once the old role is asleep the card is
+  reported idle, and only after the peer reports healthy is the new role
+  published.
+- If waking the peer fails, the card is left idle and recorded in the
+  rebalancer's `needs_recreate` set: the executor never wakes a peer on a
+  card whose engine may have crashed mid-wake (that is the crash-cascade
+  path), and rollback skips flagged cards. The only safe recovery is pod
+  recreation.
 - On failure or stale transition, per-card previous roles are recorded and
-  restored.
+  restored; wake failures additionally honor `PD_REBALANCER_WAKE_RETRIES`
+  (default 3) and `PD_REBALANCER_WAKE_BACKOFF_SECONDS` (default 5) before a
+  card is flagged.
 - `Deployment /scale` is never touched in warm-standby mode.
 
 ### 2.3 Pre-warm pool and SLO-driven scaling
@@ -122,9 +147,15 @@ prefillDecode:
   poolBootSleep: false   # optional: boot both engines asleep (pre-warm pool)
 ```
 
-The rebalancer `/sleep` retry knobs are chart values too:
-`pdRebalancer.sleepRetries` (default 5) and
-`pdRebalancer.sleepBackoffSeconds` (default 2).
+The rebalancer retry knobs are chart values too: `pdRebalancer.sleepRetries`
+(default 5) and `pdRebalancer.sleepBackoffSeconds` (default 2) for `/sleep`;
+`pdRebalancer.wakeRetries` (default 3) and
+`pdRebalancer.wakeBackoffSeconds` (default 5) for `/wake_up`; and
+`pdRebalancer.wakeAfterSleepSeconds` (default 2) as a short grace between a
+confirmed sleep and the peer wake. The optional KV warm-up gate is
+`pdRebalancer.kvWarmup` (default 0): enable it only when the KV transport keeps
+long-lived connections, where the first cross-engine comm after a wake can trip
+the HCCL ra-port race.
 
 ### 2.6 Sleep-mode requirements
 
@@ -138,6 +169,19 @@ required for the supported engine image:
 3. Set `VLLM_ASCEND_ENABLE_NZ=0`.
 4. Set `VLLM_SERVER_DEV_MODE=1` (exposes `/sleep` and `/wake_up`) and
    `VLLM_WORKER_MULTIPROC_METHOD=spawn`.
+5. Keep the KV transport connections short-lived:
+   `ASCEND_USE_SHORT_CONNECTION=1` (chart value
+   `vllm.ascendUseShortConnection`, default "1"). With long-lived HIXL comms a
+   sleeping engine that has served external KV keeps roughly 50 GiB of physical
+   pages pinned and `wake_up` cannot remap them.
+6. Pin Mooncake store PUTs to the writing engine's own segment:
+   `mooncake.preferredSegment=true` (rendered into `mooncake.json`). Otherwise a
+   PUT can land on a co-located sleeping engine and the later pull fails.
+7. Install the CaMem/Mooncake sleep-wake overlay (`camem.py`,
+   `mooncake_transfer_engine.py`): either build the engine image with the
+   companion patch, or enable `vllm.sleepOverlay` and provide the two files in
+   the chart `files/` directory. The overlay files ship separately and enabling
+   the overlay without them fails the render.
 
 The chart injects these automatically in warm-standby mode.
 
@@ -148,24 +192,41 @@ The chart injects these automatically in warm-standby mode.
 | `41-vllm-pd-disagg.yaml` | warmstandby: single dual-engine Deployment (startup gate, device-share, sleep env) + per-role Services selected by awake labels |
 | `42-vllm-pd-rebalancer.yaml` | models JSON carries `mode/deployment/replicas/ports/sleepLevel`; RBAC restricted to the dual-engine Deployment and pod label patches |
 | `files/pd_rebalancer.py` | per-card awake counting, flip executor with drain-free pool scale-up and idempotent wake/sleep, `previousRoles` rollback, pool status, mode dispatch (scale/warmstandby) |
-| `files/pd_proxy.py` | unchanged (already pool-level routing) |
+| `files/pd_proxy.py` | drain-first queueing at the request entry and at both phase boundaries; `503` + `Retry-After` for planned transitions; bounded whole-request retry for unplanned endpoint failures; `X-Request-Id` in-flight dedup; transition metrics |
 | `files/pd_planner.py` | decision semantics unchanged (target = awake counts); decode metrics scraped from the decode port |
 
 ## 4. Validation plan
 
 - Unit tests: awake counting, minimal-flip planning, sleep-before-wake ordering,
-  rollback, budget validation, and Helm render assertions (containers, ports,
-  labels, Services, RBAC, sleep-mode compatibility).
-- Request correctness: fixed `X-Request-Id` end-to-end; no lost or hung requests;
-  decode-side KV hit evidence; no decode-only fallback.
+  wake retry/needs_recreate, KV warm-up gating, rollback and budget validation
+  (`tests/pd_rebalancer/`); proxy transition semantics (`test_pd_proxy.py`);
+  Helm render assertions (`tests/helm/test_pd_warm_standby.py`, requires `helm`
+  on PATH).
+- Request correctness: fixed `X-Request-Id` end-to-end through proxy, prefill and
+  decode; no lost or hung requests during a planned flip; decode-side KV hit
+  evidence; no decode-only fallback.
+- Observability: the proxy exposes `pd_proxy_retry_total`,
+  `pd_proxy_drain_wait_seconds_total`/`_count`, `pd_proxy_reject_503/502/409_total`
+  and phase-duration counters; the rebalancer logs `sleep`/`wake`/`total`
+  timings per flip.
 - Performance: transition duration of warmstandby flips vs cold `Deployment
   /scale` transitions under identical workloads.
 
 ## 5. Known boundaries
 
 - Prompts shorter than the KV connector block granularity are not published to
-  the shared store and therefore not reused (connector design, topology
-  independent).
+  the shared store and therefore not reused; prompts covering at least one
+  full block are published and pulled by the decode engine (connector design,
+  topology independent).
+- Validated on vllm-ascend v0.23.0 with short-lived connections: single-node
+  TP=2 warm-standby flips P1,D2 <-> P2,D1 with concurrent requests (8 rounds,
+  16 flips, 40/40 requests served, no engine restarts) and sleep/wake memory
+  checks (freed ~55.9 GiB, restore 223/223, re-register 72/72). The earlier
+  TP=1/DP=1, TP=1/DP=2 and TP=2/DP=2 matrices were validated on the v0.18 image
+  and have not been re-run on v0.23.0.
+- Long-lived KV transport connections are not supported: a sleeping engine that
+  has served external KV retains ~50 GiB of pinned pages and the peer wake
+  fails. Keep `ASCEND_USE_SHORT_CONNECTION=1`.
 - `hostNetwork=true` is not supported in warm-standby mode (port and loopback
   semantics conflict with two engines per pod).
 - First cold start loads the model twice (prefill, then decode); steady-state

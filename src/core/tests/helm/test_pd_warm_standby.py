@@ -258,3 +258,22 @@ def test_scale_mode_still_renders_two_pools() -> None:
     assert "vllm-qwen-decode" in names
     assert "vllm-qwen-pd" not in names
     assert "--enable-sleep-mode" not in result.stdout
+
+
+def test_sleep_overlay_render_depends_on_overlay_files() -> None:
+    """The sleep overlay renders when its files exist and fails fast otherwise.
+
+    The overlay files (`camem.py`, `mooncake_transfer_engine.py`) ship as a
+    separate package, so this test accepts either checkout state.
+    """
+    files_present = all(
+        (CHART / "files" / name).exists()
+        for name in ("camem.py", "mooncake_transfer_engine.py")
+    )
+    manifest, stderr = render(
+        "--set", "vllm.sleepOverlay.enabled=true", expect_ok=files_present
+    )
+    if files_present:
+        assert "te-unreg-sc" in manifest
+    else:
+        assert "vllm.sleepOverlay.enabled requires" in stderr

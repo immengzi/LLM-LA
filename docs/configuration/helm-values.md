@@ -33,13 +33,28 @@ There are three ways values reach the chart:
 | `global.imageRegistry` | `reg.local:32000` | If set, all images are rewritten to this registry; `""` disables rewrite |
 | `images.router` / `images.sidecar` | `kv-router:latest` / `kv-sidecar:latest` | Python services |
 | `images.routerGo` / `images.sidecarGo` | `kv-router-go:latest` / `kv-sidecar-go:latest` | Used when `serviceImpl=go` |
-| `images.vllm` | `docker.io/library/vllm-ascend:v0.18.0` | vLLM engine image |
+| `images.vllm` | `quay.io/ascend/vllm-ascend:v0.23.0` | vLLM engine image |
 | `images.sglang` | `lmsysorg/sglang:v0.5.15-cu129` | Complete official SGLang v0.5.15 image with CUDA 12.9 |
 | `images.cpuHash` | `vllm-cpu-hash:latest` | Legacy external prefix-hash service (used only when `router.hashSource=external`) |
 | `images.redis` | `redis:7-alpine` | Redis |
-| `images.mooncakeMaster` | `docker.io/library/vllm-ascend:v0.18.0` | Mooncake master |
+| `images.mooncakeMaster` | `quay.io/ascend/vllm-ascend:v0.23.0` | Mooncake master |
 
 A fully-qualified per-model `image` bypasses the registry rewrite.
+
+### Dynamic P/D (warm standby) additions
+
+| Key | Default | Notes |
+|-----|---------|-------|
+| `mooncake.preferredSegment` | `true` | Rendered as `preferred_segment` in `mooncake.json`; pins store PUTs to the writing engine's own local segment |
+| `vllm.ascendUseShortConnection` | `"1"` | Sets `ASCEND_USE_SHORT_CONNECTION`; keeps HIXL comms short-lived so CaMem sleep actually releases KV physical pages |
+| `vllm.sleepOverlay.enabled` | `false` | Mounts the vllm-ascend sleep/wake overlay (`camem.py`, `mooncake_transfer_engine.py`) into engine pods. The overlay files ship separately; enabling without them fails the render |
+| `vllm.sleepOverlay.configMapName` | `""` | `""` -> `<release>-te-unreg-sc` |
+| `models[].prefillDecode.proxy.nodeSelector` | `{}` | Optional node selector for the P/D proxy pod |
+| `models[].prefillDecode.proxy.retryDeadlineSeconds` | `60` | Whole-request retry deadline (seconds) for unplanned endpoint failures |
+| `pdRebalancer.wakeRetries` | `3` | `/wake_up` attempts before the card is marked needs_recreate |
+| `pdRebalancer.wakeBackoffSeconds` | `5` | Linear backoff between `/wake_up` attempts |
+| `pdRebalancer.wakeAfterSleepSeconds` | `2` | Grace between a confirmed sleep and waking the peer |
+| `pdRebalancer.kvWarmup` | `0` | `1` enables the cold-pair KV warm-up gate (only needed with long-lived transport connections) |
 
 The explicit CUDA tag avoids the unqualified v0.5.15 image's CUDA 13 runtime,
 which is incompatible with NVIDIA 570-series drivers. The complete `-cu129`

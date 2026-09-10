@@ -249,6 +249,12 @@ class Rebalancer:
         self.lock = threading.Lock()
         self.last_error = ""
         self.planner_error = ""
+        # Pods whose wake-up failed mid-flip (engine may have crashed). They
+        # are taken out of service (labels idle) and excluded from flip plans;
+        # the only safe recovery is pod recreation, because waking the peer on
+        # the same card while the failed engine may still hold NPU memory is
+        # what turns a wake failure into a crash cascade.
+        self.needs_recreate: set[str] = set()
         self.heartbeat_timeout = float(
             os.environ.get("PD_REBALANCER_HEARTBEAT_TIMEOUT_SECONDS", "60")
         )
@@ -257,6 +263,27 @@ class Rebalancer:
             "planner": time.monotonic(),
         }
         self.heartbeat_lock = threading.Lock()
+        # KV-path warm-up gate: waking an engine into a role makes every
+        # engine of the other role its "cold KV pair": the first decode->
+        # prefill ADXL comm creation can collide on the HCCL ra port (CANN
+        # 503900 / -800) and the retry storm pushes request latency from
+        # seconds to minutes. The gate therefore runs INSIDE the proxy
+        # drain window (traffic paused, new requests wait at the proxy) so
+        # the probes are isolated and warm the pair deterministically in a
+        # few seconds; on budget exhaustion the transition raises and rolls
+        # back instead of leaving a degraded topology serving 100s+ latency.
+        self.kv_warmup_enabled = os.environ.get(
+            "PD_REBALANCER_KV_WARMUP", "1"
+        ).lower() not in ("0", "false", "no")
+        self.kv_warmup_attempts = int(
+            os.environ.get("PD_REBALANCER_KV_WARMUP_ATTEMPTS", "3")
+        )
+        self.kv_warmup_timeout = float(
+            os.environ.get("PD_REBALANCER_KV_WARMUP_TIMEOUT_SECONDS", "20")
+        )
+        self.kv_warmup_gap = float(
+            os.environ.get("PD_REBALANCER_KV_WARMUP_GAP_SECONDS", "2")
+        )
         # First pass after a pod restart: an active transition marker cannot be
         # resumed safely (we do not know which steps completed), so roll back.
         self._first_pass = True
@@ -437,7 +464,14 @@ class Rebalancer:
         )
 
     def _wake_engine(self, config: ModelConfig, pod: dict[str, Any], role: str) -> None:
-        """POST /wake_up and wait /health 200 (no label change)."""
+        """POST /wake_up (retrying transient HTTP errors) and wait /health 200.
+
+        Mirrors ``_sleep_engine``: a wake can transiently return HTTP 500 while
+        the engine drains background connector work after a long sleep, so a
+        single failure must not immediately tear the card down. Health is
+        re-checked between retries because a 500 may still have woken the
+        engine.
+        """
         base = self._engine_base(pod, self._role_port(config, role))
         name = (pod.get("metadata") or {}).get("name", "")
         # Idempotent: an engine that is already awake (label/runtime divergence
@@ -450,9 +484,32 @@ class Rebalancer:
         except Exception:  # noqa: BLE001
             pass
         if not already_awake:
-            self.stamp_heartbeat("rebalancer")
-            with urlopen(Request(f"{base}/wake_up", method="POST"), timeout=120) as response:
-                response.read()
+            wake_retries = int(os.environ.get("PD_REBALANCER_WAKE_RETRIES", "3"))
+            wake_backoff = float(
+                os.environ.get("PD_REBALANCER_WAKE_BACKOFF_SECONDS", "5")
+            )
+            last_error: Optional[Exception] = None
+            for attempt in range(wake_retries):
+                self.stamp_heartbeat("rebalancer")
+                try:
+                    with urlopen(
+                        Request(f"{base}/wake_up", method="POST"), timeout=120
+                    ) as response:
+                        response.read()
+                    break
+                except HTTPError as error:
+                    last_error = error
+                    print(
+                        f"[pd-rebalancer] {config.name}: {name} {role} wake returned "
+                        f"HTTP {error.code}, retry {attempt + 1}/{wake_retries}",
+                        flush=True,
+                    )
+                    time.sleep(wake_backoff * (attempt + 1))
+            else:
+                raise RuntimeError(
+                    f"{name} {role} wake_up failed after {wake_retries} attempts: "
+                    f"{last_error}"
+                )
         deadline = time.monotonic() + self.ready_timeout
         while time.monotonic() < deadline:
             self.stamp_heartbeat("rebalancer")
@@ -499,19 +556,52 @@ class Rebalancer:
         Mutual exclusion is a hard constraint on the shared card: the current
         engine must be sleeping (NPU released) before the peer is woken,
         otherwise CaMem OOM can kill EngineCore.
+
+        Labels are patched after every engine step (not only at the end) so
+        Services and ``awake()`` always reflect reality: once the old role is
+        asleep the card is reported idle, and only after the peer reports
+        healthy is the new role published. If waking the peer fails the card is
+        left idle and recorded in ``needs_recreate``; the peer must NOT be
+        woken on a card whose engine may have crashed mid-wake (that is the
+        crash-cascade path), so rollback skips such cards.
         """
         current = self._pod_active_role(pod)
         if current == to_role:
             return
+        flip_started = time.monotonic()
+        sleep_seconds = 0.0
+        wake_seconds = 0.0
         if current is not None:
+            _t0 = time.monotonic()
             self._sleep_engine(config, pod, current)
+            sleep_seconds = time.monotonic() - _t0
+            self._patch_awake_labels(config, pod, None)
+            # Short grace between confirmed sleep and peer wake: driver-side
+            # physical page release can lag the is_sleeping=true response.
+            wake_grace = float(
+                os.environ.get("PD_REBALANCER_WAKE_AFTER_SLEEP_SECONDS", "2")
+            )
+            if wake_grace > 0:
+                time.sleep(wake_grace)
         if to_role is not None:
-            self._wake_engine(config, pod, to_role)
-        self._patch_awake_labels(config, pod, to_role)
+            _t0 = time.monotonic()
+            try:
+                self._wake_engine(config, pod, to_role)
+            except Exception as error:  # noqa: BLE001
+                name = (pod.get("metadata") or {}).get("name", "")
+                self.needs_recreate.add(name)
+                raise RuntimeError(
+                    f"{name} wake to {to_role} failed ({error}); card left idle, "
+                    f"pod needs recreation"
+                ) from error
+            wake_seconds = time.monotonic() - _t0
+            self._patch_awake_labels(config, pod, to_role)
         name = (pod.get("metadata") or {}).get("name", "")
         print(
             f"[pd-rebalancer] {config.name}: {name} role flip "
-            f"{current if current else 'idle'} -> {to_role if to_role else 'idle'}",
+            f"{current if current else 'idle'} -> {to_role if to_role else 'idle'} "
+            f"sleep={sleep_seconds:.2f}s wake={wake_seconds:.2f}s "
+            f"total={time.monotonic() - flip_started:.2f}s",
             flush=True,
         )
 
@@ -530,14 +620,22 @@ class Rebalancer:
             (
                 p
                 for p in self._card_pods(config)
-                if self._pod_ip(p) and self._pod_ready(p)
+                if self._pod_ip(p)
+                and self._pod_ready(p)
+                and (p.get("metadata") or {}).get("name") not in self.needs_recreate
             ),
             key=lambda p: (p.get("metadata") or {}).get("name", ""),
         )
         if len(pods) < target.prefill + target.decode:
+            flagged = sorted(self.needs_recreate)
             raise RuntimeError(
                 f"only {len(pods)} ready dual-engine pods, need "
                 f"{target.prefill + target.decode} for P{target.prefill},D{target.decode}"
+                + (
+                    f"; pods awaiting recreation after failed wake: {flagged}"
+                    if flagged
+                    else ""
+                )
             )
         prefill_pods = [p for p in pods if self._pod_active_role(p) == "prefill"]
         decode_pods = [p for p in pods if self._pod_active_role(p) == "decode"]
@@ -589,6 +687,11 @@ class Rebalancer:
             self.drain_proxy(config, False)
             for pod in self._card_pods(config):
                 name = (pod.get("metadata") or {}).get("name", "")
+                if name in self.needs_recreate:
+                    # Wake failed on this card and the engine may have crashed:
+                    # never re-wake the peer here. Leave it idle (already done
+                    # by _flip_pod) and require pod recreation.
+                    continue
                 want = previous_roles.get(name)
                 if self._pod_active_role(pod) != want:
                     self._flip_pod(config, pod, want)
@@ -619,12 +722,203 @@ class Rebalancer:
                 flush=True,
             )
 
+    def _newly_active_engines(
+        self,
+        config: ModelConfig,
+        previous_roles: dict[str, Optional[str]],
+    ) -> list[tuple[str, str]]:
+        """(name, role) pairs whose engine became active this transition.
+
+        A freshly woken engine is a cold KV pair for every already-active
+        engine of the other role (comms are torn down on sleep and recreated
+        lazily), so the gate must run for prefill wake-ups and decode wake-ups
+        alike.
+        """
+        woken: list[tuple[str, str]] = []
+        for pod in self._card_pods(config):
+            name = (pod.get("metadata") or {}).get("name", "")
+            current = self._pod_active_role(pod)
+            if current is not None and previous_roles.get(name) != current:
+                woken.append((name, current))
+        return woken
+
+    def _resolve_served_model(self, base: str, config: ModelConfig) -> str:
+        """Discover the model id the proxy/engines accept in the chat body.
+
+        ``config.name`` is the rebalancer's short key (e.g. "qwen"), which can
+        differ from the vLLM ``--served-model-name`` ("qwen3-8b") validated by
+        the engines; a probe with the wrong id 404s on every attempt and would
+        force an avoidable rollback. The proxy relays GET /v1/models to a
+        decode engine, so ask it for the served id instead.
+        """
+        last_error: Optional[Exception] = None
+        for attempt in range(3):
+            self.stamp_heartbeat("rebalancer")
+            try:
+                with urlopen(f"{base}/v1/models", timeout=5) as response:
+                    data = json.loads(response.read())
+                ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+                if config.name in ids:
+                    return config.name
+                if ids:
+                    return ids[0]
+            except Exception as error:  # noqa: BLE001
+                last_error = error
+            if attempt < 2:
+                time.sleep(1)
+        raise RuntimeError(
+            f"{config.name} served-model discovery via {base}/v1/models "
+            f"failed: {last_error}"
+        )
+
+    @staticmethod
+    def _chat_body(served_model: str, content: str, max_tokens: int) -> bytes:
+        return json.dumps(
+            {
+                "model": served_model,
+                "messages": [{"role": "user", "content": content}],
+                "max_tokens": max_tokens,
+                "stream": False,
+            }
+        ).encode()
+
+    def _warmup_kv_path(
+        self,
+        config: ModelConfig,
+        woken: list[tuple[str, str]],
+    ) -> None:
+        """Pin each freshly woken engine's cold KV pair warm with direct calls.
+
+        The proxy load-balances/sticks across PREFILL endpoints, so a probe
+        through the proxy can "succeed" against an already-hot prefill and
+        never exercise the woken engine (false positive). Instead, drive the
+        real two-phase flow DIRECTLY at the specific pod pair:
+          phase 1 -> POST the prompt (max_tokens=1) to the prefill engine that
+                     must serve it. A unique per-attempt prompt prefix forces a
+                     KV-cache miss so the prefill really computes and publishes
+                     into ITS pool;
+          phase 2 -> POST the same prompt to the peer decode engine, which then
+                     pulls the KV from that prefill. The pull creates the
+                     ADXL/HCCL comm lazily; right after wake the two TP workers
+                     of a cold prefill can race on HCCL ra port 16666 (CANN
+                     503900 / -800 retry storm), so one successful pair proves
+                     the comm is warm.
+        Budget exhaustion raises -> the caller rolls the flip back instead of
+        leaving a degraded topology serving 100s+ latency.
+        """
+        if not woken:
+            return
+        proxy_base = self._proxy_base(config)
+        served_model = self._resolve_served_model(proxy_base, config)
+        pods_by_name = {
+            (pod.get("metadata") or {}).get("name"): pod
+            for pod in self._card_pods(config)
+        }
+        active_prefills = [
+            pod for pod in self._card_pods(config)
+            if self._pod_active_role(pod) == "prefill"
+        ]
+        active_decodes = [
+            pod for pod in self._card_pods(config)
+            if self._pod_active_role(pod) == "decode"
+        ]
+        # One job per woken engine: phase 1 always lands on a prefill engine,
+        # phase 2 always lands on a decode engine, so the exercised pair is
+        # exactly (woken engine, its peer).
+        jobs: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+        for name, role in sorted(woken):
+            pod = pods_by_name.get(name)
+            if pod is None:
+                raise RuntimeError(f"{name} not found for KV warm-up")
+            if role == "prefill":
+                if not active_decodes:
+                    raise RuntimeError(f"{name} prefill has no active decode to warm")
+                jobs.append((pod, active_decodes))
+            else:
+                if not active_prefills:
+                    raise RuntimeError(f"{name} decode has no active prefill to warm")
+                for prefill in active_prefills:
+                    jobs.append((prefill, [pod]))
+        last_error: Optional[Exception] = None
+        for job_index, (phase1_pod, phase2_pods) in enumerate(jobs, start=1):
+            label = (phase1_pod.get("metadata") or {}).get("name", "?")
+            warmed = False
+            for attempt in range(1, self.kv_warmup_attempts + 1):
+                self.stamp_heartbeat("rebalancer")
+                rid = f"pd-warmup-{config.name}-{int(time.time() * 1000)}"
+                content = (
+                    f"[warm {rid}] "
+                    + "The quick brown fox jumps over the lazy dog. " * 138
+                )
+                started = time.monotonic()
+                try:
+                    phase1_base = self._engine_base(
+                        phase1_pod, self._role_port(config, "prefill")
+                    )
+                    self._post_chat(
+                        f"{phase1_base}/v1/chat/completions",
+                        self._chat_body(served_model, content, 1),
+                        rid,
+                    )
+                    for peer in phase2_pods:
+                        peer_base = self._engine_base(
+                            peer, self._role_port(config, "decode")
+                        )
+                        self._post_chat(
+                            f"{peer_base}/v1/chat/completions",
+                            self._chat_body(served_model, content, 16),
+                            rid,
+                        )
+                    elapsed = time.monotonic() - started
+                    print(
+                        f"[pd-rebalancer] {config.name}: KV warm-up job {job_index}/"
+                        f"{len(jobs)} attempt {attempt}/{self.kv_warmup_attempts} "
+                        f"OK ({elapsed:.1f}s, prefill={label})",
+                        flush=True,
+                    )
+                    warmed = True
+                    break
+                except Exception as error:  # noqa: BLE001
+                    last_error = error
+                    elapsed = time.monotonic() - started
+                    print(
+                        f"[pd-rebalancer] {config.name}: KV warm-up job {job_index}/"
+                        f"{len(jobs)} attempt {attempt}/{self.kv_warmup_attempts} "
+                        f"failed after {elapsed:.1f}s "
+                        f"({error.__class__.__name__}: {str(error)[:160]})",
+                        flush=True,
+                    )
+                    if attempt < self.kv_warmup_attempts:
+                        time.sleep(self.kv_warmup_gap)
+            if not warmed:
+                raise RuntimeError(
+                    f"{config.name} KV path did not warm up (prefill={label}) "
+                    f"after {self.kv_warmup_attempts} attempts: {last_error}"
+                )
+
+    def _post_chat(self, url: str, body: bytes, rid: str) -> None:
+        request = Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Request-Id": rid,
+            },
+        )
+        with urlopen(request, timeout=self.kv_warmup_timeout) as response:
+            response.read()
+
     def reconcile_awake(self, config: ModelConfig, target: Replicas) -> bool:
         """Warm-standby transition: per-card sleep/wake flips -> verify.
 
-        A pure scale-up only wakes engines on fully-asleep pool cards, which
-        does not interrupt in-flight traffic, so the proxy drain is skipped;
-        any transition that sleeps or flips an awake engine drains first.
+        Any transition that sleeps or flips an awake engine drains first so
+        in-flight requests finish before the flip. Waking an engine into a
+        role (pure scale-up or a role swap) also drains when the KV warm-up
+        gate is enabled: the gate probes the woken engine's cold KV pairs in
+        isolation while traffic is paused, and traffic resumes only after the
+        pairs are warm (or the flip rolls back). With the gate disabled, pure
+        scale-ups keep their old drain-free behaviour.
         """
         previous = self.awake(config)
         if previous == target:
@@ -632,6 +926,17 @@ class Rebalancer:
         self._validate_awake_target(config, target)
         plan = self._flip_plan(config, target)
         needs_drain = any(self._pod_active_role(pod) is not None for pod, _ in plan)
+        # A flip that wakes an engine into a role (idle->role, or a role swap)
+        # creates cold KV pairs whose first comm creation can race (503900 /
+        # ra port 16666). The warm-up gate must run in isolation, so such
+        # transitions pause new requests too; traffic resumes only after every
+        # woken engine's pairs are provably warm (or the flip rolled back).
+        wakes_engine = any(
+            to_role is not None and self._pod_active_role(pod) != to_role
+            for pod, to_role in plan
+        )
+        if self.kv_warmup_enabled and wakes_engine:
+            needs_drain = True
         previous_roles = {
             (p.get("metadata") or {}).get("name"): self._pod_active_role(p)
             for p in self._card_pods(config)
@@ -659,6 +964,20 @@ class Rebalancer:
             now = self.awake(config)
             if now != target:
                 raise RuntimeError(f"awake after transition {now} != {target}")
+            # KV-path warm-up gate: still drained (new P/D requests wait at
+            # the proxy), so probes are isolated from real traffic and warm
+            # each woken engine's cold pairs deterministically. Failure raises
+            # -> rollback to the previous topology (never leave a degraded P/D
+            # mix serving 100s+ latency). Only after the pairs are warm does
+            # traffic resume, and only then is the new topology committed.
+            newly_active = self._newly_active_engines(config, previous_roles)
+            if self.kv_warmup_enabled and newly_active:
+                print(
+                    f"[pd-rebalancer] {config.name}: warming KV path after "
+                    f"engine wake(s) {', '.join(f'{n}:{r}' for n, r in sorted(newly_active))}",
+                    flush=True,
+                )
+                self._warmup_kv_path(config, newly_active)
             if needs_drain:
                 self.drain_proxy(config, False)
             with self.lock:

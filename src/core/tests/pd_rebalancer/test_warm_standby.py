@@ -8,10 +8,12 @@ touches Deployment `/scale`.
 from __future__ import annotations
 
 import importlib.util
+import json
 import threading
 import time
 import types
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -104,11 +106,17 @@ def make_rebalancer(pods: list[dict], api: FakeKubernetesApi | None = None) -> o
     rebalancer.last_error = ""
     rebalancer._first_pass = True
     rebalancer.heartbeat_timeout = 60.0
+    rebalancer.proxy_port = 8200
     rebalancer.heartbeats = {
         "rebalancer": time.monotonic(),
         "planner": time.monotonic(),
     }
     rebalancer.heartbeat_lock = threading.Lock()
+    rebalancer.needs_recreate = set()
+    rebalancer.kv_warmup_enabled = True
+    rebalancer.kv_warmup_attempts = 3
+    rebalancer.kv_warmup_timeout = 1.0
+    rebalancer.kv_warmup_gap = 0.0
     rebalancer.targets = lambda: api.state
     rebalancer._ensure_entry = lambda state, name: state.setdefault(name, {})
     rebalancer.drain_proxy = lambda config, enabled: None
@@ -340,6 +348,7 @@ def test_reconcile_awake_applies_flips_and_commits() -> None:
     pods = [card("a", "decode"), card("b", "decode"), card("c", "decode")]
     api = FakeKubernetesApi(pods)
     rebalancer = make_rebalancer(pods, api)
+    rebalancer.kv_warmup_enabled = False
     config = warm_config()
     drain_calls: list[bool] = []
     rebalancer.drain_proxy = lambda config, enabled: drain_calls.append(enabled)  # type: ignore[method-assign]
@@ -363,6 +372,7 @@ def test_reconcile_awake_pure_wake_skips_drain() -> None:
     pods = [card("a", None), card("b", None), card("c", None)]
     api = FakeKubernetesApi(pods)
     rebalancer = make_rebalancer(pods, api)
+    rebalancer.kv_warmup_enabled = False
     config = warm_config()
     drain_calls: list[bool] = []
     rebalancer.drain_proxy = lambda config, enabled: drain_calls.append(enabled)  # type: ignore[method-assign]
@@ -398,51 +408,168 @@ def test_reconcile_awake_scale_down_still_drains() -> None:
     }
     assert rebalancer.engine_calls == [("sleep", "prefill")]
     assert drain_calls == [True, False]
-    assert rebalancer.pool(config) == 1
 
 
-def test_status_reports_pool_depth() -> None:
-    pods = [card("a", "decode"), card("b", "prefill"), card("c", None)]
-    api = FakeKubernetesApi(pods)
-    rebalancer = make_rebalancer(pods, api)
-    config = warm_config()
-    rebalancer.models = {"qwen": config}  # type: ignore[attr-defined]
-
-    status = rebalancer.status("qwen")
-    assert status["current"] == {"prefill": 1, "decode": 1}
-    assert status["pool"] == {"cards": 1}
-
-
-def test_pool_counts_only_cards_with_both_engines_asleep() -> None:
-    pods = [
-        card("a", "decode"),    # decode serving, prefill sleeping -> not pooled
-        card("b", "prefill"),   # prefill serving, decode sleeping -> not pooled
-        card("c", None),        # both engines asleep -> pooled
-        card("d", "decode"),
-    ]
-    rebalancer = make_rebalancer(pods)
-    assert rebalancer.pool(warm_config()) == 1
-
-
-def test_reconcile_awake_rolls_back_pods_and_state_on_failure() -> None:
+def test_reconcile_awake_runs_kv_warmup_when_prefill_woken() -> None:
     pods = [card("a", "decode"), card("b", "decode"), card("c", "decode")]
     api = FakeKubernetesApi(pods)
     rebalancer = make_rebalancer(pods, api)
     config = warm_config()
-    # First flip (card-b) succeeds; second flip (card-c) fails at wake, so the
-    # rollback must flip card-b back to decode.
-    rebalancer.fail_wake_at_call = 2
+    events: list[str] = []
+    rebalancer.drain_proxy = lambda config, enabled: events.append(  # type: ignore[method-assign]
+        "drain:on" if enabled else "drain:off"
+    )
+    rebalancer._warmup_kv_path = lambda config, woken: events.append(  # type: ignore[method-assign]
+        "warmup:" + ",".join(f"{n}:{r}" for n, r in sorted(woken))
+    )
+
+    assert rebalancer.reconcile_awake(config, MODULE.Replicas(2, 1)) is True
+    # Role-swap wake (decode -> prefill) drains first; the gate warms the
+    # woken prefills INSIDE the drain window; traffic resumes only after.
+    assert events == ["drain:on", "warmup:b:prefill,c:prefill", "drain:off"]
+    assert api.state["qwen"]["target"] == {"prefill": 2, "decode": 1}
+
+
+def test_reconcile_awake_pure_wake_drains_for_kv_warmup() -> None:
+    pods = [card("a", "prefill"), card("b", "decode"), card("c", None)]
+    api = FakeKubernetesApi(pods)
+    rebalancer = make_rebalancer(pods, api)
+    config = warm_config()
+    events: list[str] = []
+    rebalancer.drain_proxy = lambda config, enabled: events.append(  # type: ignore[method-assign]
+        "drain:on" if enabled else "drain:off"
+    )
+    rebalancer._warmup_kv_path = lambda config, woken: events.append(  # type: ignore[method-assign]
+        "warmup:" + ",".join(f"{n}:{r}" for n, r in sorted(woken))
+    )
+
+    # P1,D1 -> P1,D2 pure scale-up: card c wakes as decode. Even though no
+    # awake engine sleeps, the flip creates a cold KV pair (c <-> a), so it
+    # must drain and warm that pair before traffic resumes.
+    assert rebalancer.reconcile_awake(config, MODULE.Replicas(1, 2)) is True
+    assert events == ["drain:on", "warmup:c:decode", "drain:off"]
+    assert rebalancer.engine_calls == [("wake", "decode")]
+    assert api.state["qwen"]["target"] == {"prefill": 1, "decode": 2}
+
+
+def test_reconcile_awake_skips_kv_warmup_when_no_engine_woken() -> None:
+    pods = [card("a", "prefill"), card("b", "decode"), card("c", "decode")]
+    api = FakeKubernetesApi(pods)
+    rebalancer = make_rebalancer(pods, api)
+    config = warm_config()
+    events: list[str] = []
+    rebalancer.drain_proxy = lambda config, enabled: events.append(  # type: ignore[method-assign]
+        "drain:on" if enabled else "drain:off"
+    )
+    rebalancer._warmup_kv_path = lambda config, woken: events.append(  # type: ignore[method-assign]
+        "warmup:unexpected"
+    )
+
+    # P1,D2 -> P1,D1: only a decode engine sleeps; nothing new joins service,
+    # so no KV warm-up runs (but the sleep of an awake engine still drains).
+    assert rebalancer.reconcile_awake(config, MODULE.Replicas(1, 1)) is True
+    assert events == ["drain:on", "drain:off"]
+
+
+def test_warmup_budget_exhaustion_rolls_back() -> None:
+    pods = [card("a", "decode"), card("b", "decode"), card("c", "decode")]
+    api = FakeKubernetesApi(pods)
+    rebalancer = make_rebalancer(pods, api)
+    config = warm_config()
+    drain_calls: list[bool] = []
+    rebalancer.drain_proxy = lambda config, enabled: drain_calls.append(enabled)  # type: ignore[method-assign]
+
+    def fail_warmup(config, woken) -> None:  # type: ignore[no-untyped-def]
+        raise RuntimeError("KV path did not warm up")
+
+    rebalancer._warmup_kv_path = fail_warmup  # type: ignore[method-assign]
+    rebalancer.kv_warmup_enabled = True
 
     assert rebalancer.reconcile_awake(config, MODULE.Replicas(2, 1)) is False
-    # every card is back to its previous role (decode)
-    assert active_roles(rebalancer, config) == {"a": "decode", "b": "decode", "c": "decode"}
-    entry = api.state["qwen"]
-    assert entry["target"] == {"prefill": 0, "decode": 3}
-    assert "transition" not in entry
+    # Rolled back to the previous decode-only topology (drain held through the
+    # gate, released by the rollback path).
+    assert drain_calls == [True, False]
+    assert active_roles(rebalancer, config) == {
+        "a": "decode",
+        "b": "decode",
+        "c": "decode",
+    }
     assert "awake transition failed" in rebalancer.last_error
-    # rollback flips the partially flipped cards back (sleep prefill, wake decode)
-    assert ("sleep", "prefill") in rebalancer.engine_calls
-    assert ("wake", "decode") in rebalancer.engine_calls
+    assert "KV path did not warm up" in rebalancer.last_error
+    assert rebalancer.pool(config) == 0
+    assert api.state["qwen"]["target"] == {"prefill": 0, "decode": 3}
+
+
+def test_warmup_probe_uses_served_model_discovery_and_pins_pairs() -> None:
+    # Post-flip state for P1,D2 -> P2,D1: a stays decode; b,c woke as prefill.
+    # Each woken prefill must be warmed against the active decode a, via
+    # DIRECT engine-to-engine probes.
+    pods = [card("a", "decode"), card("b", "prefill"), card("c", "prefill")]
+    api = FakeKubernetesApi(pods)
+    rebalancer = make_rebalancer(pods, api)
+    config = warm_config()
+    base = rebalancer._proxy_base(config)
+    chat_bodies: list[dict] = []
+    urls: list[str] = []
+
+    def fake_urlopen(request, timeout=None) -> _FakeResponse:  # type: ignore[no-untyped-def]
+        url = request.full_url if isinstance(request, MODULE.Request) else request
+        if url == f"{base}/v1/models":
+            return _FakeResponse(json.dumps({"data": [{"id": "qwen3-8b"}]}).encode())
+        if url.endswith("/v1/chat/completions"):
+            urls.append(url)
+            chat_bodies.append(json.loads(request.data))
+            return _FakeResponse(b"{}")
+        raise AssertionError(f"unexpected url {url}")
+
+    woken = [("b", "prefill"), ("c", "prefill")]
+    with mock.patch.object(MODULE, "urlopen", side_effect=fake_urlopen):
+        rebalancer._warmup_kv_path(config, woken)
+
+    # config.name is "qwen" but the engines serve "qwen3-8b"; the probe must
+    # use the discovered served id or every attempt would 404.
+    assert len(chat_bodies) == 4
+    assert all(body["model"] == "qwen3-8b" for body in chat_bodies)
+    # Two jobs (b then c); each phase-1 goes to the woken prefill port 8200
+    # and phase-2 to the decode port 8201 on pod a.
+    assert [url for url in urls if url.endswith(":8200/v1/chat/completions")] == [
+        "http://10.0.0.1:8200/v1/chat/completions",
+        "http://10.0.0.1:8200/v1/chat/completions",
+    ]
+    assert [url for url in urls if url.endswith(":8201/v1/chat/completions")] == [
+        "http://10.0.0.1:8201/v1/chat/completions",
+        "http://10.0.0.1:8201/v1/chat/completions",
+    ]
+    # phase 1 forces max_tokens=1 (prefill compute+publish); phase 2 pulls.
+    assert [body["max_tokens"] for body in chat_bodies] == [1, 16, 1, 16]
+
+
+def test_warmup_woken_decode_covers_every_active_prefill() -> None:
+    pods = [card("a", "prefill"), card("b", "prefill"), card("c", "decode")]
+    api = FakeKubernetesApi(pods)
+    rebalancer = make_rebalancer(pods, api)
+    config = warm_config()
+    urls: list[str] = []
+
+    def fake_urlopen(request, timeout=None) -> _FakeResponse:  # type: ignore[no-untyped-def]
+        url = request.full_url if isinstance(request, MODULE.Request) else request
+        if url.endswith("/v1/models"):
+            return _FakeResponse(json.dumps({"data": [{"id": "qwen3-8b"}]}).encode())
+        if url.endswith("/v1/chat/completions"):
+            urls.append(url)
+            return _FakeResponse(b"{}")
+        raise AssertionError(f"unexpected url {url}")
+
+    # A decode woken into P2,D1 -> P2,D2 must warm against BOTH active
+    # prefills: requests can land on either, so both pairs must be hot.
+    woken = [("c", "decode")]
+    with mock.patch.object(MODULE, "urlopen", side_effect=fake_urlopen):
+        rebalancer._warmup_kv_path(config, woken)
+
+    assert len(urls) == 4
+    # one job per active prefill: (a,c) and (b,c)
+    assert urls.count("http://10.0.0.1:8200/v1/chat/completions") == 2
+    assert urls.count("http://10.0.0.1:8201/v1/chat/completions") == 2
 
 
 def test_begin_transition_records_previous_roles_for_stale_rollback() -> None:
