@@ -47,14 +47,22 @@ A fully-qualified per-model `image` bypasses the registry rewrite.
 |-----|---------|-------|
 | `mooncake.preferredSegment` | `true` | Rendered as `preferred_segment` in `mooncake.json`; pins store PUTs to the writing engine's own local segment |
 | `vllm.ascendUseShortConnection` | `"1"` | Sets `ASCEND_USE_SHORT_CONNECTION`; keeps HIXL comms short-lived so CaMem sleep actually releases KV physical pages |
-| `vllm.sleepOverlay.enabled` | `false` | Mounts the vllm-ascend sleep/wake overlay (`camem.py`, `mooncake_transfer_engine.py`) into engine pods. The overlay files ship separately; enabling without them fails the render |
+| `vllm.ascendConnectTimeout` | `"2000"` | `ASCEND_CONNECT_TIMEOUT` (ms). Mooncake defaults to 10000, and every attempt against an engine that has gone to sleep pays that timeout before the request falls back to recompute; the dyn-pd delivery uses `"500"` (a healthy connect measures ~6 ms) |
+| `vllm.sleepOverlay.enabled` | `false` | Mounts the vllm-ascend sleep/wake overlay into engine pods. The chart is file-agnostic: it renders whatever `vllm.sleepOverlay.files` describes, and fails when an entry is incomplete |
 | `vllm.sleepOverlay.configMapName` | `""` | `""` -> `<release>-te-unreg-sc` |
+| `vllm.sleepOverlay.files.<name>` | `{}` | One entry per patched upstream file: `key` (ConfigMap key **and** mount `subPath`), `path` (target inside the engine container), `content` (file body, injected at deploy time). The patch package (`overlay.json` + `make-overlay-command.py`) generates the values fragment and the `--set-file` flags — see [image patches](../operations/image-patches.md) |
+| `models[].prefillDecode.prefill/decode.hcclSocketPortRange` | `""` | `HCCL_NPU_SOCKET_PORT_RANGE` for that role. Ships empty: in warm-standby mode both engines share the pod's NPUs, so the chart renders a `fail` with guidance until each role gets its own range (disjoint between roles, not covering CANN's reserved 16666-16667) |
+| `models[].prefillDecode.prefill/decode.hcclHostSocketPortRange` | `""` | `HCCL_HOST_SOCKET_PORT_RANGE` for that role — same rules as the NPU range |
+| `models[].prefillDecode.prefill/decode.hixlListenPort` | `""` | `ASCEND_GLOBAL_RESOURCE_CONFIG`'s `comm_resource_config.listen_port`, i.e. the HIXL/ADXL (NPU network adapter) listen port. The HCCL ranges do **not** cover it: without a per-role value every engine falls back to 16666 and the engine that wakes later can never bind (EI0020 `Bind_IP_Port` → `error_codes=[-800]` → recompute) |
 | `models[].prefillDecode.proxy.nodeSelector` | `{}` | Optional node selector for the P/D proxy pod |
 | `models[].prefillDecode.proxy.retryDeadlineSeconds` | `60` | Whole-request retry deadline (seconds) for unplanned endpoint failures |
 | `pdRebalancer.wakeRetries` | `3` | `/wake_up` attempts before the card is marked needs_recreate |
 | `pdRebalancer.wakeBackoffSeconds` | `5` | Linear backoff between `/wake_up` attempts |
 | `pdRebalancer.wakeAfterSleepSeconds` | `2` | Grace between a confirmed sleep and waking the peer |
-| `pdRebalancer.kvWarmup` | `0` | `1` enables the cold-pair KV warm-up gate (only needed with long-lived transport connections) |
+| `pdRebalancer.kvWarmup` | `0` | `1` enables the light KV warm-up probe (unique ~270-token prompt, `max_tokens=1` per leg). It exists to pay the one-off *per engine pair* cold start (~3.4 s per leg) deliberately; the chart keeps it off and the delivery turns it on |
+| `pdRebalancer.kvWarmupBlocking` | `0` | `1` runs the probe inside the proxy drain window, so the first user request after a flip is already warm (delivery uses `1`) |
+| `pdRebalancer.kvWarmupBlockingBudgetSeconds` | `20` | Hard cap on how long a blocking warm-up may hold the drain; past the budget the traffic is released and the probe finishes in the background (a failure *within* the budget still rolls the flip back) |
+| `pdRebalancer.kvWarmupFillerRepeats` / `kvWarmupMaxTokens` / `kvWarmupPeerMaxTokens` / `kvWarmupTimeoutSeconds` / `kvWarmupAttempts` / `kvWarmupGapSeconds` | `24` / `1` / `1` / `40` / `2` / `1` | Probe weight, per-leg timeouts and retry budget |
 
 The explicit CUDA tag avoids the unqualified v0.5.15 image's CUDA 13 runtime,
 which is incompatible with NVIDIA 570-series drivers. The complete `-cu129`

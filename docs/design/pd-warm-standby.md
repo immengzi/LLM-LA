@@ -135,14 +135,27 @@ pod restart) is repaired with a label patch instead of an engine error.
 
 ```yaml
 prefillDecode:
-  replicas: 3            # dual-engine pods (cards); null -> maxTotalReplicas
-  prefill: { port: 8200, tensorParallelSize: 1, batchSize: 32 }
-  decode:  { port: 8201, tensorParallelSize: 1, batchSize: 32 }
+  replicas: 4            # dual-engine pods (cards); null -> maxTotalReplicas
+  prefill:
+    port: 8200
+    tensorParallelSize: 2
+    batchSize: 16
+    # Multi-process port plan (see 2.6) - required in warm-standby mode
+    hcclSocketPortRange: "63000-63050"        # HCCL_NPU_SOCKET_PORT_RANGE
+    hcclHostSocketPortRange: "62000-62050"    # HCCL_HOST_SOCKET_PORT_RANGE
+    hixlListenPort: 16700                     # HIXL / NPU-adapter listen port
+  decode:
+    port: 8201
+    tensorParallelSize: 2
+    batchSize: 16
+    hcclSocketPortRange: "65000-65050"
+    hcclHostSocketPortRange: "64000-64050"
+    hixlListenPort: 16800
   dynamicRebalance:
     mode: warmstandby    # scale (cold /scale) | warmstandby (per-card sleep/wake)
     minPrefillReplicas: 1
     minDecodeReplicas: 1
-    maxTotalReplicas: 3
+    maxTotalReplicas: 4
     sleepLevel: 1
   poolBootSleep: false   # optional: boot both engines asleep (pre-warm pool)
 ```
@@ -152,12 +165,65 @@ The rebalancer retry knobs are chart values too: `pdRebalancer.sleepRetries`
 `pdRebalancer.wakeRetries` (default 3) and
 `pdRebalancer.wakeBackoffSeconds` (default 5) for `/wake_up`; and
 `pdRebalancer.wakeAfterSleepSeconds` (default 2) as a short grace between a
-confirmed sleep and the peer wake. The optional KV warm-up gate is
-`pdRebalancer.kvWarmup` (default 0): enable it only when the KV transport keeps
-long-lived connections, where the first cross-engine comm after a wake can trip
-the HCCL ra-port race.
+confirmed sleep and the peer wake.
 
-### 2.6 Sleep-mode requirements
+The KV warm-up gate (`pdRebalancer.kvWarmup`, default 0 in the chart) pays the
+one-off cold start of each *engine pair* before user traffic sees it: a fresh
+pair needs ~3.4 s for its first transfer on each leg, and after a flip that cost
+otherwise lands on the first request. Two modes:
+
+* `pdRebalancer.kvWarmupBlocking=1` (delivery setting) runs a light probe
+  (unique ~270-token prompt, `max_tokens=1`) inside the proxy **drain window** and
+  holds traffic until it finishes or `kvWarmupBlockingBudgetSeconds` (default 20)
+  expires - past the budget the traffic is released and the probe finishes in the
+  background, while a failure *within* the budget still rolls the flip back.
+* `kvWarmupBlocking=0` runs it in a background thread after the drain is
+  released: the flip stays as short as possible, but the first request may race
+  the probe.
+
+### 2.6 Multi-process port plan (two engines on one card)
+
+A warm-standby pod runs a prefill **and** a decode engine on the same NPUs, so
+every port family has to be split between the two containers. Three independent
+layers matter, and only the third controls the port that used to break role
+flips:
+
+1. `HCCL_NPU_SOCKET_PORT_RANGE` / `HCCL_HOST_SOCKET_PORT_RANGE` - HCCL's own
+   device-side and host-side sockets. The two roles' ranges must be disjoint and
+   must avoid CANN's reserved ports 16666-16667 (libhcomm rejects a range that
+   covers them, and a second process per card otherwise has to run without
+   HCCL's multi-process support).
+2. `ASCEND_GLOBAL_RESOURCE_CONFIG` = `{"comm_resource_config.listen_port": N}` -
+   the **HIXL/ADXL (NPU network adapter) listen port**. The HCCL ranges do *not*
+   cover it: without a per-role value every engine falls back to the default
+   **16666** and the engine that wakes later can never bind it
+   (`EI0020 Bind_IP_Port` / `ra socket listen could not start, port[16666] has
+   already been bound` -> `error_codes=[-800]` -> `Failed to load blocks` ->
+   recompute). The reference deployment uses 16 700 (prefill) / 16 800 (decode).
+3. The HIXL-generated rank table carries **no** port fields
+   (`'device_port'` / `'device_vnic_port'` / `'host_port' in ranktable is not
+   set`), which is exactly why (2) has to be provided explicitly.
+
+The chart validates the plan at render time (`_helpers.tpl`): both roles must set
+all three keys; ranges must be `<start>-<end>` with start <= end, disjoint
+between the roles, and must not cover 16666-16667; `hixlListenPort` must be an
+integer in 1024-65520, differ between the roles, and stay outside its own role's
+ranges. The chart ships these values **empty** and renders a `fail` with
+guidance, because the concrete numbers are environment specific (they must miss
+the node's other services and `HCCL_IF_BASE_PORT`'s 16-port block).
+
+> Correction (2026-09-14): an earlier revision blamed
+> `HCCL_HOST_SOCKET_PORT_RANGE` not reaching the engine *worker* processes and
+> added a `sitecustomize.py` shim. An ablation showed the shim was a no-op - the
+> variable does reach the processes that parse it (`env_config.cc` logs
+> `HCCL_HOST_SOCKET_PORT_RANGE is set to [...]`), and the warning actually seen at
+> runtime is the rank-table one in (3). The shim was removed from the chart.
+
+Measured on the reference deployment (8x910B3, CANN 9.1.0, vllm-ascend v0.23.0):
+role flips stay at 13.2-13.5 s while the first user request after a flip is
+~1.5 s (it was ~15 s before the port plan and the warm-up probe).
+
+### 2.7 Sleep-mode requirements
 
 The engines run with vLLM sleep mode (`--enable-sleep-mode`). The following are
 required for the supported engine image:
@@ -177,11 +243,14 @@ required for the supported engine image:
 6. Pin Mooncake store PUTs to the writing engine's own segment:
    `mooncake.preferredSegment=true` (rendered into `mooncake.json`). Otherwise a
    PUT can land on a co-located sleeping engine and the later pull fails.
-7. Install the CaMem/Mooncake sleep-wake overlay (`camem.py`,
-   `mooncake_transfer_engine.py`): either build the engine image with the
-   companion patch, or enable `vllm.sleepOverlay` and provide the two files in
-   the chart `files/` directory. The overlay files ship separately and enabling
-   the overlay without them fails the render.
+7. Install the CaMem/Mooncake sleep-wake overlay: either build the engine image
+   with the companion patch (preferred for a release), or enable
+   `vllm.sleepOverlay` and inject the patched sources at deploy time. The chart
+   is file-agnostic - it renders whatever `vllm.sleepOverlay.files` describes -
+   and the patch package (`overlay.json` + `make-overlay-command.py`) produces
+   both the values fragment and the `--set-file` flags. Patch sources are never
+   committed into this repository, and enabling the overlay with an incomplete
+   entry fails the render with guidance.
 
 The chart injects these automatically in warm-standby mode.
 

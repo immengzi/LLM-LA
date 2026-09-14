@@ -284,6 +284,30 @@ class Rebalancer:
         self.kv_warmup_gap = float(
             os.environ.get("PD_REBALANCER_KV_WARMUP_GAP_SECONDS", "2")
         )
+        # Probe weight (keep it minimal: a unique prefix plus just enough filler
+        # to produce one or two KV blocks) and whether to run it inside the
+        # drain window (blocking: flip grows by the one-off cold start, but the
+        # first user request afterwards is already warm) or after traffic
+        # resumes (background: flip duration unchanged, first request may race).
+        self.kv_warmup_filler_repeats = int(
+            os.environ.get("PD_REBALANCER_KV_WARMUP_FILLER_REPEATS", "24")
+        )
+        self.kv_warmup_max_tokens = int(
+            os.environ.get("PD_REBALANCER_KV_WARMUP_MAX_TOKENS", "1")
+        )
+        self.kv_warmup_peer_max_tokens = int(
+            os.environ.get("PD_REBALANCER_KV_WARMUP_PEER_MAX_TOKENS", "1")
+        )
+        self.kv_warmup_blocking = os.environ.get(
+            "PD_REBALANCER_KV_WARMUP_BLOCKING", "0"
+        ).lower() in ("1", "true", "yes")
+        # Hard cap on how long a blocking warm-up may hold the proxy drain. On
+        # budget exhaustion the traffic is released and the probe keeps running
+        # in a background thread, so a slow/broken KV path can never park the
+        # proxy for the full attempts x (phase1 + phase2 + gap) budget.
+        self.kv_warmup_blocking_budget = float(
+            os.environ.get("PD_REBALANCER_KV_WARMUP_BLOCKING_BUDGET_SECONDS", "20")
+        )
         # First pass after a pod restart: an active transition marker cannot be
         # resumed safely (we do not know which steps completed), so roll back.
         self._first_pass = True
@@ -695,15 +719,33 @@ class Rebalancer:
                 want = previous_roles.get(name)
                 if self._pod_active_role(pod) != want:
                     self._flip_pod(config, pod, want)
+            # Never park the cluster in a state that violates the configured
+            # minimums: the boot-time role set (all decode) has no prefill at
+            # all, and falling back to it leaves the model served by the
+            # decode-only proxy fallback. Keep at least min_prefill/min_decode
+            # awake, inside the fixed budget.
+            fallback_prefill = max(previous.prefill, config.min_prefill)
+            fallback_decode = max(previous.decode, config.min_decode)
+            while fallback_prefill + fallback_decode > config.max_total:
+                if fallback_decode > config.min_decode:
+                    fallback_decode -= 1
+                elif fallback_prefill > config.min_prefill:
+                    fallback_prefill -= 1
+                else:
+                    break
             with self.lock:
                 state = self.targets()
                 entry = self._ensure_entry(state, config.name)
-                entry["target"] = {"prefill": previous.prefill, "decode": previous.decode}
+                entry["target"] = {
+                    "prefill": fallback_prefill,
+                    "decode": fallback_decode,
+                }
                 entry.pop("transition", None)
                 self.api.write_state(self.state_configmap, state)
             print(
                 f"[pd-rebalancer] {config.name}: rolled back awake to "
-                f"P{previous.prefill},D{previous.decode}",
+                f"P{previous.prefill},D{previous.decode}; fallback target "
+                f"P{fallback_prefill},D{fallback_decode} keeps the minimums",
                 flush=True,
             )
         except Exception as rollback_error:  # noqa: BLE001
@@ -772,15 +814,27 @@ class Rebalancer:
         )
 
     @staticmethod
-    def _chat_body(served_model: str, content: str, max_tokens: int) -> bytes:
+    def _chat_body(
+        served_model: str, content: str, max_tokens: int, stream: bool = False
+    ) -> bytes:
         return json.dumps(
             {
                 "model": served_model,
                 "messages": [{"role": "user", "content": content}],
                 "max_tokens": max_tokens,
-                "stream": False,
+                "stream": stream,
             }
         ).encode()
+
+    def _background_warmup(self, config: ModelConfig, woken: list[tuple[str, str]]) -> None:
+        """Best-effort KV warm-up that must never fail a transition."""
+        try:
+            self._warmup_kv_path(config, woken)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[pd-rebalancer] {config.name}: background KV warm-up failed: {exc}",
+                flush=True,
+            )
 
     def _warmup_kv_path(
         self,
@@ -848,26 +902,70 @@ class Rebalancer:
                 rid = f"pd-warmup-{config.name}-{int(time.time() * 1000)}"
                 content = (
                     f"[warm {rid}] "
-                    + "The quick brown fox jumps over the lazy dog. " * 138
+                    + "The quick brown fox jumps over the lazy dog. "
+                    * self.kv_warmup_filler_repeats
                 )
                 started = time.monotonic()
                 try:
                     phase1_base = self._engine_base(
                         phase1_pod, self._role_port(config, "prefill")
                     )
-                    self._post_chat(
+                    self._post_chat_timed(
                         f"{phase1_base}/v1/chat/completions",
-                        self._chat_body(served_model, content, 1),
+                        self._chat_body(
+                            served_model, content, self.kv_warmup_max_tokens, stream=True
+                        ),
                         rid,
+                        f"prefill={label}",
                     )
-                    for peer in phase2_pods:
-                        peer_base = self._engine_base(
-                            peer, self._role_port(config, "decode")
+                    # Phase-2 legs are independent pulls of the same freshly
+                    # published prefix, so run them concurrently: serial pulls
+                    # multiply the one-off cold start by the number of decodes
+                    # (3 decodes -> ~10s) while concurrent ones cost ~one leg.
+                    # Every failed peer is reported, not just the first one:
+                    # when several decodes pull from the same freshly published
+                    # prefix, the interesting signal is which of them stayed
+                    # cold (and why), not only that one of them did.
+                    peer_errors: list[tuple[str, Exception]] = []
+
+                    def warm_peer(peer: dict[str, Any], rid: str, content: str) -> None:
+                        peer_name = (peer.get("metadata") or {}).get("name", "?")
+                        try:
+                            peer_base = self._engine_base(
+                                peer, self._role_port(config, "decode")
+                            )
+                            self._post_chat_timed(
+                                f"{peer_base}/v1/chat/completions",
+                                self._chat_body(
+                                    served_model,
+                                    content,
+                                    self.kv_warmup_peer_max_tokens,
+                                    stream=True,
+                                ),
+                                rid,
+                                f"decode={peer_name}",
+                            )
+                        except Exception as error:  # noqa: BLE001
+                            peer_errors.append((peer_name, error))
+
+                    peer_threads = [
+                        threading.Thread(
+                            target=warm_peer, args=(peer, rid, content), daemon=True
                         )
-                        self._post_chat(
-                            f"{peer_base}/v1/chat/completions",
-                            self._chat_body(served_model, content, 16),
-                            rid,
+                        for peer in phase2_pods
+                    ]
+                    for thread in peer_threads:
+                        thread.start()
+                    for thread in peer_threads:
+                        thread.join()
+                    if peer_errors:
+                        detail = ", ".join(
+                            f"{name}: {err.__class__.__name__}: {str(err)[:120]}"
+                            for name, err in peer_errors
+                        )
+                        raise RuntimeError(
+                            f"{len(peer_errors)}/{len(phase2_pods)} decode legs "
+                            f"failed to warm [{detail}]"
                         )
                     elapsed = time.monotonic() - started
                     print(
@@ -908,6 +1006,48 @@ class Rebalancer:
         )
         with urlopen(request, timeout=self.kv_warmup_timeout) as response:
             response.read()
+
+    def _post_chat_timed(self, url: str, body: bytes, rid: str, label: str) -> None:
+        """POST a streaming warm-up probe and log connect/TTFT/total per leg.
+
+        The first KV transfer that involves a freshly woken engine pays a
+        one-off channel/pool setup; the per-leg split shows which side paid it
+        and makes the warm-up budget debuggable instead of a single opaque
+        timeout.
+
+        ``ttft`` is the time until the first *readable byte* of the SSE stream
+        (i.e. when the server starts flushing), not a strict first-token
+        timestamp: vLLM may buffer the first chunk. Use ``total`` for budgeting
+        and read ``ttft`` as "when this leg started producing".
+        """
+        request = Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Request-Id": rid,
+                "Accept": "text/event-stream",
+            },
+        )
+        started = time.monotonic()
+        with urlopen(request, timeout=self.kv_warmup_timeout) as response:
+            first_byte = None
+            total_bytes = 0
+            while True:
+                chunk = response.read(4096)
+                if not chunk:
+                    break
+                if first_byte is None:
+                    first_byte = time.monotonic()
+                total_bytes += len(chunk)
+        ended = time.monotonic()
+        ttft = (first_byte - started) if first_byte is not None else (ended - started)
+        print(
+            f"[pd-rebalancer] KVWARM {label} rid={rid} ttft={ttft:.2f}s "
+            f"total={ended - started:.2f}s bytes={total_bytes}",
+            flush=True,
+        )
 
     def reconcile_awake(self, config: ModelConfig, target: Replicas) -> bool:
         """Warm-standby transition: per-card sleep/wake flips -> verify.
@@ -971,15 +1111,75 @@ class Rebalancer:
             # mix serving 100s+ latency). Only after the pairs are warm does
             # traffic resume, and only then is the new topology committed.
             newly_active = self._newly_active_engines(config, previous_roles)
-            if self.kv_warmup_enabled and newly_active:
+            if self.kv_warmup_enabled and newly_active and self.kv_warmup_blocking:
+                # Blocking mode: pay the one-off cold start *inside* the drain
+                # window so the first user request after the flip is already
+                # warm, but never longer than kv_warmup_blocking_budget: past
+                # that budget the traffic is released and the probe finishes in
+                # the background (the flip result is unchanged, the first
+                # request may race the remaining probe work).
                 print(
-                    f"[pd-rebalancer] {config.name}: warming KV path after "
+                    f"[pd-rebalancer] {config.name}: blocking KV warm-up inside the "
+                    f"drain window (budget {self.kv_warmup_blocking_budget:.0f}s) for "
+                    f"{', '.join(f'{n}:{r}' for n, r in sorted(newly_active))}",
+                    flush=True,
+                )
+                warmup_result: dict[str, Exception] = {}
+
+                def run_blocking_warmup() -> None:
+                    try:
+                        self._warmup_kv_path(config, newly_active)
+                    except Exception as error:  # noqa: BLE001
+                        warmup_result["error"] = error
+
+                warmup_thread = threading.Thread(
+                    target=run_blocking_warmup, daemon=True
+                )
+                warmup_started = time.monotonic()
+                warmup_thread.start()
+                warmup_thread.join(self.kv_warmup_blocking_budget)
+                if warmup_thread.is_alive():
+                    print(
+                        f"[pd-rebalancer] {config.name}: blocking KV warm-up exceeded "
+                        f"its {self.kv_warmup_blocking_budget:.0f}s budget after "
+                        f"{time.monotonic() - warmup_started:.1f}s; releasing traffic and "
+                        f"letting the probe finish in the background",
+                        flush=True,
+                    )
+                elif "error" in warmup_result:
+                    # Failed inside the budget: keep the previous behaviour and
+                    # let the caller roll the flip back.
+                    raise warmup_result["error"]
+                else:
+                    print(
+                        f"[pd-rebalancer] {config.name}: blocking KV warm-up done in "
+                        f"{time.monotonic() - warmup_started:.1f}s",
+                        flush=True,
+                    )
+            if needs_drain:
+                self.drain_proxy(config, False)
+            if (
+                self.kv_warmup_enabled
+                and newly_active
+                and not self.kv_warmup_blocking
+            ):
+                # Warm the freshly woken engines' cold KV pairs *after* traffic
+                # resumes. The first transfer to a just-woken engine pays a
+                # one-off channel/pool setup (~15s, measured 2026-09-11), and
+                # holding the drain for it stretches every transition, while
+                # leaving it to the next user request shows up as a slow first
+                # request. Backgrounding it keeps the flip short and soaks the
+                # cost before that pair is needed.
+                print(
+                    f"[pd-rebalancer] {config.name}: background KV warm-up after "
                     f"engine wake(s) {', '.join(f'{n}:{r}' for n, r in sorted(newly_active))}",
                     flush=True,
                 )
-                self._warmup_kv_path(config, newly_active)
-            if needs_drain:
-                self.drain_proxy(config, False)
+                threading.Thread(
+                    target=self._background_warmup,
+                    args=(config, newly_active),
+                    daemon=True,
+                ).start()
             with self.lock:
                 state = self.targets()
                 entry = self._ensure_entry(state, config.name)

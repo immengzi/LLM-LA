@@ -243,6 +243,26 @@ spec:
               value: {{ $.Values.pdRebalancer.wakeAfterSleepSeconds | default 2 | quote }}
             - name: PD_REBALANCER_KV_WARMUP
               value: {{ $.Values.pdRebalancer.kvWarmup | default 0 | quote }}
+            {{/* Defaults live in values.yaml (pdRebalancer.kvWarmup*); the
+                 `| default` fallbacks here only cover callers that pass a
+                 partial values file, so keep the two in sync when changing a
+                 default. */}}
+            - name: PD_REBALANCER_KV_WARMUP_BLOCKING
+              value: {{ $.Values.pdRebalancer.kvWarmupBlocking | default 1 | quote }}
+            - name: PD_REBALANCER_KV_WARMUP_BLOCKING_BUDGET_SECONDS
+              value: {{ $.Values.pdRebalancer.kvWarmupBlockingBudgetSeconds | default 20 | quote }}
+            - name: PD_REBALANCER_KV_WARMUP_FILLER_REPEATS
+              value: {{ $.Values.pdRebalancer.kvWarmupFillerRepeats | default 24 | quote }}
+            - name: PD_REBALANCER_KV_WARMUP_MAX_TOKENS
+              value: {{ $.Values.pdRebalancer.kvWarmupMaxTokens | default 1 | quote }}
+            - name: PD_REBALANCER_KV_WARMUP_PEER_MAX_TOKENS
+              value: {{ $.Values.pdRebalancer.kvWarmupPeerMaxTokens | default 1 | quote }}
+            - name: PD_REBALANCER_KV_WARMUP_TIMEOUT_SECONDS
+              value: {{ $.Values.pdRebalancer.kvWarmupTimeoutSeconds | default 40 | quote }}
+            - name: PD_REBALANCER_KV_WARMUP_ATTEMPTS
+              value: {{ $.Values.pdRebalancer.kvWarmupAttempts | default 2 | quote }}
+            - name: PD_REBALANCER_KV_WARMUP_GAP_SECONDS
+              value: {{ $.Values.pdRebalancer.kvWarmupGapSeconds | default 1 | quote }}
             - name: PD_REBALANCER_CAPACITY_PREFLIGHT
               value: {{ $capEnabled | quote }}
             - name: PD_REBALANCER_CAPACITY_RESOURCE

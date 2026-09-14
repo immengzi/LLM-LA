@@ -21,8 +21,20 @@ BASE_MODEL = (
     "models[0].prefillDecode.dynamicRebalance.enabled=true,"
     "models[0].prefillDecode.dynamicRebalance.mode=warmstandby,"
     "models[0].prefillDecode.replicas=3,"
-    "models[0].prefillDecode.dynamicRebalance.maxTotalReplicas=3"
+    "models[0].prefillDecode.dynamicRebalance.maxTotalReplicas=3,"
+    # Warm standby runs both engines of a card on the pod's NPUs, so the chart
+    # requires an explicit role-disjoint port plan (validated by
+    # `vllmkv.validateWarmStandbyPorts`; see the multi-process port plan in
+    # docs/design/pd-warm-standby.md).
+    "models[0].prefillDecode.prefill.hcclSocketPortRange=63000-63050,"
+    "models[0].prefillDecode.prefill.hcclHostSocketPortRange=62000-62050,"
+    "models[0].prefillDecode.prefill.hixlListenPort=16700,"
+    "models[0].prefillDecode.decode.hcclSocketPortRange=65000-65050,"
+    "models[0].prefillDecode.decode.hcclHostSocketPortRange=64000-64050,"
+    "models[0].prefillDecode.decode.hixlListenPort=16800"
 )
+
+CAMEM_PATH = "/vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/camem.py"
 
 
 def _require_helm() -> None:
@@ -216,6 +228,54 @@ def test_warmstandby_allows_equal_tensor_parallel_size() -> None:
     )
 
 
+def test_warmstandby_requires_an_explicit_port_plan() -> None:
+    """Without a port plan the render fails and says what is missing."""
+    _require_helm()
+    result = subprocess.run(
+        [
+            "helm", "template", "test", str(CHART), "--set",
+            "models[0].name=qwen,"
+            "models[0].modelSubPath=placeholder,"
+            "models[0].tensorParallelSize=1,"
+            "models[0].prefillDecode.enabled=true,"
+            "models[0].prefillDecode.dynamicRebalance.enabled=true,"
+            "models[0].prefillDecode.dynamicRebalance.mode=warmstandby,"
+            "models[0].prefillDecode.replicas=3,"
+            "models[0].prefillDecode.dynamicRebalance.maxTotalReplicas=3",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "hixlListenPort must be set for BOTH roles" in result.stderr
+
+
+def test_warmstandby_rejects_a_shared_hixl_listen_port() -> None:
+    _, stderr = render(
+        "--set", "models[0].prefillDecode.decode.hixlListenPort=16700",
+        expect_ok=False,
+    )
+    assert "must differ" in stderr
+
+
+def test_warmstandby_rejects_overlapping_socket_ranges() -> None:
+    _, stderr = render(
+        "--set", "models[0].prefillDecode.decode.hcclSocketPortRange=63000-63050",
+        expect_ok=False,
+    )
+    assert "overlaps" in stderr
+
+
+def test_warmstandby_rejects_a_reserved_hixl_port() -> None:
+    _, stderr = render(
+        "--set", "models[0].prefillDecode.decode.hixlListenPort=16666",
+        expect_ok=False,
+    )
+    assert "reserved port" in stderr
+
+
+
 def test_warmstandby_rejects_unequal_tensor_parallel_size() -> None:
     _, stderr = render(
         "--set", "models[0].prefillDecode.prefill.tensorParallelSize=2",
@@ -260,20 +320,47 @@ def test_scale_mode_still_renders_two_pools() -> None:
     assert "--enable-sleep-mode" not in result.stdout
 
 
-def test_sleep_overlay_render_depends_on_overlay_files() -> None:
-    """The sleep overlay renders when its files exist and fails fast otherwise.
+def test_sleep_overlay_files_are_injected_with_set_file(tmp_path: Path) -> None:
+    """The overlay body is injected at deploy time, not read from the chart.
 
-    The overlay files (`camem.py`, `mooncake_transfer_engine.py`) ship as a
-    separate package, so this test accepts either checkout state.
+    The patch package ships `overlay.json` + `make-overlay-command.py`; each
+    patched upstream file becomes `vllm.sleepOverlay.files.<name>` =
+    {key, path, content}, with the body coming from
+    `--set-file ...content=<file>`. Nothing about the file names is hardcoded
+    in the chart, so the file set can move with the upstream version.
     """
-    files_present = all(
-        (CHART / "files" / name).exists()
-        for name in ("camem.py", "mooncake_transfer_engine.py")
+    _require_helm()
+    body = tmp_path / "camem.py"
+    body.write_text("# patched camem\n")
+    result = subprocess.run(
+        [
+            "helm", "template", "test", str(CHART), "--set", BASE_MODEL,
+            "--set", "vllm.sleepOverlay.enabled=true",
+            "--set", "vllm.sleepOverlay.files.camem.key=camem.py",
+            "--set", f"vllm.sleepOverlay.files.camem.path={CAMEM_PATH}",
+            "--set-file", f"vllm.sleepOverlay.files.camem.content={body}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
     )
-    manifest, stderr = render(
-        "--set", "vllm.sleepOverlay.enabled=true", expect_ok=files_present
-    )
-    if files_present:
-        assert "te-unreg-sc" in manifest
-    else:
-        assert "vllm.sleepOverlay.enabled requires" in stderr
+    assert result.returncode == 0, result.stderr
+
+    configmap = find_docs(result.stdout, "ConfigMap", "test-te-unreg-sc")[0]
+    assert configmap["data"]["camem.py"].strip() == "# patched camem"
+
+    deployment = find_docs(result.stdout, "Deployment", "vllm-qwen-pd")[0]
+    spec = deployment["spec"]["template"]["spec"]
+    for container in ("vllm-prefill", "vllm-decode"):
+        overlay = [
+            m
+            for m in engine_container(spec, container)["volumeMounts"]
+            if m.get("subPath") == "camem.py"
+        ]
+        assert overlay, container
+        assert overlay[0]["mountPath"] == CAMEM_PATH
+
+
+def test_sleep_overlay_enabled_without_files_fails_fast() -> None:
+    _, stderr = render("--set", "vllm.sleepOverlay.enabled=true", expect_ok=False)
+    assert "vllm.sleepOverlay.enabled requires" in stderr

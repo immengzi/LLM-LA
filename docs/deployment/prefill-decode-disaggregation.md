@@ -139,6 +139,34 @@ logs planned transitions without changing `/scale`. See the
 [P/D metrics contract](../architecture/pd-metrics-contract.md) for the
 signals, decision rules, and transition protocol.
 
+#### Warm-standby prerequisites
+
+With `dynamicRebalance.mode: warmstandby` the pod runs **both** engines on the
+same NPUs, which adds three requirements. The chart validates the first two at
+render time, so a misconfigured plan fails the release instead of surfacing
+later as a slow or broken role flip:
+
+* **Port plan** - set `hcclSocketPortRange`, `hcclHostSocketPortRange` and
+  `hixlListenPort` for *each* role. The chart ships them empty and renders a
+  `fail` with guidance until both roles have a disjoint plan that avoids CANN's
+  reserved ports 16666-16667. The rules and the reference values (prefill
+  62xxx/63xxx + 16 700, decode 64xxx/65xxx + 16 800) are in
+  [Dynamic P/D Rebalancing with Per-Card Warm Standby](../design/pd-warm-standby.md).
+  `hixlListenPort` renders `ASCEND_GLOBAL_RESOURCE_CONFIG`'s
+  `comm_resource_config.listen_port`; the `HCCL_*_SOCKET_PORT_RANGE` values do
+  **not** cover that port.
+* **Sleep/wake overlay** - either build the vllm-ascend patch into the engine
+  image, or enable `vllm.sleepOverlay` and inject the patched sources at deploy
+  time. The chart is file-agnostic (`vllm.sleepOverlay.files`); the patch
+  package's `overlay.json` + `make-overlay-command.py` generate the values
+  fragment and the `--set-file` flags.
+* **KV warm-up probe (recommended)** - `pdRebalancer.kvWarmup=1` together with
+  `pdRebalancer.kvWarmupBlocking=1` pays each freshly woken engine pair's one-off
+  cold start inside the drain window (bounded by
+  `pdRebalancer.kvWarmupBlockingBudgetSeconds`, default 20 s). Without it the
+  first request after a flip absorbs that cost; on the reference deployment the
+  probe keeps flips at ~13 s while the first request stays ~1.5 s.
+
 ## Values schema
 
 Global defaults live under `prefillDecode:` in `values.yaml`; per-model settings
@@ -152,6 +180,11 @@ under `models[].prefillDecode` override them (deep-merged, model wins).
 | `prefillDecode.decode.replicas` | `1` | decode pod count |
 | `prefillDecode.decode.tensorParallelSize` | `null` → model TP | decode TP |
 | `prefillDecode.decode.batchSize` | `null` → model batch | decode `--max-num-seqs` |
+| `prefillDecode.{prefill,decode}.hcclSocketPortRange` | `""` | `HCCL_NPU_SOCKET_PORT_RANGE` for that role (warm standby only; empty means "not configured yet" and fails the render) |
+| `prefillDecode.{prefill,decode}.hcclHostSocketPortRange` | `""` | `HCCL_HOST_SOCKET_PORT_RANGE` for that role |
+| `prefillDecode.{prefill,decode}.hixlListenPort` | `""` | HIXL/ADXL (NPU network adapter) listen port via `ASCEND_GLOBAL_RESOURCE_CONFIG`; must differ between roles |
+| `vllm.sleepOverlay.enabled` / `.files.<name>` | `false` / `{}` | Runtime sleep/wake overlay: `key` (ConfigMap key + mount subPath), `path` (container target), `content` (source, injected with `--set-file`) |
+| `pdRebalancer.kvWarmup` / `.kvWarmupBlocking` / `.kvWarmupBlockingBudgetSeconds` | `0` / `0` / `20` | Light KV warm-up probe, drained or backgrounded, with a hard budget on how long it may hold the proxy drain |
 | `prefillDecode.proxy.image` | `""` → `images.vllm` | proxy image (any Python image with aiohttp; CPU-only) |
 | `prefillDecode.proxy.replicas` | `1` | proxy pod count |
 | `prefillDecode.proxy.port` | `8200` | proxy container port |

@@ -444,12 +444,38 @@ vllm:
   cpuOffloadGb: null               # null = off; set to e.g. 3 to offload model weights to CPU for more KV cache
   ascendBufferPool: "4:8"          # NPU buffer pool config (set unconditionally for Ascend hardware)
   ascendUseShortConnection: "1" # ADXL disconnect after each transfer batch; required for clean CaMem sleep/wake (dyn-pd)
+  # ADXL/HIXL connect timeout (ms). Mooncake defaults to 10000, and every failed
+  # attempt against an engine that has gone to sleep pays that timeout before the
+  # request falls back to recompute. 2000 is the conservative chart default;
+  # dyn-pd runs 500 (healthy connect measures ~6ms, so 500 still leaves ~80x
+  # margin) and sets it in delivery/values-pd-dynamic-rebalance.yaml; see
+  # DELIVERY.md for the measurement.
+  ascendConnectTimeout: "2000"
   # Ascend sleep/wake overlay installed at runtime instead of baking it into
-  # the engine image. Requires files/camem.py and files/mooncake_transfer_engine.py
-  # (delivered as a separate overlay package); enabling without them fails fast.
+  # the engine image. The chart is file-agnostic: it renders whatever the
+  # vllm.sleepOverlay.files table below describes (see the patch package's
+  # overlay.json + make-overlay-command.py), and fails fast when an entry is
+  # incomplete.
   sleepOverlay:
     enabled: false
     configMapName: ""   # "" -> <release>-te-unreg-sc
+    # The overlay is data-driven: one entry per patched upstream file.
+    #   <name>:            free label used by --set-file
+    #     key:             ConfigMap key AND mount subPath (usually the file name)
+    #     path:            target path inside the engine container
+    #     content:         file body, injected at deploy time with
+    #                      --set-file vllm.sleepOverlay.files.<name>.content=<file>
+    # The mapping (which upstream files a given vllm-ascend version needs, and
+    # where they live in the container) belongs to the PATCH PACKAGE, not to this
+    # repository: delivery/pd-dynamic-rebalance/overlay.json + make-overlay-command.py
+    # generate both this fragment and the --set-file flags, so adding or removing
+    # a patched file is a patch-package change, never a chart change.
+    files: {}
+    # Example (filled in by the patch package):
+    #   camem:
+    #     key: camem.py
+    #     path: /vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/camem.py
+    #     content: ""
   gpuMemoryUtilization: null       # null = use vLLM default
   quantization: null               # null = no quantization
   enableExpertParallel: false      # false = disable
@@ -669,12 +695,36 @@ prefillDecode:
     port: 8200                # engine http port (warmstandby: prefill container)
     tensorParallelSize: null   # null -> model.tensorParallelSize (or global)
     batchSize: null            # null -> model.batchSize (or global)
+    # Multi-process-per-NPU port plan (warmstandby runs a prefill AND a decode
+    # engine on the same two NPUs, so every port family must be disjoint
+    # between the two containers and must avoid CANN's reserved/default ports
+    # 16666-16667):
+    #   hcclSocketPortRange     -> HCCL_NPU_SOCKET_PORT_RANGE (device side)
+    #   hcclHostSocketPortRange -> HCCL_HOST_SOCKET_PORT_RANGE (host side)
+    #   hixlListenPort          -> ASCEND_GLOBAL_RESOURCE_CONFIG's
+    #                              comm_resource_config.listen_port, i.e. the
+    #                              HIXL/ADXL (NPU network adapter) listen port.
+    #                              This one is NOT covered by the HCCL ranges;
+    #                              without it every engine uses 16666 and the
+    #                              engine that wakes later can never bind
+    #                              (EI0020 Bind_IP_Port -> recompute tail).
+    # These are ENVIRONMENT values (they must miss CANN's reserved 16666-16667,
+    # HCCL_IF_BASE_PORT's 16-port block and the rest of the cluster's ports), so
+    # the chart ships them empty and warmstandby renders a fail with guidance
+    # until the deployment supplies a validated plan - see
+    # delivery/pd-dynamic-rebalance/values-pd-dynamic-rebalance.yaml.
+    hcclSocketPortRange: ""
+    hcclHostSocketPortRange: ""
+    hixlListenPort: ""
   decode:
     replicas: 1
     port: 8201                # engine http port (warmstandby: decode container;
                               # scale mode keeps 8200 unless overridden)
     tensorParallelSize: null
     batchSize: null
+    hcclSocketPortRange: ""
+    hcclHostSocketPortRange: ""
+    hixlListenPort: ""
   # Per-model opt-in only (models[].prefillDecode.dynamicRebalance). Defaults
   # used by the rebalancer template when a model opts in:
   #   enabled: true
@@ -716,7 +766,27 @@ pdRebalancer:
   wakeRetries: 3               # warmstandby: /wake_up retry attempts before the card is marked needs_recreate
   wakeBackoffSeconds: 5        # warmstandby: linear backoff between /wake_up retries (seconds)
   wakeAfterSleepSeconds: 2     # warmstandby: grace between a confirmed sleep and waking the peer
-  kvWarmup: 0                  # warmstandby: 1 -> probe the cold KV pair inside the drain window (required only with long-lived transport connections)
+  # warmstandby: the light KV warm-up probe. Every engine pair pays a one-off
+  # channel/pool setup (~3.4s per leg) the first time it transfers, and after a
+  # role flip that cost would otherwise land on the first user request. The
+  # probe pays it deliberately: with kvWarmupBlocking it runs INSIDE the drain
+  # window (first request afterwards is warm, flip duration unchanged because
+  # the probe itself costs <1s once the pair is warm).
+  # Off by default: it sends synthetic requests through the engines, so enable
+  # it per deployment (dyn-pd enables both, see the delivery values).
+  kvWarmup: 0
+  kvWarmupBlocking: 0          # 1 -> warm inside the drain window; 0 -> background thread after the drain is released
+  # Hard cap on how long a blocking warm-up may hold the proxy drain. On budget
+  # exhaustion the traffic is released and the probe keeps running in the
+  # background (a genuinely failed warm-up still rolls the flip back as long as
+  # it fails within the budget).
+  kvWarmupBlockingBudgetSeconds: 20
+  kvWarmupFillerRepeats: 24    # "The quick brown fox..."xN; 24 ~= 270 tokens, enough for >=2 KV blocks
+  kvWarmupMaxTokens: 1         # prefill leg generation length
+  kvWarmupPeerMaxTokens: 1     # decode leg generation length
+  kvWarmupTimeoutSeconds: 40   # per-leg HTTP timeout (cold start is ~3.4s/leg)
+  kvWarmupAttempts: 2
+  kvWarmupGapSeconds: 1
   capacityPreflight:           # reject targets that cannot fit the cluster's accelerator budget
     enabled: true              # true -> renders a ClusterRole (nodes + all-namespace pods read)
     resourceName: ""           # optional override; empty -> accelerator.resourceName via vllmkv.acceleratorResource

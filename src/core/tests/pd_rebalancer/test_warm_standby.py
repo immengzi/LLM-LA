@@ -82,8 +82,14 @@ class _FakeResponse:
     def __init__(self, payload: bytes = b"", status: int = 200) -> None:
         self.status = status
         self._payload = payload
+        self._sent = False
 
-    def read(self) -> bytes:
+    def read(self, *_args) -> bytes:  # noqa: ANN002 - http.client read(size) shape
+        # A real http.client response answers b"" at EOF; the streaming probe
+        # keeps reading until then, so the stub must not repeat the payload.
+        if self._sent:
+            return b""
+        self._sent = True
         return self._payload
 
     def __enter__(self) -> "_FakeResponse":
@@ -117,6 +123,14 @@ def make_rebalancer(pods: list[dict], api: FakeKubernetesApi | None = None) -> o
     rebalancer.kv_warmup_attempts = 3
     rebalancer.kv_warmup_timeout = 1.0
     rebalancer.kv_warmup_gap = 0.0
+    rebalancer.kv_warmup_filler_repeats = 24
+    rebalancer.kv_warmup_max_tokens = 1
+    rebalancer.kv_warmup_peer_max_tokens = 1
+    # Most tests below exercise the drained (blocking) form of the gate: traffic
+    # resumes only after the probe finishes. The background form (drain released
+    # first, probe runs afterwards) has its own tests further down.
+    rebalancer.kv_warmup_blocking = True
+    rebalancer.kv_warmup_blocking_budget = 20.0
     rebalancer.targets = lambda: api.state
     rebalancer._ensure_entry = lambda state, name: state.setdefault(name, {})
     rebalancer.drain_proxy = lambda config, enabled: None
@@ -184,9 +198,16 @@ def test_sleep_engine_retries_http_500_then_succeeds(monkeypatch) -> None:
     class FakeResponse:
         def __init__(self, payload: bytes = b""):
             self._payload = payload
+            self._sent = False
 
-        def read(self) -> bytes:
+        def _read_once(self) -> bytes:
+            if self._sent:
+                return b""
+            self._sent = True
             return self._payload
+
+        def read(self, *_args) -> bytes:  # noqa: ANN002 - http.client read(size) shape
+            return self._read_once()
 
         def __enter__(self) -> "FakeResponse":
             return self
@@ -471,7 +492,91 @@ def test_reconcile_awake_skips_kv_warmup_when_no_engine_woken() -> None:
     assert events == ["drain:on", "drain:off"]
 
 
-def test_warmup_budget_exhaustion_rolls_back() -> None:
+def test_reconcile_awake_background_warmup_when_not_blocking() -> None:
+    """kv_warmup_blocking=0: the flip returns and traffic resumes while the
+    probe keeps running after the drain is released."""
+    pods = [card("a", "decode"), card("b", "decode"), card("c", "decode")]
+    api = FakeKubernetesApi(pods)
+    rebalancer = make_rebalancer(pods, api)
+    rebalancer.kv_warmup_blocking = False
+    config = warm_config()
+    events: list[str] = []
+    rebalancer.drain_proxy = lambda config, enabled: events.append(  # type: ignore[method-assign]
+        "drain:on" if enabled else "drain:off"
+    )
+    warmed = threading.Event()
+
+    def slow_warmup(config, woken) -> None:  # type: ignore[no-untyped-def]
+        events.append("warmup:" + ",".join(f"{n}:{r}" for n, r in sorted(woken)))
+        warmed.set()
+
+    rebalancer._warmup_kv_path = slow_warmup  # type: ignore[method-assign]
+
+    assert rebalancer.reconcile_awake(config, MODULE.Replicas(2, 1)) is True
+    assert warmed.wait(2), "background warm-up never ran"
+    # Traffic is released before the probe is reported: the flip never waits.
+    assert events[:2] == ["drain:on", "drain:off"]
+    assert events[2].startswith("warmup:")
+    assert api.state["qwen"]["target"] == {"prefill": 2, "decode": 1}
+
+
+def test_reconcile_awake_background_warmup_failure_does_not_roll_back() -> None:
+    """A background probe is best-effort: its failure must not fail the flip."""
+    pods = [card("a", "decode"), card("b", "decode"), card("c", "decode")]
+    api = FakeKubernetesApi(pods)
+    rebalancer = make_rebalancer(pods, api)
+    rebalancer.kv_warmup_blocking = False
+    config = warm_config()
+    called = threading.Event()
+
+    def failing_warmup(config, woken) -> None:  # type: ignore[no-untyped-def]
+        called.set()
+        raise RuntimeError("KV path did not warm up")
+
+    rebalancer._warmup_kv_path = failing_warmup  # type: ignore[method-assign]
+
+    assert rebalancer.reconcile_awake(config, MODULE.Replicas(2, 1)) is True
+    assert called.wait(2), "background warm-up never ran"
+    assert rebalancer.last_error == ""
+    assert api.state["qwen"]["target"] == {"prefill": 2, "decode": 1}
+
+
+def test_warmup_budget_exhaustion_releases_traffic() -> None:
+    """A probe that outlives the blocking budget must not park the proxy drain:
+    the flip completes and the probe is left running in the background."""
+    pods = [card("a", "decode"), card("b", "decode"), card("c", "decode")]
+    api = FakeKubernetesApi(pods)
+    rebalancer = make_rebalancer(pods, api)
+    rebalancer.kv_warmup_blocking = True
+    rebalancer.kv_warmup_blocking_budget = 0.05
+    config = warm_config()
+    drain_calls: list[bool] = []
+    rebalancer.drain_proxy = lambda config, enabled: drain_calls.append(enabled)  # type: ignore[method-assign]
+    started = threading.Event()
+    release = threading.Event()
+
+    def hanging_warmup(config, woken) -> None:  # type: ignore[no-untyped-def]
+        started.set()
+        release.wait(5)
+
+    rebalancer._warmup_kv_path = hanging_warmup  # type: ignore[method-assign]
+
+    try:
+        assert rebalancer.reconcile_awake(config, MODULE.Replicas(2, 1)) is True
+        assert started.wait(2), "warm-up never started"
+        # Drain released despite the probe still running, and the flip committed.
+        assert drain_calls == [True, False]
+        assert active_roles(rebalancer, config) == {
+            "a": "decode",
+            "b": "prefill",
+            "c": "prefill",
+        }
+        assert api.state["qwen"]["target"] == {"prefill": 2, "decode": 1}
+    finally:
+        release.set()
+
+
+def test_warmup_failure_within_budget_rolls_back() -> None:
     pods = [card("a", "decode"), card("b", "decode"), card("c", "decode")]
     api = FakeKubernetesApi(pods)
     rebalancer = make_rebalancer(pods, api)
@@ -497,7 +602,12 @@ def test_warmup_budget_exhaustion_rolls_back() -> None:
     assert "awake transition failed" in rebalancer.last_error
     assert "KV path did not warm up" in rebalancer.last_error
     assert rebalancer.pool(config) == 0
-    assert api.state["qwen"]["target"] == {"prefill": 0, "decode": 3}
+    # The per-card roles are restored to the previous decode-only set, but the
+    # committed target is floored at the configured minimums (min_prefill=1,
+    # min_decode=1, max_total=3). Parking the target on P0,D3 would leave the
+    # model served by the decode-only proxy fallback, so the next reconcile is
+    # aimed at P1,D2 instead.
+    assert api.state["qwen"]["target"] == {"prefill": 1, "decode": 2}
 
 
 def test_warmup_probe_uses_served_model_discovery_and_pins_pairs() -> None:
@@ -540,8 +650,10 @@ def test_warmup_probe_uses_served_model_discovery_and_pins_pairs() -> None:
         "http://10.0.0.1:8201/v1/chat/completions",
         "http://10.0.0.1:8201/v1/chat/completions",
     ]
-    # phase 1 forces max_tokens=1 (prefill compute+publish); phase 2 pulls.
-    assert [body["max_tokens"] for body in chat_bodies] == [1, 16, 1, 16]
+    # Both legs are deliberately minimal: phase 1 forces max_tokens=1 (prefill
+    # compute + publish) and phase 2 pulls the published prefix with the same
+    # 1-token budget, which is all it takes to open the KV pair.
+    assert [body["max_tokens"] for body in chat_bodies] == [1, 1, 1, 1]
 
 
 def test_warmup_woken_decode_covers_every_active_prefill() -> None:

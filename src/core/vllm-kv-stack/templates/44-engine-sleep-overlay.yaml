@@ -1,8 +1,10 @@
 {{- if .Values.vllm.sleepOverlay.enabled }}
 {{- if not (include "vllmkv.isNvidia" .) }}
-{{- if or (not (.Files.Get "files/camem.py")) (not (.Files.Get "files/mooncake_transfer_engine.py")) }}
-{{- fail "vllm.sleepOverlay.enabled requires files/camem.py and files/mooncake_transfer_engine.py; those files are delivered separately (drop them into the chart files/ directory) or set vllm.sleepOverlay.enabled=false" }}
-{{- end }}
+{{/* File list + bodies are injected at deploy time (see the patch package:
+     overlay.json + make-overlay-command.py). Shared with 41 so a partial entry
+     fails identically wherever the overlay is rendered. */}}
+{{- include "vllmkv.validateOverlayFiles" . }}
+{{- $overlayFiles := .Values.vllm.sleepOverlay.files | default dict }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,9 +13,9 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 data:
-  camem.py: |
-{{ .Files.Get "files/camem.py" | nindent 4 }}
-  mooncake_transfer_engine.py: |
-{{ .Files.Get "files/mooncake_transfer_engine.py" | nindent 4 }}
+{{- range $name, $f := $overlayFiles }}
+  {{ $f.key | quote }}: |
+{{ $f.content | nindent 4 }}
+{{- end }}
 {{- end }}
 {{- end }}
