@@ -14,6 +14,7 @@ import time
 import types
 from pathlib import Path
 from unittest import mock
+from urllib.error import URLError
 
 import pytest
 
@@ -43,7 +44,7 @@ def warm_config() -> object:
     )
 
 
-def card(name: str, role: str | None, ip: str = "10.0.0.1") -> dict:
+def card(name: str, role: str | None, ip: str = "10.0.0.1", ready: bool = True) -> dict:
     labels = {
         "app": "vllm-qwen-pd",
         "pd-prefill-awake": "true" if role == "prefill" else "false",
@@ -52,7 +53,7 @@ def card(name: str, role: str | None, ip: str = "10.0.0.1") -> dict:
     status = {
         "phase": "Running",
         "podIP": ip,
-        "conditions": [{"type": "Ready", "status": "True"}],
+        "conditions": [{"type": "Ready", "status": "True" if ready else "False"}],
     }
     return {"metadata": {"name": name, "labels": labels}, "status": status}
 
@@ -732,3 +733,96 @@ def test_scale_mode_current_uses_deployment_replicas() -> None:
     rebalancer = make_rebalancer([])
     rebalancer.api = ScaleApi()  # type: ignore[assignment]
     assert rebalancer.current(config) == MODULE.Replicas(prefill=2, decode=1)
+
+
+# --- mid-flip pod replacement (2026-09-15 kill injection) --------------------
+
+
+def _scripted_engines(rebalancer, fail_on: str | None = None) -> None:
+    """Engine stubs that record the pod they touch.
+
+    ``fail_on`` mimics the real thing the kill injection exercised: a card
+    whose engine is not listening (freshly recreated pod) answers the HTTP call
+    with ECONNREFUSED. Without ``fail_on`` the stubs answer for every card.
+    """
+
+    def engine(kind: str):
+        def call(config, pod, role) -> None:
+            name = (pod.get("metadata") or {}).get("name", "")
+            rebalancer.engine_calls.append((kind, name, role))
+            if fail_on is not None and name == fail_on:
+                raise URLError(ConnectionRefusedError(111, "Connection refused"))
+
+        return call
+
+    rebalancer._sleep_engine = engine("sleep")  # type: ignore[method-assign]
+    rebalancer._wake_engine = engine("wake")  # type: ignore[method-assign]
+
+
+def _state_with_transition(api, prefill: int, decode: int) -> None:
+    api.state["qwen"] = {
+        "target": {"prefill": prefill, "decode": decode},
+        "transition": {"active": True, "startedAt": time.time()},
+    }
+
+
+def test_flip_pod_refuses_a_card_whose_engines_are_not_serving() -> None:
+    pod = card("a", "decode", ready=False)
+    rebalancer = make_rebalancer([pod])
+    _scripted_engines(rebalancer)
+    with pytest.raises(MODULE.CardUnavailable, match="not Ready"):
+        rebalancer._flip_pod(warm_config(), pod, "prefill")
+    assert rebalancer.engine_calls == []
+
+
+def test_rollback_skips_a_booting_replacement_card_and_finishes() -> None:
+    """The replacement pod must not be slept: it has boot labels, no engine."""
+    pods = [
+        card("a", "decode"),
+        card("b", "prefill"),
+        card("c", "prefill"),
+        card("d", "decode", ready=False),  # replacement pod, still booting
+    ]
+    api = FakeKubernetesApi(pods)
+    rebalancer = make_rebalancer(pods, api)
+    config = warm_config()
+    _state_with_transition(api, 2, 2)
+    previous_roles = {"a": "decode", "b": "prefill", "c": "prefill"}
+    _scripted_engines(rebalancer)
+
+    rebalancer._rollback_awake(
+        config, MODULE.Replicas(2, 2), MODULE.Replicas(2, 1), previous_roles, "wake failed"
+    )
+
+    assert [call for call in rebalancer.engine_calls if call[1] == "d"] == []
+    assert api.state["qwen"]["target"] == {"prefill": 2, "decode": 1}
+    assert "transition" not in api.state["qwen"]
+    assert rebalancer.last_error == ""
+
+
+def test_rollback_survives_a_card_that_cannot_be_flipped() -> None:
+    pods = [card("a", "decode"), card("b", "prefill"), card("c", "decode")]
+    api = FakeKubernetesApi(pods)
+    rebalancer = make_rebalancer(pods, api)
+    config = warm_config()
+    _state_with_transition(api, 1, 2)
+    previous_roles = {"a": "decode", "b": "prefill", "c": None}
+    _scripted_engines(rebalancer, fail_on="c")
+
+    rebalancer._rollback_awake(
+        config, MODULE.Replicas(1, 2), MODULE.Replicas(2, 1), previous_roles, "wake failed"
+    )
+
+    assert ("sleep", "c", "decode") in rebalancer.engine_calls
+    # a failing card must not strand the rollback: target is still published and
+    # the transition marker (which blocks propose/commit) is cleared
+    assert api.state["qwen"]["target"] == {"prefill": 2, "decode": 1}
+    assert "transition" not in api.state["qwen"]
+    assert rebalancer.last_error == ""
+
+
+def test_sync_needs_recreate_forgets_pods_that_no_longer_exist() -> None:
+    rebalancer = make_rebalancer([card("a", "decode")])
+    rebalancer.needs_recreate = {"a", "killed-pod"}
+    rebalancer._sync_needs_recreate(warm_config())
+    assert rebalancer.needs_recreate == {"a"}

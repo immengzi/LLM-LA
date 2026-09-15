@@ -54,6 +54,19 @@ class CapacityError(RuntimeError):
     """The target topology cannot fit the cluster's accelerator budget."""
 
 
+class CardUnavailable(RuntimeError):
+    """A card cannot be slept/woken right now (engines not serving yet).
+
+    Raised instead of letting a bare ``ECONNREFUSED`` escape from
+    ``_sleep_engine``: a card whose Pod is not Ready (a freshly recreated pod
+    still booting, or one already terminating) has no engine listening on its
+    role port. The card carries no traffic in that state, so the correct
+    handling is to leave it alone and let the normal reconcile place it once it
+    is Ready - never to abort a rollback on it (2026-09-15 kill test: that
+    locked the rebalancer out for ~7 min).
+    """
+
+
 class ApiError(RuntimeError):
     """Kubernetes API failure carrying the HTTP status code."""
 
@@ -569,6 +582,46 @@ class Rebalancer:
             flush=True,
         )
 
+    def _card_unavailable_reason(self, pod: dict[str, Any]) -> Optional[str]:
+        """Why this card must not be slept/woken right now (``None`` = usable).
+
+        Flippable means both containers are Ready, i.e. both engines answer
+        ``/health``; only then can ``/sleep`` or ``/wake_up`` mean anything. A
+        freshly created pod already carries the boot-time role labels (decode
+        awake) before either engine serves, and a terminating pod keeps its
+        labels while its engine is already gone, so label state alone is not
+        enough to decide that a card needs sleeping.
+        """
+        name = (pod.get("metadata") or {}).get("name", "")
+        if self._pod_ip(pod) is None:
+            return "no podIP"
+        if name in self.needs_recreate:
+            # Wake already failed on this card and the engine may have crashed:
+            # never sleep/wake its peer. The only safe recovery is recreation.
+            return "awaiting pod recreation after a failed wake"
+        if not self._pod_ready(pod):
+            return "not Ready (containers still starting or terminating)"
+        return None
+
+    def _sync_needs_recreate(self, config: ModelConfig) -> None:
+        """Forget cards whose pod no longer exists.
+
+        ``needs_recreate`` is keyed by pod name, so a replacement pod can never
+        match an old entry; without this the set grows on every pod kill.
+        """
+        if not self.needs_recreate:
+            return
+        live = {
+            (pod.get("metadata") or {}).get("name") for pod in self._card_pods(config)
+        }
+        for name in sorted(self.needs_recreate - live):
+            self.needs_recreate.discard(name)
+            print(
+                f"[pd-rebalancer] {config.name}: {name} is gone; cleared from "
+                f"needs_recreate",
+                flush=True,
+            )
+
     def _flip_pod(
         self,
         config: ModelConfig,
@@ -589,6 +642,10 @@ class Rebalancer:
         woken on a card whose engine may have crashed mid-wake (that is the
         crash-cascade path), so rollback skips such cards.
         """
+        name = (pod.get("metadata") or {}).get("name", "")
+        blocked = self._card_unavailable_reason(pod)
+        if blocked:
+            raise CardUnavailable(f"{name or 'card'} cannot be flipped: {blocked}")
         current = self._pod_active_role(pod)
         if current == to_role:
             return
@@ -620,7 +677,6 @@ class Rebalancer:
                 ) from error
             wake_seconds = time.monotonic() - _t0
             self._patch_awake_labels(config, pod, to_role)
-        name = (pod.get("metadata") or {}).get("name", "")
         print(
             f"[pd-rebalancer] {config.name}: {name} role flip "
             f"{current if current else 'idle'} -> {to_role if to_role else 'idle'} "
@@ -709,16 +765,37 @@ class Rebalancer:
         )
         try:
             self.drain_proxy(config, False)
+            skipped: list[str] = []
+            failed: list[str] = []
             for pod in self._card_pods(config):
                 name = (pod.get("metadata") or {}).get("name", "")
-                if name in self.needs_recreate:
-                    # Wake failed on this card and the engine may have crashed:
-                    # never re-wake the peer here. Leave it idle (already done
-                    # by _flip_pod) and require pod recreation.
+                blocked = self._card_unavailable_reason(pod)
+                if blocked:
+                    # Not flippable: this covers the card whose wake failed
+                    # (needs_recreate) and - the 2026-09-15 regression - a
+                    # replacement pod that is still booting. Its template labels
+                    # already say "decode awake" while neither engine listens
+                    # yet, so trying to sleep it only yields ECONNREFUSED.
+                    # Leave the labels alone; reconcile places the card when it
+                    # is Ready.
+                    skipped.append(f"{name} ({blocked})")
                     continue
                 want = previous_roles.get(name)
-                if self._pod_active_role(pod) != want:
+                if self._pod_active_role(pod) == want:
+                    continue
+                try:
                     self._flip_pod(config, pod, want)
+                except Exception as error:  # noqa: BLE001
+                    # Best effort per card: a single unreachable card must never
+                    # abort the rollback and leave ``transition.rollbackFailed``
+                    # behind, which strands the transition until the stale
+                    # timeout fires and blocks propose/commit in the meantime.
+                    failed.append(f"{name}: {error}")
+                    print(
+                        f"[pd-rebalancer] {config.name}: rollback of {name} failed "
+                        f"({error}); continuing",
+                        flush=True,
+                    )
             # Never park the cluster in a state that violates the configured
             # minimums: the boot-time role set (all decode) has no prefill at
             # all, and falling back to it leaves the model served by the
@@ -745,7 +822,19 @@ class Rebalancer:
             print(
                 f"[pd-rebalancer] {config.name}: rolled back awake to "
                 f"P{previous.prefill},D{previous.decode}; fallback target "
-                f"P{fallback_prefill},D{fallback_decode} keeps the minimums",
+                f"P{fallback_prefill},D{fallback_decode} keeps the minimums"
+                + (
+                    f"; skipped {len(skipped)} unavailable card(s): "
+                    + ", ".join(skipped)
+                    if skipped
+                    else ""
+                )
+                + (
+                    f"; {len(failed)} card(s) failed to roll back: "
+                    + ", ".join(failed)
+                    if failed
+                    else ""
+                ),
                 flush=True,
             )
         except Exception as rollback_error:  # noqa: BLE001
@@ -1060,6 +1149,7 @@ class Rebalancer:
         pairs are warm (or the flip rolls back). With the gate disabled, pure
         scale-ups keep their old drain-free behaviour.
         """
+        self._sync_needs_recreate(config)
         previous = self.awake(config)
         if previous == target:
             return True
