@@ -85,7 +85,12 @@ def test_proxy_retries_prefill_once_before_fallback():
     # failed ones, and 4xx client errors are intentionally not retried.
     assert "for attempt, base in enumerate(prefill_candidates, start=1):" in PROXY_SRC
     assert "400 <= prefill_status < 500" in PROXY_SRC
-    assert "skip=failed | {prefill_base}" in PROXY_SRC
+    # The candidate list comes from the prefill pool with the base that just
+    # failed excluded (skip=skip | {first}) and the recent-failure set applied,
+    # so a retry can never land back on the pod that is going away.
+    assert "_candidates(_prefill_rr, PREFILL, prefill_base, failed)" in PROXY_SRC
+    assert "skip=skip | {first}" in PROXY_SRC
+    assert "await _remember_failure(base)" in PROXY_SRC
 
 
 def test_proxy_decode_retry_skips_failed_bases():
@@ -93,11 +98,17 @@ def test_proxy_decode_retry_skips_failed_bases():
     # several decode pods are draining at once: each base is tried at most
     # once, failed bases are remembered briefly, and picks avoid known
     # failures so a retry can reach a surviving instance.
-    assert "async for base in _decode_candidates():" in PROXY_SRC
-    assert "skip=failed | {decode_base}" in PROXY_SRC
+    assert "for base in decode_candidates:" in PROXY_SRC
+    assert "_decode_rr, DECODE, decode_base, failed" in PROXY_SRC
+    # "at most once per base" is the de-duplication inside _candidates.
+    assert "if base not in picked:" in PROXY_SRC
     assert "await _remember_failure(base)" in PROXY_SRC
     assert "_cycle_candidates" in PROXY_SRC
 
 
 def test_proxy_drain_window_blocks_new_pd_requests():
-    assert '{"error": "pd-proxy is draining; retry later"}, status=503' in PROXY_SRC
+    # Planned unavailability answers 503 + Retry-After through one helper, so
+    # every drain-timeout path also increments reject_503_total.
+    assert '_unavailable("pd-proxy is draining; retry later")' in PROXY_SRC
+    assert '{"error": message}, status=503, headers={"Retry-After": "1"}' in PROXY_SRC
+    assert 'await _metrics.inc("reject_503_total", 1.0)' in PROXY_SRC
