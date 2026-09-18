@@ -422,7 +422,7 @@ def test_reconcile_awake_pure_wake_skips_drain() -> None:
     assert rebalancer.pool(config) == 0
 
 
-def test_reconcile_awake_scale_down_still_drains() -> None:
+def test_reconcile_awake_scale_down_quiesces_without_drain() -> None:
     pods = [card("a", "prefill"), card("b", "prefill"), card("c", "decode")]
     api = FakeKubernetesApi(pods)
     rebalancer = make_rebalancer(pods, api)
@@ -437,7 +437,9 @@ def test_reconcile_awake_scale_down_still_drains() -> None:
         "c": "decode",
     }
     assert rebalancer.engine_calls == [("sleep", "prefill")]
-    assert drain_calls == [True, False]
+    # Per-card quiesce replaced the model-wide drain: sleeping a card only
+    # removes it from its Service and waits for its own in-flight gauges.
+    assert drain_calls == []
 
 
 def test_reconcile_awake_runs_kv_warmup_when_prefill_woken() -> None:
@@ -495,10 +497,11 @@ def test_reconcile_awake_skips_kv_warmup_when_no_engine_woken() -> None:
         "warmup:unexpected"
     )
 
-    # P1,D2 -> P1,D1: only a decode engine sleeps; nothing new joins service,
-    # so no KV warm-up runs (but the sleep of an awake engine still drains).
+    # P1,D2 -> P1,D1: only a decode engine sleeps and nothing new joins the
+    # Service, so there is no KV warm-up to run; per-card quiesce means there
+    # is no model-wide drain either.
     assert rebalancer.reconcile_awake(config, MODULE.Replicas(1, 1)) is True
-    assert events == ["drain:on", "drain:off"]
+    assert events == []
 
 
 def test_reconcile_awake_background_warmup_when_not_blocking() -> None:
@@ -523,9 +526,10 @@ def test_reconcile_awake_background_warmup_when_not_blocking() -> None:
 
     assert rebalancer.reconcile_awake(config, MODULE.Replicas(2, 1)) is True
     assert warmed.wait(2), "background warm-up never ran"
-    # Traffic is released before the probe is reported: the flip never waits.
-    assert events[:2] == ["drain:on", "drain:off"]
-    assert events[2].startswith("warmup:")
+    # kv_warmup_blocking=0 -> no model-wide drain; traffic is never held and
+    # the probe is reported from the background.
+    assert events and events[0].startswith("warmup:")
+    assert "drain:on" not in events
     assert api.state["qwen"]["target"] == {"prefill": 2, "decode": 1}
 
 

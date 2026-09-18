@@ -22,7 +22,7 @@ import sys
 import time
 import uuid
 from collections import deque
-from aiohttp import web, ClientSession, ClientTimeout
+from aiohttp import web, ClientSession, ClientTimeout, TCPConnector
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
 logging.basicConfig(
@@ -578,7 +578,19 @@ async def _handle_pd(request, path: str, body: dict, req_id: str):
 
 
 async def _on_startup(app):
-    app["session"] = ClientSession(timeout=ClientTimeout(total=None))
+    # No connection reuse: the proxy addresses the role *Services*, and a
+    # kept-alive connection stays pinned to whichever pod kube-proxy picked
+    # at connect time. With continuous traffic that pin never expires, so one
+    # pod of a role served ~100% of the requests while its peers idled, and a
+    # card taken out of the Service for a flip kept receiving traffic through
+    # the established connection (quiesce then took minutes instead of
+    # seconds). force_close makes every request re-enter the Service, which
+    # spreads load across the role's pods and lets endpoint removal take
+    # effect immediately.
+    app["session"] = ClientSession(
+        timeout=ClientTimeout(total=None),
+        connector=TCPConnector(force_close=True),
+    )
 
 async def _on_cleanup(app):
     await app["session"].close()

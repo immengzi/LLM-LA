@@ -321,6 +321,13 @@ class Rebalancer:
         self.kv_warmup_blocking_budget = float(
             os.environ.get("PD_REBALANCER_KV_WARMUP_BLOCKING_BUDGET_SECONDS", "20")
         )
+        # How long an engine must stay at zero in-flight requests after its
+        # card was taken out of the Service before the rebalancer sleeps it.
+        # Covers the kube-proxy endpoint update window so a request admitted
+        # just before the label patch cannot be cut off mid-flight.
+        self.quiesce_settle_seconds = float(
+            os.environ.get("PD_REBALANCER_QUIESCE_SETTLE_SECONDS", "3")
+        )
         # First pass after a pod restart: an active transition marker cannot be
         # resumed safely (we do not know which steps completed), so roll back.
         self._first_pass = True
@@ -622,6 +629,83 @@ class Rebalancer:
                 flush=True,
             )
 
+    def _engine_inflight(
+        self, config: ModelConfig, pod: dict[str, Any], role: str
+    ) -> Optional[float]:
+        """In-flight requests on one engine, read from its own /metrics.
+
+        Returns ``None`` when the engine's metrics cannot be read, so callers
+        can fall back to the sleep path's ``is_sleeping`` gate instead of
+        blocking the transition forever.
+        """
+        base = self._engine_base(pod, self._role_port(config, role))
+        try:
+            with urlopen(f"{base}/metrics", timeout=5) as response:
+                text = response.read().decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            return None
+        inflight = 0.0
+        found = False
+        for line in text.splitlines():
+            if not line or line.startswith("#"):
+                continue
+            name, _, raw = line.partition(" ")
+            if "num_requests_running" not in name and "num_requests_waiting" not in name:
+                continue
+            try:
+                inflight += float(raw.strip())
+                found = True
+            except ValueError:
+                continue
+        return inflight if found else None
+
+    def _quiesce_pod(
+        self, config: ModelConfig, pod: dict[str, Any], role: str
+    ) -> None:
+        """Take one card's engine out of service and wait for it to go idle.
+
+        The proxy fronts the role *Services*, so the only per-card isolation
+        available is the pod's awake label: patch it to idle first (kube-proxy
+        stops selecting it), then wait for that engine's own in-flight gauges to
+        reach zero. Every other card keeps serving, which is what removes the
+        model-wide pause that used to front a transition.
+        """
+        name = (pod.get("metadata") or {}).get("name", "")
+        self._patch_awake_labels(config, pod, None)
+        deadline = time.monotonic() + self.drain_timeout
+        settle_since: Optional[float] = None
+        while time.monotonic() < deadline:
+            self.stamp_heartbeat("rebalancer")
+            inflight = self._engine_inflight(config, pod, role)
+            if inflight is None:
+                print(
+                    f"[pd-rebalancer] {config.name}: {name} {role} metrics "
+                    f"unreadable; relying on the sleep gate",
+                    flush=True,
+                )
+                return
+            if inflight > 0:
+                settle_since = None
+                print(
+                    f"[pd-rebalancer] {config.name}: {name} {role} draining "
+                    f"{inflight:.0f} in-flight request(s)",
+                    flush=True,
+                )
+            elif settle_since is None:
+                settle_since = time.monotonic()
+            elif time.monotonic() - settle_since >= self.quiesce_settle_seconds:
+                print(
+                    f"[pd-rebalancer] {config.name}: {name} {role} idle and out "
+                    f"of the Service",
+                    flush=True,
+                )
+                return
+            time.sleep(self.poll_seconds)
+        raise TimeoutError(
+            f"{config.name}: {name} {role} still had in-flight requests after "
+            f"{self.drain_timeout:.0f}s"
+        )
+
     def _flip_pod(
         self,
         config: ModelConfig,
@@ -650,9 +734,13 @@ class Rebalancer:
         if current == to_role:
             return
         flip_started = time.monotonic()
+        quiesce_seconds = 0.0
         sleep_seconds = 0.0
         wake_seconds = 0.0
         if current is not None:
+            _t0 = time.monotonic()
+            self._quiesce_pod(config, pod, current)
+            quiesce_seconds = time.monotonic() - _t0
             _t0 = time.monotonic()
             self._sleep_engine(config, pod, current)
             sleep_seconds = time.monotonic() - _t0
@@ -683,7 +771,8 @@ class Rebalancer:
         print(
             f"[pd-rebalancer] {config.name}: {name} role flip "
             f"{current if current else 'idle'} -> {to_role if to_role else 'idle'} "
-            f"sleep={sleep_seconds:.2f}s wake={wake_seconds:.2f}s "
+            f"quiesce={quiesce_seconds:.2f}s sleep={sleep_seconds:.2f}s "
+            f"wake={wake_seconds:.2f}s "
             f"total={time.monotonic() - flip_started:.2f}s",
             flush=True,
         )
@@ -1241,7 +1330,12 @@ class Rebalancer:
             return True
         self._validate_awake_target(config, target)
         plan = self._flip_plan(config, target)
-        needs_drain = any(self._pod_active_role(pod) is not None for pod, _ in plan)
+        # Per-card quiesce (label out + wait for the engine's own in-flight
+        # gauges to reach zero) replaces the model-wide proxy drain: only the
+        # card about to be slept stops taking traffic while every other card
+        # keeps serving. The drain is kept solely for the blocking KV
+        # warm-up gate, which needs an isolated probe window.
+        needs_drain = False
         # A flip that wakes an engine into a role (idle->role, or a role swap)
         # creates cold KV pairs whose first comm creation can race (503900 /
         # ra port 16666). The warm-up gate must run in isolation, so such
@@ -1251,7 +1345,7 @@ class Rebalancer:
             to_role is not None and self._pod_active_role(pod) != to_role
             for pod, to_role in plan
         )
-        if self.kv_warmup_enabled and wakes_engine:
+        if self.kv_warmup_enabled and wakes_engine and self.kv_warmup_blocking:
             needs_drain = True
         previous_roles = {
             (p.get("metadata") or {}).get("name"): self._pod_active_role(p)

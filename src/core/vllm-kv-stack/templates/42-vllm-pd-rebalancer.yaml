@@ -231,6 +231,8 @@ spec:
               value: {{ $.Values.pdRebalancer.readinessTimeoutSeconds | default 900 | quote }}
             - name: PD_REBALANCER_DRAIN_TIMEOUT_SECONDS
               value: {{ $.Values.pdRebalancer.drainTimeoutSeconds | default 300 | quote }}
+            - name: PD_REBALANCER_QUIESCE_SETTLE_SECONDS
+              value: {{ $.Values.pdRebalancer.quiesceSettleSeconds | default 3 | quote }}
             - name: PD_REBALANCER_SLEEP_RETRIES
               value: {{ $.Values.pdRebalancer.sleepRetries | default 5 | quote }}
             - name: PD_REBALANCER_SLEEP_BACKOFF_SECONDS

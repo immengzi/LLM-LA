@@ -38,10 +38,14 @@ One card = one pod (vllm-<model>-pd)
   Services and requests are routed to any awake engine of the required role. The
   decode phase pulls KV from the shared store (Mooncake/LMCache) by hash; it is
   never routed to the co-located engine on the same card.
-- A planned flip is hidden from clients by the proxy: the rebalancer drains the
-  proxy first and the proxy queues new P/D requests at the request entry and
-  again at each phase boundary, so an in-flight request waits for the new
-  topology instead of racing the endpoint switch. Planned unavailability is
+- A planned flip is hidden from clients per card: the rebalancer takes the
+  card's engine out of its role Service (label patch) and waits until that
+  engine's own in-flight gauges reach zero before sleeping it, so every other
+  card keeps serving and in-flight requests finish normally. The proxy only
+  queues for the model-wide drain that the *blocking* KV warm-up gate requests:
+  it queues new P/D requests at the request entry and again at each phase
+  boundary, so a request admitted during that window waits for the new topology
+  instead of racing the endpoint switch. Planned unavailability is
   reported as `503` with `Retry-After`; `502` is reserved for real upstream
   protocol errors. Requests that fail on an unplanned endpoint error are retried
   as a whole (prefill + decode) for at most `PROXY_RETRY_DEADLINE_SECONDS`
@@ -61,12 +65,23 @@ One card = one pod (vllm-<model>-pd)
 ### 2.2 Card-level flip (rebalancer executor)
 
 - A target `(P,D)` keeps pods that already match a needed role and minimizes the
-  number of flips.
-- Per-card flip sequence: drain the proxy -> `POST /sleep` on the currently
-  active engine -> wait for `is_sleeping=true` -> patch labels to idle
-  (`pd-*-awake: "false"`) -> `POST /wake_up` on the co-located peer (retrying
-  transient HTTP errors) -> wait for `/health` -> patch labels to the new
-  role.
+  number of flips. One transition trades replicas between the roles, so `P + D`
+  is preserved: the planner moves up to `max_step_replicas` replicas per
+  decision (default 1), clamped by the role floors and the fixed budget, and the
+  executor applies the whole target atomically.
+- Per-card flip sequence: patch labels to idle
+  (`pd-*-awake: "false"`, the card leaves its role Service) -> wait until the
+  active engine's own `vllm:num_requests_running/waiting` is zero and stays zero
+  for `quiesceSettleSeconds` (`PD_REBALANCER_QUIESCE_SETTLE_SECONDS`, default 3s)
+  -> `POST /sleep` -> wait for `is_sleeping=true` -> `POST /wake_up` on the
+  co-located peer after the `wakeAfterSleepSeconds` grace (retrying transient
+  HTTP errors) -> wait for `/health` -> patch labels to the new role. Each flip
+  logs `quiesce=/sleep=/wake=/total=` timings.
+- The cards of one transition flip **concurrently** (`_apply_flip_plan`): every
+  pod owns its own NPUs and ports, so a multi-replica move costs roughly one
+  flip (`PD_REBALANCER_FLIP_PARALLELISM=<n>` caps the batch; `1` = sequential,
+  for troubleshooting a wake resource spike). The batch is always joined before
+  returning, so the rollback path sees every card in its final state.
 - Mutual exclusion is a hard constraint: the current engine must be asleep
   (NPU released) before the peer is woken; waking the peer too early can
   OOM-kill EngineCore.
@@ -103,13 +118,15 @@ cards; every other card is fully asleep and holds a reserved card slot.
 
 - **Scale-up**: wake a role engine on a fully-asleep pool card (the card
   leaves the pool) and patch its labels into the Service. Waking never
-  interrupts in-flight traffic, so a transition that only wakes engines (no
-  awake engine is slept or flipped) **skips the proxy drain** — the executor
-  classifies the plan and drains only when an awake engine must sleep or flip.
-- **Scale-down**: sleep the excess engines and patch their labels out of
-  the Service. Because a serving engine is being quiesced, this path still
-  drains the proxy first; the card then returns to the pool with both engines
-  asleep.
+  interrupts in-flight traffic, so the transition never drains the proxy.
+- **Scale-down**: patch the excess engines out of the Service, quiesce them
+  (wait for their own in-flight gauges) and sleep them; those cards return to
+  the pool with both engines asleep. This is per card, so the remaining cards
+  keep serving — there is no model-wide pause.
+- **When the proxy still drains**: only the *blocking* KV warm-up gate
+  (`kvWarmup=1` with `kvWarmupBlocking=1`) needs an isolated probe window; it
+  pauses new requests for the budgeted warm-up. With the default background
+  gate (`kvWarmupBlocking=0`) every transition is drain-free.
 - **Pool depth**: `GET /v1/targets/<model>` reports
   `pool: {cards}` — the number of cards whose BOTH engines are asleep. A card
   with one engine awake (even if its peer is sleeping) is serving, not pooled.
@@ -262,7 +279,7 @@ The chart injects these automatically in warm-standby mode.
 | `42-vllm-pd-rebalancer.yaml` | models JSON carries `mode/deployment/replicas/ports/sleepLevel`; RBAC restricted to the dual-engine Deployment and pod label patches |
 | `files/pd_rebalancer.py` | per-card awake counting, flip executor with drain-free pool scale-up and idempotent wake/sleep, `previousRoles` rollback, pool status, mode dispatch (scale/warmstandby) |
 | `files/pd_proxy.py` | drain-first queueing at the request entry and at both phase boundaries; `503` + `Retry-After` for planned transitions; bounded whole-request retry for unplanned endpoint failures; `X-Request-Id` in-flight dedup; transition metrics |
-| `files/pd_planner.py` | decision semantics unchanged (target = awake counts); decode metrics scraped from the decode port |
+| `files/pd_planner.py` | target = awake counts with `max_step_replicas` per decision (default 1, clamped by floors + budget); decode metrics scraped from the decode port |
 
 ## 4. Validation plan
 

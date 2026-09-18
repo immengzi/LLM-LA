@@ -761,6 +761,9 @@ pdRebalancer:
   heartbeatTimeoutSeconds: 60   # /healthz fails when a worker loop has not stamped within this many seconds
   readinessTimeoutSeconds: 900
   drainTimeoutSeconds: 300     # rebalancer waits this long for the proxy to drain in-flight requests
+  quiesceSettleSeconds: 3      # warmstandby: a card's engine must report zero in-flight requests for this
+                               # long (after its label left the Service) before the flip sleeps it;
+                               # covers the kube-proxy endpoint update window (per-card quiesce)
   sleepRetries: 5              # warmstandby: /sleep retry attempts (transient 500 while delayed KV connector frees drain)
   sleepBackoffSeconds: 2       # warmstandby: linear backoff between /sleep retries (seconds)
   wakeRetries: 3               # warmstandby: /wake_up retry attempts before the card is marked needs_recreate
