@@ -139,14 +139,18 @@ def make_rebalancer(pods: list[dict], api: FakeKubernetesApi | None = None) -> o
     rebalancer.engine_calls: list[tuple[str, str]] = []
     rebalancer.fail_wake_at_call: int | None = None
     rebalancer._wake_count = 0
+    # cards flip concurrently now, so the injected wake counter needs a lock
+    rebalancer._wake_count_lock = threading.Lock()
 
     def sleep_engine(config, pod, role) -> None:
         rebalancer.engine_calls.append(("sleep", role))
 
     def wake_engine(config, pod, role) -> None:
         rebalancer.engine_calls.append(("wake", role))
-        rebalancer._wake_count += 1
-        if rebalancer.fail_wake_at_call == rebalancer._wake_count:
+        with rebalancer._wake_count_lock:
+            rebalancer._wake_count += 1
+            call = rebalancer._wake_count
+        if rebalancer.fail_wake_at_call == call:
             raise RuntimeError(f"wake {role} failed (test)")
 
     rebalancer._sleep_engine = sleep_engine  # type: ignore[method-assign]
@@ -377,13 +381,17 @@ def test_reconcile_awake_applies_flips_and_commits() -> None:
 
     assert rebalancer.reconcile_awake(config, MODULE.Replicas(2, 1)) is True
     assert active_roles(rebalancer, config) == {"a": "decode", "b": "prefill", "c": "prefill"}
-    assert rebalancer.engine_calls == [
+    # Cards flip concurrently, so the batch order is not defined; the
+    # per-card sleep-before-wake contract is covered by the single-card
+    # test above. What is fixed here is the batch content.
+    assert sorted(rebalancer.engine_calls) == [
+        ("sleep", "decode"),
         ("sleep", "decode"),
         ("wake", "prefill"),
-        ("sleep", "decode"),
         ("wake", "prefill"),
     ]
-    assert drain_calls == [True, False]
+    # kv_warmup_enabled=False -> nothing to probe, so no model-wide drain.
+    assert drain_calls == []
     entry = api.state["qwen"]
     assert entry["target"] == {"prefill": 2, "decode": 1}
     assert "transition" not in entry
@@ -405,10 +413,10 @@ def test_reconcile_awake_pure_wake_skips_drain() -> None:
         "b": "prefill",
         "c": "decode",
     }
-    assert rebalancer.engine_calls == [
-        ("wake", "prefill"),
-        ("wake", "prefill"),
+    assert sorted(rebalancer.engine_calls) == [
         ("wake", "decode"),
+        ("wake", "prefill"),
+        ("wake", "prefill"),
     ]
     assert drain_calls == []
     assert rebalancer.pool(config) == 0
@@ -826,3 +834,134 @@ def test_sync_needs_recreate_forgets_pods_that_no_longer_exist() -> None:
     rebalancer.needs_recreate = {"a", "killed-pod"}
     rebalancer._sync_needs_recreate(warm_config())
     assert rebalancer.needs_recreate == {"a"}
+
+def _timed_flips(rebalancer, delay: float = 0.2) -> None:
+    """Replace _flip_pod with a stub that records start/end per card."""
+    lock = threading.Lock()
+
+    def slow_flip(config, pod, to_role) -> None:  # type: ignore[no-untyped-def]
+        name = (pod.get("metadata") or {}).get("name", "")
+        with lock:
+            rebalancer.flip_spans.setdefault(name, []).append(time.monotonic())
+        time.sleep(delay)
+        with lock:
+            rebalancer.flip_spans[name].append(time.monotonic())
+
+    rebalancer.flip_spans = {}
+    rebalancer._flip_pod = slow_flip  # type: ignore[method-assign]
+
+
+def _fail_wake_for_card(rebalancer, fail_on: str) -> None:
+    """Sleeps always succeed; waking ``fail_on`` behaves like a dead engine."""
+    lock = threading.Lock()
+
+    def sleep_engine(config, pod, role) -> None:  # type: ignore[no-untyped-def]
+        name = (pod.get("metadata") or {}).get("name", "")
+        with lock:
+            rebalancer.engine_calls.append(("sleep", name, role))
+
+    def wake_engine(config, pod, role) -> None:  # type: ignore[no-untyped-def]
+        name = (pod.get("metadata") or {}).get("name", "")
+        with lock:
+            rebalancer.engine_calls.append(("wake", name, role))
+        if name == fail_on:
+            raise URLError(ConnectionRefusedError(111, "Connection refused"))
+
+    rebalancer._sleep_engine = sleep_engine  # type: ignore[method-assign]
+    rebalancer._wake_engine = wake_engine  # type: ignore[method-assign]
+
+
+def test_apply_flip_plan_overlaps_cards() -> None:
+    pods = [card("a", "decode"), card("b", "decode"), card("c", "decode")]
+    rebalancer = make_rebalancer(pods)
+    _timed_flips(rebalancer)
+    started = time.monotonic()
+    rebalancer._apply_flip_plan(
+        warm_config(),
+        [(pods[0], "prefill"), (pods[1], "prefill"), (pods[2], "prefill")],
+    )
+    elapsed = time.monotonic() - started
+    spans = rebalancer.flip_spans
+    assert set(spans) == {"a", "b", "c"}
+    # every card is in flight before the first one returns: one flip, not three
+    assert max(span[0] for span in spans.values()) < min(span[1] for span in spans.values())
+    assert elapsed < 0.5, elapsed
+
+
+def test_apply_flip_plan_serial_when_capped_to_one(monkeypatch) -> None:
+    monkeypatch.setenv("PD_REBALANCER_FLIP_PARALLELISM", "1")
+    pods = [card("a", "decode"), card("b", "decode")]
+    rebalancer = make_rebalancer(pods)
+    _timed_flips(rebalancer)
+    started = time.monotonic()
+    rebalancer._apply_flip_plan(warm_config(), [(pods[0], "prefill"), (pods[1], "prefill")])
+    elapsed = time.monotonic() - started
+    spans = rebalancer.flip_spans
+    assert min(span[1] for span in spans.values()) < max(span[0] for span in spans.values())
+    assert elapsed >= 0.38, elapsed
+
+
+def test_apply_flip_plan_honours_parallelism_cap(monkeypatch) -> None:
+    monkeypatch.setenv("PD_REBALANCER_FLIP_PARALLELISM", "1")
+    pods = [card("a", "decode"), card("b", "decode")]
+    rebalancer = make_rebalancer(pods)
+    _timed_flips(rebalancer)
+    rebalancer._apply_flip_plan(warm_config(), [(pods[0], "prefill"), (pods[1], "prefill")])
+    spans = rebalancer.flip_spans
+    assert min(span[1] for span in spans.values()) < max(span[0] for span in spans.values())
+
+
+def test_apply_flip_plan_rejects_duplicate_cards() -> None:
+    pods = [card("a", "decode")]
+    rebalancer = make_rebalancer(pods)
+    with pytest.raises(RuntimeError, match="same card twice"):
+        rebalancer._apply_flip_plan(warm_config(), [(pods[0], "prefill"), (pods[0], None)])
+
+
+def test_apply_flip_plan_runs_every_card_and_raises_on_failure() -> None:
+    pods = [card("a", "decode"), card("b", "decode")]
+    rebalancer = make_rebalancer(pods)
+    calls: list[str] = []
+
+    def flaky_flip(config, pod, to_role) -> None:  # type: ignore[no-untyped-def]
+        name = (pod.get("metadata") or {}).get("name", "")
+        calls.append(name)
+        if name == "a":
+            raise RuntimeError("boom")
+
+    rebalancer._flip_pod = flaky_flip  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="1/2 card flip"):
+        rebalancer._apply_flip_plan(warm_config(), [(pods[0], "prefill"), (pods[1], "prefill")])
+    # the healthy card is still flipped: the batch is joined, not aborted
+    assert sorted(calls) == ["a", "b"]
+
+
+def test_parallel_wake_failure_parks_that_card_and_rolls_back() -> None:
+    """A failed wake in the parallel batch must leave a consistent topology."""
+    pods = [card("a", "decode"), card("b", "decode"), card("c", "decode")]
+    api = FakeKubernetesApi(pods)
+    rebalancer = make_rebalancer(pods, api)
+    rebalancer.kv_warmup_enabled = False
+    config = warm_config()
+    target = MODULE.Replicas(2, 1)
+    # The plan is deterministic (it keeps the first decode pod and flips the
+    # rest); fail the wake of the first planned card.
+    planned = [
+        (pod.get("metadata") or {}).get("name", "")
+        for pod, _ in rebalancer._flip_plan(config, target)
+    ]
+    failing, healthy = planned[0], planned[1]
+    _fail_wake_for_card(rebalancer, fail_on=failing)
+
+    assert rebalancer.reconcile_awake(config, target) is False
+    # only the card whose wake failed is parked for recreation
+    assert rebalancer.needs_recreate == {failing}
+    roles = active_roles(rebalancer, config)
+    assert roles[failing] is None
+    # the healthy card was flipped and then rolled back to its previous role
+    assert roles[healthy] == "decode"
+    assert ("sleep", healthy, "prefill") in rebalancer.engine_calls
+    assert ("wake", healthy, "decode") in rebalancer.engine_calls
+    assert "transition" not in api.state["qwen"]
+    assert api.state["qwen"]["target"] == {"prefill": 1, "decode": 2}
+    assert "awake transition failed" in rebalancer.last_error

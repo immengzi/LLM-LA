@@ -116,6 +116,7 @@ def test_documented_defaults() -> None:
     assert default.decode_scale_down_kv_percent == 60.0
     assert default.min_observations == 5
     assert default.cooldown_seconds == 300.0
+    assert default.max_step_replicas == 1
 
 
 @pytest.mark.parametrize("backlog", PREFILL_BOUNDARY_VALUES)
@@ -205,6 +206,40 @@ def test_budget_invariants_when_both_roles_at_floor() -> None:
             now=1_000_000.0,
         )
         assert decision.target is None
+
+
+@pytest.mark.parametrize("prefill", (1, 2, 3))
+@pytest.mark.parametrize("decode", (1, 2, 3))
+def test_multi_step_targets_stay_within_floors_and_budget(prefill: int, decode: int) -> None:
+    """With max_step_replicas=3 / max_total=4 every target stays legal."""
+
+    current = MODULE.Replicas(prefill, decode)
+    if prefill + decode > 4:
+        pytest.skip("state unreachable under max_total=4")
+
+    for backlog, kv in [
+        (1_000_000.0, 0.0),
+        (1_000_000.0, 100.0),
+        (0.0, 100.0),
+        (0.0, 0.0),
+    ]:
+        decision = MODULE.decide(
+            current,
+            metrics(prefill_backlog=backlog, decode_kv=kv),
+            cfg(min_observations=1, cooldown_seconds=0.0, max_total=4, max_step_replicas=3),
+            MODULE.PlannerState(),
+            now=1_000_000.0,
+        )
+        target = decision.target
+        if target is None:
+            continue
+        assert target.prefill >= 1 and target.decode >= 1, (prefill, decode, backlog, kv)
+        assert target.prefill + target.decode <= 4, (prefill, decode, backlog, kv)
+        # A single transition only ever trades prefill for decode (budget fixed).
+        assert target.prefill + target.decode == current.prefill + current.decode
+        moved = abs(target.prefill - current.prefill)
+        assert 1 <= moved <= 3, (prefill, decode, backlog, kv)
+        assert abs(target.decode - current.decode) == moved
 
 
 def test_debounce_requires_five_consecutive_samples() -> None:

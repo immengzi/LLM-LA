@@ -131,6 +131,75 @@ def test_budget_ceiling_blocks_prefill_to_decode() -> None:
     assert decision.target is None
 
 
+def test_max_step_replicas_moves_multiple_replicas_in_one_transition() -> None:
+    # P1,D3 -> P3,D1 in a single decision (one executor transition).
+    decision = MODULE.decide(
+        MODULE.Replicas(1, 3),
+        metrics(prefill_backlog=1_000.0, decode_kv=30.0),
+        cfg(min_observations=1, max_total=4, max_step_replicas=2),
+        MODULE.PlannerState(),
+        now=1_000_000.0,
+    )
+    assert decision.target == MODULE.Replicas(3, 1)
+    assert "D->P x2" in decision.reason
+
+
+def test_max_step_replicas_is_clamped_by_budget_room() -> None:
+    # max_total=3 with current P1,D2 leaves room for exactly one replica.
+    decision = MODULE.decide(
+        MODULE.Replicas(1, 2),
+        metrics(prefill_backlog=1_000.0, decode_kv=30.0),
+        cfg(min_observations=1, max_total=3, max_step_replicas=3),
+        MODULE.PlannerState(),
+        now=1_000_000.0,
+    )
+    assert decision.target == MODULE.Replicas(2, 1)
+    assert "D->P x1" in decision.reason
+
+
+def test_max_step_replicas_is_clamped_by_role_floor() -> None:
+    # Two decode replicas but min_decode=1 -> at most one may move.
+    decision = MODULE.decide(
+        MODULE.Replicas(1, 2),
+        metrics(prefill_backlog=1_000.0, decode_kv=30.0),
+        cfg(min_observations=1, max_total=4, max_step_replicas=5),
+        MODULE.PlannerState(),
+        now=1_000_000.0,
+    )
+    assert decision.target == MODULE.Replicas(2, 1)
+
+
+def test_max_step_replicas_applies_in_both_directions() -> None:
+    decision = MODULE.decide(
+        MODULE.Replicas(3, 1),
+        metrics(prefill_backlog=50.0, decode_kv=95.0),
+        cfg(min_observations=1, max_total=4, max_step_replicas=2),
+        MODULE.PlannerState(),
+        now=1_000_000.0,
+    )
+    assert decision.target == MODULE.Replicas(1, 3)
+    assert "P->D x2" in decision.reason
+
+
+def test_default_step_is_one_replica_for_backward_compatibility() -> None:
+    assert MODULE.default_config().max_step_replicas == 1
+    decision = MODULE.decide(
+        MODULE.Replicas(1, 3),
+        metrics(prefill_backlog=1_000.0, decode_kv=30.0),
+        cfg(min_observations=1, max_total=4),
+        MODULE.PlannerState(),
+        now=1_000_000.0,
+    )
+    assert decision.target == MODULE.Replicas(2, 2)
+
+
+def test_max_step_replicas_must_be_positive() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="max_step_replicas"):
+        cfg(max_step_replicas=0).validate()
+
+
 def test_both_roles_pressured_means_no_change() -> None:
     decision = MODULE.decide(
         MODULE.Replicas(2, 1),

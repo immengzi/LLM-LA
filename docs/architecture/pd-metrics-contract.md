@@ -27,12 +27,21 @@ the workload's mean prompt-token length via `pdRebalancer.plannerConfig`.
 | `decode_scale_down_kv_percent` | 60 | below this counts as relaxed |
 | `min_observations` | 5 | consecutive samples required in the same direction |
 | `cooldown_seconds` | 300 | minimum seconds between two transitions |
+| `max_step_replicas` | 1 | largest number of replicas one transition may move (clamped by the role floors and the fixed `P+D` budget) |
 
 ```text
-prefill pressure and decode relaxed -> recommend D->P (one replica per step)
-decode pressure and prefill relaxed -> recommend P->D
+prefill pressure and decode relaxed -> recommend D->P (up to max_step_replicas)
+decode pressure and prefill relaxed -> recommend P->D (up to max_step_replicas)
 both pressured / both relaxed / budget or floor blocks -> no change
 ```
+
+A transition trades replicas between the roles, so `P + D` is preserved and the
+step is bounded by `decode - min_decode` (or `prefill - min_prefill`) and by the
+per-role budget cap. The executor applies the whole target atomically, so with
+`max_step_replicas: 2` a swing like `P1,D3 -> P3,D1` completes in a single
+transition instead of two — one round of per-card sleep/wake flips in
+warm-standby mode (and, while the blocking KV warm-up gate is on, one drain
+window).
 
 ## Closed loop
 

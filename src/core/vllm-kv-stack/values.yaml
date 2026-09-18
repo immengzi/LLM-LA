@@ -766,6 +766,10 @@ pdRebalancer:
   wakeRetries: 3               # warmstandby: /wake_up retry attempts before the card is marked needs_recreate
   wakeBackoffSeconds: 5        # warmstandby: linear backoff between /wake_up retries (seconds)
   wakeAfterSleepSeconds: 2     # warmstandby: grace between a confirmed sleep and waking the peer
+  # warmstandby: cap on how many cards of one transition flip at the same time.
+  # Empty -> every card of the plan flips at once (a 2-replica move then costs
+  # ~one flip); 1 -> sequential, for troubleshooting a wake resource spike.
+  flipParallelism: ""
   # warmstandby: the light KV warm-up probe. Every engine pair pays a one-off
   # channel/pool setup (~3.4s per leg) the first time it transfers, and after a
   # role flip that cost would otherwise land on the first user request. The

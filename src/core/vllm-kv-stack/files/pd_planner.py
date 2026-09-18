@@ -21,6 +21,13 @@ The policy is deliberately simple and explainable:
 
 Hysteresis (separate scale-up / scale-down thresholds), a sustained-observation
 streak, and a post-change cooldown prevent flapping between adjacent targets.
+
+One transition moves up to ``max_step_replicas`` replicas (default 1) in a
+single direction, bounded by the role floors and the fixed ``P + D`` budget.
+The executor applies the whole target atomically, so a larger step reaches the
+same ratio with fewer transitions -- in warm-standby mode that also means fewer
+rounds of sleep/wake flips (and, while the blocking KV warm-up gate is enabled,
+fewer proxy drain windows).
 """
 
 from __future__ import annotations
@@ -70,6 +77,11 @@ class PlannerConfig:
     min_observations: int = 5
     # Minimum seconds between two executed transitions.
     cooldown_seconds: float = 300.0
+    # Largest number of replicas a single transition may move (>= 1). The
+    # executor applies the whole target atomically, so a bigger step needs
+    # fewer transitions to reach the same ratio; the actual step is still
+    # clamped by the role floors and the fixed P+D budget.
+    max_step_replicas: int = 1
 
     def validate(self) -> None:
         if self.min_prefill < 1 or self.min_decode < 1:
@@ -86,6 +98,8 @@ class PlannerConfig:
             raise ValueError("min_observations must be >= 1")
         if self.cooldown_seconds < 0:
             raise ValueError("cooldown_seconds must be >= 0")
+        if self.max_step_replicas < 1:
+            raise ValueError("max_step_replicas must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -152,19 +166,28 @@ def decide(
     decode_pressure = metrics.decode_kv_usage_percent >= config.decode_scale_up_kv_percent
     decode_relaxed = metrics.decode_kv_usage_percent <= config.decode_scale_down_kv_percent
 
-    # Candidate directions. Only one replica moves per transition, and only if
-    # the fixed budget and role floors still hold after the move.
+    # Candidate directions. A transition trades replicas between the roles, so
+    # ``P + D`` is preserved; the step is bounded by the role floors and by the
+    # per-role budget cap (``max_total`` bounds either role, and the sum is
+    # validated when the rebalancer starts).
+    decode_to_prefill_room = min(
+        current.decode - config.min_decode,
+        config.max_total - current.prefill,
+    )
+    prefill_to_decode_room = min(
+        current.prefill - config.min_prefill,
+        config.max_total - current.decode,
+    )
+
     wants_decode_to_prefill = (
         prefill_pressure
         and decode_relaxed
-        and current.decode > config.min_decode
-        and current.prefill + 1 <= config.max_total
+        and decode_to_prefill_room >= 1
     )
     wants_prefill_to_decode = (
         decode_pressure
         and prefill_relaxed
-        and current.prefill > config.min_prefill
-        and current.decode + 1 <= config.max_total
+        and prefill_to_decode_room >= 1
     )
 
     cooldown_elapsed = now - state.last_change_timestamp >= config.cooldown_seconds
@@ -177,7 +200,10 @@ def decide(
             prefill_to_decode_streak=0,
         )
         if streak >= config.min_observations and cooldown_elapsed:
-            target = Replicas(prefill=current.prefill + 1, decode=current.decode - 1)
+            step = min(config.max_step_replicas, decode_to_prefill_room)
+            target = Replicas(
+                prefill=current.prefill + step, decode=current.decode - step
+            )
             next_state = PlannerState(
                 last_change_timestamp=now,
                 decode_to_prefill_streak=0,
@@ -189,7 +215,7 @@ def decide(
                     f"prefill backlog {metrics.prefill_backlog_tokens:.0f} >= "
                     f"{config.prefill_scale_up_tokens:.0f} and decode KV "
                     f"{metrics.decode_kv_usage_percent:.1f}% <= "
-                    f"{config.decode_scale_down_kv_percent:.1f}%; D->P"
+                    f"{config.decode_scale_down_kv_percent:.1f}%; D->P x{step}"
                 ),
                 state=next_state,
             )
@@ -210,7 +236,10 @@ def decide(
             prefill_to_decode_streak=streak,
         )
         if streak >= config.min_observations and cooldown_elapsed:
-            target = Replicas(prefill=current.prefill - 1, decode=current.decode + 1)
+            step = min(config.max_step_replicas, prefill_to_decode_room)
+            target = Replicas(
+                prefill=current.prefill - step, decode=current.decode + step
+            )
             next_state = PlannerState(
                 last_change_timestamp=now,
                 decode_to_prefill_streak=0,
@@ -222,7 +251,7 @@ def decide(
                     f"decode KV {metrics.decode_kv_usage_percent:.1f}% >= "
                     f"{config.decode_scale_up_kv_percent:.1f}% and prefill backlog "
                     f"{metrics.prefill_backlog_tokens:.0f} <= "
-                    f"{config.prefill_scale_down_tokens:.0f}; P->D"
+                    f"{config.prefill_scale_down_tokens:.0f}; P->D x{step}"
                 ),
                 state=next_state,
             )
@@ -293,10 +322,14 @@ def advise_cli(argv: Optional[list[str]] = None) -> int:
             max_total=int(raw.get("max_total", config.max_total)),
             prefill_scale_up_tokens=float(raw.get("prefill_scale_up_tokens", config.prefill_scale_up_tokens)),
             prefill_scale_down_tokens=float(raw.get("prefill_scale_down_tokens", config.prefill_scale_down_tokens)),
+            prefill_mean_prompt_tokens_fallback=float(
+                raw.get("prefill_mean_prompt_tokens_fallback", config.prefill_mean_prompt_tokens_fallback)
+            ),
             decode_scale_up_kv_percent=float(raw.get("decode_scale_up_kv_percent", config.decode_scale_up_kv_percent)),
             decode_scale_down_kv_percent=float(raw.get("decode_scale_down_kv_percent", config.decode_scale_down_kv_percent)),
             min_observations=int(raw.get("min_observations", config.min_observations)),
             cooldown_seconds=float(raw.get("cooldown_seconds", config.cooldown_seconds)),
+            max_step_replicas=int(raw.get("max_step_replicas", config.max_step_replicas)),
         )
 
     state = PlannerState()
@@ -311,6 +344,7 @@ def advise_cli(argv: Optional[list[str]] = None) -> int:
         "min_prefill": config.min_prefill,
         "min_decode": config.min_decode,
         "max_total": config.max_total,
+        "max_step_replicas": config.max_step_replicas,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     if args.state:

@@ -241,6 +241,8 @@ spec:
               value: {{ $.Values.pdRebalancer.wakeBackoffSeconds | default 5 | quote }}
             - name: PD_REBALANCER_WAKE_AFTER_SLEEP_SECONDS
               value: {{ $.Values.pdRebalancer.wakeAfterSleepSeconds | default 2 | quote }}
+            - name: PD_REBALANCER_FLIP_PARALLELISM
+              value: {{ $.Values.pdRebalancer.flipParallelism | default "" | quote }}
             - name: PD_REBALANCER_KV_WARMUP
               value: {{ $.Values.pdRebalancer.kvWarmup | default 0 | quote }}
             {{/* Defaults live in values.yaml (pdRebalancer.kvWarmup*); the

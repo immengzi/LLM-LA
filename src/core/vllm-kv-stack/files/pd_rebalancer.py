@@ -670,7 +670,10 @@ class Rebalancer:
                 self._wake_engine(config, pod, to_role)
             except Exception as error:  # noqa: BLE001
                 name = (pod.get("metadata") or {}).get("name", "")
-                self.needs_recreate.add(name)
+                with self.lock:
+                    # Mutated by concurrent flip workers, read by _flip_plan
+                    # and _rollback_awake on the control thread.
+                    self.needs_recreate.add(name)
                 raise RuntimeError(
                     f"{name} wake to {to_role} failed ({error}); card left idle, "
                     f"pod needs recreation"
@@ -737,6 +740,89 @@ class Rebalancer:
             if self._pod_active_role(pod) is not None:
                 plan.append((pod, None))
         return plan
+
+    def _apply_flip_plan(
+        self,
+        config: ModelConfig,
+        plan: list[tuple[dict[str, Any], Optional[str]]],
+    ) -> None:
+        """Apply one transition's per-card flips, all cards concurrently.
+
+        Every plan entry targets a different pod, and each pod owns its own NPUs
+        and ports, so the flips are independent: the mutual exclusion that
+        matters - sleep the local engine before waking its peer on the *same*
+        card pair - stays inside ``_flip_pod``. Running the batch concurrently
+        makes a multi-replica move cost roughly one flip (quiesce + sleep +
+        wake grace + wake) instead of N times that.
+
+        The batch is always joined (success and failure) before returning: the
+        rollback path must observe every card in its final state, and no worker
+        may still be touching a card while ``_rollback_awake`` flips it back.
+
+        Knob: ``PD_REBALANCER_FLIP_PARALLELISM=<n>`` caps how many cards flip
+        at once; ``1`` restores the previous serial behaviour and the default
+        (unset) flips every card of the plan concurrently.
+        """
+        if not plan:
+            return
+        names = [(pod.get("metadata") or {}).get("name", "") for pod, _ in plan]
+        if len(set(names)) != len(names):
+            raise RuntimeError(f"flip plan targets the same card twice: {names}")
+
+        raw = os.environ.get("PD_REBALANCER_FLIP_PARALLELISM", "").strip()
+        workers = len(plan)
+        if raw:
+            try:
+                workers = int(raw)
+            except ValueError:
+                print(
+                    f"[pd-rebalancer] {config.name}: PD_REBALANCER_FLIP_PARALLELISM="
+                    f"{raw!r} is not an integer; flipping all {len(plan)} card(s) "
+                    f"in parallel",
+                    flush=True,
+                )
+        workers = max(1, min(workers, len(plan)))
+
+        if workers == 1:
+            for pod, to_role in plan:
+                self._flip_pod(config, pod, to_role)
+            return
+
+        started = time.monotonic()
+        print(
+            f"[pd-rebalancer] {config.name}: flipping {len(plan)} card(s) in "
+            f"parallel (max {workers}): "
+            + ", ".join(
+                f"{name}->{to_role if to_role else 'idle'}"
+                for name, (_, to_role) in zip(names, plan)
+            ),
+            flush=True,
+        )
+        failures: list[tuple[str, Exception]] = []
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="pd-flip"
+        ) as executor:
+            futures = {
+                executor.submit(self._flip_pod, config, pod, to_role): name
+                for (pod, to_role), name in zip(plan, names)
+            }
+            for future in concurrent.futures.as_completed(futures):
+                name = futures[future]
+                try:
+                    future.result()
+                except Exception as error:  # noqa: BLE001
+                    failures.append((name, error))
+        print(
+            f"[pd-rebalancer] {config.name}: parallel flip batch finished in "
+            f"{time.monotonic() - started:.2f}s "
+            f"({len(plan) - len(failures)}/{len(plan)} ok)",
+            flush=True,
+        )
+        if failures:
+            detail = "; ".join(f"{name}: {error}" for name, error in failures)
+            raise RuntimeError(
+                f"{len(failures)}/{len(plan)} card flip(s) failed: {detail}"
+            )
 
     def _validate_awake_target(self, config: ModelConfig, target: Replicas) -> None:
         if target.prefill < config.min_prefill or target.decode < config.min_decode:
@@ -1189,8 +1275,7 @@ class Rebalancer:
             if needs_drain:
                 self.drain_proxy(config, True)
                 self.wait_drained(config)
-            for pod, to_role in plan:
-                self._flip_pod(config, pod, to_role)
+            self._apply_flip_plan(config, plan)
             now = self.awake(config)
             if now != target:
                 raise RuntimeError(f"awake after transition {now} != {target}")
