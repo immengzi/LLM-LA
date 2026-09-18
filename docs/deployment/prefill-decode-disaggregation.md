@@ -156,8 +156,9 @@ later as a slow or broken role flip:
   `comm_resource_config.listen_port`; the `HCCL_*_SOCKET_PORT_RANGE` values do
   **not** cover that port.
 * **Sleep/wake overlay** - either build the vllm-ascend patch into the engine
-  image, or enable `vllm.sleepOverlay` and inject the patched sources at deploy
-  time. The chart is file-agnostic (`vllm.sleepOverlay.files`); the patch
+  image, or enable `vllm.upstreamOverlay` and inject the patched sources at deploy
+  time. The chart is file-agnostic (`vllm.upstreamOverlay.files`; the older
+  `vllm.sleepOverlay` key still works as a deprecated alias); the patch
   package's `overlay.json` + `make-overlay-command.py` generate the values
   fragment and the `--set-file` flags.
 * **KV warm-up probe (recommended)** - `pdRebalancer.kvWarmup=1` together with
@@ -183,7 +184,7 @@ under `models[].prefillDecode` override them (deep-merged, model wins).
 | `prefillDecode.{prefill,decode}.hcclSocketPortRange` | `""` | `HCCL_NPU_SOCKET_PORT_RANGE` for that role (warm standby only; empty means "not configured yet" and fails the render) |
 | `prefillDecode.{prefill,decode}.hcclHostSocketPortRange` | `""` | `HCCL_HOST_SOCKET_PORT_RANGE` for that role |
 | `prefillDecode.{prefill,decode}.hixlListenPort` | `""` | HIXL/ADXL (NPU network adapter) listen port via `ASCEND_GLOBAL_RESOURCE_CONFIG`; must differ between roles |
-| `vllm.sleepOverlay.enabled` / `.files.<name>` | `false` / `{}` | Runtime sleep/wake overlay: `key` (ConfigMap key + mount subPath), `path` (container target), `content` (source, injected with `--set-file`) |
+| `vllm.upstreamOverlay.enabled` / `.files.<name>` | `false` / `{}` | Runtime overlay of patched upstream engine sources: `key` (ConfigMap key + mount subPath), `path` (container target), `content` (source, injected with `--set-file`). `vllm.sleepOverlay` is a deprecated alias |
 | `pdRebalancer.kvWarmup` / `.kvWarmupBlocking` / `.kvWarmupBlockingBudgetSeconds` | `0` / `0` / `20` | Light KV warm-up probe, drained or backgrounded, with a hard budget on how long it may hold the proxy drain |
 | `prefillDecode.proxy.image` | `""` → `images.vllm` | proxy image (any Python image with aiohttp; CPU-only) |
 | `prefillDecode.proxy.replicas` | `1` | proxy pod count |

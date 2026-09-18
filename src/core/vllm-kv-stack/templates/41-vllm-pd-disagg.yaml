@@ -103,6 +103,7 @@ data:
 {{- $kvRpcBase := $.Values.mooncake.lookupRpcPort | default "10010" | int }}
 {{- $pdHostNetwork := $pd.hostNetwork | default ($.Values.vllm.hostNetwork | default false) }}
 {{- $useHostNet := or $pdHostNetwork (and (or $.Values.mooncake.enabled $.Values.lmcache.enabled) $.Values.vllm.hostNetwork) }}
+{{- $overlay := include "vllmkv.overlayValues" $ | fromYaml }}
 {{- if $warmStandby }}
 {{- if ne $prefillTp $decodeTp }}
 {{- fail (printf "warmstandby mode requires equal prefill/decode tensorParallelSize for model %q" $modelName) }}
@@ -110,7 +111,7 @@ data:
 {{/* Port plan + overlay validation live in shared helpers so both the mounts here
      and the ConfigMap in 44-engine-sleep-overlay.yaml fail with the same message. */}}
 {{- include "vllmkv.validateWarmStandbyPorts" (dict "modelName" $modelName "prefill" $prefill "decode" $decode) }}
-{{- if $.Values.vllm.sleepOverlay.enabled }}
+{{- if $overlay.enabled }}
 {{- include "vllmkv.validateOverlayFiles" $ }}
 {{- end }}
 {{- $pdReplicas := $pd.replicas | default ($reb.maxTotalReplicas | default 1 | int) | int }}
@@ -368,8 +369,8 @@ spec:
             - name: dshm
               mountPath: /dev/shm
             {{- include "vllmkv.ascendDriverMounts" $ | nindent 12 }}
-            {{- if $.Values.vllm.sleepOverlay.enabled }}
-{{- range $name, $f := ($.Values.vllm.sleepOverlay.files | default dict) }}
+            {{- if $overlay.enabled }}
+{{- range $name, $f := ($overlay.files | default dict) }}
             - name: te-unreg-sc
               mountPath: {{ $f.path }}
               subPath: {{ $f.key }}
@@ -469,10 +470,10 @@ spec:
             medium: Memory
             sizeLimit: {{ mul $maxTp 16 }}Gi
         {{- include "vllmkv.ascendDriverVolumes" $ | nindent 8 }}
-        {{- if $.Values.vllm.sleepOverlay.enabled }}
+        {{- if $overlay.enabled }}
         - name: te-unreg-sc
           configMap:
-            name: {{ $.Values.vllm.sleepOverlay.configMapName | default (printf "%s-te-unreg-sc" $.Release.Name) }}
+            name: {{ $overlay.configMapName | default (printf "%s-te-unreg-sc" $.Release.Name) }}
         {{- end }}
         - name: cache-volume
           hostPath:
@@ -745,8 +746,8 @@ spec:
             - name: dshm
               mountPath: /dev/shm
             {{- include "vllmkv.ascendDriverMounts" $ | nindent 12 }}
-            {{- if $.Values.vllm.sleepOverlay.enabled }}
-{{- range $name, $f := ($.Values.vllm.sleepOverlay.files | default dict) }}
+            {{- if $overlay.enabled }}
+{{- range $name, $f := ($overlay.files | default dict) }}
             - name: te-unreg-sc
               mountPath: {{ $f.path }}
               subPath: {{ $f.key }}
@@ -838,10 +839,10 @@ spec:
             medium: Memory
             sizeLimit: {{ mul $tp 16 }}Gi
         {{- include "vllmkv.ascendDriverVolumes" $ | nindent 8 }}
-        {{- if $.Values.vllm.sleepOverlay.enabled }}
+        {{- if $overlay.enabled }}
         - name: te-unreg-sc
           configMap:
-            name: {{ $.Values.vllm.sleepOverlay.configMapName | default (printf "%s-te-unreg-sc" $.Release.Name) }}
+            name: {{ $overlay.configMapName | default (printf "%s-te-unreg-sc" $.Release.Name) }}
         {{- end }}
         - name: cache-volume
           hostPath:

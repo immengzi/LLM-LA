@@ -1,14 +1,15 @@
-{{- if .Values.vllm.sleepOverlay.enabled }}
+{{- $overlay := include "vllmkv.overlayValues" . | fromYaml }}
+{{- if $overlay.enabled }}
 {{- if not (include "vllmkv.isNvidia" .) }}
 {{/* File list + bodies are injected at deploy time (see the patch package:
      overlay.json + make-overlay-command.py). Shared with 41 so a partial entry
      fails identically wherever the overlay is rendered. */}}
 {{- include "vllmkv.validateOverlayFiles" . }}
-{{- $overlayFiles := .Values.vllm.sleepOverlay.files | default dict }}
+{{- $overlayFiles := $overlay.files | default dict }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ .Values.vllm.sleepOverlay.configMapName | default (printf "%s-te-unreg-sc" .Release.Name) }}
+  name: {{ $overlay.configMapName | default (printf "%s-te-unreg-sc" .Release.Name) }}
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/managed-by: {{ .Release.Service }}

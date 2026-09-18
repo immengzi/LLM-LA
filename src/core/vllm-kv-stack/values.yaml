@@ -451,20 +451,24 @@ vllm:
   # margin) and sets it in delivery/values-pd-dynamic-rebalance.yaml; see
   # DELIVERY.md for the measurement.
   ascendConnectTimeout: "2000"
-  # Ascend sleep/wake overlay installed at runtime instead of baking it into
-  # the engine image. The chart is file-agnostic: it renders whatever the
-  # vllm.sleepOverlay.files table below describes (see the patch package's
-  # overlay.json + make-overlay-command.py), and fails fast when an entry is
-  # incomplete.
-  sleepOverlay:
+  # Engine-source overlay: patched *upstream engine sources* mounted into the
+  # engine containers at runtime instead of baking them into the image. The chart
+  # is file-agnostic: it renders whatever the vllm.upstreamOverlay.files table
+  # below describes (see the patch package's overlay.json +
+  # make-overlay-command.py) and fails fast when an entry is incomplete.
+  #
+  # vllm.sleepOverlay is a deprecated alias, read only while
+  # vllm.upstreamOverlay.enabled is false: the mechanism grew out of the
+  # sleep/wake patch package but is not specific to it.
+  upstreamOverlay:
     enabled: false
-    configMapName: ""   # "" -> <release>-te-unreg-sc
+    configMapName: ""   # "" -> <release>-te-unreg-sc (legacy CM name, unchanged)
     # The overlay is data-driven: one entry per patched upstream file.
     #   <name>:            free label used by --set-file
     #     key:             ConfigMap key AND mount subPath (usually the file name)
     #     path:            target path inside the engine container
     #     content:         file body, injected at deploy time with
-    #                      --set-file vllm.sleepOverlay.files.<name>.content=<file>
+    #                      --set-file vllm.upstreamOverlay.files.<name>.content=<file>
     # The mapping (which upstream files a given vllm-ascend version needs, and
     # where they live in the container) belongs to the PATCH PACKAGE, not to this
     # repository: delivery/pd-dynamic-rebalance/overlay.json + make-overlay-command.py
@@ -476,6 +480,11 @@ vllm:
     #     key: camem.py
     #     path: /vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/camem.py
     #     content: ""
+    # Deprecated alias for existing values files (prefer the generic name):
+    # sleepOverlay:
+    #   enabled: false
+    #   configMapName: ""
+    #   files: {}
   gpuMemoryUtilization: null       # null = use vLLM default
   quantization: null               # null = no quantization
   enableExpertParallel: false      # false = disable

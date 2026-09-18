@@ -250,8 +250,9 @@ required for the supported engine image:
    PUT can land on a co-located sleeping engine and the later pull fails.
 7. Install the CaMem/Mooncake sleep-wake overlay: either build the engine image
    with the companion patch (preferred for a release), or enable
-   `vllm.sleepOverlay` and inject the patched sources at deploy time. The chart
-   is file-agnostic - it renders whatever `vllm.sleepOverlay.files` describes -
+   `vllm.upstreamOverlay` and inject the patched sources at deploy time. The chart
+   is file-agnostic - it renders whatever `vllm.upstreamOverlay.files` describes
+   (the older `vllm.sleepOverlay` key is a deprecated alias) -
    and the patch package (`overlay.json` + `make-overlay-command.py`) produces
    both the values fragment and the `--set-file` flags. Patch sources are never
    committed into this repository, and enabling the overlay with an incomplete

@@ -998,15 +998,35 @@ PY
 {{- end -}}
 {{- end -}}
 
-{{/* Validate vllm.sleepOverlay.files. Context: the root chart context ($). */}}
+{{/* Resolve the engine-source overlay table. Context: the root chart context ($).
+
+     `vllm.upstreamOverlay` is the generic name: the chart only ever mounts the
+     patched *upstream engine sources* handed to it by the patch package, so nothing
+     here is specific to the sleep/wake patch it grew out of. `vllm.sleepOverlay` is
+     a deprecated alias, honoured only while the generic table is disabled, so
+     existing deployments keep rendering unchanged. */}}
+{{- define "vllmkv.overlayValues" -}}
+{{- $generic := .Values.vllm.upstreamOverlay | default dict -}}
+{{- $legacy := .Values.vllm.sleepOverlay | default dict -}}
+{{- if and $generic.enabled $legacy.enabled -}}
+{{- fail "set either vllm.upstreamOverlay or the deprecated vllm.sleepOverlay, not both" -}}
+{{- end -}}
+{{- if and (not $generic.enabled) $legacy.enabled -}}
+{{- toYaml $legacy -}}
+{{- else -}}
+{{- toYaml $generic -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Validate the resolved overlay table. Context: the root chart context ($). */}}
 {{- define "vllmkv.validateOverlayFiles" -}}
-{{- $files := .Values.vllm.sleepOverlay.files | default dict -}}
+{{- $files := (include "vllmkv.overlayValues" $ | fromYaml).files | default dict -}}
 {{- if not $files -}}
-{{- fail "vllm.sleepOverlay.enabled requires vllm.sleepOverlay.files (one entry per patched upstream file: key = ConfigMap key/mount subPath, path = target inside the container, content = file body). The patch package ships overlay.json + make-overlay-command.py which generate both the values fragment and the --set-file flags; or set vllm.sleepOverlay.enabled=false and deploy an image built with the patch" -}}
+{{- fail "vllm.upstreamOverlay.enabled requires vllm.upstreamOverlay.files (one entry per patched upstream file: key = ConfigMap key/mount subPath, path = target inside the container, content = file body). The patch package ships overlay.json + make-overlay-command.py which generate both the values fragment and the --set-file flags; or set vllm.upstreamOverlay.enabled=false and deploy an image built with the patch (the deprecated vllm.sleepOverlay alias behaves identically)" -}}
 {{- end -}}
 {{- range $name, $f := $files -}}
 {{- if or (not $f.key) (not $f.path) (not $f.content) -}}
-{{- fail (printf "vllm.sleepOverlay.files.%s needs key, path and content; inject the body with --set-file vllm.sleepOverlay.files.%s.content=<file> (see the patch package helper)" $name $name) -}}
+{{- fail (printf "vllm.upstreamOverlay.files.%s needs key, path and content; inject the body with --set-file vllm.upstreamOverlay.files.%s.content=<file> (see the patch package helper)" $name $name) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

@@ -324,7 +324,7 @@ def test_sleep_overlay_files_are_injected_with_set_file(tmp_path: Path) -> None:
     """The overlay body is injected at deploy time, not read from the chart.
 
     The patch package ships `overlay.json` + `make-overlay-command.py`; each
-    patched upstream file becomes `vllm.sleepOverlay.files.<name>` =
+    patched upstream file becomes `vllm.upstreamOverlay.files.<name>` =
     {key, path, content}, with the body coming from
     `--set-file ...content=<file>`. Nothing about the file names is hardcoded
     in the chart, so the file set can move with the upstream version.
@@ -335,10 +335,10 @@ def test_sleep_overlay_files_are_injected_with_set_file(tmp_path: Path) -> None:
     result = subprocess.run(
         [
             "helm", "template", "test", str(CHART), "--set", BASE_MODEL,
-            "--set", "vllm.sleepOverlay.enabled=true",
-            "--set", "vllm.sleepOverlay.files.camem.key=camem.py",
-            "--set", f"vllm.sleepOverlay.files.camem.path={CAMEM_PATH}",
-            "--set-file", f"vllm.sleepOverlay.files.camem.content={body}",
+            "--set", "vllm.upstreamOverlay.enabled=true",
+            "--set", "vllm.upstreamOverlay.files.camem.key=camem.py",
+            "--set", f"vllm.upstreamOverlay.files.camem.path={CAMEM_PATH}",
+            "--set-file", f"vllm.upstreamOverlay.files.camem.content={body}",
         ],
         check=False,
         capture_output=True,
@@ -361,6 +361,36 @@ def test_sleep_overlay_files_are_injected_with_set_file(tmp_path: Path) -> None:
         assert overlay[0]["mountPath"] == CAMEM_PATH
 
 
-def test_sleep_overlay_enabled_without_files_fails_fast() -> None:
-    _, stderr = render("--set", "vllm.sleepOverlay.enabled=true", expect_ok=False)
-    assert "vllm.sleepOverlay.enabled requires" in stderr
+def test_upstream_overlay_enabled_without_files_fails_fast() -> None:
+    _, stderr = render("--set", "vllm.upstreamOverlay.enabled=true", expect_ok=False)
+    assert "vllm.upstreamOverlay.enabled requires" in stderr
+
+
+def test_legacy_sleep_overlay_alias_still_renders(tmp_path: Path) -> None:
+    """`vllm.sleepOverlay` stays supported as a deprecated alias."""
+    body = tmp_path / "camem.py"
+    body.write_text("# patched camem\n")
+    manifest, _ = render(
+        "--set", "vllm.sleepOverlay.enabled=true",
+        "--set", "vllm.sleepOverlay.files.camem.key=camem.py",
+        "--set", f"vllm.sleepOverlay.files.camem.path={CAMEM_PATH}",
+        "--set-file", f"vllm.sleepOverlay.files.camem.content={body}",
+    )
+    configmap = find_docs(manifest, "ConfigMap", "test-te-unreg-sc")[0]
+    assert configmap["data"]["camem.py"].strip() == "# patched camem"
+    deployment = find_docs(manifest, "Deployment", "vllm-qwen-pd")[0]
+    spec = deployment["spec"]["template"]["spec"]
+    for container in ("vllm-prefill", "vllm-decode"):
+        mounts = [
+            m for m in engine_container(spec, container)["volumeMounts"] if m.get("subPath") == "camem.py"
+        ]
+        assert mounts, container
+
+
+def test_both_overlay_keys_enabled_fails_fast() -> None:
+    _, stderr = render(
+        "--set", "vllm.upstreamOverlay.enabled=true",
+        "--set", "vllm.sleepOverlay.enabled=true",
+        expect_ok=False,
+    )
+    assert "not both" in stderr
