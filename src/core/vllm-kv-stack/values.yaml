@@ -695,24 +695,17 @@ prefillDecode:
     port: 8200                # engine http port (warmstandby: prefill container)
     tensorParallelSize: null   # null -> model.tensorParallelSize (or global)
     batchSize: null            # null -> model.batchSize (or global)
-    # Multi-process-per-NPU port plan (warmstandby runs a prefill AND a decode
-    # engine on the same two NPUs, so every port family must be disjoint
-    # between the two containers and must avoid CANN's reserved/default ports
-    # 16666-16667):
+    # Multi-process-per-NPU port plan: warmstandby runs a prefill AND a decode
+    # engine on the same two NPUs, so every port family must be disjoint between
+    # the containers and must avoid CANN's reserved ports 16666-16667.
     #   hcclSocketPortRange     -> HCCL_NPU_SOCKET_PORT_RANGE (device side)
     #   hcclHostSocketPortRange -> HCCL_HOST_SOCKET_PORT_RANGE (host side)
     #   hixlListenPort          -> ASCEND_GLOBAL_RESOURCE_CONFIG's
-    #                              comm_resource_config.listen_port, i.e. the
-    #                              HIXL/ADXL (NPU network adapter) listen port.
-    #                              This one is NOT covered by the HCCL ranges;
-    #                              without it every engine uses 16666 and the
-    #                              engine that wakes later can never bind
-    #                              (EI0020 Bind_IP_Port -> recompute tail).
-    # These are ENVIRONMENT values (they must miss CANN's reserved 16666-16667,
-    # HCCL_IF_BASE_PORT's 16-port block and the rest of the cluster's ports), so
-    # the chart ships them empty and warmstandby renders a fail with guidance
-    # until the deployment supplies a validated plan - see
-    # delivery/pd-dynamic-rebalance/values-pd-dynamic-rebalance.yaml.
+    #                              comm_resource_config.listen_port, NOT covered
+    #                              by the HCCL ranges.
+    # Environment-specific: the chart ships them empty and warmstandby renders a
+    # fail with guidance until the deployment supplies a validated plan (see
+    # delivery/pd-dynamic-rebalance/values-pd-dynamic-rebalance.yaml).
     hcclSocketPortRange: ""
     hcclHostSocketPortRange: ""
     hixlListenPort: ""

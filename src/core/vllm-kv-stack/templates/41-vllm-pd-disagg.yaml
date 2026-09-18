@@ -334,13 +334,10 @@ spec:
               value: {{ $r.hcclHostSocketPortRange | quote }}
             {{- end }}
             {{- if $r.hixlListenPort }}
-            # HIXL/ADXL (NPU network adapter) listen port. NOT covered by the
-            # HCCL_*_SOCKET_PORT_RANGE variables: HIXL reads it from
-            # ASCEND_GLOBAL_RESOURCE_CONFIG (dotted key form, same as the
-            # upstream vllm-ascend kv_pool docs). Without it every engine on a
-            # card falls back to 16666; with two engines per card (warmstandby)
-            # the one that wakes later can never bind and its KV path stays
-            # broken (EI0020 Bind_IP_Port -> error_codes=[-800] -> recompute).
+            # HIXL/ADXL (NPU network adapter) listen port, read from
+            # ASCEND_GLOBAL_RESOURCE_CONFIG. NOT covered by the HCCL_*_SOCKET_PORT
+            # ranges: with two engines per card (warmstandby) both would fall back
+            # to the reserved default 16666 and the later wake could not bind.
             - name: ASCEND_GLOBAL_RESOURCE_CONFIG
               value: {{ printf "{\"comm_resource_config.listen_port\":%v}" $r.hixlListenPort | quote }}
             {{- end }}

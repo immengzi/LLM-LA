@@ -1117,10 +1117,9 @@ class Rebalancer:
                      into ITS pool;
           phase 2 -> POST the same prompt to the peer decode engine, which then
                      pulls the KV from that prefill. The pull creates the
-                     ADXL/HCCL comm lazily; right after wake the two TP workers
-                     of a cold prefill can race on HCCL ra port 16666 (CANN
-                     503900 / -800 retry storm), so one successful pair proves
-                     the comm is warm.
+                     ADXL/HCCL comm lazily; right after a wake the two TP workers
+                     of a cold prefill can race on that comm (CANN 503900/-800),
+                     so one successful pair proves the comm is warm.
         Budget exhaustion raises -> the caller rolls the flip back instead of
         leaving a degraded topology serving 100s+ latency.
         """
@@ -1337,10 +1336,10 @@ class Rebalancer:
         # warm-up gate, which needs an isolated probe window.
         needs_drain = False
         # A flip that wakes an engine into a role (idle->role, or a role swap)
-        # creates cold KV pairs whose first comm creation can race (503900 /
-        # ra port 16666). The warm-up gate must run in isolation, so such
-        # transitions pause new requests too; traffic resumes only after every
-        # woken engine's pairs are provably warm (or the flip rolled back).
+        # creates cold KV pairs whose first comm creation can race (CANN 503900).
+        # The warm-up gate must run in isolation, so such transitions pause new
+        # requests too; traffic resumes only after every woken engine's pairs are
+        # provably warm (or the flip rolled back).
         wakes_engine = any(
             to_role is not None and self._pod_active_role(pod) != to_role
             for pod, to_role in plan

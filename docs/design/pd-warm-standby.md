@@ -212,14 +212,10 @@ flips:
    HCCL's multi-process support).
 2. `ASCEND_GLOBAL_RESOURCE_CONFIG` = `{"comm_resource_config.listen_port": N}` -
    the **HIXL/ADXL (NPU network adapter) listen port**. The HCCL ranges do *not*
-   cover it: without a per-role value every engine falls back to the default
-   **16666** and the engine that wakes later can never bind it
-   (`EI0020 Bind_IP_Port` / `ra socket listen could not start, port[16666] has
-   already been bound` -> `error_codes=[-800]` -> `Failed to load blocks` ->
-   recompute). The reference deployment uses 16 700 (prefill) / 16 800 (decode).
-3. The HIXL-generated rank table carries **no** port fields
-   (`'device_port'` / `'device_vnic_port'` / `'host_port' in ranktable is not
-   set`), which is exactly why (2) has to be provided explicitly.
+   cover it, and the HIXL rank table carries no port fields either: without a
+   per-role value both engines on the card fall back to the same reserved
+   default (16666) and whichever wakes second cannot bind. The reference
+   deployment uses 16700 (prefill) / 16800 (decode).
 
 The chart validates the plan at render time (`_helpers.tpl`): both roles must set
 all three keys; ranges must be `<start>-<end>` with start <= end, disjoint
@@ -229,16 +225,8 @@ ranges. The chart ships these values **empty** and renders a `fail` with
 guidance, because the concrete numbers are environment specific (they must miss
 the node's other services and `HCCL_IF_BASE_PORT`'s 16-port block).
 
-> Correction (2026-09-14): an earlier revision blamed
-> `HCCL_HOST_SOCKET_PORT_RANGE` not reaching the engine *worker* processes and
-> added a `sitecustomize.py` shim. An ablation showed the shim was a no-op - the
-> variable does reach the processes that parse it (`env_config.cc` logs
-> `HCCL_HOST_SOCKET_PORT_RANGE is set to [...]`), and the warning actually seen at
-> runtime is the rank-table one in (3). The shim was removed from the chart.
-
 Measured on the reference deployment (8x910B3, CANN 9.1.0, vllm-ascend v0.23.0):
-role flips stay at 13.2-13.5 s while the first user request after a flip is
-~1.5 s (it was ~15 s before the port plan and the warm-up probe).
+role flips stay at 13-14 s while the first request after a flip is ~1.5 s.
 
 ### 2.7 Sleep-mode requirements
 
