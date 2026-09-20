@@ -201,29 +201,31 @@ otherwise lands on the first request. Two modes:
 ### 2.6 Multi-process port plan (two engines on one card)
 
 A warm-standby pod runs a prefill **and** a decode engine on the same NPUs, so
-every port family has to be split between the two containers. Three independent
-layers matter, and only the third controls the port that used to break role
-flips:
+every port family has to be split between the two containers:
 
-1. `HCCL_NPU_SOCKET_PORT_RANGE` / `HCCL_HOST_SOCKET_PORT_RANGE` - HCCL's own
-   device-side and host-side sockets. The two roles' ranges must be disjoint and
-   must avoid CANN's reserved ports 16666-16667 (libhcomm rejects a range that
-   covers them, and a second process per card otherwise has to run without
-   HCCL's multi-process support).
+1. `HCCL_NPU_SOCKET_PORT_RANGE` / `HCCL_HOST_SOCKET_PORT_RANGE` - the device-side
+   and host-side sockets that HCCL opens. The ranges of the two roles must be
+   disjoint and must stay clear of the ports libhcomm binds for itself (below).
 2. `ASCEND_GLOBAL_RESOURCE_CONFIG` = `{"comm_resource_config.listen_port": N}` -
-   the **HIXL/ADXL (NPU network adapter) listen port**. The HCCL ranges do *not*
-   cover it, and the HIXL rank table carries no port fields either: without a
-   per-role value both engines on the card fall back to the same reserved
-   default (16666) and whichever wakes second cannot bind. The reference
-   deployment uses 16700 (prefill) / 16800 (decode).
+   the **HIXL/ADXL (NPU network adapter) listen port**, which the HCCL ranges do
+   *not* cover. Without a per-role value both engines on the card fall back to
+   the same libhcomm default (16666) and whichever wakes second cannot bind it.
+   The reference deployment uses 16700 (prefill) / 16800 (decode).
+
+The ports to stay clear of are the defaults that libhcomm binds when the rank
+table carries no port. CANN 9.1.0 names them in the aicpu_kfc headers:
+`HETEROG_CCL_PORT = 16666` (communication default, `pub_inc/hccl_common.h` and
+`rank_table_info/new_rank_info.h`) and `AICPU_RETRY_BACKUP_PORT = 16667` (AICPU
+re-execution backup, `resource_manager/transport_manager.h`). The chart keeps the
+set in `vllmkv.libhcommDefaultPorts` and rejects any plan that contains one of
+them: a user range that hands out such a port competes with libhcomm for it.
 
 The chart validates the plan at render time (`_helpers.tpl`): both roles must set
-all three keys; ranges must be `<start>-<end>` with start <= end, disjoint
-between the roles, and must not cover 16666-16667; `hixlListenPort` must be an
-integer in 1024-65520, differ between the roles, and stay outside its own role's
-ranges. The chart ships these values **empty** and renders a `fail` with
-guidance, because the concrete numbers are environment specific (they must miss
-the node's other services and `HCCL_IF_BASE_PORT`'s 16-port block).
+all three keys; ranges must be `<start>-<end>` with start <= end, disjoint between
+the roles and free of the libhcomm defaults; `hixlListenPort` must be an integer in
+1024-65520, differ between the roles, and stay outside the ranges of its own role.
+The chart ships these values **empty** and renders a `fail` with guidance, because
+the concrete numbers are environment specific.
 
 Measured on the reference deployment (8x910B3, CANN 9.1.0, vllm-ascend v0.23.0):
 role flips stay at 13-14 s while the first request after a flip is ~1.5 s.
@@ -251,8 +253,7 @@ required for the supported engine image:
 7. Install the CaMem/Mooncake sleep-wake overlay: either build the engine image
    with the companion patch (preferred for a release), or enable
    `vllm.upstreamOverlay` and inject the patched sources at deploy time. The chart
-   is file-agnostic - it renders whatever `vllm.upstreamOverlay.files` describes
-   (the older `vllm.sleepOverlay` key is a deprecated alias) -
+   is file-agnostic - it renders whatever `vllm.upstreamOverlay.files` describes,
    and the patch package (`overlay.json` + `make-overlay-command.py`) produces
    both the values fragment and the `--set-file` flags. Patch sources are never
    committed into this repository, and enabling the overlay with an incomplete

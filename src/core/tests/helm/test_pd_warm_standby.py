@@ -267,13 +267,30 @@ def test_warmstandby_rejects_overlapping_socket_ranges() -> None:
     assert "overlaps" in stderr
 
 
-def test_warmstandby_rejects_a_reserved_hixl_port() -> None:
-    _, stderr = render(
-        "--set", "models[0].prefillDecode.decode.hixlListenPort=16666",
-        expect_ok=False,
-    )
-    assert "reserved port" in stderr
+def test_warmstandby_rejects_the_libhcomm_default_ports() -> None:
+    """16666/16667 are the ports libhcomm binds for itself (HETEROG_CCL_PORT
+    and AICPU_RETRY_BACKUP_PORT), so neither role may plan them."""
+    for port, name in ((16666, "HETEROG_CCL_PORT"), (16667, "AICPU_RETRY_BACKUP_PORT")):
+        _, stderr = render(
+            "--set", f"models[0].prefillDecode.decode.hixlListenPort={port}",
+            expect_ok=False,
+        )
+        assert name in stderr, (port, stderr)
 
+
+def test_warmstandby_rejects_ranges_containing_a_libhcomm_default() -> None:
+    """Any range containing 16666 or 16667 is rejected - including a range that
+    starts exactly at 16667, the boundary an endpoint comparison misses."""
+    for raw in ("16666-16690", "16600-16666", "16660-16670", "16667-16690", "16667-16667"):
+        _, stderr = render(
+            "--set", f"models[0].prefillDecode.prefill.hcclHostSocketPortRange={raw}",
+            expect_ok=False,
+        )
+        assert "libhcomm binds for itself" in stderr, raw
+
+
+def test_warmstandby_accepts_a_range_below_the_libhcomm_defaults() -> None:
+    render("--set", "models[0].prefillDecode.prefill.hcclHostSocketPortRange=16600-16665")
 
 
 def test_warmstandby_rejects_unequal_tensor_parallel_size() -> None:
@@ -364,33 +381,3 @@ def test_sleep_overlay_files_are_injected_with_set_file(tmp_path: Path) -> None:
 def test_upstream_overlay_enabled_without_files_fails_fast() -> None:
     _, stderr = render("--set", "vllm.upstreamOverlay.enabled=true", expect_ok=False)
     assert "vllm.upstreamOverlay.enabled requires" in stderr
-
-
-def test_legacy_sleep_overlay_alias_still_renders(tmp_path: Path) -> None:
-    """`vllm.sleepOverlay` stays supported as a deprecated alias."""
-    body = tmp_path / "camem.py"
-    body.write_text("# patched camem\n")
-    manifest, _ = render(
-        "--set", "vllm.sleepOverlay.enabled=true",
-        "--set", "vllm.sleepOverlay.files.camem.key=camem.py",
-        "--set", f"vllm.sleepOverlay.files.camem.path={CAMEM_PATH}",
-        "--set-file", f"vllm.sleepOverlay.files.camem.content={body}",
-    )
-    configmap = find_docs(manifest, "ConfigMap", "test-te-unreg-sc")[0]
-    assert configmap["data"]["camem.py"].strip() == "# patched camem"
-    deployment = find_docs(manifest, "Deployment", "vllm-qwen-pd")[0]
-    spec = deployment["spec"]["template"]["spec"]
-    for container in ("vllm-prefill", "vllm-decode"):
-        mounts = [
-            m for m in engine_container(spec, container)["volumeMounts"] if m.get("subPath") == "camem.py"
-        ]
-        assert mounts, container
-
-
-def test_both_overlay_keys_enabled_fails_fast() -> None:
-    _, stderr = render(
-        "--set", "vllm.upstreamOverlay.enabled=true",
-        "--set", "vllm.sleepOverlay.enabled=true",
-        expect_ok=False,
-    )
-    assert "not both" in stderr

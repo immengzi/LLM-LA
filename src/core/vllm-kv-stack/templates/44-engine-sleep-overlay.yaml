@@ -1,4 +1,4 @@
-{{- $overlay := include "vllmkv.overlayValues" . | fromYaml }}
+{{- $overlay := .Values.vllm.upstreamOverlay | default dict }}
 {{- if $overlay.enabled }}
 {{- if not (include "vllmkv.isNvidia" .) }}
 {{/* File list + bodies are injected at deploy time (see the patch package:

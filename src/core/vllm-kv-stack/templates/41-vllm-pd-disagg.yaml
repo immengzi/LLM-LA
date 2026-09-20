@@ -103,7 +103,7 @@ data:
 {{- $kvRpcBase := $.Values.mooncake.lookupRpcPort | default "10010" | int }}
 {{- $pdHostNetwork := $pd.hostNetwork | default ($.Values.vllm.hostNetwork | default false) }}
 {{- $useHostNet := or $pdHostNetwork (and (or $.Values.mooncake.enabled $.Values.lmcache.enabled) $.Values.vllm.hostNetwork) }}
-{{- $overlay := include "vllmkv.overlayValues" $ | fromYaml }}
+{{- $overlay := $.Values.vllm.upstreamOverlay | default dict }}
 {{- if $warmStandby }}
 {{- if ne $prefillTp $decodeTp }}
 {{- fail (printf "warmstandby mode requires equal prefill/decode tensorParallelSize for model %q" $modelName) }}
@@ -336,9 +336,9 @@ spec:
             {{- end }}
             {{- if $r.hixlListenPort }}
             # HIXL/ADXL (NPU network adapter) listen port, read from
-            # ASCEND_GLOBAL_RESOURCE_CONFIG. NOT covered by the HCCL_*_SOCKET_PORT
-            # ranges: with two engines per card (warmstandby) both would fall back
-            # to the reserved default 16666 and the later wake could not bind.
+            # ASCEND_GLOBAL_RESOURCE_CONFIG. The HCCL_*_SOCKET_PORT_RANGE values
+            # do not cover it, so both engines of a card would otherwise fall
+            # back to the libhcomm default (16666) and the later wake cannot bind.
             - name: ASCEND_GLOBAL_RESOURCE_CONFIG
               value: {{ printf "{\"comm_resource_config.listen_port\":%v}" $r.hixlListenPort | quote }}
             {{- end }}

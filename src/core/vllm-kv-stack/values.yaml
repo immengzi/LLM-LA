@@ -456,13 +456,9 @@ vllm:
   # is file-agnostic: it renders whatever the vllm.upstreamOverlay.files table
   # below describes (see the patch package's overlay.json +
   # make-overlay-command.py) and fails fast when an entry is incomplete.
-  #
-  # vllm.sleepOverlay is a deprecated alias, read only while
-  # vllm.upstreamOverlay.enabled is false: the mechanism grew out of the
-  # sleep/wake patch package but is not specific to it.
   upstreamOverlay:
     enabled: false
-    configMapName: ""   # "" -> <release>-te-unreg-sc (legacy CM name, unchanged)
+    configMapName: ""   # "" -> <release>-te-unreg-sc
     # The overlay is data-driven: one entry per patched upstream file.
     #   <name>:            free label used by --set-file
     #     key:             ConfigMap key AND mount subPath (usually the file name)
@@ -480,11 +476,6 @@ vllm:
     #     key: camem.py
     #     path: /vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/camem.py
     #     content: ""
-    # Deprecated alias for existing values files (prefer the generic name):
-    # sleepOverlay:
-    #   enabled: false
-    #   configMapName: ""
-    #   files: {}
   gpuMemoryUtilization: null       # null = use vLLM default
   quantization: null               # null = no quantization
   enableExpertParallel: false      # false = disable
@@ -705,16 +696,16 @@ prefillDecode:
     tensorParallelSize: null   # null -> model.tensorParallelSize (or global)
     batchSize: null            # null -> model.batchSize (or global)
     # Multi-process-per-NPU port plan: warmstandby runs a prefill AND a decode
-    # engine on the same two NPUs, so every port family must be disjoint between
-    # the containers and must avoid CANN's reserved ports 16666-16667.
+    # engine on the same NPUs, so every port family must be disjoint between the
+    # containers and must stay clear of the ports libhcomm binds for itself
+    # (16666 HETEROG_CCL_PORT, 16667 AICPU_RETRY_BACKUP_PORT).
     #   hcclSocketPortRange     -> HCCL_NPU_SOCKET_PORT_RANGE (device side)
     #   hcclHostSocketPortRange -> HCCL_HOST_SOCKET_PORT_RANGE (host side)
-    #   hixlListenPort          -> ASCEND_GLOBAL_RESOURCE_CONFIG's
-    #                              comm_resource_config.listen_port, NOT covered
+    #   hixlListenPort          -> comm_resource_config.listen_port inside
+    #                              ASCEND_GLOBAL_RESOURCE_CONFIG, NOT covered
     #                              by the HCCL ranges.
-    # Environment-specific: the chart ships them empty and warmstandby renders a
-    # fail with guidance until the deployment supplies a validated plan (see
-    # delivery/pd-dynamic-rebalance/values-pd-dynamic-rebalance.yaml).
+    # The numbers are environment values: the chart ships them empty and
+    # warmstandby fails the render with guidance until a plan is supplied.
     hcclSocketPortRange: ""
     hcclHostSocketPortRange: ""
     hixlListenPort: ""

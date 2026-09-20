@@ -914,10 +914,10 @@ PY
  * dyn-pd warmstandby helpers
  *
  * Both engines of a warm-standby pod run on the SAME NPUs, so the port plan
- * and the sleep/wake overlay are validated here, at render time, instead of
- * after a role flip (where a bad plan shows up as a woken engine that can
- * never bind its NPU-adapter port: EI0020 Bind_IP_Port -> error_codes=[-800]
- * -> recompute tail). See DELIVERY.md ("2026-09-14 multi-process port plan").
+ * and the engine-source overlay are validated at render time instead of after
+ * a role flip, where a bad plan only shows up as a woken engine that can never
+ * bind its NPU-adapter port (EI0020 Bind_IP_Port -> error_codes=[-800] ->
+ * recompute).
  * ------------------------------------------------------------------ */}}
 
 {{/* Parse "start-end" into "start end" (validated). Context: the range string. */}}
@@ -940,6 +940,14 @@ PY
 {{- printf "%d %d" (int $start) (int $end) -}}
 {{- end -}}
 
+{{/* Ports libhcomm binds for itself when neither the rank table nor the env
+     supplies one; a user port plan that contains them competes with libhcomm.
+     Names and values from CANN 9.1.0 (aicpu_kfc headers). */}}
+{{- define "vllmkv.libhcommDefaultPorts" -}}
+16666: HETEROG_CCL_PORT
+16667: AICPU_RETRY_BACKUP_PORT
+{{- end -}}
+
 {{/* Validate the warmstandby port plan. Context: dict modelName/prefill/decode. */}}
 {{- define "vllmkv.validateWarmStandbyPorts" -}}
 {{- $modelName := .modelName -}}
@@ -947,8 +955,9 @@ PY
 {{- $decode := .decode | default dict -}}
 {{- $pfHixl := $prefill.hixlListenPort | default 0 -}}
 {{- $dcHixl := $decode.hixlListenPort | default 0 -}}
+{{- $libhcommPorts := include "vllmkv.libhcommDefaultPorts" . | fromYaml -}}
 {{- if or (not $pfHixl) (not $dcHixl) -}}
-{{- fail (printf "warmstandby model %q: hixlListenPort must be set for BOTH roles (prefill=%v decode=%v). Every engine of a warm-standby pod shares the pod's NPUs, so each role needs its OWN HIXL/NPU-adapter listen port (rendered as ASCEND_GLOBAL_RESOURCE_CONFIG comm_resource_config.listen_port). Pick two disjoint, non-reserved ports, e.g. prefill 16700 / decode 16800, and set them under prefillDecode.{prefill,decode}.hixlListenPort" $modelName $pfHixl $dcHixl) -}}
+{{- fail (printf "warmstandby model %q: hixlListenPort must be set for BOTH roles (prefill=%v decode=%v). Each engine renders its own ASCEND_GLOBAL_RESOURCE_CONFIG comm_resource_config.listen_port, so every role needs its own port: pick two that differ and stay clear of the ports libhcomm binds for itself, e.g. prefill 16700 / decode 16800" $modelName $pfHixl $dcHixl) -}}
 {{- end -}}
 {{- range $role, $port := (dict "prefill" $pfHixl "decode" $dcHixl) -}}
 {{- if not (regexMatch "^[0-9]+$" (printf "%v" $port)) -}}
@@ -958,18 +967,20 @@ PY
 {{- if or (lt $p 1024) (gt $p 65520) -}}
 {{- fail (printf "warmstandby model %q: %s.hixlListenPort=%d is outside the usable range 1024-65520" $modelName $role $p) -}}
 {{- end -}}
-{{- if or (eq $p 16666) (eq $p 16667) -}}
-{{- fail (printf "warmstandby model %q: %s.hixlListenPort=%d is a CANN reserved port (16666-16667)" $modelName $role $p) -}}
+{{- range $dp, $dpName := $libhcommPorts -}}
+{{- if eq $p (int $dp) -}}
+{{- fail (printf "warmstandby model %q: %s.hixlListenPort=%d is %s, the default port libhcomm binds when the rank table carries none; pick another port, e.g. 16700/16800" $modelName $role $p $dpName) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if eq (int $pfHixl) (int $dcHixl) -}}
-{{- fail (printf "warmstandby model %q: prefill.hixlListenPort and decode.hixlListenPort must differ (both %d); the two engines share the pod's NPUs" $modelName (int $pfHixl)) -}}
+{{- fail (printf "warmstandby model %q: prefill.hixlListenPort and decode.hixlListenPort must differ (both %d); both engines run on the pod NPUs" $modelName (int $pfHixl)) -}}
 {{- end -}}
 {{- range $family := list "hcclHostSocketPortRange" "hcclSocketPortRange" -}}
 {{- $pfRange := index $prefill $family -}}
 {{- $dcRange := index $decode $family -}}
 {{- if or (not $pfRange) (not $dcRange) -}}
-{{- fail (printf "warmstandby model %q: %s must be set for BOTH roles so the two engines use disjoint socket ranges (prefill=%v decode=%v). Pick two wide ranges away from the CANN defaults 16666-16667 and from HCCL_IF_BASE_PORT's 16-port block, e.g. prefill host 62000-62050 / npu 63000-63050, decode host 64000-64050 / npu 65000-65050" $modelName $family $pfRange $dcRange) -}}
+{{- fail (printf "warmstandby model %q: %s must be set for BOTH roles so the two engines use disjoint socket ranges (prefill=%v decode=%v). Pick two wide ranges clear of the ports libhcomm binds for itself, e.g. prefill host 62000-62050 / npu 63000-63050, decode host 64000-64050 / npu 65000-65050" $modelName $family $pfRange $dcRange) -}}
 {{- end -}}
 {{- $bounds := dict -}}
 {{- range $role, $raw := (dict "prefill" $pfRange "decode" $dcRange) -}}
@@ -979,14 +990,16 @@ PY
 {{- $pf := index $bounds "prefill" -}}
 {{- $dc := index $bounds "decode" -}}
 {{- if and (le (int $pf.start) (int $dc.end)) (le (int $dc.start) (int $pf.end)) -}}
-{{- fail (printf "warmstandby model %q: prefill.%s=%s overlaps decode.%s=%s; the two engines share the pod's NPUs and cannot overlap (unlike the old single-engine layout)" $modelName $family $pfRange $family $dcRange) -}}
+{{- fail (printf "warmstandby model %q: prefill.%s=%s overlaps decode.%s=%s; both engines run on the pod NPUs and need disjoint ranges" $modelName $family $pfRange $family $dcRange) -}}
 {{- end -}}
 {{- range $role, $raw := (dict "prefill" $pfRange "decode" $dcRange) -}}
 {{- $parsed := splitList " " (include "vllmkv.parsePortRange" $raw) -}}
 {{- $lo := int (index $parsed 0) -}}
 {{- $hi := int (index $parsed 1) -}}
-{{- if or (eq $lo 16666) (eq $hi 16666) (and (lt $lo 16667) (gt $hi 16666)) -}}
-{{- fail (printf "warmstandby model %q: %s.%s=%s covers the CANN reserved ports 16666-16667; move the range (e.g. 62000-62050 / 64000-65050 style blocks)" $modelName $role $family $raw) -}}
+{{- range $dp, $dpName := $libhcommPorts -}}
+{{- if and (le $lo (int $dp)) (ge $hi (int $dp)) -}}
+{{- fail (printf "warmstandby model %q: %s.%s=%s contains %d (%s), a port libhcomm binds for itself; move the range clear of it, e.g. prefill 62000-62050 / 63000-63050, decode 64000-64050 / 65000-65050" $modelName $role $family $raw (int $dp) $dpName) -}}
+{{- end -}}
 {{- end -}}
 {{- if and (ge (int $pfHixl) $lo) (le (int $pfHixl) $hi) (eq $role "prefill") -}}
 {{- fail (printf "warmstandby model %q: prefill.hixlListenPort=%d falls inside prefill.%s=%s" $modelName (int $pfHixl) $family $raw) -}}
@@ -998,31 +1011,12 @@ PY
 {{- end -}}
 {{- end -}}
 
-{{/* Resolve the engine-source overlay table. Context: the root chart context ($).
-
-     `vllm.upstreamOverlay` is the generic name: the chart only ever mounts the
-     patched *upstream engine sources* handed to it by the patch package, so nothing
-     here is specific to the sleep/wake patch it grew out of. `vllm.sleepOverlay` is
-     a deprecated alias, honoured only while the generic table is disabled, so
-     existing deployments keep rendering unchanged. */}}
-{{- define "vllmkv.overlayValues" -}}
-{{- $generic := .Values.vllm.upstreamOverlay | default dict -}}
-{{- $legacy := .Values.vllm.sleepOverlay | default dict -}}
-{{- if and $generic.enabled $legacy.enabled -}}
-{{- fail "set either vllm.upstreamOverlay or the deprecated vllm.sleepOverlay, not both" -}}
-{{- end -}}
-{{- if and (not $generic.enabled) $legacy.enabled -}}
-{{- toYaml $legacy -}}
-{{- else -}}
-{{- toYaml $generic -}}
-{{- end -}}
-{{- end -}}
 
 {{/* Validate the resolved overlay table. Context: the root chart context ($). */}}
 {{- define "vllmkv.validateOverlayFiles" -}}
-{{- $files := (include "vllmkv.overlayValues" $ | fromYaml).files | default dict -}}
+{{- $files := .Values.vllm.upstreamOverlay.files | default dict -}}
 {{- if not $files -}}
-{{- fail "vllm.upstreamOverlay.enabled requires vllm.upstreamOverlay.files (one entry per patched upstream file: key = ConfigMap key/mount subPath, path = target inside the container, content = file body). The patch package ships overlay.json + make-overlay-command.py which generate both the values fragment and the --set-file flags; or set vllm.upstreamOverlay.enabled=false and deploy an image built with the patch (the deprecated vllm.sleepOverlay alias behaves identically)" -}}
+{{- fail "vllm.upstreamOverlay.enabled requires vllm.upstreamOverlay.files (one entry per patched upstream file: key = ConfigMap key/mount subPath, path = target inside the container, content = file body). The patch package ships overlay.json + make-overlay-command.py which generate both the values fragment and the --set-file flags; or set vllm.upstreamOverlay.enabled=false and deploy an image built with the patch" -}}
 {{- end -}}
 {{- range $name, $f := $files -}}
 {{- if or (not $f.key) (not $f.path) (not $f.content) -}}

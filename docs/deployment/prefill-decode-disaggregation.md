@@ -148,17 +148,17 @@ later as a slow or broken role flip:
 
 * **Port plan** - set `hcclSocketPortRange`, `hcclHostSocketPortRange` and
   `hixlListenPort` for *each* role. The chart ships them empty and renders a
-  `fail` with guidance until both roles have a disjoint plan that avoids CANN's
-  reserved ports 16666-16667. The rules and the reference values (prefill
+  `fail` with guidance until both roles have a disjoint plan that stays clear of
+  the ports libhcomm binds for itself (16666 `HETEROG_CCL_PORT`, 16667
+  `AICPU_RETRY_BACKUP_PORT`). The rules and the reference values (prefill
   62xxx/63xxx + 16 700, decode 64xxx/65xxx + 16 800) are in
   [Dynamic P/D Rebalancing with Per-Card Warm Standby](../design/pd-warm-standby.md).
-  `hixlListenPort` renders `ASCEND_GLOBAL_RESOURCE_CONFIG`'s
-  `comm_resource_config.listen_port`; the `HCCL_*_SOCKET_PORT_RANGE` values do
+  `hixlListenPort` renders the `comm_resource_config.listen_port` of
+  `ASCEND_GLOBAL_RESOURCE_CONFIG`; the `HCCL_*_SOCKET_PORT_RANGE` values do
   **not** cover that port.
 * **Sleep/wake overlay** - either build the vllm-ascend patch into the engine
   image, or enable `vllm.upstreamOverlay` and inject the patched sources at deploy
-  time. The chart is file-agnostic (`vllm.upstreamOverlay.files`; the older
-  `vllm.sleepOverlay` key still works as a deprecated alias); the patch
+  time. The chart is file-agnostic (`vllm.upstreamOverlay.files`); the patch
   package's `overlay.json` + `make-overlay-command.py` generate the values
   fragment and the `--set-file` flags.
 * **KV warm-up probe (recommended)** - `pdRebalancer.kvWarmup=1` together with
@@ -184,7 +184,7 @@ under `models[].prefillDecode` override them (deep-merged, model wins).
 | `prefillDecode.{prefill,decode}.hcclSocketPortRange` | `""` | `HCCL_NPU_SOCKET_PORT_RANGE` for that role (warm standby only; empty means "not configured yet" and fails the render) |
 | `prefillDecode.{prefill,decode}.hcclHostSocketPortRange` | `""` | `HCCL_HOST_SOCKET_PORT_RANGE` for that role |
 | `prefillDecode.{prefill,decode}.hixlListenPort` | `""` | HIXL/ADXL (NPU network adapter) listen port via `ASCEND_GLOBAL_RESOURCE_CONFIG`; must differ between roles |
-| `vllm.upstreamOverlay.enabled` / `.files.<name>` | `false` / `{}` | Runtime overlay of patched upstream engine sources: `key` (ConfigMap key + mount subPath), `path` (container target), `content` (source, injected with `--set-file`). `vllm.sleepOverlay` is a deprecated alias |
+| `vllm.upstreamOverlay.enabled` / `.files.<name>` | `false` / `{}` | Runtime overlay of patched upstream engine sources: `key` (ConfigMap key + mount subPath), `path` (container target), `content` (source, injected with `--set-file`). |
 | `pdRebalancer.kvWarmup` / `.kvWarmupBlocking` / `.kvWarmupBlockingBudgetSeconds` | `0` / `0` / `20` | Light KV warm-up probe, drained or backgrounded, with a hard budget on how long it may hold the proxy drain |
 | `prefillDecode.proxy.image` | `""` → `images.vllm` | proxy image (any Python image with aiohttp; CPU-only) |
 | `prefillDecode.proxy.replicas` | `1` | proxy pod count |
