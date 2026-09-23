@@ -293,13 +293,32 @@ def test_warmstandby_accepts_a_range_below_the_libhcomm_defaults() -> None:
     render("--set", "models[0].prefillDecode.prefill.hcclHostSocketPortRange=16600-16665")
 
 
-def test_warmstandby_rejects_unequal_tensor_parallel_size() -> None:
-    _, stderr = render(
-        "--set", "models[0].prefillDecode.prefill.tensorParallelSize=2",
-        "--set", "models[0].prefillDecode.decode.tensorParallelSize=1",
-        expect_ok=False,
-    )
-    assert "requires equal prefill/decode tensorParallelSize" in stderr
+def test_warmstandby_accepts_unequal_tensor_parallel_size() -> None:
+    """P/D may run different tensor-parallel sizes.
+
+    The engine side already supports a TP mismatch through the store connector
+    (AscendStore sub-key split), and a warmstandby pod shares one card pair
+    between its two engines, so the accelerator footprint must follow
+    max(prefillTp, decodeTp) - sizing it by the prefill role alone would
+    under-request for an asymmetric pair such as P=1/D=2.
+    """
+    for prefill_tp, decode_tp in ((2, 1), (1, 2)):
+        manifest, _ = render(
+            "--set", f"models[0].prefillDecode.prefill.tensorParallelSize={prefill_tp}",
+            "--set", f"models[0].prefillDecode.decode.tensorParallelSize={decode_tp}",
+        )
+        requested: list[int] = []
+        for dep in (d for d in docs(manifest) if d.get("kind") == "Deployment"):
+            for container in dep["spec"]["template"]["spec"]["containers"]:
+                requests = (container.get("resources") or {}).get("requests") or {}
+                if "accelerator.example.com/device" in requests:
+                    requested.append(int(requests["accelerator.example.com/device"]))
+        assert requested, (prefill_tp, decode_tp)
+        assert set(requested) == {max(prefill_tp, decode_tp)}, (
+            prefill_tp,
+            decode_tp,
+            requested,
+        )
 
 
 def test_warmstandby_rejects_replicas_below_max_total() -> None:

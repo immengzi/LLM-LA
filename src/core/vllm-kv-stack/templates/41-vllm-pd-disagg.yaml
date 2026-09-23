@@ -105,9 +105,6 @@ data:
 {{- $useHostNet := or $pdHostNetwork (and (or $.Values.mooncake.enabled $.Values.lmcache.enabled) $.Values.vllm.hostNetwork) }}
 {{- $overlay := $.Values.vllm.upstreamOverlay | default dict }}
 {{- if $warmStandby }}
-{{- if ne $prefillTp $decodeTp }}
-{{- fail (printf "warmstandby mode requires equal prefill/decode tensorParallelSize for model %q" $modelName) }}
-{{- end }}
 {{/* Port plan + overlay validation live in shared helpers so both the mounts here
      and the ConfigMap in 44-engine-sleep-overlay.yaml fail with the same message. */}}
 {{- include "vllmkv.validateWarmStandbyPorts" (dict "modelName" $modelName "prefill" $prefill "decode" $decode) }}
@@ -431,7 +428,11 @@ spec:
           resources:
             requests:
               {{- if $r.primary }}
-              {{ include "vllmkv.acceleratorResource" $ }}: {{ $r.tp }}
+              {{/* A warmstandby pod shares one card pair between its two
+                   engines, so the footprint follows max(prefillTp, decodeTp);
+                   sizing it by the prefill role alone would under-request
+                   for an asymmetric pair such as P=1/D=2. */}}
+              {{ include "vllmkv.acceleratorResource" $ }}: {{ $maxTp }}
               {{- end }}
               ephemeral-storage: "2Gi"
               {{- with $.Values.vllm.engineResources.requests.cpu }}
@@ -442,7 +443,7 @@ spec:
               {{- end }}
             limits:
               {{- if $r.primary }}
-              {{ include "vllmkv.acceleratorResource" $ }}: {{ $r.tp }}
+              {{ include "vllmkv.acceleratorResource" $ }}: {{ $maxTp }}
               {{- end }}
               ephemeral-storage: "4Gi"
               {{- with $.Values.vllm.engineResources.limits.cpu }}

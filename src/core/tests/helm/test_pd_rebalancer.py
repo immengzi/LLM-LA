@@ -117,7 +117,13 @@ def test_rebalancer_managed_deployments_fall_back_to_chart_replicas() -> None:
     assert decode_block is not None and decode_block.group(1) == "1"
 
 
-def test_rebalancer_rejects_mismatched_tensor_parallelism() -> None:
+def test_rebalancer_accepts_mismatched_tensor_parallelism() -> None:
+    """P/D may run different tensor-parallel sizes.
+
+    The rebalancer models JSON keeps the per-role TP values and the engine
+    side handles the KV layout difference through the store connector's
+    sub-key split, so an asymmetric pair must render rather than fail.
+    """
     if shutil.which("helm") is None:
         pytest.skip("helm is not installed")
     result = subprocess.run(
@@ -139,8 +145,10 @@ def test_rebalancer_rejects_mismatched_tensor_parallelism() -> None:
         capture_output=True,
         text=True,
     )
-    assert result.returncode != 0
-    assert "equal prefill/decode tensorParallelSize" in result.stderr
+    assert result.returncode == 0, result.stderr
+    # PD_REBALANCER_MODELS_JSON is rendered as a quoted (escaped) JSON string.
+    assert '\\"prefillTp\\":1' in result.stdout
+    assert '\\"decodeTp\\":2' in result.stdout
 
 
 @pytest.mark.parametrize(

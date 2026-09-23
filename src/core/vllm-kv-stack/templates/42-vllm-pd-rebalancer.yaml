@@ -11,9 +11,6 @@
 {{- $defaultTp := $m.tensorParallelSize | default $.Values.tensorParallelSize | int }}
 {{- $prefillTp := $prefill.tensorParallelSize | default $defaultTp | int }}
 {{- $decodeTp := $decode.tensorParallelSize | default $defaultTp | int }}
-{{- if ne $prefillTp $decodeTp }}
-{{- fail (printf "dynamicRebalance requires equal prefill/decode tensorParallelSize for model %q" $m.name) }}
-{{- end }}
 {{- $warmStandby := eq ($rebalancer.mode | default "scale") "warmstandby" }}
 {{- $minPrefill := $rebalancer.minPrefillReplicas | default 1 | int }}
 {{- $minDecode := $rebalancer.minDecodeReplicas | default 1 | int }}
